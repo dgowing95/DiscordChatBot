@@ -1,4 +1,4 @@
-from ollama import Client
+from ollama import AsyncClient
 from ollama import ChatResponse
 from classes.config_manager import configManager
 
@@ -20,7 +20,7 @@ class ollamaHandler:
         self.get_client()
 
     def get_client(self):
-       self.client = Client(host=self.ollama_host)
+       self.client = AsyncClient(host=self.ollama_host)
 
     def format_message_history(self):
 
@@ -51,7 +51,6 @@ class ollamaHandler:
            }
       ]
 
-      print(msgs)
-
-      response: ChatResponse = self.client.chat(model=self.model, messages=msgs)
+      response: ChatResponse = await self.client.chat(model=self.model, messages=msgs)
+      print(f'Message returned')
       return response['message']['content']

@@ -12,7 +12,6 @@ client = discord.Client(intents=intents)
 @client.event
 async def on_ready():
     print(f'Logged in as {client.user}')
-    CLIENT_ID = client.user.id
 
 @client.event
 async def on_message(message):
