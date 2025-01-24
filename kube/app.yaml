@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: discordchatbot
+  namespace: discordchatbot
+  labels:
+    app: discordchatbot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: discordchatbot
+  template:
+    metadata:
+      labels:
+        app: discordchatbot
+    spec:
+      hostNetwork: true
+      volumes:
+      - name: discordchatbot-storage
+        persistentVolumeClaim:
+          claimName: discordchatbot-claim
+      containers:
+      - name: discordchatbot
+        image: localhost:32000/discordchatbot:2
+        imagePullPolicy: Always
+        volumeMounts:
+          - mountPath: "/app/data"
+            name: discordchatbot-storage

@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: discordchatbot-pv-volume
+  namespace: discordchatbot
+  labels:
+    type: local
+spec:
+  storageClassName: manual
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    path: "/mnt/DiscordChatBot"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: discordchatbot-claim
+  namespace: discordchatbot
+spec:
+  storageClassName: manual
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi

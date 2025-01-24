@@ -1,6 +1,7 @@
 import discord
 import os
 from classes.message_handler import MessageHandler
+from classes.config_manager import configManager
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -23,4 +24,5 @@ async def on_message(message):
     async with message.channel.typing():
         await handler.handle_message()
 
-client.run(os.environ["DISCORD_BOT_TOKEN"])
+token = configManager().get_setting("discord_token")
+client.run(token)

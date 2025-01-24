@@ -1,4 +1,4 @@
-from ollama import chat
+from ollama import Client
 from ollama import ChatResponse
 from classes.config_manager import configManager
 
@@ -16,6 +16,11 @@ class ollamaHandler:
         self.client_id = client_id
         self.system = configManager().get_setting("system")
         self.model = configManager().get_setting("model")
+        self.ollama_host = configManager().get_setting("ollama_host")
+        self.get_client()
+
+    def get_client(self):
+       self.client = Client(host=self.ollama_host)
 
     def format_message_history(self):
 
@@ -48,5 +53,5 @@ class ollamaHandler:
 
       print(msgs)
 
-      response: ChatResponse = chat(model=self.model, messages=msgs)
+      response: ChatResponse = self.client.chat(model=self.model, messages=msgs)
       return response['message']['content']

@@ -1,2 +1,6 @@
 FROM python:3.12
-ADD app
+WORKDIR /app
+ADD app /app
+RUN pip install -r requirements.txt
+
+ENTRYPOINT ["python3", "main.py", "-u"]
