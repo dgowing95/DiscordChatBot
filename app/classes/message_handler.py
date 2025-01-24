@@ -12,7 +12,7 @@ class MessageHandler:
         self.client = client
 
     async def get_message_history(self):
-        self.history = [message async for message in self.message.channel.history(limit=50)]
+        self.history = [message async for message in self.message.channel.history(limit=15)]
         return self.history
 
     def should_process_message(self):
