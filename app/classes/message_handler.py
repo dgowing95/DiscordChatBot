@@ -2,10 +2,6 @@ import random
 from classes.ollama_handler import ollamaHandler
 
 class MessageHandler:
-    message = False
-    client = False
-    history = []
-    response_exists = False
 
     def __init__(self, message, client):
         self.message = message

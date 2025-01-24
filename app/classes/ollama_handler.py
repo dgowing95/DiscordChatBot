@@ -3,12 +3,6 @@ from ollama import ChatResponse
 from classes.config_manager import configManager
 
 class ollamaHandler:
-    history = []
-    message_history = []
-    system = ""
-    model = ""
-    prompt = ""
-    client_id = 0
 
     def __init__(self, history, prompt, client_id):
         self.history = history

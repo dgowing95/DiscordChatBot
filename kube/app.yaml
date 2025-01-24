@@ -22,7 +22,7 @@ spec:
           claimName: discordchatbot-claim
       containers:
       - name: discordchatbot
-        image: localhost:32000/discordchatbot:4
+        image: localhost:32000/discordchatbot:5
         imagePullPolicy: Always
         volumeMounts:
           - mountPath: "/app/data"
