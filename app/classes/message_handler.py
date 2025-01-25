@@ -16,7 +16,7 @@ class MessageHandler:
             return False
         if self.client.user in self.message.mentions:
             return True
-        if (random.randint(0,9) == 0):
+        if (random.randint(0,30) == 0):
             return True
         return False
     
