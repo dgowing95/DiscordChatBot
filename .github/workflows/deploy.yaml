@@ -8,8 +8,6 @@ jobs:
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v2
-      - run: |
-          ls -la
-          podman build -f Dockerfile -t localhost:32000/discordchatbot:${{github.sha}} .
+      - run: podman --cgroup-manager cgroupfs build -f Dockerfile -t localhost:32000/discordchatbot:${{github.sha}} .
       - run: sed -i -e 's/<<tag>>/${{github.sha}}/g' kube/app.yaml
       - run: kubectl apply -f kube
