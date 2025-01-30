@@ -51,4 +51,4 @@ class ollamaHandler:
       
       text = response['message']['content']
       cleaned_response = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-      return cleaned_response
+      return cleaned_response[0:1999]
