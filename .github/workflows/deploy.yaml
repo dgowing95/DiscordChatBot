@@ -10,6 +10,7 @@ jobs:
       - uses: actions/checkout@v2
       - run: |
           ls -la
+          chmod 777 Dockerfile
           docker build -f Dockerfile -t localhost:32000/discordchatbot:${{github.sha}} .
       - run: sed -i -e 's/<<tag>>/${{github.sha}}/g' kube/app.yaml
       - run: kubectl apply -f kube
