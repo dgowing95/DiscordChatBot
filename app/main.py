@@ -31,7 +31,6 @@ async def process_messages():
             await handler.handle_message()
         message_queue.task_done()
     
-    
 
 token = configManager().get_setting("discord_token")
 client.run(token)
