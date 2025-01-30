@@ -47,4 +47,5 @@ class ollamaHandler:
 
       response: ChatResponse = await self.client.chat(model=self.model, messages=msgs)
       print(f'Message returned')
-      return response['message']['content']
+      
+      return response['message']['content'][0:1999]
