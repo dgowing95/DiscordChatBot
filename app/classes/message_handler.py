@@ -6,6 +6,7 @@ class MessageHandler:
     def __init__(self, message, client):
         self.message = message
         self.client = client
+        self.response_exists = False
 
     async def get_message_history(self):
         self.history = [message async for message in self.message.channel.history(limit=15)]
