@@ -1,0 +1,5 @@
+services:
+  discordchatbot:
+    build: .
+    volumes:
+      - ./app:/app
