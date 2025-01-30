@@ -9,7 +9,7 @@ class MessageHandler:
         self.response_exists = False
 
     async def get_message_history(self):
-        self.history = [message async for message in self.message.channel.history(limit=15)]
+        self.history = [message async for message in self.message.channel.history(limit=2)]
         return self.history
 
     def should_process_message(self):
@@ -22,7 +22,7 @@ class MessageHandler:
         return False
     
     async def handle_text_input(self):
-        ollama = ollamaHandler(self.history, self.message.content, self.client.user.id)
+        ollama = ollamaHandler(self.history, self.message, self.client.user.id)
         response = await ollama.generate()
         self.response_exists = True
         return response
