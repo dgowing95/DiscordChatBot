@@ -9,5 +9,6 @@ jobs:
     steps:
       - uses: actions/checkout@v2
       - run: podman --cgroup-manager cgroupfs build -f Dockerfile -t localhost:32000/discordchatbot:${{github.sha}} .
+      - run: podman push localhost:32000/discordchatbot:${{github.sha}}
       - run: sed -i -e 's/<<tag>>/${{github.sha}}/g' kube/app.yaml
       - run: microk8s kubectl apply -f kube
