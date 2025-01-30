@@ -1,0 +1,13 @@
+name: Build & Deploy
+on:
+  push:
+    branches:
+      - main
+jobs:
+  build-deploy:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v2
+      - run: docker build -t localhost:32000/discordchatbot:${{github.sha}} .
+      - run: sed -i -e 's/<<tag>>/${{github.sha}}/g' kube/app.yaml
+      - run: kubectl apply -f kube
