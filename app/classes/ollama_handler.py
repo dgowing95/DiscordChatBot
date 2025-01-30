@@ -1,3 +1,4 @@
+import re
 from ollama import AsyncClient
 from ollama import ChatResponse
 from classes.config_manager import configManager
@@ -48,4 +49,6 @@ class ollamaHandler:
       response: ChatResponse = await self.client.chat(model=self.model, messages=msgs)
       print(f'Message returned')
       
-      return response['message']['content'][0:1999]
+      text = response['message']['content']
+      cleaned_response = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+      return cleaned_response
