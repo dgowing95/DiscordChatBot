@@ -9,6 +9,6 @@ jobs:
     steps:
       - uses: actions/checkout@v2
       - run: ls -la
-      - run: docker build -t localhost:32000/discordchatbot:${{github.sha}} .
+      - run: docker build -f Dockerfile -t localhost:32000/discordchatbot:${{github.sha}} .
       - run: sed -i -e 's/<<tag>>/${{github.sha}}/g' kube/app.yaml
       - run: kubectl apply -f kube
