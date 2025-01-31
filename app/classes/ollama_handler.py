@@ -15,12 +15,15 @@ class ollamaHandler:
         self.get_client()
 
     def get_client(self):
-       self.client = AsyncClient(host=self.ollama_host)
+       try:
+         self.client = AsyncClient(host=self.ollama_host)
+       except:
+         print('Failed to connect to Ollama Host')
 
     def format_message_history(self):
 
        self.history.pop(0) # Remove current message
-       self.history.reverse() 
+       self.history.reverse() # Reverse the order of the messages so the newest is first
 
        formatted_history = []
        for message in self.history:
@@ -45,10 +48,14 @@ class ollamaHandler:
                 'content': self.prompt
            }
       ]
+      try:
+         response: ChatResponse = await self.client.chat(model=self.model, messages=msgs)
+         print(f'Message returned from Ollama')
 
-      response: ChatResponse = await self.client.chat(model=self.model, messages=msgs)
-      print(f'Message returned')
+         text = response['message']['content']
+         cleaned_response = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+         return cleaned_response[0:1999]
+      except:
+         print('Failed to get response from Ollama')
+         return "Error"
       
-      text = response['message']['content']
-      cleaned_response = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-      return cleaned_response[0:1999]

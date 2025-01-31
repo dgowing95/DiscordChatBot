@@ -36,7 +36,11 @@ class MessageHandler:
         if len(self.message.content) > 0:
             text_response = await self.handle_text_input()
 
+        if text_response == "Error":
+            self.response_exists = False
+
         if self.response_exists == False:
+            await self.message.add_reaction('❌')
             return
         
         await self.message.reply(
