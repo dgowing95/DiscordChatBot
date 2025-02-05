@@ -13,7 +13,7 @@ class ollamaHandler:
         self.model = configManager().get_setting("model")
         self.ollama_host = configManager().get_setting("ollama_host")
         self.options = {
-         "temperature": "0.8"
+         "temperature": configManager().get_setting("temperature")
         }
         self.get_client()
 
@@ -58,7 +58,7 @@ class ollamaHandler:
          text = response['message']['content']
          cleaned_response = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
          return cleaned_response[0:1999]
-      except:
-         print('Failed to get response from Ollama')
+      except Exception as e:
+         print('Failed to get response from Ollama: ' + str(e))
          return "Error"
       
