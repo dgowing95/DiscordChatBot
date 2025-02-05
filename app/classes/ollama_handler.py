@@ -12,6 +12,9 @@ class ollamaHandler:
         self.system = configManager().get_setting("system")
         self.model = configManager().get_setting("model")
         self.ollama_host = configManager().get_setting("ollama_host")
+        self.options = {
+         "temperature": "0.8"
+        }
         self.get_client()
 
     def get_client(self):
@@ -49,7 +52,7 @@ class ollamaHandler:
            }
       ]
       try:
-         response: ChatResponse = await self.client.chat(model=self.model, messages=msgs)
+         response: ChatResponse = await self.client.chat(model=self.model, messages=msgs, options=self.options)
          print(f'Message returned from Ollama')
 
          text = response['message']['content']
