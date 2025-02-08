@@ -5,10 +5,8 @@ from classes.config_manager import configManager
 
 class ollamaHandler:
 
-    def __init__(self, history, message, client_id):
-        self.history = history
-        self.message = message
-        self.client_id = client_id
+    def __init__(self, messages):
+        self.messages = messages
         self.system = configManager().get_setting("system")
         self.model = configManager().get_setting("model")
         self.ollama_host = configManager().get_setting("ollama_host")
@@ -23,33 +21,11 @@ class ollamaHandler:
        except:
          print('Failed to connect to Ollama Host')
 
-    def format_message_history(self):
-
-       self.history.pop(0) # Remove current message
-       self.history.reverse() # Reverse the order of the messages so the newest is first
-
-       formatted_history = []
-       for message in self.history:
-          if len(message.content) == 0:
-             continue
-          
-          formatted_history.append({
-             'role': "assistant" if message.author.id == self.client_id else "user",
-             'content': f"Message from '{message.author.name}': {message.content.replace(f'<@{self.client_id}>', '').strip()}"
-          })
-       self.message_history = formatted_history
-          
 
     async def generate(self):
-      self.format_message_history()
-
       msgs = [
            {"role": "system", "content": self.system},
-            *self.message_history,
-           {
-                'role': 'user',
-                'content': f"Message from '{self.message.author.name}': {self.message.content}"
-           }
+            *self.messages,
       ]
 
       print(json.dumps(msgs, indent=2))
