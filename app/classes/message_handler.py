@@ -22,13 +22,17 @@ class MessageHandler:
         return False
     
     async def handle_text_input(self):
-        ollama = ollamaHandler(self.history, self.message.content, self.client.user.id)
+        ollama = ollamaHandler(self.history, self.message, self.client.user.id)
         response = await ollama.generate()
         self.response_exists = True
         return response
+    
+    def clean_message_content(self, message):
+        return message.content.replace(f'<@{self.client.user.id}>', '').strip()
 
     
     async def handle_message(self):
+        self.message.content = self.clean_message_content(self.message)
         print(f'Handling message: {self.message.content}')
         await self.get_message_history()
 
