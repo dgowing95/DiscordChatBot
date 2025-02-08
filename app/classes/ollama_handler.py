@@ -1,13 +1,13 @@
-import re
+import re, json
 from ollama import AsyncClient
 from ollama import ChatResponse
 from classes.config_manager import configManager
 
 class ollamaHandler:
 
-    def __init__(self, history, prompt, client_id):
+    def __init__(self, history, message, client_id):
         self.history = history
-        self.prompt = prompt
+        self.message = message
         self.client_id = client_id
         self.system = configManager().get_setting("system")
         self.model = configManager().get_setting("model")
@@ -35,7 +35,7 @@ class ollamaHandler:
           
           formatted_history.append({
              'role': "assistant" if message.author.id == self.client_id else "user",
-             'content': message.content
+             'content': f"Message from '{message.author.name}': {message.content.replace(f'<@{self.client_id}>', '').strip()}"
           })
        self.message_history = formatted_history
           
@@ -48,15 +48,19 @@ class ollamaHandler:
             *self.message_history,
            {
                 'role': 'user',
-                'content': self.prompt
+                'content': f"Message from '{self.message.author.name}': {self.message.content}"
            }
       ]
+
+      print(json.dumps(msgs, indent=2))
+
       try:
          response: ChatResponse = await self.client.chat(model=self.model, messages=msgs, options=self.options)
          print(f'Message returned from Ollama')
 
          text = response['message']['content']
          cleaned_response = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+         cleaned_response = re.sub(r"^.*:", "", text, flags=re.DOTALL)
          return cleaned_response[0:1999]
       except Exception as e:
          print('Failed to get response from Ollama: ' + str(e))
