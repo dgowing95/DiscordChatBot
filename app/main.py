@@ -56,9 +56,12 @@ async def process_messages():
 
         if handler.should_process_message() == False:
             continue
-
-        async with message.channel.typing():
-            await handler.handle_message()
+        
+        try:
+            async with message.channel.typing():
+                await handler.handle_message()
+        except:
+            print("Error handling message")
         message_queue.task_done()
     
     
