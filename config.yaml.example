@@ -2,5 +2,6 @@ system: An AI Storyteller
 model: dolphin-llama3:8b
 env: development
 discord_token: ""
-ollama_host: "http://172.17.0.1:11434"
+text_api_token: ""
+llm_text_host: "http://172.17.0.1:11434"
 temperature: 0.8
