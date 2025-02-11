@@ -36,7 +36,8 @@ class TextLLMHandler:
          response = await self.client.chat.completions.create(
             model=self.model,
             messages=msgs,
-            temperature=self.options["temperature"]
+            temperature=self.options["temperature"],
+            max_tokens=1024
           )
         #  print(response)
          print(f'Message returned from Text LLM')
