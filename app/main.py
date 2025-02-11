@@ -23,17 +23,7 @@ async def register_commands():
     @command_tree.command(name="temperature", description="Change the randomness of responses, max of 2.0 is max random")
     async def change_temperature(ctx, temperature: float):
         configManager().update_setting("temperature", temperature)
-        await ctx.response.send_message(content=f"Temperature updated to: \"{temperature}\"")
-
-    @command_tree.command(name="model", description="Change the model used to generate reponses")
-    @discord.app_commands.choices(choices=[
-        discord.app_commands.Choice(name="dolphin-llama3:8b", value="dolphin-llama3:8b"),
-        discord.app_commands.Choice(name="deepseek-r1:8b", value="deepseek-r1:8b"),
-        discord.app_commands.Choice(name="deepseek-r1:14b", value="deepseek-r1:14b")
-    ])
-    async def change_model(ctx, choices: discord.app_commands.Choice[str]):
-        configManager().update_setting("model", choices.value)
-        await ctx.response.send_message(content=f"Model updated to: \"{choices.value}\"")        
+        await ctx.response.send_message(content=f"Temperature updated to: \"{temperature}\"")  
 
     synced_commands = await command_tree.sync()
     for synced_command in synced_commands:

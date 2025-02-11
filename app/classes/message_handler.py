@@ -1,5 +1,5 @@
 import random
-from classes.ollama_handler import ollamaHandler
+from classes.text_llm_handler import TextLLMHandler
 
 class MessageHandler:
 
@@ -41,7 +41,7 @@ class MessageHandler:
         return False
     
     async def handle_text_input(self):
-        ollama = ollamaHandler(self.messages)
+        ollama = TextLLMHandler(self.messages)
         response = await ollama.generate()
         self.response_exists = True
         return response
