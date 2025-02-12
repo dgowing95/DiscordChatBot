@@ -25,26 +25,21 @@ class TextLLMHandler:
 
 
     async def generate(self):
+      system = self.system + ". Reply with only your message, no prefixes or titles."
       msgs = [
-           {"role": "system", "content": self.system},
+           {"role": "system", "content": system},
             *self.messages,
       ]
 
-      # print(json.dumps(msgs, indent=2))
-
       try:
-         response = await self.client.chat.completions.create(
+         response_stream = await self.client.chat.completions.create(
             model=self.model,
             messages=msgs,
-            temperature=self.options["temperature"]
+            temperature=self.options["temperature"],
+            stream=True
           )
-        #  print(response)
          print(f'Message returned from Text LLM')
-
-         text = response.choices[0].message.content
-         remove_think_text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-         cleaned_response = re.sub(r"^.*:", "", remove_think_text, flags=re.DOTALL)
-         return cleaned_response[0:1999]
+         return response_stream
       except Exception as e:
          print('Failed to get response from LLM: ' + str(e))
          return "Error"

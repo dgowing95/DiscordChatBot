@@ -50,8 +50,8 @@ async def process_messages():
         try:
             async with message.channel.typing():
                 await handler.handle_message()
-        except:
-            print("Error handling message")
+        except Exception as e:
+            print("Error handling message: " + str(e))
         message_queue.task_done()
     
     
