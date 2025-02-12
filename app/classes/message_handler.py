@@ -88,15 +88,10 @@ class MessageHandler:
             await self.message.add_reaction('❌')
             return
 
-        chunk_collect_task = asyncio.create_task(
-            self.handle_text_stream(text_response_stream)
-        )
-
-        message_response_task = asyncio.create_task(
-            self.handle_message_response(chunk_collect_task)
-        )
-
-        await asyncio.gather(
-            chunk_collect_task,
-            message_response_task
-        )
+        async with asyncio.TaskGroup() as tg:
+            chunk_collect_task = asyncio.create_task(
+                self.handle_text_stream(text_response_stream)
+            )
+            message_response_task = asyncio.create_task(
+                self.handle_message_response(chunk_collect_task)
+            )
