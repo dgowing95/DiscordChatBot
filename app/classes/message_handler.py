@@ -76,7 +76,7 @@ class MessageHandler:
 
     def filter_response(self):
         self.text_response.replace(f'<@{self.client.user.id}>', '').strip()
-        self.text_response = re.sub(r"^.*:", "", self.text_response, flags=re.DOTALL)
+        self.text_response = re.sub(r"^<@.*:", "", self.text_response, flags=re.DOTALL)
         self.text_response = re.sub(r"Message from.*?:", "", self.text_response, flags=re.DOTALL)
 
     async def handle_message(self):
