@@ -63,6 +63,8 @@ class MessageHandler:
         )
 
         while chunk_collect_task.done() == False:
+            if self.text_response == "Message from":
+                continue
             await self.discord_message_object.edit(
                 content=self.text_response
             )
