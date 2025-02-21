@@ -11,7 +11,7 @@ class MessageHandler:
 
 
     async def build_messages(self):
-       self.history = [message async for message in self.message.channel.history(limit=15)]
+       self.history = [message async for message in self.message.channel.history(limit=5)]
        self.history.pop(0) # Remove current message
        self.history.reverse() # Reverse the order of the messages so the newest is first
 
@@ -59,12 +59,12 @@ class MessageHandler:
 
     async def handle_message_response(self, chunk_collect_task):
         self.discord_message_object = await self.message.reply(
-            content=self.text_response or ""
+            content=self.text_response or "..."
         )
 
         while chunk_collect_task.done() == False:
             await self.discord_message_object.edit(
-                content=self.text_response
+                content=self.text_response or "..."
             )
             await asyncio.sleep(3)
 
