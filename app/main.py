@@ -20,6 +20,11 @@ async def register_commands():
         configManager().update_setting("system", system)
         await ctx.response.send_message(content=f"System updated to: \"{system}\"")
 
+    @command_tree.command(name="get_system", description="See the existing behaviour/personality of the bot")
+    async def get_system(ctx):
+        system = configManager().get_setting("system")
+        await ctx.response.send_message(content=f"System is currently: \"{system}\"")
+
     @command_tree.command(name="temperature", description="Change the randomness of responses, max of 2.0 is max random")
     async def change_temperature(ctx, temperature: float):
         configManager().update_setting("temperature", temperature)
