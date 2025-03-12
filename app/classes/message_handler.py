@@ -1,4 +1,4 @@
-import random, asyncio, re
+import random, asyncio, re, json
 from classes.text_llm_handler import TextLLMHandler
 
 class MessageHandler:
@@ -17,8 +17,16 @@ class MessageHandler:
 
        formatted_history = []
        for message in self.history:
+          
+          for embed in message.embeds:
+              content = json.dumps(embed.to_dict())
+              formatted_history.append({
+                  'role': "assistant" if message.author.id == self.client.user.id else "user",
+                  'content': f"Discord Emebed from '{message.author.name}' converted to JSON: {content}"
+              })
+            
           if len(message.content) == 0:
-             continue
+             continue        
           
           formatted_history.append({
              'role': "assistant" if message.author.id == self.client.user.id else "user",
@@ -33,7 +41,7 @@ class MessageHandler:
 
 
     def should_process_message(self):
-        if len(self.message.content) == 0:
+        if len(self.message.content) == 0 and len(self.message.embeds) == 0:
             return False
         if self.message.author == self.client.user:
             return False
