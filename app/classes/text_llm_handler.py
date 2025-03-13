@@ -16,7 +16,7 @@ class TextLLMHandler:
 	
     def get_settings(self):
         self.system = self.config.get_setting("system", self.guild_id) or "An AI Story Teller"
-        self.model = self.config.get_setting("model", self.guild_id) or "gemma3:4b"
+        self.model = "llama3.1:8b"
         self.options = {
          "temperature": float(self.config.get_setting("temperature", self.guild_id)) or 1.0
         }
