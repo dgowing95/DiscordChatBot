@@ -52,7 +52,7 @@ class MessageHandler:
         return False
     
     async def handle_text_input(self):
-        ollama = TextLLMHandler(self.messages)
+        ollama = TextLLMHandler(self.messages, self.message.guild.id)
         response = await ollama.generate()
         return response
     

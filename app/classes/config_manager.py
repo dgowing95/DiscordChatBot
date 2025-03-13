@@ -1,15 +1,12 @@
-import yaml
+import yaml, redis, os
 class configManager:
-    config = False
 
     def __init__(self):
-        with open('data/config.yaml', 'r') as file:
-            self.config = yaml.safe_load(file)
+        self.redis = redis.Redis(host=os.environ['REDIS_HOST'], port=6379, db=0, charset="utf-8", decode_responses=True)
+        self.namespace = "dcb"
 
-    def get_setting(self, setting):
-        return self.config[setting] or False
+    def get_setting(self, setting, guild_id):
+        return self.redis.get(f"{self.namespace}:{guild_id}:{setting}") or False
     
-    def update_setting(self, setting, value):
-        self.config[setting] = value
-        with open('data/config.yaml', 'w') as file:
-            yaml.dump(self.config, file)
+    def update_setting(self, setting, value, guild_id):
+        self.redis.set(f"{self.namespace}:{guild_id}:{setting}", value)

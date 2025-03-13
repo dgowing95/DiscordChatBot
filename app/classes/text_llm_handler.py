@@ -1,24 +1,31 @@
-import re, json
+import re, json, os
 from openai import AsyncOpenAI
 from classes.config_manager import configManager
 
 class TextLLMHandler:
 
-    def __init__(self, messages):
+    def __init__(self, messages, guild_id):
         self.messages = messages
-        self.system = configManager().get_setting("system")
-        self.model = configManager().get_setting("model")
-        self.llm_text_host_url = configManager().get_setting("llm_text_host")
-        self.options = {
-         "temperature": configManager().get_setting("temperature")
-        }
+        self.guild_id = guild_id
+        self.config = configManager()
+        self.get_settings()
+        self.llm_text_host_url = os.environ['LLM_TEXT_HOST']
+        self.llm_text_api_token = os.environ['TEXT_API_TOKEN']
         self.get_client()
+
+	
+    def get_settings(self):
+        self.system = self.config.get_setting("system", self.guild_id) or "An AI Story Teller"
+        self.model = self.config.get_setting("model", self.guild_id) or "gemma3:4b"
+        self.options = {
+         "temperature": float(self.config.get_setting("temperature", self.guild_id)) or 1.0
+        }
 
     def get_client(self):
        try:
          self.client = AsyncOpenAI(
             base_url=self.llm_text_host_url,
-            api_key=configManager().get_setting("text_api_token")
+            api_key=self.llm_text_api_token
           )
        except Exception as e:
          print('Failed to connect to LLM Host: ' + str(e))
