@@ -9,6 +9,7 @@ intents.message_content = True
 
 client = discord.Client(intents=intents)
 message_queue = asyncio.Queue()
+config = configManager()
 
 
 async def register_commands():
@@ -17,17 +18,17 @@ async def register_commands():
 
     @command_tree.command(name="system", description="Change the behaviour/personality of the bot")
     async def change_system(ctx, system: str):
-        configManager().update_setting("system", system)
+        config.update_setting("system", system, ctx.guild.id)
         await ctx.response.send_message(content=f"System updated to: \"{system}\"")
 
     @command_tree.command(name="get_system", description="See the existing behaviour/personality of the bot")
     async def get_system(ctx):
-        system = configManager().get_setting("system")
+        system = config.get_setting("system", ctx.guild.id)
         await ctx.response.send_message(content=f"System is currently: \"{system}\"")
 
     @command_tree.command(name="temperature", description="Change the randomness of responses, max of 2.0 is max random")
     async def change_temperature(ctx, temperature: float):
-        configManager().update_setting("temperature", temperature)
+        config.update_setting("temperature", temperature, ctx.guild.id)
         await ctx.response.send_message(content=f"Temperature updated to: \"{temperature}\"")  
 
     synced_commands = await command_tree.sync()
@@ -61,5 +62,5 @@ async def process_messages():
     
     
 
-token = configManager().get_setting("discord_token")
+token = os.environ['DISCORD_TOKEN']
 client.run(token)
