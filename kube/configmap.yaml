@@ -4,6 +4,6 @@ metadata:
   name: discordchatbot-config
   namespace: discordchatbot
 data:
-  REDIS_HOST: redis-master.redis.svc.cluster.local
+  REDIS_HOST: 10.152.183.88
   LLM_TEXT_HOST: http://172.17.0.1:11434/v1
   TEXT_API_TOKEN: ollama
