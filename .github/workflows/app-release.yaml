@@ -2,7 +2,7 @@ name: Build & Push application
 on:
   push:
     branches:
-      - change-to-gcr.io
+      - main
     paths:
       - .github/workflows/app-release.yaml
       - Dockerfile
