@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-configmap
+  namespace: {{ .Release.Namespace }}
+data:
+  DISCORD_TOKEN: {{ .Values.discordToken }}
+  REDIS_HOST: {{ .Values.redisHost }}
+  LLM_TEXT_HOST: {{ .Values.llmTextHost }}
+  TEXT_API_TOKEN: {{ .Values.llmTextToken }}
