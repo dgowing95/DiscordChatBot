@@ -3,11 +3,10 @@ on:
   push:
     branches:
       - change-to-gcr.io
-  change:
-    paths:
-      - .github/workflows/app-release.yaml
-      - Dockerfile
-      - app/*
+  paths:
+    - .github/workflows/app-release.yaml
+    - Dockerfile
+    - app/**
 jobs:
   build-deploy:
     runs-on: ubuntu:latest
