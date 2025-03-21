@@ -20,4 +20,4 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           push: true
-          tags: ghcr.io/dgowing95/discordchatbot:${{github.sha}}     
+          tags: ghcr.io/dgowing95/DiscordChatBot:${{github.sha}}     
