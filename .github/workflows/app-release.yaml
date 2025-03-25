@@ -42,6 +42,10 @@ jobs:
           git config user.name "$GITHUB_ACTOR"
           git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
 
+      - name: Add new image tag to chart values.yaml
+        run: |
+          sed -i -e 's/<<tag>>/${{github.sha}}/g' charts/dis-ai-bot/values.yaml
+
       - name: Run chart-releaser
         uses: helm/chart-releaser-action@v1.7.0
         env:
