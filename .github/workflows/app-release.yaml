@@ -27,7 +27,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           push: true
-          tags: ghcr.io/dgowing95/discordchatbot:${{github.sha}}    
+          tags: ghcr.io/dgowing95/discordchatbot:${{github.sha}}
 
   helm-chart-release:
     needs: build-push
@@ -41,6 +41,18 @@ jobs:
         run: |
           git config user.name "$GITHUB_ACTOR"
           git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+
+      - name: Get Next Version
+        id: semver
+        uses: ietf-tools/semver-action@v1
+        with:
+          token: ${{ github.token }}
+          branch: main
+          fallbackTag: 0.0.0          
+
+      - name: Add version to helm chart
+        run: |
+          sed -i -e 's/<<chart_version>>/${{ steps.semver.outputs.nextStrict }}/g' charts/dis-ai-bot/Chart.yaml
 
       - name: Add new image tag to chart values.yaml
         run: |
