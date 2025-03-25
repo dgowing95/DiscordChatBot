@@ -1,4 +1,4 @@
-import re, json, os
+import os
 from openai import AsyncOpenAI
 from classes.config_manager import configManager
 
