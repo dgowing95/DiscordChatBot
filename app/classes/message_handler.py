@@ -20,7 +20,7 @@ class MessageHandler:
           
           for embed in message.embeds:
               embed_dict = embed.to_dict()
-              embed_dict.pop('image', None)
+              embed_dict.pop('fields', None)
               content = json.dumps(embed_dict)
               formatted_history.append({
                   'role': "assistant" if message.author.id == self.client.user.id else "user",
