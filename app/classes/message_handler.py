@@ -19,7 +19,9 @@ class MessageHandler:
        for message in self.history:
           
           for embed in message.embeds:
-              content = json.dumps(embed.to_dict())
+              embed_dict = embed.to_dict()
+              embed_dict.pop('image', None)
+              content = json.dumps(embed_dict)
               formatted_history.append({
                   'role': "assistant" if message.author.id == self.client.user.id else "user",
                   'content': f"Discord Emebed from '{message.author.name}' converted to JSON: {content}"
