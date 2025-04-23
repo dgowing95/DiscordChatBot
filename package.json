@@ -1,5 +1,10 @@
 {
     "release": {
-      "branches": ["main"]
+        "branches": [
+            "main"
+        ]
+    },
+    "devDependencies": {
+        "semantic-release": "^24.2.3"
     }
 }
