@@ -4,7 +4,7 @@ on:
     branches:
       - main
     paths:
-      - .github/workflows/app-release.yaml
+      - .github/workflows/release.yaml
       - Dockerfile
       - app/**
       - charts/**
