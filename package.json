@@ -1,4 +1,6 @@
 {
+    "name": "discordchatbot",
+    "private": true,
     "release": {
         "branches": [
             "main"
