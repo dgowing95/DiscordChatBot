@@ -1,4 +1,4 @@
-name: Build & Push application 
+name: Release
 on:
   push:
     branches:
@@ -9,7 +9,7 @@ on:
       - app/**
       - charts/**
 jobs:
-  publish:
+  release:
     runs-on: ubuntu-latest
     permissions:
       contents: write
