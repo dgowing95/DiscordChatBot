@@ -20,8 +20,9 @@ imagePullSecrets: []
 
 discordToken: ""
 redisHost: "redis-master.redis.svc.cluster.local"
-llmTextHost: "http://172.17.0.1:11434/v1"
-llmTextToken:  "ollama"
+llm_hosts:
+  - base_url: "http://172.17.0.1:11434/v1"
+    api_key: "ollama"
 
 
 # This is for setting Kubernetes Annotations to a Pod.

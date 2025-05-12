@@ -1,5 +1,6 @@
-import os
+import os, yaml, asyncio
 from openai import AsyncOpenAI
+from urllib.parse import urlparse
 from classes.config_manager import configManager
 
 class TextLLMHandler:
@@ -9,9 +10,6 @@ class TextLLMHandler:
         self.guild_id = guild_id
         self.config = configManager()
         self.get_settings()
-        self.llm_text_host_url = os.environ['LLM_TEXT_HOST']
-        self.llm_text_api_token = os.environ['TEXT_API_TOKEN']
-        self.get_client()
 
 	
     def get_settings(self):
@@ -21,17 +19,38 @@ class TextLLMHandler:
          "temperature": float(self.config.get_setting("temperature", self.guild_id)) or 1.0
         }
 
-    def get_client(self):
-       try:
-         self.client = AsyncOpenAI(
-            base_url=self.llm_text_host_url,
-            api_key=self.llm_text_api_token
-          )
-       except Exception as e:
-         print('Failed to connect to LLM Host: ' + str(e))
+
+    async def test_connection(self, host, port):
+      try:
+        _reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=5)
+        writer.close()
+        await writer.wait_closed()
+        return True
+      except:
+        return False
+
+    async def try_clients(self):
+      yaml_config = yaml.safe_load(os.environ.get("LLM_HOSTS", "[]"))
+      print(yaml_config)
+      for llm_host in yaml_config['llm_hosts']:
+         print(f"Trying LLM host: {llm_host['base_url']}")
+         url_components = urlparse(llm_host['base_url'])
+         if await self.test_connection(url_components.hostname, url_components.port):
+            return llm_host
+        
+      raise Exception("No LLM hosts available")
+
+    async def get_client(self):
+      valid_client = await self.try_clients()
+      self.client = client = AsyncOpenAI(
+          base_url=valid_client['base_url'],
+          api_key=valid_client['api_key']
+      )
+
 
 
     async def generate(self):
+      await self.get_client()
       system = self.system + ". Reply with only your message, no prefixes or titles."
       msgs = [
            {"role": "system", "content": system},
