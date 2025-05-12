@@ -45,7 +45,7 @@ class TextLLMHandler:
             temperature=self.options["temperature"],
             stream=True
           )
-         print(f'Message returned from Text LLM')
+         print(f'Stream response generated')
          return response_stream
       except Exception as e:
          print('Failed to get response from LLM: ' + str(e))
