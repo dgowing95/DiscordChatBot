@@ -53,12 +53,19 @@ async def process_messages():
         if handler.should_process_message() == False:
             continue
         
+        print("Picking up message from queue")
         try:
             async with message.channel.typing():
                 await handler.handle_message()
+                message_queue.task_done()
+                print("Done with message from queue")
         except Exception as e:
             print("Error handling message: " + str(e))
-        message_queue.task_done()
+            message_queue.task_done()
+            print("Done with message from queue")
+
+        
+        
     
     
 

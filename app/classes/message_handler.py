@@ -1,4 +1,4 @@
-import random, asyncio, re, json
+import random, asyncio, re, json, time
 from classes.text_llm_handler import TextLLMHandler
 
 class MessageHandler:
@@ -76,7 +76,7 @@ class MessageHandler:
             await self.discord_message_object.edit(
                 content=self.text_response or "..."
             )
-            await asyncio.sleep(3)
+            time.sleep(3)
 
         # Final update to the message
         await self.discord_message_object.edit(
@@ -100,9 +100,10 @@ class MessageHandler:
             return
 
         async with asyncio.TaskGroup() as tg:
-            chunk_collect_task = asyncio.create_task(
+            chunk_collect_task = tg.create_task(
                 self.handle_text_stream(text_response_stream)
             )
-            message_response_task = asyncio.create_task(
+            message_response_task = tg.create_task(
                 self.handle_message_response(chunk_collect_task)
             )
+        return
