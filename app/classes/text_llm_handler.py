@@ -32,7 +32,7 @@ class TextLLMHandler:
     async def try_clients(self):
       client_configs = json.loads(os.environ.get("LLM_HOSTS", "[]"))
       print(client_configs)
-      for llm_host in client_configs['llm_hosts']:
+      for llm_host in client_configs:
          print(f"Trying LLM host: {llm_host['base_url']}")
          url_components = urlparse(llm_host['base_url'])
          if await self.test_connection(url_components.hostname, url_components.port):
