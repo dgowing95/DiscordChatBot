@@ -6,4 +6,4 @@ metadata:
 data:
   DISCORD_TOKEN: {{ .Values.discordToken }}
   REDIS_HOST: {{ .Values.redisHost }}
-  LLM_HOSTS: {{ .Values.llm_hosts }}
+  LLM_HOSTS: {{ .Values.llm_hosts | toJson | quote }}
