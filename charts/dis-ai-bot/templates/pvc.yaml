@@ -1,0 +1,53 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ include "helm.fullname" . }}-pvc-redis
+  labels:
+    type: local
+spec:
+  storageClassName: {{ include "helm.fullname" . }}-pvc-redis
+  capacity:
+    storage: {{ .Values.pvc.redisSize }}
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    path: {{ .Values.pvc.hostPath }}/redis
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ include "helm.fullname" . }}-pvc-ollama
+  labels:
+    type: local
+spec:
+  storageClassName: {{ include "helm.fullname" . }}-pvc-ollama
+  capacity:
+    storage: {{ .Values.pvc.ollamaSize }}
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    path: {{ .Values.pvc.hostPath }}/ollama
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-pv-claim
+spec:
+  storageClassName: {{ include "helm.fullname" . }}-pvc-redis
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.pvc.redisSize }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ollama-pv-claim
+spec:
+  storageClassName: {{ include "helm.fullname" . }}-pvc-ollama
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.pvc.ollamaSize }}

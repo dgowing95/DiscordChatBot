@@ -27,6 +27,13 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}    
       hostNetwork: true
+      volumes:
+        - name: redis-data
+          persistentVolumeClaim:
+            claimName: redis-pv-claim
+        - name: ollama-data
+          persistentVolumeClaim:
+            claimName: ollama-pv-claim
       containers:
       - name: {{ .Chart.Name }}
         image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
@@ -34,3 +41,25 @@ spec:
         envFrom:
         - configMapRef:
             name: {{ .Release.Name }}-configmap
+
+      - name: {{ .Chart.Name }}-redis
+        image: "redis:8.0.1"
+        command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+        imagePullPolicy: IfNotPresent
+        volumeMounts:
+          - name: redis-data
+            mountPath: /data        
+
+      - name: {{ .Chart.Name }}-ollama
+        image: "ollama/ollama:0.7.0"
+        imagePullPolicy: IfNotPresent
+        {{ if .Values.gpuLimit }}
+        resources:
+          limits:
+            nvidia.com/gpu: {{ .Values.gpuLimit }}
+        {{ end }}
+        volumeMounts:
+          - name: ollama-data
+            mountPath: /root/.ollama
+
+

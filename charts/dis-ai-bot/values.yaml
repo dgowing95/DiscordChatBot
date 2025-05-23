@@ -19,11 +19,19 @@ image:
 imagePullSecrets: []
 
 discordToken: ""
-redisHost: "redis-master.redis.svc.cluster.local"
+redisHost: "127.0.0.1"
 llm_hosts:
-  - base_url: "http://172.17.0.1:11434/v1"
+  - base_url: "http://127.0.0.1:11434/v1"
     api_key: "ollama"
 
+model: gemma3:1b
+
+pvc:
+  redisSize: 5Gi
+  ollamaSize: 45Gi
+  hostPath: /data/kube/discordchatbot
+
+gpuLimit: 0
 
 # This is for setting Kubernetes Annotations to a Pod.
 # For more information checkout: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/
