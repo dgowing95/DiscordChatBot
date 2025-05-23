@@ -25,6 +25,7 @@ llm_hosts:
     api_key: "ollama"
 
 model: gemma3:1b
+message_history: 5
 
 pvc:
   redisSize: 5Gi

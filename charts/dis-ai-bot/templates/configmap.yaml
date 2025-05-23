@@ -8,3 +8,4 @@ data:
   REDIS_HOST: {{ .Values.redisHost }}
   LLM_HOSTS: {{ .Values.llm_hosts | toJson | quote }}
   MODEL: {{ .Values.model }}
+  MSG_HISTORY_LIMIT: {{ .Values.message_history }}

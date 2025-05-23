@@ -1,4 +1,4 @@
-import random, asyncio, re, json, time
+import random, asyncio, re, json, time, os
 from classes.text_llm_handler import TextLLMHandler
 
 class MessageHandler:
@@ -11,7 +11,7 @@ class MessageHandler:
 
 
     async def build_messages(self):
-       self.history = [message async for message in self.message.channel.history(limit=5)]
+       self.history = [message async for message in self.message.channel.history(limit=os.environ.get("MSG_HISTORY_LIMIT", 5))]
        self.history.pop(0) # Remove current message
        self.history.reverse() # Reverse the order of the messages so the newest is first
 
