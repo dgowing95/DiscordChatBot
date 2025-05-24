@@ -11,7 +11,7 @@ class MessageHandler:
 
 
     async def build_messages(self):
-       self.history = [message async for message in self.message.channel.history(limit=os.environ.get("MSG_HISTORY_LIMIT", 5))]
+       self.history = [message async for message in self.message.channel.history(limit=int(os.environ.get("MSG_HISTORY_LIMIT", 5)))]
        self.history.pop(0) # Remove current message
        self.history.reverse() # Reverse the order of the messages so the newest is first
 
