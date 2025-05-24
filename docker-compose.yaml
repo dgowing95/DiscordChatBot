@@ -6,6 +6,17 @@ services:
     command: redis-server --save 60 1 --loglevel warning
     ports:
       - "6379:6379"
+  ollama:
+    image: ollama/ollama:0.7.0
+    volumes:
+      - ollama_data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
   discordchatbot:
     build: .
     volumes:
@@ -15,3 +26,4 @@ services:
       - redis
 volumes:
   data:
+  ollama_data:
