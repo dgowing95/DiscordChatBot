@@ -25,7 +25,9 @@ spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
-      {{- end }}    
+      {{- end }}
+      strategy:
+        type: Recreate
       hostNetwork: true
       volumes:
         - name: redis-data
