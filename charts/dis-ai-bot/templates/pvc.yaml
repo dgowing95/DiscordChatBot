@@ -29,6 +29,21 @@ spec:
     path: {{ .Values.pvc.hostPath }}/ollama
 ---
 apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ include "helm.fullname" . }}-pvc-diffusers
+  labels:
+    type: local
+spec:
+  storageClassName: {{ include "helm.fullname" . }}-pvc-diffusers
+  capacity:
+    storage: {{ .Values.pvc.diffusersSize }}
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    path: {{ .Values.pvc.hostPath }}/diffusers    
+---
+apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: redis-pv-claim
@@ -51,3 +66,15 @@ spec:
   resources:
     requests:
       storage: {{ .Values.pvc.ollamaSize }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: diffusers-pv-claim
+spec:
+  storageClassName: {{ include "helm.fullname" . }}-pvc-diffusers
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.pvc.diffusersSize }}

@@ -36,10 +36,21 @@ spec:
         - name: ollama-data
           persistentVolumeClaim:
             claimName: ollama-pv-claim
+        - name: diffusers-data
+          persistentVolumeClaim:
+            claimName: diffusers-pv-claim
       containers:
       - name: {{ .Chart.Name }}
         image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
         imagePullPolicy: {{ .Values.image.pullPolicy }}
+        {{ if .Values.gpuLimit }}
+        resources:
+          limits:
+            nvidia.com/gpu: {{ .Values.gpuLimit }}
+        {{ end }}        
+        volumeMounts:
+          - name: diffusers-data
+            mountPath: /home/.cache/huggingface
         envFrom:
         - configMapRef:
             name: {{ .Release.Name }}-configmap

@@ -6,6 +6,8 @@ metadata:
 data:
   DISCORD_TOKEN: {{ .Values.discordToken }}
   REDIS_HOST: {{ .Values.redisHost }}
-  LLM_HOSTS: {{ .Values.llm_hosts | toJson | quote }}
+  LLM_HOST: {{ .Values.llm_host }}
+  LLM_PASS: {{ .Values.llm_pass }}
+  IMAGE_MODEL: {{ .Values.image_model }}
   MODEL: {{ .Values.model }}
   MSG_HISTORY_LIMIT: {{ .Values.message_history | toString | quote }}

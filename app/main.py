@@ -2,7 +2,9 @@ import discord
 import asyncio
 import os
 from classes.message_handler import MessageHandler
+from classes.text_llm_handler import TextLLMHandler
 from classes.config_manager import configManager
+from classes.image_handler import ImageHandler
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -30,6 +32,15 @@ async def register_commands():
     async def change_temperature(ctx, temperature: float):
         config.update_setting("temperature", temperature, ctx.guild.id)
         await ctx.response.send_message(content=f"Temperature updated to: \"{temperature}\"")  
+    
+    @command_tree.command(name="make_image", description="Generate an image based on a prompt")
+    async def make_image(ctx, prompt: str):
+        followup = ctx.followup
+        print(f"Received image generation request with prompt: {prompt}")
+        await ctx.response.defer(ephemeral=False, thinking=True)
+        
+        img = await ImageHandler().generate_image(prompt)
+        await followup.send(file=img, content=prompt)
 
     synced_commands = await command_tree.sync()
     for synced_command in synced_commands:
@@ -38,11 +49,18 @@ async def register_commands():
 @client.event
 async def on_ready():
     print(f'Logged in as {client.user}')
+    await TextLLMHandler.pull_model()
+    await ImageHandler().setup()
+
     await register_commands()
     client.loop.create_task(process_messages())
+    
 
 @client.event
 async def on_message(message):
+    # img = await ImageHandler().generate_image("a cat")
+    
+    # await message.reply(file=img)
     await message_queue.put(message)
     
 async def process_messages():

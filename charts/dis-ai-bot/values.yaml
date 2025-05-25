@@ -20,9 +20,10 @@ imagePullSecrets: []
 
 discordToken: ""
 redisHost: "127.0.0.1"
-llm_hosts:
-  - base_url: "http://127.0.0.1:11434/v1"
-    api_key: "ollama"
+llm_host: "http://127.0.0.1:11434/v1"
+llm_pass: "ollama"
+
+image_model: "stable-diffusion-v1-5/stable-diffusion-v1-5"    
 
 model: gemma3:1b
 message_history: 5
@@ -30,6 +31,7 @@ message_history: 5
 pvc:
   redisSize: 5Gi
   ollamaSize: 45Gi
+  diffusersSize: 15Gi
   hostPath: /data/kube/discordchatbot
 
 gpuLimit: 0
