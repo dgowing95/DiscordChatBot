@@ -11,7 +11,7 @@ class ImageHandler:
         if ImageHandler.pipe is None:
             print("Initializing ImageHandler...")
             model = os.environ.get("IMAGE_MODEL", "stable-diffusion-v1-5/stable-diffusion-v1-5")
-            ImageHandler.pipe = DiffusionPipeline.from_pretrained(model, torch_dtype=torch.float16)
+            ImageHandler.pipe = DiffusionPipeline.from_pretrained(model, torch_dtype=torch.float16, cache_dir="/home/.cache/huggingface/hub", safety_checker=None)
             ImageHandler.pipe.to("cuda")
             print(f"ImageHandler initialized with model: {model}")
 
