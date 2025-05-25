@@ -10,6 +10,7 @@ services:
     image: ollama/ollama:0.7.0
     volumes:
       - ollama_data:/root/.ollama
+    runtime: nvidia
     deploy:
       resources:
         reservations:
@@ -21,9 +22,19 @@ services:
     build: .
     volumes:
       - ./app:/app
+      - diffusers_data:/home/.cache/huggingface/hub
     env_file: .env
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]    
     depends_on:
       - redis
 volumes:
   data:
   ollama_data:
+  diffusers_data:

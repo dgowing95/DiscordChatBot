@@ -1,4 +1,4 @@
-import os, asyncio, json
+import os, asyncio, json, requests
 from openai import AsyncOpenAI
 from urllib.parse import urlparse
 from classes.config_manager import configManager
@@ -11,6 +11,9 @@ class TextLLMHandler:
         self.config = configManager()
         self.get_settings()
 
+    def pull_model(self):
+       pass
+       
 	
     def get_settings(self):
         self.system = self.config.get_setting("system", self.guild_id) or "An AI Story Teller"

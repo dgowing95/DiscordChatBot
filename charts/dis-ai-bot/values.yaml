@@ -24,6 +24,8 @@ llm_hosts:
   - base_url: "http://127.0.0.1:11434/v1"
     api_key: "ollama"
 
+image_model: "stable-diffusion-v1-5/stable-diffusion-v1-5"    
+
 model: gemma3:1b
 message_history: 5
 

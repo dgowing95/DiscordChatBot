@@ -3,6 +3,7 @@ import asyncio
 import os
 from classes.message_handler import MessageHandler
 from classes.config_manager import configManager
+from classes.image_handler import ImageHandler
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -38,11 +39,15 @@ async def register_commands():
 @client.event
 async def on_ready():
     print(f'Logged in as {client.user}')
-    await register_commands()
+    #await register_commands()
     client.loop.create_task(process_messages())
+    
 
 @client.event
 async def on_message(message):
+    # img = await ImageHandler().generate_image("a cat")
+    
+    # await message.reply(file=img)
     await message_queue.put(message)
     
 async def process_messages():
