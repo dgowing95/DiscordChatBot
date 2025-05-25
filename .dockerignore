@@ -1,3 +1,7 @@
 venv
 __pycache__
 config.yaml
+node_modules
+.github
+charts
+kube
