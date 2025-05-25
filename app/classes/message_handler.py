@@ -89,6 +89,7 @@ class MessageHandler:
         self.text_response = re.sub(r"^<@.*:", "", self.text_response, flags=re.DOTALL)
         self.text_response = re.sub(r'\n\s*\n', '\n\n', self.text_response, flags=re.DOTALL)
         self.text_response = re.sub(r"Message from.*?:", "", self.text_response, flags=re.DOTALL)
+        self.text_response = re.sub('<think>.*?</think>', '', self.text_response, flags=re.DOTALL)
 
     async def handle_message(self):
         print(f'Handling message: {self.message.content}')

@@ -2,6 +2,7 @@ import discord
 import asyncio
 import os
 from classes.message_handler import MessageHandler
+from classes.text_llm_handler import TextLLMHandler
 from classes.config_manager import configManager
 from classes.image_handler import ImageHandler
 
@@ -39,6 +40,8 @@ async def register_commands():
 @client.event
 async def on_ready():
     print(f'Logged in as {client.user}')
+    await TextLLMHandler.pull_model()
+
     #await register_commands()
     client.loop.create_task(process_messages())
     
