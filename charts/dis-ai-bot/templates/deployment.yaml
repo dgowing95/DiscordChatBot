@@ -7,6 +7,8 @@ metadata:
     {{- include "helm.labels" . | nindent 4 }}
 spec:
   replicas: 1
+  strategy:
+    type: Recreate  
   selector:
     matchLabels:
       {{- include "helm.selectorLabels" . | nindent 6 }}
@@ -26,8 +28,6 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      strategy:
-        type: Recreate
       hostNetwork: true
       volumes:
         - name: redis-data
