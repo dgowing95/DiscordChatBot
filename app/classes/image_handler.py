@@ -17,9 +17,11 @@ class ImageHandler:
 
             # load both base & refiner
             ImageHandler.pipe = DiffusionPipeline.from_pretrained(
-                "stabilityai/stable-diffusion-xl-base-1.0", torch_dtype=torch.float16, variant="fp16", use_safetensors=True, cache_dir="/home/.cache/huggingface/hub", safety_checker=None
+                "stabilityai/stable-diffusion-xl-base-1.0", torch_dtype=torch.float16, variant="fp16", use_safetensors=True, cache_dir="/home/.cache/huggingface/hub"
             )
             ImageHandler.pipe.enable_model_cpu_offload()
+            ImageHandler.pipe.safety_checker = None
+
             ImageHandler.refiner = DiffusionPipeline.from_pretrained(
                 "stabilityai/stable-diffusion-xl-refiner-1.0",
                 text_encoder_2=ImageHandler.pipe.text_encoder_2,
@@ -30,6 +32,7 @@ class ImageHandler:
                 variant="fp16",
             )
             ImageHandler.refiner.enable_model_cpu_offload()
+            ImageHandler.refiner.safety_checker = None
 
 
             print(f"ImageHandler initialized")
