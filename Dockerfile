@@ -8,4 +8,4 @@ RUN pip --no-cache-dir install -r requirements.txt
 WORKDIR /app
 ADD app /app
 
-ENTRYPOINT ["python3", "-u", "main.py"]
+ENTRYPOINT ["python3", "-W ignore", "-u", "main.py"]
