@@ -22,7 +22,9 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           push: true
-          tags: ghcr.io/dgowing95/discordchatbot:${{github.ref_name}}
+          tags: ghcr.io/dgowing95/discordchatbot:${{github.ref_name}},ghcr.io/dgowing95/discordchatbot:latest
+          cache-from: type=registry,ref=user/app:latest
+          cache-to: type=inline
   
   helm-chart-release:
     needs: build
