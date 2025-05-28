@@ -11,7 +11,7 @@ class ImageHandler:
         if ImageHandler.pipe is None:
             print("Initializing ImageHandler...")
             ImageHandler.pipe = DiffusionPipeline.from_pretrained(
-                "stabilityai/stable-diffusion-xl-base-1.0",
+                os.environ.get("IMAGE_MODEL, "stabilityai/stable-diffusion-xl-base-1.0"),
                 torch_dtype=torch.float16,
                 variant="fp16",
                 use_safetensors=True,
