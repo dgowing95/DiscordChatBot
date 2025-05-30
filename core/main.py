@@ -1,6 +1,8 @@
 import discord
 import asyncio
 import os
+import aiohttp
+import io
 from classes.message_handler import MessageHandler
 from classes.text_llm_handler import TextLLMHandler
 from classes.config_manager import configManager
@@ -11,6 +13,7 @@ intents.message_content = True
 
 client = discord.Client(intents=intents)
 message_queue = asyncio.Queue()
+image_task_queue = asyncio.Queue()
 config = configManager()
 
 
@@ -35,13 +38,8 @@ async def register_commands():
     
     @command_tree.command(name="make_image", description="Generate an image based on a prompt")
     async def make_image(ctx, prompt: str):
-        return
-        # followup = ctx.followup
-        # print(f"Received image generation request with prompt: {prompt}")
-        # await ctx.response.defer(ephemeral=False, thinking=True)
-        
-        # img = await ImageHandler().generate_image(prompt)
-        # await followup.send(file=img, content=prompt)
+        await ctx.response.defer(ephemeral=False, thinking=True)
+        await image_task_queue.put((ctx, prompt))
 
     synced_commands = await command_tree.sync()
     for synced_command in synced_commands:
@@ -53,6 +51,7 @@ async def on_ready():
     await TextLLMHandler.pull_model()
     #await register_commands()
     client.loop.create_task(process_messages())
+    client.loop.create_task(process_text_images())
     
 
 @client.event
@@ -82,8 +81,30 @@ async def process_messages():
             print("Done with message from queue")
 
         
-        
-    
+async def process_text_images():
+    while True:
+        ctx, prompt = await image_task_queue.get()
+        try:
+            print(f"Processing image for prompt: {prompt}")
+            image_bytes = await generate_image_from_api(prompt)
+
+            file = discord.File(io.BytesIO(image_bytes), filename="image.png")
+            await ctx.followup.send(file=file, content=prompt)
+
+        except Exception as e:
+            print(f"Error during image generation: {e}")
+            await ctx.followup.send("Failed to generate image.")
+        image_task_queue.task_done()
+
+async def generate_image_from_api(prompt: str) -> bytes:
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "http://diffusion:8000/text-to-image",
+            json={"prompt": prompt}
+        ) as resp:
+            if resp.status != 200:
+                raise Exception(f"API failed with status {resp.status}")
+            return await resp.read()
     
 
 token = os.environ['DISCORD_TOKEN']
