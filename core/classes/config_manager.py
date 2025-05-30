@@ -1,4 +1,4 @@
-import yaml, redis, os
+import redis, os
 class configManager:
 
     def __init__(self):

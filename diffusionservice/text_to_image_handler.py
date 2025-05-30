@@ -25,9 +25,11 @@ class TextToImageHandler:
         await self.setup()
         try:
             image = TextToImageHandler.pipe(prompt=prompt).images[0]
+            TextToImageHandler.pipe = None  # Clear the pipeline to free up memory
             return self._image_to_bytes(image)
         except Exception as e:
             print(f"Error generating image: {e}")
+            TextToImageHandler.pipe = None  # Clear the pipeline to free up memory
             return None
 
     def _image_to_bytes(self, image):

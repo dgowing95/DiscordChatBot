@@ -18,12 +18,20 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-  discordchatbot:
-    build: .
+  core:
+    build: ./core
     volumes:
-      - ./app:/app
-      - diffusers_data:/home/.cache/huggingface/hub
+      - ./core:/app
     env_file: .env
+    depends_on:
+      - redis
+  diffusion:
+    build: ./diffusionservice
+    volumes:
+      - ./diffusionservice:/app
+      - diffusers_data:/home/.cache/huggingface/hub
+    ports:
+      - "8000:8000"
     runtime: nvidia
     deploy:
       resources:
@@ -32,8 +40,6 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]    
-    depends_on:
-      - redis
 volumes:
   data:
   ollama_data:

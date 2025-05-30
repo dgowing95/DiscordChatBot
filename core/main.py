@@ -4,7 +4,7 @@ import os
 from classes.message_handler import MessageHandler
 from classes.text_llm_handler import TextLLMHandler
 from classes.config_manager import configManager
-from classes.image_handler import ImageHandler
+
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -35,12 +35,13 @@ async def register_commands():
     
     @command_tree.command(name="make_image", description="Generate an image based on a prompt")
     async def make_image(ctx, prompt: str):
-        followup = ctx.followup
-        print(f"Received image generation request with prompt: {prompt}")
-        await ctx.response.defer(ephemeral=False, thinking=True)
+        return
+        # followup = ctx.followup
+        # print(f"Received image generation request with prompt: {prompt}")
+        # await ctx.response.defer(ephemeral=False, thinking=True)
         
-        img = await ImageHandler().generate_image(prompt)
-        await followup.send(file=img, content=prompt)
+        # img = await ImageHandler().generate_image(prompt)
+        # await followup.send(file=img, content=prompt)
 
     synced_commands = await command_tree.sync()
     for synced_command in synced_commands:
@@ -50,9 +51,7 @@ async def register_commands():
 async def on_ready():
     print(f'Logged in as {client.user}')
     await TextLLMHandler.pull_model()
-    await ImageHandler().setup()
-
-    await register_commands()
+    #await register_commands()
     client.loop.create_task(process_messages())
     
 
