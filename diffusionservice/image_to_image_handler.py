@@ -25,7 +25,6 @@ class ImageToImageHandler:
         try:
             output = ImageToImageHandler.pipe(prompt=prompt, image=init_image)
             self.release_resources()
-            print(output)
             return self.return_image_bytes(output.images[0])
         except Exception as e:
             print(f"Error during image-to-image generation: {e}")
@@ -34,6 +33,8 @@ class ImageToImageHandler:
 
     def release_resources(self):
         if ImageToImageHandler.pipe is not None:
+            print("Releasing resources...")
+            del ImageToImageHandler.pipe
             ImageToImageHandler.pipe = None
             torch.cuda.empty_cache()
             gc.collect()

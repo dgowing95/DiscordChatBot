@@ -34,6 +34,8 @@ class TextToImageHandler:
 
     def release_resources(self):
         if TextToImageHandler.pipe is not None:
+            print("Releasing resources...")
+            del TextToImageHandler.pipe
             TextToImageHandler.pipe = None
             torch.cuda.empty_cache()
             gc.collect()
