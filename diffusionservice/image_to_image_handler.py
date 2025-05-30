@@ -1,4 +1,4 @@
-import os, torch, io
+import os, torch, io,gc
 from diffusers import AutoPipelineForImage2Image
 from PIL import Image
 
@@ -24,13 +24,20 @@ class ImageToImageHandler:
         await self.setup()
         try:
             output = ImageToImageHandler.pipe(prompt=prompt, image=init_image)
-            ImageToImageHandler.pipe = None  # Clear the pipeline to free up memory
+            self.release_resources()
             print(output)
             return self.return_image_bytes(output.images[0])
         except Exception as e:
             print(f"Error during image-to-image generation: {e}")
-            ImageToImageHandler.pipe = None  # Clear the pipeline to free up memory
+            self.release_resources()
             return None
+
+    def release_resources(self):
+        if ImageToImageHandler.pipe is not None:
+            ImageToImageHandler.pipe = None
+            torch.cuda.empty_cache()
+            gc.collect()
+
 
     def return_image_bytes(self, image: Image.Image):
         byte_array = io.BytesIO()
