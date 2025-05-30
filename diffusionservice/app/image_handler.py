@@ -1,7 +1,7 @@
 import os, torch, io
 from diffusers import DiffusionPipeline
 
-from PIL import Image  # For return type if needed
+from PIL import Image
 
 class ImageHandler:
     pipe: DiffusionPipeline = None
