@@ -1,18 +1,16 @@
 import os, torch, io
 from diffusers import DiffusionPipeline
 
-from PIL import Image
-
-class ImageHandler:
+class TextToImageHandler:
     pipe: DiffusionPipeline = None
 
     def __init__(self):
         pass
 
     async def setup(self):
-        if ImageHandler.pipe is None:
+        if TextToImageHandler.pipe is None:
             print("Initializing ImageHandler...")
-            ImageHandler.pipe = DiffusionPipeline.from_pretrained(
+            TextToImageHandler.pipe = DiffusionPipeline.from_pretrained(
                 os.environ.get("IMAGE_MODEL", "stabilityai/stable-diffusion-xl-base-1.0"),
                 torch_dtype=torch.float16,
                 variant="fp16",
@@ -20,13 +18,13 @@ class ImageHandler:
                 cache_dir="/home/.cache/huggingface/hub",
                 device_map="balanced"
             )
-            ImageHandler.pipe.safety_checker = None
+            TextToImageHandler.pipe.safety_checker = None
             print(f"ImageHandler initialized")
 
     async def generate_image(self, prompt: str) -> bytes:
         await self.setup()
         try:
-            image = ImageHandler.pipe(prompt=prompt).images[0]
+            image = TextToImageHandler.pipe(prompt=prompt).images[0]
             return self._image_to_bytes(image)
         except Exception as e:
             print(f"Error generating image: {e}")
