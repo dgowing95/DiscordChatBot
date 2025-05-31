@@ -39,7 +39,13 @@ async def register_commands():
     @command_tree.command(name="make_image", description="Generate an image based on a prompt")
     async def make_image(ctx, prompt: str):
         await ctx.response.defer(ephemeral=False, thinking=True)
-        await image_task_queue.put({'context': ctx, 'prompt': prompt})
+        await image_task_queue.put({'type': 'make', 'task_data': {'context': ctx, 'prompt': prompt}})
+        print(f"Image generation task added to queue with prompt: {prompt}")
+
+    @command_tree.command(name="modify_image", description="Modify an image based on a prompt")
+    async def modify_image(ctx, prompt: str, attachment: discord.Attachment):
+        await ctx.response.defer(ephemeral=False, thinking=True)
+        await image_task_queue.put({'type': 'modify', 'task_data': {'context': ctx, 'prompt': prompt, 'attachment': attachment}})
         print(f"Image generation task added to queue with prompt: {prompt}")
 
     synced_commands = await command_tree.sync()
@@ -57,9 +63,6 @@ async def on_ready():
 
 @client.event
 async def on_message(message):
-    # img = await ImageHandler().generate_image("a cat")
-    
-    # await message.reply(file=img)
     await message_queue.put(message)
     
 async def process_messages():
@@ -85,11 +88,17 @@ async def process_messages():
 async def process_text_images():
     while True:
         task = await image_task_queue.get()
-        prompt = task.get('prompt')
-        ctx = task.get('context')
+        prompt = task['task_data']['prompt']
+        ctx = task['task_data']['context']
+
         try:
-            print(f"Processing image for prompt: {prompt}")
-            image_bytes = await generate_image_from_api(prompt)
+            if task['type'] == 'make':
+                print(f"Processing image generation for prompt: {prompt}")
+                image_bytes = await generate_image_from_api(prompt)
+            elif task['type'] == 'modify':
+                print(f"Processing image modification for prompt: {prompt}")
+                attachment = task['task_data']['attachment']
+                image_bytes = await modify_image_from_api(prompt, attachment)
 
             file = discord.File(io.BytesIO(image_bytes), filename="image.png")
             await ctx.followup.send(file=file, content=prompt)
@@ -104,6 +113,22 @@ async def generate_image_from_api(prompt: str) -> bytes:
         async with session.post(
             f"http://{os.environ.get("DIFFUSION_URL", 5)}:8000/text-image",
             json={"prompt": prompt}
+        ) as resp:
+            if resp.status != 200:
+                raise Exception(f"API failed with status {resp.status}")
+            return await resp.read()
+    
+
+async def modify_image_from_api(prompt: str, image: discord.Attachment) -> bytes:
+    async with aiohttp.ClientSession(auto_decompress=False) as session:
+        image_bytes = await image.read()
+        data = aiohttp.FormData()
+        data.add_field('prompt', prompt)
+        data.add_field('file', image_bytes)
+
+        async with session.post(
+            f"http://{os.environ.get("DIFFUSION_URL", 5)}:8000/image-image",
+            data=data
         ) as resp:
             if resp.status != 200:
                 raise Exception(f"API failed with status {resp.status}")

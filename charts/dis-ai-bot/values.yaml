@@ -25,6 +25,8 @@ llm_pass: "ollama"
 
 image_model: "stable-diffusion-v1-5/stable-diffusion-v1-5"
 diffusion_url: "localhost"
+diffusersGpuLimit: 8
+ollamaGpuLimit: 16
 
 model: gemma3:1b
 message_history: 5
@@ -35,7 +37,6 @@ pvc:
   diffusersSize: 15Gi
   hostPath: /data/kube/discordchatbot
 
-gpuLimit: 0
 
 # This is for setting Kubernetes Annotations to a Pod.
 # For more information checkout: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/
