@@ -39,7 +39,8 @@ async def register_commands():
     @command_tree.command(name="make_image", description="Generate an image based on a prompt")
     async def make_image(ctx, prompt: str):
         await ctx.response.defer(ephemeral=False, thinking=True)
-        await image_task_queue.put((ctx, prompt))
+        await image_task_queue.put({'context': ctx, 'prompt': prompt})
+        print(f"Image generation task added to queue with prompt: {prompt}")
 
     synced_commands = await command_tree.sync()
     for synced_command in synced_commands:
@@ -49,7 +50,7 @@ async def register_commands():
 async def on_ready():
     print(f'Logged in as {client.user}')
     await TextLLMHandler.pull_model()
-    #await register_commands()
+    await register_commands()
     client.loop.create_task(process_messages())
     client.loop.create_task(process_text_images())
     
@@ -83,7 +84,9 @@ async def process_messages():
         
 async def process_text_images():
     while True:
-        ctx, prompt = await image_task_queue.get()
+        task = await image_task_queue.get()
+        prompt = task.get('prompt')
+        ctx = task.get('context')
         try:
             print(f"Processing image for prompt: {prompt}")
             image_bytes = await generate_image_from_api(prompt)
@@ -97,9 +100,9 @@ async def process_text_images():
         image_task_queue.task_done()
 
 async def generate_image_from_api(prompt: str) -> bytes:
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(auto_decompress=False) as session:
         async with session.post(
-            "http://diffusion:8000/text-to-image",
+            f"http://{os.environ.get("DIFFUSION_URL", 5)}:8000/text-image",
             json={"prompt": prompt}
         ) as resp:
             if resp.status != 200:

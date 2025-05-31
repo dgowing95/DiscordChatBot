@@ -25,11 +25,11 @@ class TextToImageHandler:
         await self.setup()
         try:
             image = TextToImageHandler.pipe(prompt=prompt).images[0]
-            self.release_resources()
+            #self.release_resources()
             return self._image_to_bytes(image)
         except Exception as e:
             print(f"Error generating image: {e}")
-            self.release_resources()
+            #self.release_resources()
             return None
 
     def release_resources(self):

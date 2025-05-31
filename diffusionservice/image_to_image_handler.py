@@ -24,11 +24,11 @@ class ImageToImageHandler:
         await self.setup()
         try:
             output = ImageToImageHandler.pipe(prompt=prompt, image=init_image)
-            self.release_resources()
+            #self.release_resources()
             return self.return_image_bytes(output.images[0])
         except Exception as e:
             print(f"Error during image-to-image generation: {e}")
-            self.release_resources()
+            #self.release_resources()
             return None
 
     def release_resources(self):
