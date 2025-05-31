@@ -2,8 +2,8 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from PIL import Image
-from app.text_to_image_handler import TextToImageHandler
-from app.image_to_image_handler import ImageToImageHandler
+from text_to_image_handler import TextToImageHandler
+from image_to_image_handler import ImageToImageHandler
 import io
 
 app = FastAPI()
@@ -33,7 +33,7 @@ async def imageToImage(
     except Exception as e:
         return {"error": f"Invalid image file: {e}"}
 
-    output_bytes = await image_to_image_handler.image_to_image(prompt, init_image, strength)
+    output_bytes = await image_to_image_handler.image_to_image(prompt, init_image)
     if output_bytes is None:
         return {"error": "Image generation failed"}
 

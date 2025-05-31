@@ -23,7 +23,8 @@ redisHost: "127.0.0.1"
 llm_host: "http://127.0.0.1:11434/v1"
 llm_pass: "ollama"
 
-image_model: "stable-diffusion-v1-5/stable-diffusion-v1-5"    
+image_model: "stable-diffusion-v1-5/stable-diffusion-v1-5"
+diffusion_url: "localhost"
 
 model: gemma3:1b
 message_history: 5

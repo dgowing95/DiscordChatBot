@@ -1,4 +1,4 @@
-import os, torch, io
+import os, torch, io, gc
 from diffusers import DiffusionPipeline
 
 class TextToImageHandler:
@@ -25,10 +25,20 @@ class TextToImageHandler:
         await self.setup()
         try:
             image = TextToImageHandler.pipe(prompt=prompt).images[0]
+            #self.release_resources()
             return self._image_to_bytes(image)
         except Exception as e:
             print(f"Error generating image: {e}")
+            #self.release_resources()
             return None
+
+    def release_resources(self):
+        if TextToImageHandler.pipe is not None:
+            print("Releasing resources...")
+            del TextToImageHandler.pipe
+            TextToImageHandler.pipe = None
+            torch.cuda.empty_cache()
+            gc.collect()
 
     def _image_to_bytes(self, image):
         byte_array = io.BytesIO()

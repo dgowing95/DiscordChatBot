@@ -6,6 +6,6 @@ RUN pip --no-cache-dir install torch torchvision torchaudio --index-url https://
 RUN pip --no-cache-dir install -r requirements.txt
 
 WORKDIR /app
-ADD app /app
+ADD . /app
 
-ENTRYPOINT ["python3", "-W ignore", "-u", "main.py"]
+ENTRYPOINT ["python", "-m", "uvicorn", "--host", "0.0.0.0", "main:app"]

@@ -40,8 +40,15 @@ spec:
           persistentVolumeClaim:
             claimName: diffusers-pv-claim
       containers:
-      - name: {{ .Chart.Name }}
-        image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+      - name: {{ .Chart.Name }}-core
+        image: "{{ .Values.image.repository }}:core-{{ .Values.image.tag | default .Chart.AppVersion }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}       
+        envFrom:
+        - configMapRef:
+            name: {{ .Release.Name }}-configmap
+
+      - name: {{ .Chart.Name }}-diffusers
+        image: "{{ .Values.image.repository }}:diffusers-{{ .Values.image.tag | default .Chart.AppVersion }}"
         imagePullPolicy: {{ .Values.image.pullPolicy }}
         volumeMounts:
           - name: diffusers-data

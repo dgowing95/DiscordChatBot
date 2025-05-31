@@ -18,11 +18,21 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push
+      - name: Build and push Core docker image
         uses: docker/build-push-action@v6
         with:
           push: true
-          tags: ghcr.io/dgowing95/discordchatbot:${{github.ref_name}},ghcr.io/dgowing95/discordchatbot:latest
+          tags: ghcr.io/dgowing95/discordchatbot:core-${{github.ref_name}},ghcr.io/dgowing95/discordchatbot:core-latest
+          context: ./core
+          cache-from: type=registry,ref=user/app:latest
+          cache-to: type=inline
+
+      - name: Build and push diffusers docker image
+        uses: docker/build-push-action@v6
+        with:
+          push: true
+          tags: ghcr.io/dgowing95/discordchatbot:diffusers-${{github.ref_name}},ghcr.io/dgowing95/discordchatbot:diffusers-latest
+          context: ./diffusionservice
           cache-from: type=registry,ref=user/app:latest
           cache-to: type=inline
   
