@@ -55,7 +55,7 @@ spec:
             mountPath: /home/.cache/huggingface
         resources:
           limits:
-            nvidia.com/gpu: {{ .Values.gpuLimit }}            
+            nvidia.com/gpu: {{ .Values.diffusersGpuLimit }}            
         envFrom:
         - configMapRef:
             name: {{ .Release.Name }}-configmap
@@ -76,6 +76,6 @@ spec:
             mountPath: /root/.ollama
         resources:
           limits:
-            nvidia.com/gpu: {{ .Values.gpuLimit }}                  
+            nvidia.com/gpu: {{ .Values.ollamaGpuLimit }}                  
 
 
