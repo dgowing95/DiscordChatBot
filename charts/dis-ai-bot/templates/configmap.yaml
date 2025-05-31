@@ -11,3 +11,4 @@ data:
   IMAGE_MODEL: {{ .Values.image_model }}
   MODEL: {{ .Values.model }}
   MSG_HISTORY_LIMIT: {{ .Values.message_history | toString | quote }}
+  DIFFUSION_URL: {{ .Values.diffusion_url }}
