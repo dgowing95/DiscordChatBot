@@ -53,58 +53,31 @@ class MessageHandler:
             return True
         return False
     
-    async def handle_text_input(self):
-        ollama = TextLLMHandler(self.messages, self.message.guild.id)
-        response = await ollama.generate()
-        return response
     
     def clean_message_content(self, message):
         return message.content.replace(f'<@{self.client.user.id}>', '').strip()
     
-    async def handle_text_stream(self, text_response_stream):
-        async for chunk in text_response_stream:
-            self.text_response += chunk.choices[0].delta.content or ""
-            self.filter_response()
-        print("Finished streaming chunks from LLM")
 
-    async def handle_message_response(self, chunk_collect_task):
-        self.discord_message_object = await self.message.reply(
-            content=self.text_response or "..."
-        )
 
-        while chunk_collect_task.done() == False:
-            await self.discord_message_object.edit(
-                content=self.text_response or "..."
-            )
-            time.sleep(3)
-
-        # Final update to the message
-        await self.discord_message_object.edit(
-            content=self.text_response[:1999]
-        )
-        print("Finished streaming text to discord message")
-
-    def filter_response(self):
-        self.text_response.replace(f'<@{self.client.user.id}>', '').strip()
-        self.text_response = re.sub(r"^<@.*:", "", self.text_response, flags=re.DOTALL)
-        self.text_response = re.sub(r'\n\s*\n', '\n\n', self.text_response, flags=re.DOTALL)
-        self.text_response = re.sub(r"Message from.*?:", "", self.text_response, flags=re.DOTALL)
-        self.text_response = re.sub('<think>.*?</think>', '', self.text_response, flags=re.DOTALL)
+    def filter_response(self, text_response):
+        text_response.replace(f'<@{self.client.user.id}>', '').strip()
+        text_response = re.sub(r"^<@.*:", "", text_response, flags=re.DOTALL)
+        text_response = re.sub(r'\n\s*\n', '\n\n', text_response, flags=re.DOTALL)
+        text_response = re.sub(r"Message from.*?:", "", text_response, flags=re.DOTALL)
+        text_response = re.sub('<think>.*?</think>', '', text_response, flags=re.DOTALL)
+        return text_response.strip()
 
     async def handle_message(self):
         print(f'Handling message: {self.message.content}')
         await self.build_messages()
-        text_response_stream = await self.handle_text_input()
+        ollama = TextLLMHandler(self.messages, self.message.guild.id, self.message)
+        response = await ollama.generate()
 
-        if text_response_stream == "Error":
+        if response == "Error":
             await self.message.add_reaction('❌')
             return
 
-        async with asyncio.TaskGroup() as tg:
-            chunk_collect_task = tg.create_task(
-                self.handle_text_stream(text_response_stream)
-            )
-            message_response_task = tg.create_task(
-                self.handle_message_response(chunk_collect_task)
-            )
-        return
+        response = self.filter_response(response)
+        await self.message.reply(
+            content=response
+        )
