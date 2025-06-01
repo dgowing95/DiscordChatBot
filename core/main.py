@@ -6,6 +6,7 @@ import io
 from classes.message_handler import MessageHandler
 from classes.text_llm_handler import TextLLMHandler
 from classes.config_manager import configManager
+from classes.image_generation import generate_image_from_api, modify_image_from_api
 
 
 intents = discord.Intents.default()
@@ -108,31 +109,7 @@ async def process_text_images():
             await ctx.followup.send("Failed to generate image.")
         image_task_queue.task_done()
 
-async def generate_image_from_api(prompt: str) -> bytes:
-    async with aiohttp.ClientSession(auto_decompress=False) as session:
-        async with session.post(
-            f"http://{os.environ.get("DIFFUSION_URL", 5)}:8000/text-image",
-            json={"prompt": prompt}
-        ) as resp:
-            if resp.status != 200:
-                raise Exception(f"API failed with status {resp.status}")
-            return await resp.read()
-    
 
-async def modify_image_from_api(prompt: str, image: discord.Attachment) -> bytes:
-    async with aiohttp.ClientSession(auto_decompress=False) as session:
-        image_bytes = await image.read()
-        data = aiohttp.FormData()
-        data.add_field('prompt', prompt)
-        data.add_field('file', image_bytes)
-
-        async with session.post(
-            f"http://{os.environ.get("DIFFUSION_URL", 5)}:8000/image-image",
-            data=data
-        ) as resp:
-            if resp.status != 200:
-                raise Exception(f"API failed with status {resp.status}")
-            return await resp.read()
     
 
 token = os.environ['DISCORD_TOKEN']
