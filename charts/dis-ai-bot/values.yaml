@@ -37,6 +37,32 @@ pvc:
   diffusersSize: 15Gi
   hostPath: /data/kube/discordchatbot
 
+coreResources:
+  limits:
+    cpu: 1000m
+    memory: 1024Mi
+  requests:
+    cpu: 1000m
+    memory: 1024Mi
+
+ollamaResources:
+  limits:
+    cpu: 6000m
+    memory: 8000Mi
+  requests:
+    cpu: 6000m
+    memory: 8000Mi
+  gpu: 16
+
+diffusionResources:
+  limits:
+    cpu: 6000m
+    memory: 8000Mi
+  requests:
+    cpu: 6000m
+    memory: 8000Mi
+  gpu: 8
+
 
 # This is for setting Kubernetes Annotations to a Pod.
 # For more information checkout: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/

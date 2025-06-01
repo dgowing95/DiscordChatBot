@@ -46,6 +46,13 @@ spec:
         envFrom:
         - configMapRef:
             name: {{ .Release.Name }}-configmap
+        resources
+          limits:
+            cpu: {{ .Values.coreResources.limits.cpu }}
+            memory: {{ .Values.coreResources.limits.memory }}
+          requests:
+            cpu: {{ .Values.coreResources.requests.cpu }}
+            memory: {{ .Values.coreResources.requests.memory }}
 
       - name: {{ .Chart.Name }}-diffusers
         image: "{{ .Values.image.repository }}:diffusers-{{ .Values.image.tag | default .Chart.AppVersion }}"
@@ -55,7 +62,12 @@ spec:
             mountPath: /home/.cache/huggingface
         resources:
           limits:
-            nvidia.com/gpu: {{ .Values.diffusersGpuLimit }}            
+            cpu: {{ .Values.diffusionResources.limits.cpu }}
+            memory: {{ .Values.diffusionResources.limits.memory }}
+            nvidia.com/gpu: {{ .Values.diffusionResources.gpu }}
+          requests:
+            cpu: {{ .Values.diffusionResources.requests.cpu }}
+            memory: {{ .Values.diffusionResources.requests.memory }}    
         envFrom:
         - configMapRef:
             name: {{ .Release.Name }}-configmap
@@ -76,6 +88,11 @@ spec:
             mountPath: /root/.ollama
         resources:
           limits:
-            nvidia.com/gpu: {{ .Values.ollamaGpuLimit }}                  
+            cpu: {{ .Values.ollamaResources.limits.cpu }}
+            memory: {{ .Values.ollamaResources.limits.memory }}
+            nvidia.com/gpu: {{ .Values.ollamaResources.gpu }}
+          requests:
+            cpu: {{ .Values.ollamaResources.requests.cpu }}
+            memory: {{ .Values.ollamaResources.requests.memory }}
 
 
