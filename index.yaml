@@ -3,6 +3,16 @@ entries:
   dis-ai-bot:
   - apiVersion: v2
     appVersion: 1.0.0
+    created: "2025-06-02T10:45:15.955005435Z"
+    description: A Helm chart for deploying the DiscordChatBot on Kubernetes
+    digest: 68f5491b9e8b77be12511edf39c8b04fcfac893b825a45946bffcaa62f77bd8c
+    name: dis-ai-bot
+    type: application
+    urls:
+    - https://github.com/dgowing95/DiscordChatBot/releases/download/dis-ai-bot-v1.9.1/dis-ai-bot-v1.9.1.tgz
+    version: v1.9.1
+  - apiVersion: v2
+    appVersion: 1.0.0
     created: "2025-06-01T17:11:41.013127939Z"
     description: A Helm chart for deploying the DiscordChatBot on Kubernetes
     digest: 95c800a1911a0f3a2dc116095420ceb46c7a109349251f688e14597c8f06e33d
@@ -251,4 +261,4 @@ entries:
     urls:
     - https://github.com/dgowing95/DiscordChatBot/releases/download/dis-ai-bot-0.0.1/dis-ai-bot-0.0.1.tgz
     version: 0.0.1
-generated: "2025-06-01T17:11:41.013336081Z"
+generated: "2025-06-02T10:45:15.955233832Z"
