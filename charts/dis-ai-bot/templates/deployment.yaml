@@ -29,6 +29,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       hostNetwork: true
+      runtimeClassName: nvidia
       volumes:
         - name: redis-data
           persistentVolumeClaim:
@@ -43,6 +44,7 @@ spec:
       - name: {{ .Chart.Name }}-core
         image: "{{ .Values.image.repository }}:core-{{ .Values.image.tag | default .Chart.AppVersion }}"
         imagePullPolicy: {{ .Values.image.pullPolicy }}       
+    
         envFrom:
         - configMapRef:
             name: {{ .Release.Name }}-configmap
@@ -71,6 +73,11 @@ spec:
         envFrom:
         - configMapRef:
             name: {{ .Release.Name }}-configmap
+        env:
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: all
+        - name: NVIDIA_DRIVER_CAPABILITIES
+          value: all            
 
       - name: {{ .Chart.Name }}-redis
         image: "redis:8.0.1"
@@ -94,5 +101,10 @@ spec:
           requests:
             cpu: {{ .Values.ollamaResources.requests.cpu }}
             memory: {{ .Values.ollamaResources.requests.memory }}
+        env:
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: all
+        - name: NVIDIA_DRIVER_CAPABILITIES
+          value: all    
 
 
