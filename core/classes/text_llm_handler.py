@@ -2,7 +2,7 @@ import os,aiohttp, discord, io
 
 from agents import Agent, Runner, OpenAIChatCompletionsModel, AsyncOpenAI, FunctionTool, function_tool, RunContextWrapper
 from classes.config_manager import configManager
-from classes.image_generation import generate_image_from_api, modify_image_from_api
+
 
 
 from classes.tool_functions import *
@@ -37,20 +37,6 @@ class TextLLMHandler:
                     return    
                 print(f"Model {model} pulled successfully")
       
-    @function_tool
-    async def create_image(wrapper: RunContextWrapper[dict], prompt: str) -> str:
-        """Create an image based on the provided prompt.
-
-        Args:
-            prompt: The prompt to create the image from.
-        """
-        print(f"Creating image with prompt: {prompt}")
-        print(wrapper)
-        image_bytes = await generate_image_from_api(prompt)
-        file = discord.File(io.BytesIO(image_bytes), filename="image.png")
-        await wrapper.context['channel'].send(file=file, content=prompt)
-        return "Image created and sent"    
-	
     def get_settings(self):
         self.system = self.config.get_setting("system", self.guild_id) or "An AI Story Teller"
         self.model = os.environ.get("MODEL", "gemma3:4b")
@@ -70,7 +56,6 @@ class TextLLMHandler:
             name="Assistant",
             instructions=self.system + ". Reply with only your message, no prefixes or titles. /no_think",
             model=self.model_client,
-            tools=[self.create_image]
         )
 
     async def generate(self):
@@ -80,7 +65,7 @@ class TextLLMHandler:
          'user': self.original_message.author
       }
       try:
-         response = await Runner.run(self.agent, self.messages, context=discord_info)
+         response = await Runner.run(self.agent, self.messages)
          print(f'Response generated')
          print(response)
          return response.final_output

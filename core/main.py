@@ -6,7 +6,6 @@ import io
 from classes.message_handler import MessageHandler
 from classes.text_llm_handler import TextLLMHandler
 from classes.config_manager import configManager
-from classes.image_generation import generate_image_from_api, modify_image_from_api
 
 
 intents = discord.Intents.default()
@@ -14,7 +13,6 @@ intents.message_content = True
 
 client = discord.Client(intents=intents)
 message_queue = asyncio.Queue()
-image_task_queue = asyncio.Queue()
 config = configManager()
 
 
@@ -37,18 +35,6 @@ async def register_commands():
         config.update_setting("temperature", temperature, ctx.guild.id)
         await ctx.response.send_message(content=f"Temperature updated to: \"{temperature}\"")  
     
-    @command_tree.command(name="make_image", description="Generate an image based on a prompt")
-    async def make_image(ctx, prompt: str):
-        await ctx.response.defer(ephemeral=False, thinking=True)
-        await image_task_queue.put({'type': 'make', 'task_data': {'context': ctx, 'prompt': prompt}})
-        print(f"Image generation task added to queue with prompt: {prompt}")
-
-    @command_tree.command(name="modify_image", description="Modify an image based on a prompt")
-    async def modify_image(ctx, prompt: str, attachment: discord.Attachment):
-        await ctx.response.defer(ephemeral=False, thinking=True)
-        await image_task_queue.put({'type': 'modify', 'task_data': {'context': ctx, 'prompt': prompt, 'attachment': attachment}})
-        print(f"Image generation task added to queue with prompt: {prompt}")
-
     synced_commands = await command_tree.sync()
     for synced_command in synced_commands:
         print(f"Command '{synced_command.name}' synced")
@@ -59,7 +45,6 @@ async def on_ready():
     await TextLLMHandler.pull_model()
     await register_commands()
     client.loop.create_task(process_messages())
-    client.loop.create_task(process_text_images())
     
 
 @client.event
@@ -85,32 +70,6 @@ async def process_messages():
             message_queue.task_done()
             print("Done with message from queue")
 
-        
-async def process_text_images():
-    while True:
-        task = await image_task_queue.get()
-        prompt = task['task_data']['prompt']
-        ctx = task['task_data']['context']
-
-        try:
-            if task['type'] == 'make':
-                print(f"Processing image generation for prompt: {prompt}")
-                image_bytes = await generate_image_from_api(prompt)
-            elif task['type'] == 'modify':
-                print(f"Processing image modification for prompt: {prompt}")
-                attachment = task['task_data']['attachment']
-                image_bytes = await modify_image_from_api(prompt, attachment)
-
-            file = discord.File(io.BytesIO(image_bytes), filename="image.png")
-            await ctx.followup.send(file=file, content=prompt)
-
-        except Exception as e:
-            print(f"Error during image generation: {e}")
-            await ctx.followup.send("Failed to generate image.")
-        image_task_queue.task_done()
-
-
-    
 
 token = os.environ['DISCORD_TOKEN']
 client.run(token)

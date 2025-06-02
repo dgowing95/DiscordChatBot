@@ -25,21 +25,22 @@ services:
     env_file: .env
     depends_on:
       - redis
-  diffusion:
-    build: ./diffusionservice
-    volumes:
-      - ./diffusionservice:/app
-      - diffusers_data:/home/.cache/huggingface/hub
-    ports:
-      - "8000:8000"
-    runtime: nvidia
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]    
+      
+  # diffusion:
+  #   build: ./diffusionservice
+  #   volumes:
+  #     - ./diffusionservice:/app
+  #     - diffusers_data:/home/.cache/huggingface/hub
+  #   ports:
+  #     - "8000:8000"
+  #   runtime: nvidia
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: all
+  #             capabilities: [gpu]    
 volumes:
   data:
   ollama_data:

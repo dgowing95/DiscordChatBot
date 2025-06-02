@@ -37,9 +37,9 @@ spec:
         - name: ollama-data
           persistentVolumeClaim:
             claimName: ollama-pv-claim
-        - name: diffusers-data
-          persistentVolumeClaim:
-            claimName: diffusers-pv-claim
+        # - name: diffusers-data
+        #   persistentVolumeClaim:
+        #     claimName: diffusers-pv-claim
       containers:
       - name: {{ .Chart.Name }}-core
         image: "{{ .Values.image.repository }}:core-{{ .Values.image.tag | default .Chart.AppVersion }}"
@@ -56,28 +56,28 @@ spec:
             cpu: {{ .Values.coreResources.requests.cpu }}
             memory: {{ .Values.coreResources.requests.memory }}
 
-      - name: {{ .Chart.Name }}-diffusers
-        image: "{{ .Values.image.repository }}:diffusers-{{ .Values.image.tag | default .Chart.AppVersion }}"
-        imagePullPolicy: {{ .Values.image.pullPolicy }}
-        volumeMounts:
-          - name: diffusers-data
-            mountPath: /home/.cache/huggingface
-        resources:
-          limits:
-            cpu: {{ .Values.diffusionResources.limits.cpu }}
-            memory: {{ .Values.diffusionResources.limits.memory }}
-            nvidia.com/gpu: {{ .Values.diffusionResources.gpu }}
-          requests:
-            cpu: {{ .Values.diffusionResources.requests.cpu }}
-            memory: {{ .Values.diffusionResources.requests.memory }}    
-        envFrom:
-        - configMapRef:
-            name: {{ .Release.Name }}-configmap
-        env:
-        - name: NVIDIA_VISIBLE_DEVICES
-          value: all
-        - name: NVIDIA_DRIVER_CAPABILITIES
-          value: all            
+      # - name: {{ .Chart.Name }}-diffusers
+      #   image: "{{ .Values.image.repository }}:diffusers-{{ .Values.image.tag | default .Chart.AppVersion }}"
+      #   imagePullPolicy: {{ .Values.image.pullPolicy }}
+      #   volumeMounts:
+      #     - name: diffusers-data
+      #       mountPath: /home/.cache/huggingface
+      #   resources:
+      #     limits:
+      #       cpu: {{ .Values.diffusionResources.limits.cpu }}
+      #       memory: {{ .Values.diffusionResources.limits.memory }}
+      #       nvidia.com/gpu: {{ .Values.diffusionResources.gpu }}
+      #     requests:
+      #       cpu: {{ .Values.diffusionResources.requests.cpu }}
+      #       memory: {{ .Values.diffusionResources.requests.memory }}    
+      #   envFrom:
+      #   - configMapRef:
+      #       name: {{ .Release.Name }}-configmap
+      #   env:
+      #   - name: NVIDIA_VISIBLE_DEVICES
+      #     value: all
+      #   - name: NVIDIA_DRIVER_CAPABILITIES
+      #     value: all            
 
       - name: {{ .Chart.Name }}-redis
         image: "redis:8.0.1"
