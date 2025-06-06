@@ -49,6 +49,7 @@ async def on_ready():
     client.loop.create_task(process_messages())
     
 
+
 @client.event
 async def on_message(message):
     await message_queue.put(message)
