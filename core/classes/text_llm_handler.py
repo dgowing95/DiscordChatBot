@@ -56,6 +56,7 @@ class TextLLMHandler:
             name="Assistant",
             instructions=self.system + ". Reply with only your message, no prefixes or titles. /no_think",
             model=self.model_client,
+            tools=[web_search, fetch_url],
         )
 
     async def generate(self):
