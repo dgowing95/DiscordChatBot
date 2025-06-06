@@ -6,7 +6,8 @@ on:
     paths:
       - .github/workflows/**
       - Dockerfile
-      - app/**
+      - core/**
+      - diffusionservice/**
       - charts/**
 jobs:
   release:
