@@ -54,7 +54,7 @@ class TextLLMHandler:
         )
         self.agent = Agent(
             name="Assistant",
-            instructions=self.system + ". Reply with only your message, no prefixes or titles. /no_think",
+            instructions=self.system + ". Reply with only your message, no prefixes or titles. Answer the most recent question in the conversation.",
             model=self.model_client,
             tools=[web_search, fetch_url],
         )
