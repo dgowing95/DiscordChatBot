@@ -18,8 +18,7 @@ class TextLLMHandler:
 
 
     @staticmethod
-    async def pull_model():
-        model = os.environ.get("MODEL", "gemma3:4b")
+    async def pull_model(model: str):
         print(f"Pulling model {model} from LLM host")
 
         payload = {"model": model, "stream": False}
@@ -45,18 +44,36 @@ class TextLLMHandler:
         }
 
     async def get_client(self):
-        self.model_client = OpenAIChatCompletionsModel(
+        tool_model_client = OpenAIChatCompletionsModel(
+            model="qwen3:4b",
+            openai_client=AsyncOpenAI(
+                base_url=os.environ.get("LLM_HOST", "http://ollama:11434") + "/v1",
+                api_key=os.environ.get("LLM_PASS", "ollama")
+            )
+        )
+        main_model_client = OpenAIChatCompletionsModel(
             model=self.model,
             openai_client=AsyncOpenAI(
                 base_url=os.environ.get("LLM_HOST", "http://ollama:11434") + "/v1",
                 api_key=os.environ.get("LLM_PASS", "ollama")
             )
         )
+        tool_agent = Agent(
+            name="Tool Agent",
+            instructions="Use the tools like web search or fetch url provided to answer the user's question. If you cannot answer, ask for more information.",
+            model=tool_model_client,
+            tools=[web_search, fetch_url]
+        )
+        main_agent = Agent(
+            name="Main Agent",
+            instructions=self.system + ". Answer the most recent question in the conversation.",
+            model=main_model_client,
+        )
         self.agent = Agent(
             name="Assistant",
-            instructions=self.system + ". Reply with only your message, no prefixes or titles. Answer the most recent question in the conversation.",
-            model=self.model_client,
-            tools=[web_search, fetch_url],
+            instructions="Handoff to the Main Agent for general conversation and the Tool agent for internet searches or other tool usage.",
+            model=tool_model_client,
+            handoffs=[main_agent,tool_agent]
         )
 
     async def generate(self):
@@ -66,7 +83,7 @@ class TextLLMHandler:
          'user': self.original_message.author
       }
       try:
-         response = await Runner.run(self.agent, self.messages)
+         response = await Runner.run(self.agent, self.messages, context=discord_info)
          print(f'Response generated')
          print(response)
          return response.final_output
