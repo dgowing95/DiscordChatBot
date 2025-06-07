@@ -99,7 +99,7 @@ async def change_personality(wrapper: RunContextWrapper[dict], personality: str)
     print(f"Changing personality to: {personality}")
     try:
         configmanager = configManager()
-        configmanager.update_setting("personality", personality, wrapper.context.get("guild_id"))
+        configmanager.update_setting("system", personality, wrapper.context.get("guild_id"))
         print(f"Changed personality to: {personality}")
 
         embed = discord.Embed(title="Personality Updated",
