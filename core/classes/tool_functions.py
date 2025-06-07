@@ -88,6 +88,7 @@ async def store_user_data(wrapper: RunContextWrapper[dict], data: str) -> str:
         print(f"An error occurred while storing user data: {e}")
         return "Error storing user data."
 
+
 @function_tool
 async def change_personality(wrapper: RunContextWrapper[dict], personality: str) -> str:
     """Changes the personality of the bot.
