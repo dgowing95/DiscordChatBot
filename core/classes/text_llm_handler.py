@@ -58,20 +58,21 @@ class TextLLMHandler:
                 api_key=os.environ.get("LLM_PASS", "ollama")
             )
         )
+        main_agent = Agent(
+            name="Main Agent",
+            instructions=self.system + ". Answer the most recent question in the conversation only.",
+            handoff_description="Use this for responding to messages.",
+            model=main_model_client,
+        )
         tool_agent = Agent(
             name="Tool Agent",
-            instructions="Use the tools like web search or fetch url provided to answer the user's question. If you cannot answer, ask for more information.",
+            instructions="Use this if the prompt requires searching the internet.",
             model=tool_model_client,
             tools=[web_search, fetch_url]
         )
-        main_agent = Agent(
-            name="Main Agent",
-            instructions=self.system + ". Answer the most recent question in the conversation.",
-            model=main_model_client,
-        )
         self.agent = Agent(
             name="Assistant",
-            instructions="Handoff to the Main Agent for general conversation and the Tool agent for internet searches or other tool usage.",
+            instructions="You must transfer to the Main Agent or the Tool Agent",
             model=tool_model_client,
             handoffs=[main_agent,tool_agent]
         )
@@ -80,7 +81,7 @@ class TextLLMHandler:
       await self.get_client()
       discord_info = {
          'channel': self.original_message.channel,
-         'user': self.original_message.author
+         'user': self.original_message.author,
       }
       try:
          response = await Runner.run(self.agent, self.messages, context=discord_info)
