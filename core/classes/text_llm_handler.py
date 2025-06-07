@@ -66,9 +66,9 @@ class TextLLMHandler:
         )
         tool_agent = Agent(
             name="Tool Agent",
-            instructions="Use this if the prompt requires searching the internet.",
+            instructions="Use this if the prompt requires searching the internet or checking the date/time.",
             model=tool_model_client,
-            tools=[web_search, fetch_url]
+            tools=[web_search, fetch_url, get_current_datetime]
         )
         self.agent = Agent(
             name="Assistant",

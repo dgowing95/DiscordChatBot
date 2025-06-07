@@ -59,3 +59,13 @@ async def fetch_url(url: str) -> str:
     text = '\n'.join(chunk for chunk in chunks if chunk)
     print(f"Fetched content from {url} successfully.")
     return text
+
+@function_tool
+async def get_current_datetime() -> str:
+    """Returns the current date and time."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo("Europe/London"))
+    now_formatted = now.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"Current date and time: {now_formatted}")
+    return now_formatted
