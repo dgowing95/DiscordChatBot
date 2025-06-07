@@ -28,6 +28,7 @@ diffusion_url: "localhost"
 diffusersGpuLimit: 8
 ollamaGpuLimit: 16
 ollama_context_length: 40000
+ollama_keep_alive: "60m"
 
 model: gemma3:1b
 message_history: 5
