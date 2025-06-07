@@ -1,4 +1,4 @@
-from agents import FunctionTool, function_tool
+from agents import FunctionTool, function_tool,RunContextWrapper
 import aiohttp
 from duckduckgo_search import DDGS
 from bs4 import BeautifulSoup
@@ -69,3 +69,21 @@ async def get_current_datetime() -> str:
     now_formatted = now.strftime("%Y-%m-%d %H:%M:%S")
     print(f"Current date and time: {now_formatted}")
     return now_formatted
+
+@function_tool
+async def store_user_data(wrapper: RunContextWrapper[dict], data: str) -> str:
+    """Stores user data in Redis.
+    Args:
+        data: The data to store. e.g. User's name, preferences, etc.
+    """
+    from classes.user_memory import UserMemory
+    user_id = wrapper.context.get("user_id")
+    guild_id = wrapper.context.get("guild_id")
+    try:
+        print(f"Storing data for user {user_id} in guild {guild_id}: {data}")
+        user_memory = UserMemory(user_id, guild_id)
+        user_memory.append(data)
+        return "User data stored successfully."
+    except Exception as e:
+        print(f"An error occurred while storing user data: {e}")
+        return "Error storing user data."
