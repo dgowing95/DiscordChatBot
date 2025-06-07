@@ -1,5 +1,5 @@
 from agents import FunctionTool, function_tool,RunContextWrapper
-import discord
+import discord, aiohttp
 from duckduckgo_search import DDGS
 from bs4 import BeautifulSoup
 
