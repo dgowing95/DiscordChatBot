@@ -1,4 +1,5 @@
 import os,aiohttp, discord, io
+from classes.user_memory import UserMemory
 
 from agents import Agent, Runner, OpenAIChatCompletionsModel, AsyncOpenAI, FunctionTool, function_tool, RunContextWrapper
 from classes.config_manager import configManager
@@ -14,6 +15,7 @@ class TextLLMHandler:
         self.messages = messages
         self.guild_id = guild_id
         self.config = configManager()
+        self.user_memory = UserMemory(original_message.author.id, guild_id)
         self.get_settings()
 
 
@@ -38,19 +40,12 @@ class TextLLMHandler:
       
     def get_settings(self):
         self.system = self.config.get_setting("system", self.guild_id) or "An AI Story Teller"
-        self.model = os.environ.get("MODEL", "gemma3:4b")
+        self.model = os.environ.get("MODEL", "qwen3:4b")
         self.options = {
          "temperature": float(self.config.get_setting("temperature", self.guild_id)) or 1.0
         }
 
     async def get_client(self):
-        tool_model_client = OpenAIChatCompletionsModel(
-            model="qwen3:4b",
-            openai_client=AsyncOpenAI(
-                base_url=os.environ.get("LLM_HOST", "http://ollama:11434") + "/v1",
-                api_key=os.environ.get("LLM_PASS", "ollama")
-            )
-        )
         main_model_client = OpenAIChatCompletionsModel(
             model=self.model,
             openai_client=AsyncOpenAI(
@@ -58,32 +53,36 @@ class TextLLMHandler:
                 api_key=os.environ.get("LLM_PASS", "ollama")
             )
         )
-        tool_agent = Agent(
-            name="Tool Agent",
-            instructions="Use the tools like web search or fetch url provided to answer the user's question. If you cannot answer, ask for more information.",
-            model=tool_model_client,
-            tools=[web_search, fetch_url]
-        )
-        main_agent = Agent(
-            name="Main Agent",
-            instructions=self.system + ". Answer the most recent question in the conversation.",
-            model=main_model_client,
-        )
         self.agent = Agent(
             name="Assistant",
-            instructions="Handoff to the Main Agent for general conversation and the Tool agent for internet searches or other tool usage.",
-            model=tool_model_client,
-            handoffs=[main_agent,tool_agent]
+            instructions=self.system,
+            model=main_model_client,
+            tools=[web_search, fetch_url, get_current_datetime, store_user_data],
         )
 
     async def generate(self):
-      await self.get_client()
-      discord_info = {
-         'channel': self.original_message.channel,
-         'user': self.original_message.author
+      user_info = {
+        "data": self.user_memory.get() or [],
+        "user_id": self.original_message.author.id,
+        "guild_id": self.guild_id,
       }
+      print(user_info)
+      user_data_formatted = "\n".join(f"- {item}" for item in user_info["data"])
+      self.system = f"""
+        You are a Discord Bot designed to chat with users in a Discord server. Answer the most recent message.
+        You should respond as: {self.system}
+        You can use the following tools to assist you:
+        - web_search: Search the web for information.
+        - fetch_url: Fetch the content of a URL.
+        - get_current_datetime: Get the current date and time.
+        - store_user_data: Store user data
+
+        You know the following about the user:
+        {user_data_formatted}
+      """
+      await self.get_client()
       try:
-         response = await Runner.run(self.agent, self.messages, context=discord_info)
+         response = await Runner.run(self.agent, self.messages, context=user_info)
          print(f'Response generated')
          print(response)
          return response.final_output

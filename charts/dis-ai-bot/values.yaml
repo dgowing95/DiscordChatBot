@@ -27,6 +27,7 @@ image_model: "stable-diffusion-v1-5/stable-diffusion-v1-5"
 diffusion_url: "localhost"
 diffusersGpuLimit: 8
 ollamaGpuLimit: 16
+ollama_context_length: 40000
 
 model: gemma3:1b
 message_history: 5
