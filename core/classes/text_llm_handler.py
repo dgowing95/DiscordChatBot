@@ -1,7 +1,7 @@
 import os,aiohttp, discord, io
 from classes.user_memory import UserMemory
 
-from agents import Agent, Runner, OpenAIChatCompletionsModel, AsyncOpenAI, FunctionTool, function_tool, RunContextWrapper
+from agents import Agent, Runner, OpenAIChatCompletionsModel, AsyncOpenAI, FunctionTool, function_tool, RunContextWrapper, ModelSettings
 from classes.config_manager import configManager
 
 
@@ -58,6 +58,9 @@ class TextLLMHandler:
             instructions=self.system,
             model=main_model_client,
             tools=[web_search, fetch_url, get_current_datetime, store_user_data, change_personality],
+            model_settings=ModelSettings(
+                temperature=self.options["temperature"]
+            ),
         )
 
     async def generate(self):
