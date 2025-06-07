@@ -1,6 +1,7 @@
 from agents import FunctionTool, function_tool
 import aiohttp
 from duckduckgo_search import DDGS
+from bs4 import BeautifulSoup
 
 @function_tool
 async def fetch_weather(location: str) -> str:
@@ -34,7 +35,7 @@ async def web_search(search_request: str) -> str:
     
 @function_tool
 async def fetch_url(url: str) -> str:
-    """Fetches the content of a URL.
+    """Fetches the content of a URL. Returns the text content of the page.
 
     Args:
         url: The URL to fetch.
@@ -43,7 +44,18 @@ async def fetch_url(url: str) -> str:
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers={"User-Agent": "dis-ai-bot"}) as response:
-                return await response.text()
+                html = await response.text()
     except Exception as e:
         print(f"An error occurred while fetching the URL: {e}")
         return "Error fetching URL content."
+
+    soup = BeautifulSoup(html, features='html.parser')
+    for script in soup(["script", "style"]):
+        script.extract()  # remove all javascript and stylesheet code
+    
+    text = soup.body.get_text()
+    lines = (line.strip() for line in text.splitlines())
+    chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+    text = '\n'.join(chunk for chunk in chunks if chunk)
+    print(f"Fetched content from {url} successfully.")
+    return text
