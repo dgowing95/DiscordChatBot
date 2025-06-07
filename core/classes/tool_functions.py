@@ -1,5 +1,5 @@
 from agents import FunctionTool, function_tool,RunContextWrapper
-import aiohttp
+import discord
 from duckduckgo_search import DDGS
 from bs4 import BeautifulSoup
 
@@ -87,3 +87,25 @@ async def store_user_data(wrapper: RunContextWrapper[dict], data: str) -> str:
     except Exception as e:
         print(f"An error occurred while storing user data: {e}")
         return "Error storing user data."
+
+@function_tool
+async def change_personality(wrapper: RunContextWrapper[dict], personality: str) -> str:
+    """Changes the personality of the bot.
+    
+    Args:
+        personality: The new personality to set.
+    """
+    from classes.config_manager import configManager
+    print(f"Changing personality to: {personality}")
+    try:
+        configmanager = configManager()
+        configmanager.update_setting("personality", personality, wrapper.context.get("guild_id"))
+        print(f"Changed personality to: {personality}")
+
+        embed = discord.Embed(title="Personality Updated",
+                      description=personality)
+        await wrapper.context.get("original_message").channel.send(embed=embed)
+        return "Success."
+    except Exception as e:
+        print(f"An error occurred while changing personality: {e}")
+        return "Error changing personality."

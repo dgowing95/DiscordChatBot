@@ -1,7 +1,7 @@
 import os,aiohttp, discord, io
 from classes.user_memory import UserMemory
 
-from agents import Agent, Runner, OpenAIChatCompletionsModel, AsyncOpenAI, FunctionTool, function_tool, RunContextWrapper
+from agents import Agent, Runner, OpenAIChatCompletionsModel, AsyncOpenAI, FunctionTool, function_tool, RunContextWrapper, ModelSettings
 from classes.config_manager import configManager
 
 
@@ -57,7 +57,10 @@ class TextLLMHandler:
             name="Assistant",
             instructions=self.system,
             model=main_model_client,
-            tools=[web_search, fetch_url, get_current_datetime, store_user_data],
+            tools=[web_search, fetch_url, get_current_datetime, store_user_data, change_personality],
+            model_settings=ModelSettings(
+                temperature=self.options["temperature"]
+            ),
         )
 
     async def generate(self):
@@ -65,6 +68,7 @@ class TextLLMHandler:
         "data": self.user_memory.get() or [],
         "user_id": self.original_message.author.id,
         "guild_id": self.guild_id,
+        "original_message": self.original_message
       }
       print(user_info)
       user_data_formatted = "\n".join(f"- {item}" for item in user_info["data"])
@@ -76,6 +80,7 @@ class TextLLMHandler:
         - fetch_url: Fetch the content of a URL.
         - get_current_datetime: Get the current date and time.
         - store_user_data: Store user data
+        - change_personality: Change your personality.
 
         You know the following about the user:
         {user_data_formatted}

@@ -13,10 +13,13 @@ class MessageHandler:
     async def build_messages(self):
        self.history = [message async for message in self.message.channel.history(limit=int(os.environ.get("MSG_HISTORY_LIMIT", 5)))]
        self.history.pop(0) # Remove current message
-       self.history.reverse() # Reverse the order of the messages so the newest is first
 
        formatted_history = []
        for message in self.history:
+          
+          if message.content.lower() == "!reset_history":
+              break
+          
           
           for embed in message.embeds:
               embed_dict = embed.to_dict()
@@ -34,6 +37,8 @@ class MessageHandler:
              'role': "assistant" if message.author.id == self.client.user.id else "user",
              'content': f"Message from '{message.author.name}': {message.content.replace(f'<@{self.client.user.id}>', '').strip()}"
           })
+       formatted_history.reverse()  # Reverse the history to have the oldest message first
+
        self.message.content = self.clean_message_content(self.message)
        formatted_history.append({
             'role': 'user',
@@ -46,6 +51,8 @@ class MessageHandler:
         if len(self.message.content) == 0 and len(self.message.embeds) == 0:
             return False
         if self.message.author == self.client.user:
+            return False
+        if self.message.content.lower() == "!reset_history":
             return False
         if self.client.user in self.message.mentions:
             return True
