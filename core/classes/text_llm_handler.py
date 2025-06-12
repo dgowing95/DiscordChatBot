@@ -78,9 +78,7 @@ class TextLLMHandler:
         You can use the following tools to assist you:
         - web_search: Search the web for information.
         - fetch_url: Fetch the content of a URL.
-        - get_current_datetime: Get the current date and time.
         - store_user_data: Store user data
-        - change_personality: Change your personality.
 
         You know the following information about the user, but do not have to use it in your response:
         {user_data_formatted}

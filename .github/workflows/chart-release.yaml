@@ -24,16 +24,7 @@ jobs:
           push: true
           tags: ghcr.io/dgowing95/discordchatbot:core-${{github.ref_name}},ghcr.io/dgowing95/discordchatbot:core-latest
           context: ./core
-          cache-from: type=registry,ref=user/app:latest
-          cache-to: type=inline
-
-      - name: Build and push diffusers docker image
-        uses: docker/build-push-action@v6
-        with:
-          push: true
-          tags: ghcr.io/dgowing95/discordchatbot:diffusers-${{github.ref_name}},ghcr.io/dgowing95/discordchatbot:diffusers-latest
-          context: ./diffusionservice
-          cache-from: type=registry,ref=user/app:latest
+          cache-from: type=registry,ref=ghcr.io/dgowing95/discordchatbot:core-latest
           cache-to: type=inline
   
   helm-chart-release:
