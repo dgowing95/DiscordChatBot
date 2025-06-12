@@ -70,11 +70,12 @@ class TextLLMHandler:
         "guild_id": self.guild_id,
         "original_message": self.original_message
       }
-      print(user_info)
+      deduped_user_data = set(user_info["data"])
+      user_info["data"] = list(deduped_user_data)
       user_data_formatted = "\n".join(f"- {item}" for item in user_info["data"])
       self.system = f"""
-        You are a Discord Bot designed to chat with users in a Discord server. Answer the most recent message.
-        You should respond as: {self.system}
+        You are a Discord Bot designed to chat with users in a Discord server. Answer the most recent message only.
+        Your personality is: {self.system}.
         You can use the following tools to assist you:
         - web_search: Search the web for information.
         - fetch_url: Fetch the content of a URL.
@@ -82,7 +83,7 @@ class TextLLMHandler:
         - store_user_data: Store user data
         - change_personality: Change your personality.
 
-        You know the following about the user:
+        You know the following information about the user, but do not have to use it in your response:
         {user_data_formatted}
       """
       await self.get_client()
