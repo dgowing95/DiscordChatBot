@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-redis-deployment
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-redis
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-redis
+    spec:
+      volumes:
+        - name: redis-data
+          persistentVolumeClaim:
+            claimName: redis-pv-claim
+      containers:
+      - name: redis
+        image: "redis:8.0.1"
+        command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+        imagePullPolicy: IfNotPresent
+        volumeMounts:
+          - name: redis-data
+            mountPath: /data       
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-redis-service
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: {{ .Release.Name }}-redis
+  ports:
+    - protocol: TCP
+      port: 6379
+      targetPort: 6379
+  type: ClusterIP

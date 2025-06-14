@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-ollama-deployment
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate    
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-ollama
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-ollama
+    spec:
+      runtimeClassName: nvidia
+      volumes:
+        - name: ollama-data
+          persistentVolumeClaim:
+            claimName: ollama-pv-claim
+      containers:
+      - name: ollama
+        image: "ollama/ollama:0.9.0"
+        imagePullPolicy: IfNotPresent
+        envFrom:
+        - configMapRef:
+            name: {{ .Release.Name }}-configmap        
+        volumeMounts:
+          - name: ollama-data
+            mountPath: /root/.ollama
+        resources:
+          limits:
+            cpu: {{ .Values.ollamaResources.limits.cpu }}
+            memory: {{ .Values.ollamaResources.limits.memory }}
+            nvidia.com/gpu: {{ .Values.ollamaResources.gpu }}
+          requests:
+            cpu: {{ .Values.ollamaResources.requests.cpu }}
+            memory: {{ .Values.ollamaResources.requests.memory }}
+        env:
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: all
+        - name: NVIDIA_DRIVER_CAPABILITIES
+          value: all 
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-ollama-service
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: NodePort
+  selector:
+    app: {{ .Release.Name }}-ollama
+  ports:
+    - port: 11434
+      targetPort: 11434
+      nodePort: 31434
+      protocol: TCP
+      name: http

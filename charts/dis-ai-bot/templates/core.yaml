@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-core-deployment
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1  
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-core
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-core
+    spec:
+      containers:
+      - name: core
+        image: "{{ .Values.image.repository }}:core-{{ .Values.image.tag | default .Chart.AppVersion }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}       
+    
+        envFrom:
+        - configMapRef:
+            name: {{ .Release.Name }}-configmap
+        resources:
+          limits:
+            cpu: {{ .Values.coreResources.limits.cpu }}
+            memory: {{ .Values.coreResources.limits.memory }}
+          requests:
+            cpu: {{ .Values.coreResources.requests.cpu }}
+            memory: {{ .Values.coreResources.requests.memory }}
