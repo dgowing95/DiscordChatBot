@@ -19,8 +19,8 @@ image:
 imagePullSecrets: []
 
 discordToken: ""
-redisHost: "{{ .Release.Name }}-redis-service.{{ .Release.Namespace }}.svc.cluster.local"
-llm_host: "http://{{ .Release.Name }}-ollama-service.{{ .Release.Namespace }}.svc.cluster.local:11434/v1"
+redisHost: "dchatbot-redis-service.dchatbot.svc.cluster.local"
+llm_host: "http://dchatbot-ollama-service.dchatbot.svc.cluster.local:11434/v1"
 llm_pass: "ollama"
 
 image_model: "stable-diffusion-v1-5/stable-diffusion-v1-5"
