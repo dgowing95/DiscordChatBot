@@ -5,7 +5,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
 data:
   DISCORD_TOKEN: {{ .Values.discordToken }}
-  REDIS_HOST: {{ .Values.redisHost }}
+  REDIS_HOST: {{ .Values.redisHost | toString | quote }}
   LLM_HOST: {{ .Values.llm_host }}
   LLM_PASS: {{ .Values.llm_pass }}
   IMAGE_MODEL: {{ .Values.image_model }}
