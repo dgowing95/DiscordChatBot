@@ -73,6 +73,16 @@ class MessageHandler:
         text_response = re.sub(r"Message from.*?:", "", text_response, flags=re.DOTALL)
         text_response = re.sub('<think>.*?</think>', '', text_response, flags=re.DOTALL)
         return text_response.strip()
+    
+    async def handle_message_send(self, message_content):
+        from textwrap import wrap
+        chunks = wrap(message_content, 2000)
+        for chunk in chunks:
+            if len(chunk) == 0:
+                continue
+            await self.message.channel.send(chunk)
+        
+
 
     async def handle_message(self):
         print(f'Handling message: {self.message.content}')
@@ -85,6 +95,4 @@ class MessageHandler:
             return
 
         response = self.filter_response(response)
-        await self.message.reply(
-            content=response
-        )
+        await self.handle_message_send(response)
