@@ -81,6 +81,7 @@ class MessageHandler:
             if len(chunk) == 0:
                 continue
             await self.message.channel.send(chunk)
+            await asyncio.sleep(1)
         
 
 
