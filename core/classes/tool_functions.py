@@ -12,16 +12,24 @@ async def fetch_weather(location: str) -> str:
     """
     print(f"Fetching weather for location: {location}")
     return "15°C, clear skies"
+
+
+async def add_emoji_to_message(message: discord.Message, emoji: str) -> None:
+    try:
+        await message.add_reaction(emoji)
+        print(f"Added emoji {emoji} to message {message.id}")
+    except Exception as e:
+        print(f"Failed to add emoji {emoji} to message {message.id}: {e}")
     
 @function_tool
-async def web_search(search_request: str) -> str:
+async def web_search(wrapper: RunContextWrapper[dict], search_request: str) -> str:
     """Searches the internet for a given query.
 
     Args:
         search_request: The query to search for.
     """
     print(f"Searching the web for: {search_request}")
-
+    await add_emoji_to_message(wrapper.context.get("original_message"), "🌐")
     try:
         results = DDGS().text(search_request, max_results=5)
     except Exception as e:
@@ -34,13 +42,14 @@ async def web_search(search_request: str) -> str:
     return results
     
 @function_tool
-async def fetch_url(url: str) -> str:
+async def fetch_url(wrapper: RunContextWrapper[dict], url: str) -> str:
     """Fetches the content of a URL. Returns the text content of the page.
 
     Args:
         url: The URL to fetch.
     """
     print(f"Fetching content from URL: {url}")
+    await add_emoji_to_message(wrapper.context.get("original_message"), "🔍")
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers={"User-Agent": "dis-ai-bot"}) as response:
@@ -76,6 +85,7 @@ async def store_user_data(wrapper: RunContextWrapper[dict], data: str) -> str:
     Args:
         data: The data to store. e.g. User's name, preferences, etc.
     """
+    await add_emoji_to_message(wrapper.context.get("original_message"), "💾")
     from classes.user_memory import UserMemory
     user_id = wrapper.context.get("user_id")
     guild_id = wrapper.context.get("guild_id")
