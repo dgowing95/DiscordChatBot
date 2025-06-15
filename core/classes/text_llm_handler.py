@@ -74,12 +74,7 @@ class TextLLMHandler:
       user_info["data"] = list(deduped_user_data)
       user_data_formatted = "\n".join(f"- {item}" for item in user_info["data"])
       self.system = f"""
-        Reply as: {self.system}
-        You can use the following tools to assist you:
-        - web_search: Search the web for information.
-        - fetch_url: Fetch the content of a URL.
-        - store_user_data: Store user data
-
+        Answer the message as if you are {self.system}
         You know the following information about the user, but do not have to use it in your response:
         {user_data_formatted}
       """
