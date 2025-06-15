@@ -3,6 +3,16 @@ entries:
   dchatbot:
   - apiVersion: v2
     appVersion: 1.0.0
+    created: "2025-06-15T14:50:53.492920992Z"
+    description: A Helm chart for deploying the DiscordChatBot on Kubernetes
+    digest: 77264888b9eca2a1c86029849e54a3101e5581333a771bec4876ce0160fce712
+    name: dchatbot
+    type: application
+    urls:
+    - https://github.com/dgowing95/DiscordChatBot/releases/download/dchatbot-v1.16.0/dchatbot-v1.16.0.tgz
+    version: v1.16.0
+  - apiVersion: v2
+    appVersion: 1.0.0
     created: "2025-06-15T14:16:43.504950767Z"
     description: A Helm chart for deploying the DiscordChatBot on Kubernetes
     digest: 0e052eb5e049c170e1545185c335e89995b42bf01688f1ea3ac0c41435806c3e
@@ -392,4 +402,4 @@ entries:
     urls:
     - https://github.com/dgowing95/DiscordChatBot/releases/download/dis-ai-bot-0.0.1/dis-ai-bot-0.0.1.tgz
     version: 0.0.1
-generated: "2025-06-15T14:16:43.505045954Z"
+generated: "2025-06-15T14:50:53.49303672Z"
