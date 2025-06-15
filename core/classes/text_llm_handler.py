@@ -57,7 +57,7 @@ class TextLLMHandler:
             name="Assistant",
             instructions=self.system,
             model=main_model_client,
-            tools=[web_search, fetch_url, get_current_datetime, store_user_data, change_personality],
+            tools=[web_search, fetch_url, get_current_datetime, store_memory, change_personality],
             model_settings=ModelSettings(
                 temperature=self.options["temperature"]
             ),

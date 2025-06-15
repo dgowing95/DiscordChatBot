@@ -49,7 +49,7 @@ async def fetch_url(wrapper: RunContextWrapper[dict], url: str) -> str:
         url: The URL to fetch.
     """
     print(f"Fetching content from URL: {url}")
-    await add_emoji_to_message(wrapper.context.get("original_message"), "🔍")
+    await add_emoji_to_message(wrapper.context.get("original_message"), "📄")
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers={"User-Agent": "dis-ai-bot"}) as response:
@@ -80,8 +80,8 @@ async def get_current_datetime() -> str:
     return now_formatted
 
 @function_tool
-async def store_user_data(wrapper: RunContextWrapper[dict], data: str) -> str:
-    """Stores user data in Redis.
+async def store_memory(wrapper: RunContextWrapper[dict], data: str) -> str:
+    """Stores a memory about the user. This could be anything from preferences to personal information.
     Args:
         data: The data to store. e.g. User's name, preferences, etc.
     """
