@@ -76,7 +76,7 @@ class MessageHandler:
     
     async def handle_message_send(self, message_content):
         from textwrap import wrap
-        chunks = wrap(message_content, 2000)
+        chunks = wrap(message_content, 2000, break_long_words=False, replace_whitespace=False)
         for chunk in chunks:
             if len(chunk) == 0:
                 continue
