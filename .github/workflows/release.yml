@@ -1,0 +1,161 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'CHANGELOG.md'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install semantic-release
+          pip install poetry
+
+      - name: Create version
+        id: version
+        outputs:
+          version: ${{ steps.version.outputs.new_version }}
+        run: |
+          # Get current version
+          current_version=$(poetry version | cut -d' ' -f2)
+          echo "Current version: $current_version"
+          
+          # Check if this is a new version
+          if git describe --tags --exact-match --abbrev=0 2>/dev/null; then
+            echo "Tag already exists for this version"
+            exit 0
+          fi
+          
+          # Create release
+          poetry version patch
+          new_version=$(poetry version | cut -d' ' -f2)
+          echo "Creating new version: $new_version"
+          echo "::set-output name=new_version::$new_version"
+
+      - name: Update changelog
+        run: |
+          # Generate changelog
+          echo "# Changelog" > CHANGELOG.md
+          echo "" >> CHANGELOG.md
+          echo "## ${{ steps.version.outputs.version }}" >> CHANGELOG.md
+          echo "" >> CHANGELOG.md
+          git log --format="- %s" $current_version..HEAD >> CHANGELOG.md
+          
+          # Add and commit changelog
+          git add CHANGELOG.md
+          git commit -m "docs: update changelog for version ${{ steps.version.outputs.version }}"
+          # Set up git user info
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git push origin main
+
+  docker-build:
+    needs: build
+    runs-on: ubuntu-latest
+    outputs:
+      docker_image: ${{ steps.build.outputs.docker_image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push Core docker image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          push: true
+          tags: ghcr.io/dgowing95/discordchatbot:core-${{ needs.build.outputs.new_version }},ghcr.io/dgowing95/discordchatbot:core-latest
+          context: ./core
+          cache-from: type=registry,ref=ghcr.io/dgowing95/discordchatbot:core-latest
+          cache-to: type=inline
+          outputs:
+            docker_image: ghcr.io/dgowing95/discordchatbot:core-${{ needs.build.outputs.version }}
+
+  helm-chart:
+    needs: docker-build
+    runs-on: ubuntu-latest
+    outputs:
+      chart_url: ${{ steps.release.outputs.chart_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Helm Package Chart
+        id: release
+        uses: helm/chart-releaser-action@v1.5.0
+        with:
+          version: ${{ needs.build.outputs.new_version }}
+          helm-repo-name: charts
+          helm-repo-org: dgowing95
+          packages: charts/dis-ai-bot
+          extraFlags: --debug
+          helm-repo-url: https://dgowing95.github.io/charts
+          helm-repo-branch: main
+          helm-repo-alias: charts
+          helm-repo-token: ${{ secrets.GITHUB_TOKEN }}
+          helm-repo-username: ${{ github.actor }}
+          helm-repo-email: ${{ github.actor }}@users.noreply.github.com
+          helm-repo-description: "Helm charts for Discord AI Bot"
+          helm-repo-home: "https://github.com/dgowing95/discordchatbot"
+          helm-repo-source: "https://github.com/dgowing95/discordchatbot.git"
+
+  create-release:
+    needs: [build, docker-build, helm-chart]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.build.outputs.new_version }}
+          DOCKER_IMAGE: ${{ needs.docker-build.outputs.docker_image }}
+          CHART_URL: ${{ needs.helm-chart.outputs.chart_url }}
+        run: |
+          # Create release with all assets
+          gh release create "v$VERSION" \
+            --title "Release $VERSION" \
+            --notes "$(git log --format=%s $current_version..HEAD)" \
+            --draft \
+            --target "v$VERSION"
+
+          # Add assets to release
+          gh release upload "v$VERSION" \
+            "$DOCKER_IMAGE" \
+            "$CHART_URL" \
+            --clobber
+
+          # Publish the release
+          gh release publish "v$VERSION"
