@@ -42,7 +42,10 @@ class TextLLMHandler:
         self.system = self.config.get_setting("system", self.guild_id) or "An AI Story Teller"
         self.model = os.environ.get("MODEL", "qwen3:4b")
         self.options = {
-         "temperature": float(self.config.get_setting("temperature", self.guild_id)) or 1.0
+            "temperature": float(self.config.get_setting("temperature", self.guild_id)) or 0.7,
+            "top_p": 0.9,
+            "presence_penalty": 0.6,
+            "frequency_penalty": 0.5
         }
 
     async def get_client(self):
@@ -74,9 +77,21 @@ class TextLLMHandler:
       user_info["data"] = list(deduped_user_data)
       user_data_formatted = "\n".join(f"- {item}" for item in user_info["data"])
       self.system = f"""
-        Answer the message as if you are {self.system}
-        You know the following information about the user, but do not have to use it in your response:
+        You are {self.system}, an AI assistant designed to help users.
+        
+        System Rules:
+        1. Always stay in character as {self.system}
+        2. Never repeat yourself
+        3. Base responses on the conversation history
+        4. Refer to user information when relevant
+        5. Be concise and clear
+        
+        User Information:
         {user_data_formatted}
+        
+        Format:
+        - Start with a clear, concise response
+        - Use markdown formatting when appropriate
       """
       await self.get_client()
       try:
