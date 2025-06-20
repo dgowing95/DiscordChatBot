@@ -98,6 +98,42 @@ async def store_memory(wrapper: RunContextWrapper[dict], data: str) -> str:
         print(f"An error occurred while storing user data: {e}")
         return "Error storing user data."
 
+@function_tool
+async def remove_memory(wrapper: RunContextWrapper[dict], data: str) -> str:
+    """Removes a specific memory for the user.
+    Args:
+        data: The specific memory to remove.
+    """
+    await add_emoji_to_message(wrapper.context.get("original_message"), "🗑️")
+    from classes.user_memory import UserMemory
+    user_id = wrapper.context.get("user_id")
+    guild_id = wrapper.context.get("guild_id")
+    try:
+        user_memory = UserMemory(user_id, guild_id)
+        removed = user_memory.remove(data)
+        if removed:
+            return f"Removed memory: {data}"
+        else:
+            return "Memory not found."
+    except Exception as e:
+        print(f"An error occurred while removing user memory: {e}")
+        return "Error removing user memory."
+
+@function_tool
+async def clear_memories(wrapper: RunContextWrapper[dict]) -> str:
+    """Clears all memories for the user."""
+    await add_emoji_to_message(wrapper.context.get("original_message"), "🧹")
+    from classes.user_memory import UserMemory
+    user_id = wrapper.context.get("user_id")
+    guild_id = wrapper.context.get("guild_id")
+    try:
+        user_memory = UserMemory(user_id, guild_id)
+        user_memory.clear()
+        return "All memories cleared."
+    except Exception as e:
+        print(f"An error occurred while clearing user memories: {e}")
+        return "Error clearing user memories."
+
 
 @function_tool
 async def change_personality(wrapper: RunContextWrapper[dict], personality: str) -> str:
