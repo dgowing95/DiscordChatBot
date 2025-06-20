@@ -19,3 +19,15 @@ class UserMemory:
         if value is not None:
             return json.loads(value)
         return None
+
+    def remove(self, data):
+        memories = self.get() or []
+        if data in memories:
+            memories.remove(data)
+            serialized = json.dumps(memories)
+            self.redis.set(self.key, serialized)
+            return True
+        return False
+
+    def clear(self):
+        self.redis.delete(self.key)
