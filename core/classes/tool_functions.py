@@ -85,7 +85,7 @@ async def store_memory(wrapper: RunContextWrapper[dict], data: str) -> str:
     Args:
         data: The data to store. e.g. User's name, preferences, etc.
     """
-    await add_emoji_to_message(wrapper.context.get("original_message"), "💾")
+    
     from classes.user_memory import UserMemory
     user_id = wrapper.context.get("user_id")
     guild_id = wrapper.context.get("guild_id")
@@ -93,6 +93,7 @@ async def store_memory(wrapper: RunContextWrapper[dict], data: str) -> str:
         print(f"Storing data for user {user_id} in guild {guild_id}: {data}")
         user_memory = UserMemory(user_id, guild_id)
         user_memory.append(data)
+        await add_emoji_to_message(wrapper.context.get("original_message"), "💾")
         return "User data stored successfully."
     except Exception as e:
         print(f"An error occurred while storing user data: {e}")
@@ -104,7 +105,7 @@ async def remove_memory(wrapper: RunContextWrapper[dict], data: str) -> str:
     Args:
         data: The specific memory to remove.
     """
-    await add_emoji_to_message(wrapper.context.get("original_message"), "🗑️")
+    
     from classes.user_memory import UserMemory
     user_id = wrapper.context.get("user_id")
     guild_id = wrapper.context.get("guild_id")
@@ -112,6 +113,7 @@ async def remove_memory(wrapper: RunContextWrapper[dict], data: str) -> str:
         user_memory = UserMemory(user_id, guild_id)
         removed = user_memory.remove(data)
         if removed:
+            await add_emoji_to_message(wrapper.context.get("original_message"), "🗑️")
             return f"Removed memory: {data}"
         else:
             return "Memory not found."
@@ -122,13 +124,14 @@ async def remove_memory(wrapper: RunContextWrapper[dict], data: str) -> str:
 @function_tool
 async def clear_memories(wrapper: RunContextWrapper[dict]) -> str:
     """Clears all memories for the user."""
-    await add_emoji_to_message(wrapper.context.get("original_message"), "🧹")
+    
     from classes.user_memory import UserMemory
     user_id = wrapper.context.get("user_id")
     guild_id = wrapper.context.get("guild_id")
     try:
         user_memory = UserMemory(user_id, guild_id)
         user_memory.clear()
+        await add_emoji_to_message(wrapper.context.get("original_message"), "🧹")
         return "All memories cleared."
     except Exception as e:
         print(f"An error occurred while clearing user memories: {e}")
