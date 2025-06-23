@@ -9,7 +9,7 @@ services:
   ollama:
     image: ollama/ollama:0.9.0
     environment:
-      - OLLAMA_CONTEXT_LENGTH=20000
+      - OLLAMA_CONTEXT_LENGTH=4000
     volumes:
       - ollama_data:/root/.ollama
     runtime: nvidia

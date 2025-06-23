@@ -1,4 +1,5 @@
 from agents import FunctionTool, function_tool,RunContextWrapper
+from classes.common import Common
 import discord, aiohttp
 from duckduckgo_search import DDGS
 from bs4 import BeautifulSoup
@@ -29,16 +30,15 @@ async def web_search(wrapper: RunContextWrapper[dict], search_request: str) -> s
         search_request: The query to search for.
     """
     print(f"Searching the web for: {search_request}")
-    await add_emoji_to_message(wrapper.context.get("original_message"), "🌐")
+    await Common.send_tool_discord_embed(
+        wrapper.context.get("original_message").channel,
+        f"Searching the web for: {search_request}",
+    )
     try:
         results = DDGS().text(search_request, max_results=5)
     except Exception as e:
         print(f"An error occurred while searching: {e}")
         return "Error fetching search results."
-    
-    # for result in results:
-    #     print(f"Title: {result['title']}, URL: {result['href']}")
-    print(results)
     return results
     
 @function_tool
@@ -49,7 +49,10 @@ async def fetch_url(wrapper: RunContextWrapper[dict], url: str) -> str:
         url: The URL to fetch.
     """
     print(f"Fetching content from URL: {url}")
-    await add_emoji_to_message(wrapper.context.get("original_message"), "📄")
+    await Common.send_tool_discord_embed(
+        wrapper.context.get("original_message").channel,
+        f"Visiting URL: {url}",
+    )
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers={"User-Agent": "dis-ai-bot"}) as response:
@@ -94,6 +97,10 @@ async def store_memory(wrapper: RunContextWrapper[dict], data: str) -> str:
         user_memory = UserMemory(user_id, guild_id)
         user_memory.append(data)
         await add_emoji_to_message(wrapper.context.get("original_message"), "💾")
+        await Common.send_tool_discord_embed(
+            wrapper.context.get("original_message").channel,
+            f"Stored data: {data}",
+        )
         return "User data stored successfully."
     except Exception as e:
         print(f"An error occurred while storing user data: {e}")
