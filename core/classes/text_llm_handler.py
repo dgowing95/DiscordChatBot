@@ -59,7 +59,10 @@ class TextLLMHandler:
             model=main_model_client,
             tools=[web_search, fetch_url, get_current_datetime, store_memory, change_personality, remove_memory, clear_memories],
             model_settings=ModelSettings(
-                temperature=self.options["temperature"]
+                temperature=self.options["temperature"],
+                frequency_penalty=1.1,
+                top_p=1.0,
+                max_tokens=5000
             ),
         )
 
@@ -74,9 +77,11 @@ class TextLLMHandler:
       user_info["data"] = list(deduped_user_data)
       user_data_formatted = "\n".join(f"- {item}" for item in user_info["data"])
       self.system = f"""
-        Answer the message as if you are {self.system}
+        Answer as if you are {self.system}
+        Answer the most recent message only. Do not answer previous messages.
         You know the following information about the user, but do not have to use it in your response:
         {user_data_formatted}
+
       """
       await self.get_client()
       try:
