@@ -83,8 +83,9 @@ async def get_current_datetime() -> str:
     return now_formatted
 
 @function_tool
-async def store_memory(wrapper: RunContextWrapper[dict], data: str) -> str:
+async def store_memory(wrapper: RunContextWrapper[dict], data: str) -> bool:
     """Stores a memory about the user. This could be anything from preferences to personal information.
+    Returns True if successful, False otherwise.
     Args:
         data: The data to store. e.g. User's name, preferences, etc.
     """
@@ -101,10 +102,10 @@ async def store_memory(wrapper: RunContextWrapper[dict], data: str) -> str:
             wrapper.context.get("original_message").channel,
             f"Stored data: {data}",
         )
-        return "User data stored successfully."
+        return True
     except Exception as e:
         print(f"An error occurred while storing user data: {e}")
-        return "Error storing user data."
+        return False
 
 @function_tool
 async def remove_memory(wrapper: RunContextWrapper[dict], data: str) -> str:
@@ -146,8 +147,8 @@ async def clear_memories(wrapper: RunContextWrapper[dict]) -> str:
 
 
 @function_tool
-async def change_personality(wrapper: RunContextWrapper[dict], personality: str) -> str:
-    """Changes the personality of the bot.
+async def change_personality(wrapper: RunContextWrapper[dict], personality: str) -> bool:
+    """Changes the personality of the bot. Returns True if successful, False otherwise.
     
     Args:
         personality: The new personality to set.
@@ -162,7 +163,7 @@ async def change_personality(wrapper: RunContextWrapper[dict], personality: str)
         embed = discord.Embed(title="Personality Updated",
                       description=personality)
         await wrapper.context.get("original_message").channel.send(embed=embed)
-        return "Success."
+        return True
     except Exception as e:
         print(f"An error occurred while changing personality: {e}")
-        return "Error changing personality."
+        return False
