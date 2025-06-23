@@ -22,7 +22,7 @@ jobs:
           cache-from: type=registry,ref=ghcr.io/dgowing95/discordchatbot:core-latest
           cache-to: type=inline
 
-  verify_chart::
+  verify_chart:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
