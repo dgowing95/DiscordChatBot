@@ -17,7 +17,9 @@ class UserMemory:
     def get(self):
         value = self.redis.get(self.key)
         if value is not None:
-            return json.loads(value)
+            json_data = json.loads(value)
+            deduped = list(set(json_data))
+            return deduped
         return None
 
     def remove(self, data):

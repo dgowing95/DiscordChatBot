@@ -73,8 +73,6 @@ class TextLLMHandler:
         "guild_id": self.guild_id,
         "original_message": self.original_message
       }
-      deduped_user_data = set(user_info["data"])
-      user_info["data"] = list(deduped_user_data)
       user_data_formatted = "\n".join(f"- {item}" for item in user_info["data"])
       self.system = f"""
         Answer as if you are {self.system}
