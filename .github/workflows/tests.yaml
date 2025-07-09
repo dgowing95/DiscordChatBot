@@ -6,7 +6,6 @@ on:
       - '!main'
 jobs:
   run_pytest:
-    defaults:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
