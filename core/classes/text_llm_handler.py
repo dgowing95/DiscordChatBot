@@ -57,7 +57,7 @@ class TextLLMHandler:
             name="Assistant",
             instructions=self.system,
             model=main_model_client,
-            tools=[web_search, fetch_url, get_current_datetime, store_memory, change_personality, remove_memory, clear_memories],
+            tools=[web_search, fetch_url, store_memory, change_personality, remove_memory, clear_memories],
             model_settings=ModelSettings(
                 temperature=self.options["temperature"],
                 frequency_penalty=1.1,
@@ -71,15 +71,18 @@ class TextLLMHandler:
         "data": self.user_memory.get() or [],
         "user_id": self.original_message.author.id,
         "guild_id": self.guild_id,
-        "original_message": self.original_message
+        "original_message": self.original_message,
+        "redis_save_tool_calls": 0,
+        "personality_tool_calls": 0
       }
       user_data_formatted = "\n".join(f"- {item}" for item in user_info["data"])
+      datetime = await get_current_datetime()
       self.system = f"""
         Answer as if you are {self.system}
         Answer the most recent message only. Do not answer previous messages.
+        The current datetime is {datetime}
         You know the following information about the user, but do not have to use it in your response:
         {user_data_formatted}
-
       """
       await self.get_client()
       try:
