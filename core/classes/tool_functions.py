@@ -72,7 +72,6 @@ async def fetch_url(wrapper: RunContextWrapper[dict], url: str) -> str:
     print(f"Fetched content from {url} successfully.")
     return text
 
-@function_tool
 async def get_current_datetime() -> str:
     """Returns the current date and time."""
     from datetime import datetime
@@ -83,16 +82,27 @@ async def get_current_datetime() -> str:
     return now_formatted
 
 @function_tool
-async def store_memory(wrapper: RunContextWrapper[dict], data: str) -> bool:
+async def store_memory(wrapper: RunContextWrapper[dict], data: str) -> str:
     """Stores a memory about the user. This could be anything from preferences to personal information.
     Returns True if successful, False otherwise.
     Args:
         data: The data to store. e.g. User's name, preferences, etc.
     """
+
+    # Sometimes OpenAI repeats a tool call.
+    times_called = wrapper.context.get("redis_save_tool_calls")
+    if times_called > 0:
+        err = f"Tool call limit reached: {times_called}. Not storing data."
+        print(err)
+        return "Data stored successfully."
+    wrapper.context["redis_save_tool_calls"] += 1
     
+
     from classes.user_memory import UserMemory
     user_id = wrapper.context.get("user_id")
     guild_id = wrapper.context.get("guild_id")
+
+    response_message = ""
     try:
         print(f"Storing data for user {user_id} in guild {guild_id}: {data}")
         user_memory = UserMemory(user_id, guild_id)
@@ -102,10 +112,13 @@ async def store_memory(wrapper: RunContextWrapper[dict], data: str) -> bool:
             wrapper.context.get("original_message").channel,
             f"Stored data: {data}",
         )
-        return True
+        
+        response_message = "Data stored successfully."
     except Exception as e:
-        print(f"An error occurred while storing user data: {e}")
-        return False
+        response_message = f"An error occurred while storing user data: {e}"
+        print(response_message)
+
+    return response_message
 
 @function_tool
 async def remove_memory(wrapper: RunContextWrapper[dict], data: str) -> str:
@@ -153,6 +166,15 @@ async def change_personality(wrapper: RunContextWrapper[dict], personality: str)
     Args:
         personality: The new personality to set.
     """
+
+    # Sometimes OpenAI repeats a tool call.
+    times_called = wrapper.context.get("personality_tool_calls")
+    if times_called > 0:
+        err = f"Tool call limit reached: {times_called}. Not storing data."
+        print(err)
+        return True
+    wrapper.context["personality_tool_calls"] += 1
+
     from classes.config_manager import configManager
     print(f"Changing personality to: {personality}")
     try:

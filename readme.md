@@ -12,3 +12,10 @@ Ollama is used for the local AI and Redis is used as a database and memory store
 ## Installation
 1. Create your own values.yaml file and edit as necessary (You must provide a discord token in this file). The base/defaults can be found in charts/dis-ai-bot/values.yaml in this repository.
 1. Install via Helm e.g. `helm upgrade --install "https://github.com/dgowing95/DiscordChatBot/releases/download/v1.20.0/dchatbot-v1.20.0.tgz" -f values.yaml --namespace `dchatbot` --create-namespace`
+
+
+## Contributing
+
+### Running Tests
+1. Create a python venv and install the core/requirements.txt dependencies.
+1. In the root of the repo run `PYTHONPATH=$(pwd) pytest core/tests/user_memory_tests.py`
