@@ -27,7 +27,7 @@ class MessageHandler:
               content = json.dumps(embed_dict)
               formatted_history.append({
                   'role': "assistant" if message.author.id == self.client.user.id else "user",
-                  'content': f"Discord Emebed from '{message.author.name}' converted to JSON: {content}"
+                  'content': f"Discord Embed from '{message.author.name}' converted to JSON: {content}"
               })
             
           if len(message.content) == 0:
