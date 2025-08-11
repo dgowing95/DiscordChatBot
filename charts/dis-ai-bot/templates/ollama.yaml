@@ -22,7 +22,7 @@ spec:
             claimName: ollama-pv-claim
       containers:
       - name: ollama
-        image: "ollama/ollama:0.9.5"
+        image: "ollama/ollama:0.11.4"
         imagePullPolicy: IfNotPresent
         envFrom:
         - configMapRef:
