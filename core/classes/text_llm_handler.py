@@ -57,7 +57,6 @@ class TextLLMHandler:
             name="Assistant",
             instructions=self.system,
             model=main_model_client,
-            tools=[web_search, fetch_url, store_memory, change_personality, remove_memory, clear_memories],
             model_settings=ModelSettings(
                 temperature=self.options["temperature"],
                 frequency_penalty=1.1,
@@ -72,22 +71,11 @@ class TextLLMHandler:
         "user_id": self.original_message.author.id,
         "guild_id": self.guild_id,
         "original_message": self.original_message,
-        "redis_save_tool_calls": 0,
-        "personality_tool_calls": 0
       }
-      user_data_formatted = "\n".join(f"- {item}" for item in user_info["data"])
       datetime = await get_current_datetime()
       self.system = f"""
-        You are an AI chat bot. You operate in a Discord server with multiple users.
-        Users may target a message at you directly, or you might be triggered to respond at random to a message. Respond normally in both cases, but you should try to follow the flow of the conversation.
-        You have a history of previous messages in the conversation, which may or may not be relevant to the current message.
-        You should respond to the most recent message in the conversation.
-
-        The users have asked for you to answer as if you are {self.system}. Make sure your messages are consistent with this personality.
-        
-        The current datetime is {datetime}
-        You know the following information about the user in the most recent message, but do not have to use it in your response:
-        {user_data_formatted}
+        The current datetime is {datetime}.
+        Answer as if you are {self.system}.
       """
       await self.get_client()
       try:
