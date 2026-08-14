@@ -2,7 +2,7 @@ from agents import FunctionTool, function_tool,RunContextWrapper
 from classes.common import Common
 from classes.content_guard import check_web_request
 import discord, aiohttp
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 from bs4 import BeautifulSoup
 
 @function_tool

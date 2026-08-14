@@ -24,7 +24,7 @@ core/                  # the main bot (the app that runs in production)
     tool_functions.py      # agent function tools: web_search, fetch_url, weather, memory tools
     image_generation.py / common.py
   tests/               # pytest suite (see Testing below)
-  Dockerfile           # python:3.12 image, runs main.py
+  Dockerfile           # python:3.13-slim image, runs main.py
   requirements.txt
 diffusionservice/      # optional image-generation sidecar (text/image to image), currently commented out in docker-compose
 charts/dis-ai-bot/     # Helm chart
@@ -69,7 +69,7 @@ docker-compose.yaml    # local dev: redis + ollama (GPU) + core (mounts ./core)
 
 - **Framework:** `pytest` (in `core/requirements.txt`). No conftest/pytest.ini; plain
   test files in `core/tests/`.
-- **Prereq:** a Python 3.12+ venv with `pip install -r core/requirements.txt`
+- **Prereq:** a Python 3.13+ venv with `pip install -r core/requirements.txt`
   (tests that import `config_manager`/`user_memory` need `redis`; `response_filter`
   tests are pure-stdlib).
 - **How to run** (from the repo root — the `PYTHONPATH` is required because
