@@ -71,6 +71,7 @@ class TextLLMHandler:
                 frequency_penalty=1.1,
                 top_p=1.0,
                 max_tokens=5000
+                reasoning={"effort": "low"}
             ),
         )
 
