@@ -10,10 +10,10 @@ jobs:
     steps:
       - uses: actions/checkout@v2
    
-      - name: Set up Python 3.12
+      - name: Set up Python 3.13
         uses: actions/setup-python@v5
         with:
-          python-version: 3.12
+          python-version: 3.13
           cache: 'pip'
 
       - name: Install dependencies
@@ -23,4 +23,4 @@ jobs:
       
       - name: Run tests
         run: |
-          PYTHONPATH=$(pwd) pytest core/tests/user_memory_tests.py
+          PYTHONPATH=$(pwd) pytest core/tests/user_memory_tests.py core/tests/response_filter_tests.py core/tests/content_guard_tests.py

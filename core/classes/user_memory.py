@@ -5,7 +5,7 @@ class UserMemory:
     def __init__(self, user_id, guild_id):
         self.user_id = user_id
         self.guild_id = guild_id
-        self.redis = redis.Redis(host=os.environ['REDIS_HOST'], port=6379, db=0, charset="utf-8", decode_responses=True)
+        self.redis = redis.Redis(host=os.environ['REDIS_HOST'], port=6379, db=0, encoding="utf-8", decode_responses=True)
         self.key = f"guild:{self.guild_id}:user:{self.user_id}"
 
     def append(self, new_data):

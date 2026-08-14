@@ -1,5 +1,7 @@
 import random, asyncio, re, json, time, os
 from classes.text_llm_handler import TextLLMHandler
+from classes.config_manager import configManager
+from classes.response_filter import filter_response as clean_response
 
 class MessageHandler:
 
@@ -8,6 +10,7 @@ class MessageHandler:
         self.client = client
         self.text_response = ""
         self.discord_message_object = None
+        self.config = configManager()
 
 
     async def build_messages(self):
@@ -56,7 +59,16 @@ class MessageHandler:
             return False
         if self.client.user in self.message.mentions:
             return True
-        return False
+        return self.random_chance_reply()
+    
+    def random_chance_reply(self):
+        guild_id = self.message.guild.id if self.message.guild else 0
+        chance = self.config.get_setting("response_chance", guild_id) or 5
+        try:
+            chance = min(max(float(chance), 0), 50)
+        except (ValueError, TypeError):
+            chance = 5
+        return random.uniform(0, 100) < chance
     
     
     def clean_message_content(self, message):
@@ -65,13 +77,11 @@ class MessageHandler:
 
 
     def filter_response(self, text_response):
-        text_response.replace(f'<@{self.client.user.id}>', '').strip()
-        text_response = re.sub(r"^<@.*:", "", text_response, flags=re.DOTALL)
-        text_response = re.sub(r'\n\s*\n', '\n\n', text_response, flags=re.DOTALL)
-        text_response = re.sub(r"Message from.*?:", "", text_response, flags=re.DOTALL)
-        text_response = re.sub('<think>.*?</think>', '', text_response, flags=re.DOTALL)
-        return text_response.strip()
-    
+        # Filter logic lives in classes.response_filter (pure, unit-tested);
+        # we only inject the guild-specific bits (bot mention id).
+        return clean_response(text_response, mention=str(self.client.user.id))
+
+
     async def handle_message_send(self, message_content):
         from textwrap import wrap
         chunks = wrap(message_content, 2000, break_long_words=False, replace_whitespace=False)

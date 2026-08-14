@@ -2,7 +2,7 @@ import redis, os
 class configManager:
 
     def __init__(self):
-        self.redis = redis.Redis(host=os.environ['REDIS_HOST'], port=6379, db=0, charset="utf-8", decode_responses=True)
+        self.redis = redis.Redis(host=os.environ['REDIS_HOST'], port=6379, db=0, encoding="utf-8", decode_responses=True)
         self.namespace = "dcb"
 
     def get_setting(self, setting, guild_id):

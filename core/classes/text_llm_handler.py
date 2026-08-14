@@ -57,6 +57,15 @@ class TextLLMHandler:
             name="Assistant",
             instructions=self.system,
             model=main_model_client,
+            tools=[
+                web_search,
+                fetch_url,
+                fetch_weather,
+                store_memory,
+                remove_memory,
+                clear_memories,
+                change_personality,
+            ],
             model_settings=ModelSettings(
                 temperature=self.options["temperature"],
                 frequency_penalty=1.1,
@@ -71,6 +80,8 @@ class TextLLMHandler:
         "user_id": self.original_message.author.id,
         "guild_id": self.guild_id,
         "original_message": self.original_message,
+        "redis_save_tool_calls": 0,
+        "personality_tool_calls": 0,
       }
       datetime = await get_current_datetime()
       self.system = f"""
