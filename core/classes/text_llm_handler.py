@@ -70,7 +70,7 @@ class TextLLMHandler:
                 temperature=self.options["temperature"],
                 frequency_penalty=1.1,
                 top_p=1.0,
-                max_tokens=5000
+                max_tokens=5000,
                 reasoning={"effort": "low"}
             ),
         )
