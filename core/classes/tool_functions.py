@@ -1,5 +1,6 @@
 from agents import FunctionTool, function_tool,RunContextWrapper
 from classes.common import Common
+from classes.content_guard import check_web_request
 import discord, aiohttp
 from duckduckgo_search import DDGS
 from bs4 import BeautifulSoup
@@ -30,6 +31,13 @@ async def web_search(wrapper: RunContextWrapper[dict], search_request: str) -> s
         search_request: The query to search for.
     """
     print(f"Searching the web for: {search_request}")
+
+    allowed, reason = await check_web_request(search_request)
+    if not allowed:
+        print(f"Web search blocked by content guard: {reason}")
+        return ("I can't perform that search — it was blocked by the safety "
+                "guard. Please rephrase with a safe, non-harmful query.")
+
     await Common.send_tool_discord_embed(
         wrapper.context.get("original_message").channel,
         f"Searching the web for: {search_request}",
@@ -49,6 +57,13 @@ async def fetch_url(wrapper: RunContextWrapper[dict], url: str) -> str:
         url: The URL to fetch.
     """
     print(f"Fetching content from URL: {url}")
+
+    allowed, reason = await check_web_request(url)
+    if not allowed:
+        print(f"URL fetch blocked by content guard: {reason}")
+        return ("I can't fetch that URL — it was blocked by the safety "
+                "guard.")
+
     await Common.send_tool_discord_embed(
         wrapper.context.get("original_message").channel,
         f"Visiting URL: {url}",

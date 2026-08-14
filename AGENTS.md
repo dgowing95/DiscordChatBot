@@ -18,6 +18,7 @@ core/                  # the main bot (the app that runs in production)
     message_handler.py     # per-message orchestration: history build, send/chunking
     text_llm_handler.py    # builds an `agents` Agent against Ollama's OpenAI-compat API
     response_filter.py     # PURE (stdlib-only) response cleaning / thinking-block stripping
+    content_guard.py       # LLM-moderated safety guard for web_search/fetch_url
     user_memory.py         # JSON lists in Redis per (guild, user)
     config_manager.py      # per-guild settings in Redis (system prompt, temperature, ...)
     tool_functions.py      # agent function tools: web_search, fetch_url, weather, memory tools
@@ -58,6 +59,9 @@ docker-compose.yaml    # local dev: redis + ollama (GPU) + core (mounts ./core)
 | `LLM_HOST` | Ollama base URL, default `http://ollama:11434` |
 | `LLM_PASS` | Ollama API key placeholder, default `ollama` |
 | `MODEL` | model name, default `qwen3:4b` |
+| `GUARD_MODEL` | model for the web-tool safety moderator, defaults to `MODEL` |
+| `CONTENT_GUARD_ENABLED` | `0`/`false` disables the content guard on web tools (default: on) |
+| `CONTENT_GUARD_DEBUG` | `0`/`false` silences content-guard debug logging (default: on) |
 | `MSG_HISTORY_LIMIT` | how many prior channel messages to include, default 5 |
 | `IMAGE_MODEL`, `DIFFUSION_URL` | only for the (optional) diffusion service |
 

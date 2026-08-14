@@ -53,7 +53,9 @@ async def register_commands():
 async def on_ready():
     print(f'Logged in as {client.user}')
     model = os.environ.get("MODEL", "gemma3:4b")
+    guard_model = os.environ.get("GUARD_MODEL", "gemma3:1b")
     await TextLLMHandler.pull_model(model)
+    await TextLLMHandler.pull_model(guard_model)
     await register_commands()
     client.loop.create_task(process_messages())
     
