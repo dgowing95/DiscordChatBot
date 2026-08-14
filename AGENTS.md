@@ -1,0 +1,102 @@
+# AGENTS.md
+
+Overview of this repository and how to work with it (for humans and AI coding agents).
+
+## What this is
+
+A Python Discord bot that answers messages using a local LLM (Ollama, e.g. `qwen3:4b`).
+It is primarily deployed on **Kubernetes** via the Helm chart in `charts/dis-ai-bot`
+(releases are produced by semantic-release; a prebuilt chart is downloadable from GitHub releases).
+Redis is used as the settings store and user-memory store.
+
+## Repository layout
+
+```
+core/                  # the main bot (the app that runs in production)
+  main.py              # entrypoint: discord.Client, message queue, slash commands
+  classes/
+    message_handler.py     # per-message orchestration: history build, send/chunking
+    text_llm_handler.py    # builds an `agents` Agent against Ollama's OpenAI-compat API
+    response_filter.py     # PURE (stdlib-only) response cleaning / thinking-block stripping
+    user_memory.py         # JSON lists in Redis per (guild, user)
+    config_manager.py      # per-guild settings in Redis (system prompt, temperature, ...)
+    tool_functions.py      # agent function tools: web_search, fetch_url, weather, memory tools
+    image_generation.py / common.py
+  tests/               # pytest suite (see Testing below)
+  Dockerfile           # python:3.12 image, runs main.py
+  requirements.txt
+diffusionservice/      # optional image-generation sidecar (text/image to image), currently commented out in docker-compose
+charts/dis-ai-bot/     # Helm chart
+kube/                  # raw k8s manifests (app/configmap/pvc)
+docker-compose.yaml    # local dev: redis + ollama (GPU) + core (mounts ./core)
+.env / .env.example    # environment configuration (never commit .env)
+```
+
+## Runtime architecture
+
+1. `main.py:` every Discord message goes on an `asyncio.Queue`; a single worker loop
+   pops messages, builds a `MessageHandler`, and (if `should_process_message()`
+   passes: mentioned, or passes the random reply-chance check) handles it.
+2. `MessageHandler.handle_message()` builds the prompt
+   (channel history -- most recent `MSG_HISTORY_LIMIT` (default 5) messages; the
+   user's stored Redis memories are exposed to the agent through its function
+   tools) and calls `TextLLMHandler.generate()`.
+3. `TextLLMHandler` uses the **OpenAI `agents` SDK** pointed at Ollama's
+   OpenAI-compatible endpoint (`LLM_HOST/v1`) with function tools attached.
+4. The returned text is cleaned by `MessageHandler.filter_response()` (delegate:
+   `core/classes/response_filter.py`, a pure module) and sent in **2000-char chunks**
+   (`textwrap.wrap`, one `asyncio.sleep(1)` between sends).
+5. Per-guild settings live in Redis under the `dcb` namespace; per-user memories under
+   `guild:<id>:user:<id>`.
+
+### Environment variables
+
+| Var | Purpose |
+|---|---|
+| `DISCORD_TOKEN` | required; bot token |
+| `REDIS_HOST` | required; Redis host |
+| `LLM_HOST` | Ollama base URL, default `http://ollama:11434` |
+| `LLM_PASS` | Ollama API key placeholder, default `ollama` |
+| `MODEL` | model name, default `qwen3:4b` |
+| `MSG_HISTORY_LIMIT` | how many prior channel messages to include, default 5 |
+| `IMAGE_MODEL`, `DIFFUSION_URL` | only for the (optional) diffusion service |
+
+## Testing
+
+- **Framework:** `pytest` (in `core/requirements.txt`). No conftest/pytest.ini; plain
+  test files in `core/tests/`.
+- **Prereq:** a Python 3.12+ venv with `pip install -r core/requirements.txt`
+  (tests that import `config_manager`/`user_memory` need `redis`; `response_filter`
+  tests are pure-stdlib).
+- **How to run** (from the repo root — the `PYTHONPATH` is required because
+  modules use both `core.classes...` and `classes...` import styles):
+
+  ```bash
+  PYTHONPATH=$(pwd) pytest core/tests/user_memory_tests.py core/tests/response_filter_tests.py
+  ```
+
+  (On Windows PowerShell use `$env:PYTHONPATH=$(Get-Location)` — or
+  `PYTHONPATH=$PWD pytest ...` in bash.)
+
+- Keeping a module **pure and importable without the discord/agents SDKs** (like
+  `response_filter.py`) is the intended pattern for anything you want to unit test —
+  `MessageHandler` itself drags in `discord`, `agents`, Redis, etc.
+- **CI:** `.github/workflows/tests.yaml` runs on every push to non-main branches,
+  installs `core/requirements.txt` on Python 3.12, and calls the same pytest command
+  as above. **When you add a new test file, add it to that command.**
+- Conventions seen in existing tests: `pytest` fixtures + `unittest.mock` to stub
+  Redis; docstring-style comments at the top of test files documenting how to run them.
+
+## Conventions & gotchas
+
+- Import style is inconsistent, and it works-leave it as-is: within `core/` modules import
+  siblings as `from classes.X import ...` (works because the app runs with cwd `/app`
+  in the container), while tests import as `from core.classes.X import ...`. Both
+  resolve as namespace packages; preserve the existing style when editing.
+- LLM responses may contain internal "thinking" reasoning blocks (open/close think-tags
+  with an optional tab after the bracket). All stripping/regex logic lives in
+  `core/classes/response_filter.py` — keep it pure, and cover new behaviour in
+  `core/tests/response_filter_tests.py`.
+- `wrap(..., break_long_words=False)` silently drops whitespace-less runs longer than
+  the chunk size (2000 chars) in `handle_message_send`; be aware when changing chunking.
+- Never commit `.env`; copy `.env.example` and fill in locally.

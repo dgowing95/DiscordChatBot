@@ -33,7 +33,17 @@ async def register_commands():
     @command_tree.command(name="temperature", description="Change the randomness of responses, max of 2.0 is max random")
     async def change_temperature(ctx, temperature: float):
         config.update_setting("temperature", temperature, ctx.guild.id)
-        await ctx.response.send_message(content=f"Temperature updated to: \"{temperature}\"")  
+        await ctx.response.send_message(content=f"Temperature updated to: \"{temperature}\"")
+  
+    @command_tree.command(name="chance", description="Change the chance (0-50%) that the bot replies without being mentioned, default 5%")
+    async def change_chance(ctx, chance: discord.app_commands.Range[int, 0, 50]):
+        config.update_setting("response_chance", chance, ctx.guild.id)
+        await ctx.response.send_message(content=f"Response chance updated to: \"{chance}%\"")
+  
+    @command_tree.command(name="get_chance", description="See the current chance that the bot replies without being mentioned")
+    async def get_chance(ctx):
+        chance = config.get_setting("response_chance", ctx.guild.id) or 5
+        await ctx.response.send_message(content=f"Response chance is currently: \"{chance}%\"")  
     
     synced_commands = await command_tree.sync()
     for synced_command in synced_commands:
