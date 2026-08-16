@@ -1,7 +1,11 @@
-import random, asyncio, re, json, time, os
+import random, asyncio, re, json, time, os, base64
+import aiohttp
 from classes.text_llm_handler import TextLLMHandler
 from classes.config_manager import configManager
 from classes.response_filter import filter_response as clean_response
+
+# Max image attachments forwarded to the LLM per message (keeps prompts a sane size).
+MAX_IMAGES_PER_MESSAGE = 3
 
 class MessageHandler:
 
@@ -33,25 +37,67 @@ class MessageHandler:
                   'content': f"Discord Embed from '{message.author.name}' converted to JSON: {content}"
               })
             
-          if len(message.content) == 0:
+          image_parts = await self.download_image_parts(message.attachments)
+          if len(message.content) == 0 and not image_parts:
              continue        
           
+          text = f"Message from '{message.author.name}': {message.content.replace(f'<@{self.client.user.id}>', '').strip()}"
+          # With images the content becomes a list of parts (base64 images + text);
+          # the agents SDK forwards them as multimodal chat-completions input.
           formatted_history.append({
              'role': "assistant" if message.author.id == self.client.user.id else "user",
-             'content': f"Message from '{message.author.name}': {message.content.replace(f'<@{self.client.user.id}>', '').strip()}"
+             'content': [*image_parts, {"type": "text", "text": text}] if image_parts else text
           })
        formatted_history.reverse()  # Reverse the history to have the oldest message first
 
        self.message.content = self.clean_message_content(self.message)
+       image_parts = await self.download_image_parts(self.message.attachments)
+       user_text = f"Message from '{self.message.author.name}': {self.message.content}"
        formatted_history.append({
             'role': 'user',
-            'content': f"Message from '{self.message.author.name}': {self.message.content}"
-        })
+            'content': [*image_parts, {"type": "text", "text": user_text}] if image_parts else user_text
+       })
        self.messages = formatted_history
 
 
+    async def download_image_parts(self, attachments) -> list:
+        """Download image attachments and return them as chat-content image parts.
+
+        Each part is {'type': 'input_image', 'image_url': '<base64 data URL>'} which
+        the agents SDK converts to the OpenAI 'image_url' wire format for the LLM.
+        Non-image attachments and failed downloads are skipped."""
+        parts = []
+        for attachment in attachments or []:
+            if len(parts) >= MAX_IMAGES_PER_MESSAGE:
+                break
+            content_type = (attachment.content_type or "").lower()
+            if not content_type.startswith("image/"):
+                continue
+            url = attachment.proxy_url or attachment.url
+            if not url:
+                continue
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                        if resp.status != 200:
+                            print(f"Failed to download image {url}: HTTP {resp.status}")
+                            continue
+                        data = await resp.read()
+                        if not data:
+                            continue
+                        ctype = (resp.headers.get("Content-Type", content_type)).split(";")[0].strip()
+            except Exception as e:
+                print(f"Failed to download image {url}: {e}")
+                continue
+            parts.append({
+                "type": "input_image",
+                "image_url": f"data:{ctype};base64,{base64.b64encode(data).decode()}",
+            })
+        return parts
+
+
     def should_process_message(self):
-        if len(self.message.content) == 0 and len(self.message.embeds) == 0:
+        if len(self.message.content) == 0 and len(self.message.embeds) == 0 and not self.message.attachments:
             return False
         if self.message.author == self.client.user:
             return False
