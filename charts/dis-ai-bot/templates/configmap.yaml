@@ -14,3 +14,15 @@ data:
   DIFFUSION_URL: {{ .Values.diffusion_url }}
   OLLAMA_CONTEXT_LENGTH: {{ .Values.ollama_context_length | toString | quote }}
   OLLAMA_KEEP_ALIVE: {{ .Values.ollama_keep_alive | quote }}
+  {{- if .Values.openaiApiKey }}
+  OPENAI_API_KEY: {{ .Values.openaiApiKey }}
+  {{- end }}
+  {{- if .Values.openaiBaseUrl }}
+  OPENAI_BASE_URL: {{ .Values.openaiBaseUrl }}
+  {{- end }}
+  {{- if .Values.moderationModel }}
+  MODERATION_MODEL: {{ .Values.moderationModel }}
+  {{- end }}
+  CONTENT_GUARD_MAX_RETRIES: {{ .Values.guardMaxRetries | toString | quote }}
+  CONTENT_GUARD_RETRY_BACKOFF: {{ .Values.guardRetryBackoff | toString | quote }}
+  MODERATION_CACHE_TTL: {{ .Values.moderationCacheTtl | toString | quote }}

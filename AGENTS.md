@@ -18,7 +18,7 @@ core/                  # the main bot (the app that runs in production)
     message_handler.py     # per-message orchestration: history build, send/chunking
     text_llm_handler.py    # builds an `agents` Agent against Ollama's OpenAI-compat API
     response_filter.py     # PURE (stdlib-only) response cleaning / thinking-block stripping
-    content_guard.py       # LLM-moderated safety guard for web_search/fetch_url
+    content_guard.py       # OpenAI Moderations-based safety guard for web_search/fetch_url
     user_memory.py         # JSON lists in Redis per (guild, user)
     config_manager.py      # per-guild settings in Redis (system prompt, temperature, ...)
     tool_functions.py      # agent function tools: web_search, fetch_url, weather, memory tools
@@ -59,7 +59,7 @@ docker-compose.yaml    # local dev: redis + ollama (GPU) + core (mounts ./core)
 | `LLM_HOST` | Ollama base URL, default `http://ollama:11434` |
 | `LLM_PASS` | Ollama API key placeholder, default `ollama` |
 | `MODEL` | model name, default `qwen3:4b` |
-| `GUARD_MODEL` | model for the web-tool safety moderator, defaults to `MODEL` |
+| `OPENAI_API_KEY` | API key for the free OpenAI Moderations endpoint (web-tool guard); fail-open if unset |
 | `CONTENT_GUARD_ENABLED` | `0`/`false` disables the content guard on web tools (default: on) |
 | `CONTENT_GUARD_DEBUG` | `0`/`false` silences content-guard debug logging (default: on) |
 | `MSG_HISTORY_LIMIT` | how many prior channel messages to include, default 5 |
@@ -101,6 +101,10 @@ docker-compose.yaml    # local dev: redis + ollama (GPU) + core (mounts ./core)
   with an optional tab after the bracket). All stripping/regex logic lives in
   `core/classes/response_filter.py` — keep it pure, and cover new behaviour in
   `core/tests/response_filter_tests.py`.
+- The free OpenAI Moderations endpoint is aggressively rate-limited (HTTP 429):
+  `content_guard.py` retries 429/5xx with backoff, caches verdicts per input, and
+  fails open when it cannot get an answer. Tunables are documented at the top of
+  that module and in `.env.example`.
 - `wrap(..., break_long_words=False)` silently drops whitespace-less runs longer than
   the chunk size (2000 chars) in `handle_message_send`; be aware when changing chunking.
 - Never commit `.env`; copy `.env.example` and fill in locally.

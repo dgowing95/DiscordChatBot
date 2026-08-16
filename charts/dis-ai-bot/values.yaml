@@ -31,6 +31,18 @@ ollama_keep_alive: "60m"
 model: gemma3:1b
 message_history: 5
 
+# Web-tool safety guard (OpenAI Moderations endpoint, see .env.example)
+openaiApiKey: ""
+# Optional: defaults to https://api.openai.com/v1 when empty
+openaiBaseUrl: ""
+# Optional: e.g. text-moderation-latest (when empty the API uses its default model)
+moderationModel: ""
+# Optional: retry/backoff tuning for 429 rate limits
+guardMaxRetries: 2
+guardRetryBackoff: 2
+# Optional: seconds a verdict for the same query/URL stays cached (0 disables)
+moderationCacheTtl: 600
+
 pvc:
   redisSize: 5Gi
   ollamaSize: 45Gi
