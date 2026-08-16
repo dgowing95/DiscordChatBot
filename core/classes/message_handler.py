@@ -1,11 +1,43 @@
-import random, asyncio, re, json, time, os, base64
+import random, asyncio, re, json, time, os, io, base64
 import aiohttp
+import pillow_heif
+from PIL import Image
+
+# Teaches Pillow to open HEIC/HEIF (and AVIF); their output is re-encoded to PNG
+# further down (Ollama cannot decode HEIF), so format detection just needs to work.
+pillow_heif.register_heif_opener()
 from classes.text_llm_handler import TextLLMHandler
 from classes.config_manager import configManager
 from classes.response_filter import filter_response as clean_response
 
 # Max image attachments forwarded to the LLM per message (keeps prompts a sane size).
 MAX_IMAGES_PER_MESSAGE = 3
+
+# Formats Ollama's image decoder can actually handle (Go's image/* + a few extras).
+# Anything else (e.g. WebP) is re-encoded to PNG before being sent.
+_OLLAMA_FRIENDLY = {"JPEG": "image/jpeg", "PNG": "image/png", "GIF": "image/gif", "BMP": "image/bmp"}
+
+
+def encode_image_for_llm(data: bytes):
+    """Validate and normalize one downloaded image.
+
+    Returns (bytes, mime_type) ready for a base64 data URL, or None when the
+    payload is not a decodable image. Ollama rejects formats it cannot decode
+    (e.g. WebP: 'Failed to load image or audio file'), so we re-encode to a
+    supported format and derive the real MIME type from the pixels instead of
+    trusting the CDN's Content-Type header."""
+    try:
+        img = Image.open(io.BytesIO(data))
+        fmt = (img.format or "").upper()
+    except Exception:
+        return None
+    if fmt in _OLLAMA_FRIENDLY:
+        out = io.BytesIO()
+        img.save(out, format=fmt)
+        return out.getvalue(), _OLLAMA_FRIENDLY[fmt]
+    out = io.BytesIO()
+    img.convert("RGBA").save(out, format="PNG")
+    return out.getvalue(), "image/png"
 
 class MessageHandler:
 
@@ -83,15 +115,19 @@ class MessageHandler:
                             print(f"Failed to download image {url}: HTTP {resp.status}")
                             continue
                         data = await resp.read()
-                        if not data:
-                            continue
-                        ctype = (resp.headers.get("Content-Type", content_type)).split(";")[0].strip()
             except Exception as e:
                 print(f"Failed to download image {url}: {e}")
                 continue
+            if not data:
+                continue
+            encoded = encode_image_for_llm(data)
+            if encoded is None:
+                print(f"Skipping image {url}: not a decodable image (format={content_type!r})")
+                continue
+            image_data, ctype = encoded
             parts.append({
                 "type": "input_image",
-                "image_url": f"data:{ctype};base64,{base64.b64encode(data).decode()}",
+                "image_url": f"data:{ctype};base64,{base64.b64encode(image_data).decode()}",
             })
         return parts
 
