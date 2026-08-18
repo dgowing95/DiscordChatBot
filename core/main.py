@@ -53,14 +53,14 @@ async def register_commands():
 async def on_ready():
     print(f'Logged in as {client.user}')
     # Start the queue worker immediately so the bot still consumes messages
-    # even if model pull or command sync fails (e.g. Ollama not up yet after
-    # a power cycle).
+    # even if the model check or command sync fails (e.g. server not up yet
+    # after a power cycle).
     client.loop.create_task(process_messages())
     try:
         model = os.environ.get("MODEL", "gemma3:4b")
-        await TextLLMHandler.pull_model(model)
+        await TextLLMHandler.check_model_ready(model)
     except Exception as e:
-        print(f"Failed to pull model: {e}")
+        print(f"Failed to check model: {e}")
         return
     await register_commands()
     

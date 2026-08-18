@@ -18,17 +18,27 @@ imagePullSecrets: []
 
 discordToken: ""
 redisHost: "dchatbot-redis-service.dchatbot.svc.cluster.local"
-llm_host: "http://dchatbot-ollama-service.dchatbot.svc.cluster.local:11434/v1"
-llm_pass: "ollama"
+# Base URL of the llama.cpp server (OpenAI-compat). core appends /v1 itself, so do not include it here
+llm_host: "http://dchatbot-llamacpp-service.dchatbot.svc.cluster.local:8080"
+# llama.cpp does not authenticate; this is a non-empty placeholder for the OpenAI client
+llm_pass: "llamacpp"
 
 image_model: "stable-diffusion-v1-5/stable-diffusion-v1-5"
 diffusion_url: "localhost"
 diffusersGpuLimit: 8
-ollamaGpuLimit: 16
-ollama_context_length: 40000
-ollama_keep_alive: "60m"
 
-model: gemma3:1b
+# llama.cpp server (replaces Ollama); which model it serves: the `model` value below
+llamacpp:
+  image: ghcr.io/ggml-org/llama.cpp:server-cuda  # CUDA build; the template sets the nvidia runtime class
+  port: 8080
+  gpuLayers: 99  # 99 = all layers on GPU
+  parallel: 1
+# Prompt context window (server --ctx-size)
+llamacppContextLength: 40000
+# Model — single value for the whole chart: core requests it (MODEL) and llama.cpp
+# serves it (LLAMA_ARG_HF_REPO; <org>/<repo>[:quant], downloaded to the volume on
+# first boot, reported back exactly in /v1/models). To swap models change only this.
+model: ggml-org/Qwen3.8-27B-GGUF:Q4_K_M
 message_history: 5
 
 # Web-tool safety guard (OpenAI Moderations endpoint, see .env.example)
@@ -45,7 +55,7 @@ moderationCacheTtl: 600
 
 pvc:
   redisSize: 5Gi
-  ollamaSize: 45Gi
+  llamacppSize: 45Gi
   diffusersSize: 15Gi
   hostPath: /data/kube/discordchatbot
 
@@ -57,7 +67,7 @@ coreResources:
     cpu: 1000m
     memory: 1024Mi
 
-ollamaResources:
+llamacppResources:
   limits:
     cpu: 6000m
     memory: 8000Mi

@@ -1,1 +1,5 @@
 1. Get the application URL by running these commands:
+
+2. LLM service (llama.cpp, OpenAI-compatible API):
+   kubectl get svc <release>-llamacpp-service
+   curl http://<node>:31434/v1/models   # the model name the bot must use (MODEL value)
