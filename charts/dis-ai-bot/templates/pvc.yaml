@@ -13,6 +13,9 @@ spec:
   hostPath:
     path: {{ .Values.pvc.hostPath }}/redis
 ---
+# llama.cpp (ex-Ollama) volume: PV/PVC names and hostPath are INTENTIONALLY still
+# "ollama" so the pre-existing PV keeps matching and the data on the node is
+# preserved on upgrade (renaming would create a new empty volume).
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -22,7 +25,7 @@ metadata:
 spec:
   storageClassName: {{ include "helm.fullname" . }}-pvc-ollama
   capacity:
-    storage: {{ .Values.pvc.ollamaSize }}
+    storage: {{ .Values.pvc.llamacppSize }}
   accessModes:
     - ReadWriteOnce
   hostPath:
@@ -65,7 +68,7 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: {{ .Values.pvc.ollamaSize }}
+      storage: {{ .Values.pvc.llamacppSize }}
 # ---
 # apiVersion: v1
 # kind: PersistentVolumeClaim

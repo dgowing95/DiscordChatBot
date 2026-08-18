@@ -20,23 +20,26 @@ class TextLLMHandler:
 
 
     @staticmethod
-    async def pull_model(model: str):
-        print(f"Pulling model {model} from LLM host")
-
-        payload = {"model": model, "stream": False}
-        url = os.environ.get("LLM_HOST", "http://ollama:11434") + "/api/pull"
-
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload) as response:
-                if response.status != 200:
-                    print(f"Failed to pull model {model}: {response.status}")
-                    return
-                
-                data = await response.json()
-                if data.get("error"):
-                    print(f"Error pulling model {model}: {data['error']}")
-                    return    
-                print(f"Model {model} pulled successfully")
+    async def check_model_ready(model: str):
+        # llama.cpp has no pull endpoint: the llamacpp container downloads the model
+        # on boot (LLAMA_ARG_HF_REPO into the LLAMA_CACHE volume). We only check that
+        # the configured model is loaded (fail-soft: it may still be downloading).
+        url = os.environ.get("LLM_HOST", "http://llamacpp:8080") + "/v1/models"
+        print(f"Checking model {model} on LLM host ({url})")
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        print(f"LLM server not ready yet ({response.status}); model may still be downloading")
+                        return
+                    data = await response.json()
+                    available = [m.get("name") or m.get("id") for m in data.get("models", [])]
+                    if model in available:
+                        print(f"Model {model} is available")
+                    else:
+                        print(f"Model {model} not loaded yet (server has: {available})")
+        except Exception as e:
+            print(f"Could not reach LLM server at {url}: {e}")
       
     def get_settings(self):
         self.system = self.config.get_setting("system", self.guild_id) or "An AI Story Teller"
@@ -49,7 +52,7 @@ class TextLLMHandler:
         main_model_client = OpenAIChatCompletionsModel(
             model=self.model,
             openai_client=AsyncOpenAI(
-                base_url=os.environ.get("LLM_HOST", "http://ollama:11434") + "/v1",
+                base_url=os.environ.get("LLM_HOST", "http://llamacpp:8080") + "/v1",
                 api_key=os.environ.get("LLM_PASS", "ollama")
             )
         )

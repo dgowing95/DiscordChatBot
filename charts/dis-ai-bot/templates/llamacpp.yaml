@@ -1,0 +1,79 @@
+# llama.cpp server (replaces Ollama). Volume naming: see templates/pvc.yaml.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-llamacpp-deployment
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate    
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-llamacpp
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-llamacpp
+    spec:
+      runtimeClassName: nvidia
+      volumes:
+        - name: llamacpp-data
+          # Intentionally the pre-existing claim: keeps old data mounted.
+          persistentVolumeClaim:
+            claimName: ollama-pv-claim
+      containers:
+      - name: llamacpp
+        image: "{{ .Values.llamacpp.image }}"
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: {{ .Values.llamacpp.port }}
+        volumeMounts:
+          - name: llamacpp-data
+            mountPath: /models
+        # LLAMA_CACHE = model cache on the preserved volume; other settings are
+        # llama.cpp's LLAMA_ARG_* env vars (== CLI flags)
+        env:
+        - name: LLAMA_CACHE
+          value: /models
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: all
+        - name: NVIDIA_DRIVER_CAPABILITIES
+          value: all
+        - name: LLAMA_ARG_HF_REPO
+          # == .Values.model: the one model value shared with core's MODEL
+          value: "{{ .Values.model }}"
+        - name: LLAMA_ARG_N_GPU_LAYERS
+          value: {{ .Values.llamacpp.gpuLayers | quote }}
+        - name: LLAMA_ARG_CTX_SIZE
+          value: {{ .Values.llamacppContextLength | quote }}
+        - name: LLAMA_ARG_PORT
+          value: {{ .Values.llamacpp.port | quote }}
+        - name: LLAMA_ARG_N_PARALLEL
+          value: {{ .Values.llamacpp.parallel | quote }}
+        resources:
+          limits:
+            cpu: {{ .Values.llamacppResources.limits.cpu }}
+            memory: {{ .Values.llamacppResources.limits.memory }}
+            nvidia.com/gpu: {{ .Values.llamacppResources.gpu }}
+          requests:
+            cpu: {{ .Values.llamacppResources.requests.cpu }}
+            memory: {{ .Values.llamacppResources.requests.memory }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-llamacpp-service
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: NodePort
+  selector:
+    app: {{ .Release.Name }}-llamacpp
+  ports:
+    - port: {{ .Values.llamacpp.port }}
+      targetPort: {{ .Values.llamacpp.port }}
+      # Kept stable from the ollama service so existing external clients keep working
+      nodePort: 31434
+      protocol: TCP
+      name: http

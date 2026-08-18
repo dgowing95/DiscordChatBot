@@ -6,12 +6,24 @@ services:
     command: redis-server --save 60 1 --loglevel warning
     ports:
       - "6379:6379"
-  ollama:
-    image: ollama/ollama:0.9.5
+  llamacpp:
+    # Official llama.cpp server (OpenAI-compatible API); configured via LLAMA_ARG_* env vars:
+    # https://github.com/ggml-org/llama.cpp/blob/master/tools/cli/README.md#common-params
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    ports:
+      - "8081:8081"  # dev uses 8081 (8080 is taken locally); the helm chart uses 8080
     environment:
-      - OLLAMA_CONTEXT_LENGTH=4000
+      # Model cache (the ollama_data volume); GGUF is downloaded once, then cached
+      - LLAMA_CACHE=/models
+      # Same value core requests as MODEL; to swap models change it in .env and `docker compose up -d`
+      - LLAMA_ARG_HF_REPO=${MODEL:-ggml-org/Qwen3.8-27B-GGUF:Q4_K_M}
+      # Keep LLAMA_ARG_PORT in sync with ports: above and LLM_HOST in .env
+      - LLAMA_ARG_N_GPU_LAYERS=99
+      - LLAMA_ARG_CTX_SIZE=4000
+      - LLAMA_ARG_PORT=8081
+      - LLAMA_ARG_N_PARALLEL=1
     volumes:
-      - ollama_data:/root/.ollama
+      - ollama_data:/models  # pre-existing volume from the ollama days
     runtime: nvidia
     deploy:
       resources:
@@ -27,6 +39,7 @@ services:
     env_file: .env
     depends_on:
       - redis
+      - llamacpp
       
   # diffusion:
   #   build: ./diffusionservice

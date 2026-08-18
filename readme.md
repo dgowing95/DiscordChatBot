@@ -1,7 +1,7 @@
 # DiscordChatBot
 This is a python application that runs a discord bot that responds using AI to user messages. The application is primarily designed to run on Kubernetes and has a helm chart available.
 
-Ollama is used for the local AI and Redis is used as a database and memory store
+A local LLM served by llama.cpp (GGUF model) is used for the AI and Redis is used as a database and memory store
 
 ## Requirements for installing
 - A Kubernetes cluster (microk8s, k3s, minikube also work).

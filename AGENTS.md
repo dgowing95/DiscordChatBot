@@ -4,7 +4,7 @@ Overview of this repository and how to work with it (for humans and AI coding ag
 
 ## What this is
 
-A Python Discord bot that answers messages using a local LLM (Ollama, e.g. `qwen3:4b`).
+A Python Discord bot that answers messages using a local LLM (llama.cpp server serving a GGUF model, e.g. `ggml-org/Qwen3.8-27B-GGUF:Q4_K_M`).
 It is primarily deployed on **Kubernetes** via the Helm chart in `charts/dis-ai-bot`
 (releases are produced by semantic-release; a prebuilt chart is downloadable from GitHub releases).
 Redis is used as the settings store and user-memory store.
@@ -16,7 +16,7 @@ core/                  # the main bot (the app that runs in production)
   main.py              # entrypoint: discord.Client, message queue, slash commands
   classes/
     message_handler.py     # per-message orchestration: history build, send/chunking
-    text_llm_handler.py    # builds an `agents` Agent against Ollama's OpenAI-compat API
+    text_llm_handler.py    # builds an `agents` Agent against the LLM server's (llama.cpp) OpenAI-compat API
     response_filter.py     # PURE (stdlib-only) response cleaning / thinking-block stripping
     content_guard.py       # OpenAI Moderations-based safety guard for web_search/fetch_url
     user_memory.py         # JSON lists in Redis per (guild, user)
@@ -29,7 +29,7 @@ core/                  # the main bot (the app that runs in production)
 diffusionservice/      # optional image-generation sidecar (text/image to image), currently commented out in docker-compose
 charts/dis-ai-bot/     # Helm chart
 kube/                  # raw k8s manifests (app/configmap/pvc)
-docker-compose.yaml    # local dev: redis + ollama (GPU) + core (mounts ./core)
+docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + core (mounts ./core)
 .env / .env.example    # environment configuration (never commit .env)
 ```
 
@@ -42,8 +42,8 @@ docker-compose.yaml    # local dev: redis + ollama (GPU) + core (mounts ./core)
    (channel history -- most recent `MSG_HISTORY_LIMIT` (default 5) messages; the
    user's stored Redis memories are exposed to the agent through its function
    tools) and calls `TextLLMHandler.generate()`.
-3. `TextLLMHandler` uses the **OpenAI `agents` SDK** pointed at Ollama's
-   OpenAI-compatible endpoint (`LLM_HOST/v1`) with function tools attached.
+3. `TextLLMHandler` uses the **OpenAI `agents` SDK** pointed at the llama.cpp
+   server's OpenAI-compatible endpoint (`LLM_HOST/v1`) with function tools attached.
 4. The returned text is cleaned by `MessageHandler.filter_response()` (delegate:
    `core/classes/response_filter.py`, a pure module) and sent in **2000-char chunks**
    (`textwrap.wrap`, one `asyncio.sleep(1)` between sends).
@@ -56,9 +56,9 @@ docker-compose.yaml    # local dev: redis + ollama (GPU) + core (mounts ./core)
 |---|---|
 | `DISCORD_TOKEN` | required; bot token |
 | `REDIS_HOST` | required; Redis host |
-| `LLM_HOST` | Ollama base URL, default `http://ollama:11434` |
-| `LLM_PASS` | Ollama API key placeholder, default `ollama` |
-| `MODEL` | model name, default `qwen3:4b` |
+| `LLM_HOST` | llama.cpp server base URL (OpenAI-compat; core appends `/v1`). Points at the `llamacpp` service on :8081 in docker-compose (dev) and :8080 in the helm chart; the in-code fallback is `http://llamacpp:8080` |
+| `LLM_PASS` | placeholder key — llama.cpp does not authenticate, but the OpenAI client requires a non-empty key |
+| `MODEL` | the model, single source of truth: the bot requests this name AND the compose `llamacpp` service serves it (as `LLAMA_ARG_HF_REPO`); in the Helm chart the one `model` value feeds both. In-code default `qwen3:4b` |
 | `OPENAI_API_KEY` | API key for the free OpenAI Moderations endpoint (web-tool guard); fail-open if unset |
 | `CONTENT_GUARD_ENABLED` | `0`/`false` disables the content guard on web tools (default: on) |
 | `CONTENT_GUARD_DEBUG` | `0`/`false` silences content-guard debug logging (default: on) |
@@ -107,4 +107,14 @@ docker-compose.yaml    # local dev: redis + ollama (GPU) + core (mounts ./core)
   that module and in `.env.example`.
 - `wrap(..., break_long_words=False)` silently drops whitespace-less runs longer than
   the chunk size (2000 chars) in `handle_message_send`; be aware when changing chunking.
+- llama.cpp has no pull API: the `llamacpp` container downloads the model itself on boot
+  (`LLAMA_ARG_HF_REPO` into the `LLAMA_CACHE` volume). Changing the model therefore requires
+  restarting the server (`docker compose up -d` after editing `MODEL` in `.env`; `helm upgrade`
+  in k8s) — `compose restart` alone does not re-read `.env`. On startup `main.py` verifies
+  readiness by GETting `{LLM_HOST}/v1/models` and checking the configured `MODEL` is listed
+  (`TextLLMHandler.check_model_ready`, fail-soft — a first-boot model may still be downloading).
+- The chart's LLM PersistentVolume/Claim are still named `*-pvc-ollama` / `ollama-pv-claim`
+  (hostPath `…/ollama`) on purpose, so data survives the Ollama → llama.cpp switch and keeps
+  matching on upgrade — do not rename; the llamacpp pod mounts it at `/models`, which is also
+  its `LLAMA_CACHE`, so the GGUF model (downloaded once via `--hf-repo`) persists across redeploys.
 - Never commit `.env`; copy `.env.example` and fill in locally.
