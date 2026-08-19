@@ -13,12 +13,18 @@ model download, CPU RAM or VRAM — and it runs fewer steps than txt2img
 (int(steps * (1 - strength))).
 
 Design goals:
-  * As little VRAM as possible: smallest practical model
-    (stabilityai/sd-turbo, ~500MB), fp16 weights, 512x512, few steps, and
-    model CPU offload so only ONE pipeline component sits on the GPU at a
-    time. The text encoder lives in CPU RAM and is moved to the GPU only
-    while it encodes the prompt (sequential offload goes further: every
-    module is offloaded, at the cost of speed).
+  * As little VRAM as possible: fp16 weights and model CPU offload so only
+    ONE pipeline component sits on the GPU at a time. The text encoder
+    lives in CPU RAM and is moved to the GPU only while it encodes the
+    prompt (sequential offload goes further: every module is offloaded, at
+    the cost of speed). Attention + VAE slicing cut activation VRAM so
+    SDXL at 1024x1024 is viable on an 8GB card.
+  * Any diffusers-format SD1.5/SDXL repo works: the pipeline class is
+    auto-detected from the repo's model_index.json (e.g.
+    RunDiffusion/Juggernaut-XL-v9 for SDXL). For SDXL the legacy DDPM
+    scheduler that many repos ship is upgraded to DPM++ 2M Karras (SDXL
+    fine-tunes are tuned for it); distilled models (sd-turbo) keep their
+    own scheduler.
   * Queued: every request is put on an asyncio queue and consumed by a
     single worker, so images are generated strictly one at a time even when
     several Discord messages ask for images at once.
@@ -51,7 +57,9 @@ from PIL import Image
 
 from diffusers import (
     DiffusionPipeline,
+    DPMSolverMultistepScheduler,
     StableDiffusionImg2ImgPipeline,
+    StableDiffusionPipeline,
     StableDiffusionXLPipeline,
     StableDiffusionXLImg2ImgPipeline,
 )
@@ -105,6 +113,59 @@ img2img_pipe = None
 ready = False
 
 
+def _is_sdxl_checkpoint(path: str) -> bool:
+    """Detect the SDXL family in a single-file checkpoint from the
+    safetensors header alone (no tensor data is read).
+
+    SDXL bundles a second (larger) text encoder; the marker key depends on
+    the exporter's naming convention:
+      diffusers -> text_encoder_2.*
+      A1111     -> cond_stage_model_2.*
+      ComfyUI   -> conditioner.embedders.1.*  (clip_g)
+    """
+    import json
+    import struct
+    with open(path, "rb") as f:
+        header_len = struct.unpack("<Q", f.read(8))[0]
+        header = json.loads(f.read(header_len))
+    keys = [k for k in header if k != "__metadata__"]
+    return (
+        any(k.split(".")[0] in ("text_encoder_2", "cond_stage_model_2") for k in keys)
+        or any(k.startswith("conditioner.embedders.1.") for k in keys)
+    )
+
+
+def _hf_single_file_path(repo_id: str):
+    """Local (HF-cached) path to the repo's root-level checkpoint file.
+
+    Some repos (e.g. RunDiffusion/Juggernaut-XL-v9) are "hybrid": a
+    diffusers layout with NON-standard weight filenames
+    (text_encoder/model.fp16.safetensors), which from_pretrained cannot
+    resolve. Their primary artifact is a single-file checkpoint
+    (juggernaut_XL_v9....safetensors); from_single_file parses it and
+    auto-detects SD1.5 vs SDXL. Returns None when the repo has no
+    root-level checkpoint file (or cannot be listed)."""
+    from huggingface_hub import HfApi, hf_hub_download
+    try:
+        info = HfApi().model_info(repo_id, files_metadata=True)
+    except Exception as e:
+        print(f"could not list files for {repo_id!r}: {e}")
+        return None
+    candidates = [
+        (s.size or 0, s.rfilename)
+        for s in info.siblings
+        if "/" not in s.rfilename
+        and s.rfilename.lower().endswith((".safetensors", ".ckpt", ".bin"))
+    ]
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)  # largest first = the real checkpoint
+    size, name = candidates[0]
+    print(f"downloading single-file checkpoint {name} "
+          f"({size / 1073741824:.1f} GB) from {repo_id!r}")
+    return hf_hub_download(repo_id=repo_id, filename=name)
+
+
 def build_img2img_pipeline(base):
     """Derive the img2img pipeline from the already-loaded txt2img components.
 
@@ -147,9 +208,42 @@ def load_pipeline():
     # SD1.5 NSFW checker that some repos ship (e.g. DreamShaper) false-positives
     # and blanks images to pure black; this is a local/homelab deployment and
     # the bot's own content guard covers the LLM tool path.
-    p = DiffusionPipeline.from_pretrained(
-        MODEL, torch_dtype=dtype, safety_checker=None
-    )
+    try:
+        p = DiffusionPipeline.from_pretrained(
+            MODEL, torch_dtype=dtype, safety_checker=None
+        )
+    except Exception as e:
+        # Fallback for hybrid repos (see _hf_single_file_path): load the
+        # root-level single-file checkpoint instead. from_single_file
+        # extracts unet/vae/text_encoder(s) from it and auto-detects the
+        # model family; it needs no safety_checker (there is none to load).
+        single = _hf_single_file_path(MODEL)
+        if single is None:
+            raise
+        print(f"from_pretrained failed ({e!r}); "
+              f"using single-file checkpoint {single!r}")
+        # from_single_file lives on the concrete pipeline classes and each
+        # one validates that the checkpoint matches its family, so detect
+        # the family up front.
+        cls = StableDiffusionXLPipeline if _is_sdxl_checkpoint(single) \
+            else StableDiffusionPipeline
+        p = cls.from_single_file(single, torch_dtype=dtype)
+    if isinstance(p, StableDiffusionXLPipeline):
+        # SDXL checkpoint repos commonly ship the legacy DDPM scheduler;
+        # the fine-tunes (e.g. Juggernaut XL) are tuned for a 2nd-order
+        # solver with Karras sigmas, so upgrade it. from_config drops the
+        # DDPM-only keys (beta schedule etc.) automatically. Deliberately
+        # NOT done for other families — distilled models like sd-turbo are
+        # trained with their shipped scheduler.
+        p.scheduler = DPMSolverMultistepScheduler.from_config(
+            p.scheduler.config, use_karras_scheduling=True
+        )
+        print("scheduler upgraded to DPM++ 2M Karras (SDXL)")
+    # Slice attention and VAE activations: saves a few hundred MB of VRAM
+    # at SDXL resolutions for a small speed cost, keeping 1024x1024 viable
+    # on 8GB cards under CPU offload.
+    p.enable_attention_slicing()
+    p.enable_vae_slicing()
     if has_cuda and OFFLOAD != "none":
         if OFFLOAD == "sequential":
             p.enable_sequential_cpu_offload()
