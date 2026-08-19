@@ -12,10 +12,14 @@ from classes.tool_functions import *
 
 class TextLLMHandler:
 
-    def __init__(self, messages, guild_id, original_message):
+    def __init__(self, messages, guild_id, original_message, attachment_refs=None):
         self.original_message = original_message
         self.messages = messages
         self.guild_id = guild_id
+        # Short labels -> real CDN URLs for attached images (see
+        # MessageHandler._collect_attachment_refs). The edit_image tool
+        # resolves a label here instead of the LLM copying a full signed URL.
+        self.attachment_refs = attachment_refs or []
         self.config = configManager()
         self.user_memory = UserMemory(original_message.author.id, guild_id)
         self.get_settings()
@@ -91,6 +95,7 @@ class TextLLMHandler:
         "user_id": self.original_message.author.id,
         "guild_id": self.guild_id,
         "original_message": self.original_message,
+        "attachment_refs": self.attachment_refs,
         "redis_save_tool_calls": 0,
         "personality_tool_calls": 0,
       }

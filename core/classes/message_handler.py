@@ -54,6 +54,7 @@ class MessageHandler:
        self.history.pop(0) # Remove current message
 
        formatted_history = []
+       self.attachment_refs = []
        for message in self.history:
           
           if message.content.lower() == "!reset_history":
@@ -76,17 +77,18 @@ class MessageHandler:
           text = f"Message from '{message.author.name}': {message.content.replace(f'<@{self.client.user.id}>', '').strip()}"
           # With images the content becomes a list of parts (base64 images + text);
           # the agents SDK forwards them as multimodal chat-completions input.
-          text = self._with_image_urls(text, message.attachments)
+          text = self._with_image_labels(text, message, message.attachments)
           formatted_history.append({
              'role': "assistant" if message.author.id == self.client.user.id else "user",
              'content': [*image_parts, {"type": "text", "text": text}] if image_parts else text
           })
        formatted_history.reverse()  # Reverse the history to have the oldest message first
+       self.attachment_refs.reverse()  # keep ref order aligned with the history
 
        self.message.content = self.clean_message_content(self.message)
        image_parts = await self.download_image_parts(self.message.attachments)
        user_text = f"Message from '{self.message.author.name}': {self.message.content}"
-       user_text = self._with_image_urls(user_text, self.message.attachments)
+       user_text = self._with_image_labels(user_text, self.message, self.message.attachments)
        formatted_history.append({
             'role': 'user',
             'content': [*image_parts, {"type": "text", "text": user_text}] if image_parts else user_text
@@ -94,29 +96,46 @@ class MessageHandler:
        self.messages = formatted_history
 
 
-    def _attachment_image_urls(self, attachments) -> list:
-        """CDN URLs of image attachments (same cap/order as download_image_parts).
+    def _collect_attachment_refs(self, message, attachments) -> list:
+        """Register this message's image attachments for the edit_image tool.
 
-        The LLM sees the images as multimodal parts, but the edit_image tool
-        needs a URL it can fetch, so the URLs are also listed in the text."""
-        urls = []
+        Returns the short labels assigned (e.g. ['[1]', '[2]']). The signed
+        CDN URLs are deliberately never shown to the LLM — long hex
+        signatures get corrupted when the model copies them into tool args,
+        which 404s on fetch. The model references an image by its short
+        label; the edit_image tool resolves the label to the real URL via
+        the attachment_refs context (same cap/filter/order as
+        download_image_parts, so labels match the images the LLM sees)."""
+        labels = []
         for attachment in attachments or []:
-            if len(urls) >= MAX_IMAGES_PER_MESSAGE:
+            if len(labels) >= MAX_IMAGES_PER_MESSAGE:
                 break
             content_type = (attachment.content_type or "").lower()
             if not content_type.startswith("image/"):
                 continue
             url = attachment.proxy_url or attachment.url
-            if url:
-                urls.append(url)
-        return urls
+            if not url:
+                continue
+            self.attachment_refs.append({
+                "ref": str(len(self.attachment_refs) + 1),
+                "author": message.author.name,
+                "filename": attachment.filename or "image",
+                "url": url,
+            })
+            labels.append(f"[{self.attachment_refs[-1]['ref']}]")
+        return labels
 
-    def _with_image_urls(self, text: str, attachments) -> str:
-        urls = self._attachment_image_urls(attachments)
-        if not urls:
+    def _with_image_labels(self, text: str, message, attachments) -> str:
+        labels = self._collect_attachment_refs(message, attachments)
+        if not labels:
             return text
-        return (f"{text}\nAttached image URL(s) (pass one to the edit_image "
-                f"tool to modify it): {', '.join(urls)}")
+        entries = self.attachment_refs[-len(labels):]
+        listing = ", ".join(
+            f"{lab} {e['filename']} (from {e['author']})"
+            for lab, e in zip(labels, entries)
+        )
+        return (f"{text}\nAttached images — to modify one, call edit_image with "
+                f"its label as image_ref (e.g. image_ref=\"1\"): {listing}")
 
     async def download_image_parts(self, attachments) -> list:
         """Download image attachments and return them as chat-content image parts.
@@ -204,7 +223,7 @@ class MessageHandler:
     async def handle_message(self):
         print(f'Handling message: {self.message.content}')
         await self.build_messages()
-        ollama = TextLLMHandler(self.messages, self.message.guild.id, self.message)
+        ollama = TextLLMHandler(self.messages, self.message.guild.id, self.message, self.attachment_refs)
         response = await ollama.generate()
 
         if response == "Error":

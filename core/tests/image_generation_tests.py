@@ -345,10 +345,17 @@ async def test_edit_image_tool_absent_when_disabled(monkeypatch):
 
 # ---------------------- edit_image tool behaviour ----------------------
 
-def _tool_context(message):
+def _tool_context(message, attachment_refs=None):
     from agents.tool_context import ToolContext
+    if attachment_refs is None:
+        attachment_refs = [{
+            "ref": "1",
+            "author": "tester",
+            "filename": "img.png",
+            "url": "https://cdn.example/img.png",
+        }]
     return ToolContext(
-        context={"original_message": message},
+        context={"original_message": message, "attachment_refs": attachment_refs},
         tool_name="edit_image",
         tool_call_id="t1",
         tool_arguments="{}",
@@ -384,7 +391,7 @@ async def test_edit_image_tool_fetches_source_and_edits(monkeypatch):
             _tool_context(message),
             json.dumps({
                 "prompt": "make it snowy",
-                "image_url": "https://cdn.example/img.png",
+                "image_ref": "1",
             }),
         )
 
@@ -414,9 +421,75 @@ async def test_edit_image_tool_reports_download_failure(monkeypatch):
          patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()):
         result = await prod_tool_functions.edit_image.on_invoke_tool(
             _tool_context(message),
-            json.dumps({"prompt": "p", "image_url": "https://cdn.example/gone.png"}),
+            json.dumps({"prompt": "p", "image_ref": "1"}),
         )
 
     assert "Could not download" in result
     api.assert_not_awaited()
     message.channel.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_edit_image_tool_default_ref_is_latest(monkeypatch):
+    # image_ref omitted -> the most recent attachment is used
+    refs = [
+        {"ref": "1", "author": "a", "filename": "old.png",
+         "url": "https://cdn.example/old.png"},
+        {"ref": "2", "author": "b", "filename": "new.png",
+         "url": "https://cdn.example/new.png"},
+    ]
+    message = MagicMock()
+    message.add_reaction = AsyncMock()
+    message.channel.send = AsyncMock()
+    get_session = _mock_get_session()
+    api = AsyncMock(return_value=b"EDITED")
+
+    with patch("aiohttp.ClientSession", return_value=get_session), \
+         patch.object(prod_image_generation, "generate_image_from_api", api), \
+         patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()):
+        result = await prod_tool_functions.edit_image.on_invoke_tool(
+            _tool_context(message, refs),
+            json.dumps({"prompt": "make it snowy"}),
+        )
+
+    assert "sent to the channel" in result
+    assert get_session.get.call_args.args[0] == "https://cdn.example/new.png"
+
+
+@pytest.mark.asyncio
+async def test_edit_image_tool_unknown_ref(monkeypatch):
+    message = MagicMock()
+    get_session = _mock_get_session()
+    api = AsyncMock(return_value=b"EDITED")
+
+    with patch("aiohttp.ClientSession", return_value=get_session), \
+         patch.object(prod_image_generation, "generate_image_from_api", api), \
+         patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()):
+        result = await prod_tool_functions.edit_image.on_invoke_tool(
+            _tool_context(message),
+            json.dumps({"prompt": "p", "image_ref": "9"}),
+        )
+
+    assert "No attached image" in result
+    assert "'1'" in result  # available labels are listed
+    get_session.get.assert_not_called()
+    api.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_edit_image_tool_no_refs(monkeypatch):
+    message = MagicMock()
+    get_session = _mock_get_session()
+    api = AsyncMock(return_value=b"EDITED")
+
+    with patch("aiohttp.ClientSession", return_value=get_session), \
+         patch.object(prod_image_generation, "generate_image_from_api", api), \
+         patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()):
+        result = await prod_tool_functions.edit_image.on_invoke_tool(
+            _tool_context(message, []),
+            json.dumps({"prompt": "p"}),
+        )
+
+    assert "No image is attached" in result
+    get_session.get.assert_not_called()
+    api.assert_not_awaited()
