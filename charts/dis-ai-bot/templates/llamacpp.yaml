@@ -56,6 +56,8 @@ spec:
           value: {{ .Values.llamacpp.port | quote }}
         - name: LLAMA_ARG_N_PARALLEL
           value: {{ .Values.llamacpp.parallel | quote }}
+        - name: LLAMA_ARG_LOG_VERBOSITY
+          value: {{ .Values.llamacpp.verbosity | quote }}
         resources:
           limits:
             cpu: {{ .Values.llamacppResources.limits.cpu }}

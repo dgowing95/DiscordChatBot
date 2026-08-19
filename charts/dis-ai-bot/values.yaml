@@ -36,6 +36,8 @@ llamacpp:
   # KV cache quantization type for K/V context (llama.cpp -ctk / -ctv)
   cacheTypeK: q4_0
   cacheTypeV: q4_0
+  # Verbosity threshold (llama.cpp -lv); 4 = debug, logs the offload/buffer summary at startup
+  verbosity: 4
 # Prompt context window (server --ctx-size)
 llamacppContextLength: 40000
 # Model — single value for the whole chart: core requests it (MODEL) and llama.cpp
