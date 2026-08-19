@@ -37,6 +37,7 @@ Configuration (all env vars optional):
 """
 import asyncio
 import base64
+import copy
 import io
 import os
 from contextlib import asynccontextmanager
@@ -108,13 +109,15 @@ def build_img2img_pipeline(base):
     """Derive the img2img pipeline from the already-loaded txt2img components.
 
     Shares the exact same unet/vae/text_encoder modules (no extra weights,
-    CPU RAM or VRAM); only the scheduler is cloned. Safe because the
-    single-worker queue guarantees only one pipeline is ever in flight.
+    CPU RAM or VRAM); only the scheduler is copied (deepcopy — the diffusers
+    schedulers have no clone() method, and deepcopy of a scheduler config
+    object is cheap and side-effect free). Safe because the single-worker
+    queue guarantees only one pipeline is ever in flight.
     Returns None for model families without a matching img2img class.
     """
     try:
         components = dict(base.components)
-        components["scheduler"] = base.scheduler.clone()
+        components["scheduler"] = copy.deepcopy(base.scheduler)
         if isinstance(base, StableDiffusionXLPipeline):
             cls = StableDiffusionXLImg2ImgPipeline
         else:
