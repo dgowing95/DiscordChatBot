@@ -141,9 +141,10 @@ def load_pipeline():
           f"(steps={STEPS}, {WIDTH}x{HEIGHT}, offload={OFFLOAD}, seed={SEED})")
     # DiffusionPipeline picks the right class (SD1.5/SDXL/...) from the repo's
     # model_index.json, so IMAGE_MODEL can be swapped without code changes.
-    p = DiffusionPipeline.from_pretrained(
-        MODEL, torch_dtype=dtype, use_safetensors=True
-    )
+    # use_safetensors=None: auto-detect per component — prefer safetensors
+    # when the repo ships them, fall back to .bin (e.g. Lykon/DreamShaper's
+    # unet/vae/text_encoder are .bin-only).
+    p = DiffusionPipeline.from_pretrained(MODEL, torch_dtype=dtype)
     if has_cuda and OFFLOAD != "none":
         if OFFLOAD == "sequential":
             p.enable_sequential_cpu_offload()
