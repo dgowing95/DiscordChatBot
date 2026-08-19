@@ -19,6 +19,9 @@ services:
       - LLAMA_ARG_HF_REPO=${MODEL:-ggml-org/Qwen3.8-27B-GGUF:Q4_K_M}
       # Keep LLAMA_ARG_PORT in sync with ports: above and LLM_HOST in .env
       - LLAMA_ARG_N_GPU_LAYERS=99
+      # KV cache quantization for K/V context (llama.cpp -ctk/-ctv); override in .env
+      - LLAMA_ARG_CACHE_TYPE_K=${LLAMA_ARG_CACHE_TYPE_K:-q4_0}
+      - LLAMA_ARG_CACHE_TYPE_V=${LLAMA_ARG_CACHE_TYPE_V:-q4_0}
       - LLAMA_ARG_CTX_SIZE=4000
       - LLAMA_ARG_PORT=8081
       - LLAMA_ARG_N_PARALLEL=1

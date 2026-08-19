@@ -33,6 +33,9 @@ llamacpp:
   port: 8080
   gpuLayers: 99  # 99 = all layers on GPU
   parallel: 1
+  # KV cache quantization type for K/V context (llama.cpp -ctk / -ctv)
+  cacheTypeK: q4_0
+  cacheTypeV: q4_0
 # Prompt context window (server --ctx-size)
 llamacppContextLength: 40000
 # Model — single value for the whole chart: core requests it (MODEL) and llama.cpp

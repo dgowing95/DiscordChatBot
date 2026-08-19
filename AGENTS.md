@@ -63,6 +63,7 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + core (mo
 | `CONTENT_GUARD_ENABLED` | `0`/`false` disables the content guard on web tools (default: on) |
 | `CONTENT_GUARD_DEBUG` | `0`/`false` silences content-guard debug logging (default: on) |
 | `MSG_HISTORY_LIMIT` | how many prior channel messages to include, default 5 |
+| `LLAMA_ARG_CACHE_TYPE_K`, `LLAMA_ARG_CACHE_TYPE_V` | optional; compose `llamacpp` service only: KV cache quantization type (llama.cpp `-ctk`/`-ctv`), default `q4_0`; in the Helm chart set via `llamacpp.cacheTypeK`/`cacheTypeV` |
 | `IMAGE_MODEL`, `DIFFUSION_URL` | only for the (optional) diffusion service |
 
 ## Testing

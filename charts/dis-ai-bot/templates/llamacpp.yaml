@@ -46,6 +46,10 @@ spec:
           value: "{{ .Values.model }}"
         - name: LLAMA_ARG_N_GPU_LAYERS
           value: {{ .Values.llamacpp.gpuLayers | quote }}
+        - name: LLAMA_ARG_CACHE_TYPE_K
+          value: {{ .Values.llamacpp.cacheTypeK | quote }}
+        - name: LLAMA_ARG_CACHE_TYPE_V
+          value: {{ .Values.llamacpp.cacheTypeV | quote }}
         - name: LLAMA_ARG_CTX_SIZE
           value: {{ .Values.llamacppContextLength | quote }}
         - name: LLAMA_ARG_PORT
