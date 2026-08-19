@@ -46,21 +46,46 @@ services:
       - redis
       - llamacpp
       
-  # diffusion:
-  #   build: ./diffusionservice
-  #   volumes:
-  #     - ./diffusionservice:/app
-  #     - diffusers_data:/home/.cache/huggingface/hub
-  #   ports:
-  #     - "8000:8000"
-  #   runtime: nvidia
-  #   deploy:
-  #     resources:
-  #       reservations:
-  #         devices:
-  #           - driver: nvidia
-  #             count: all
-  #             capabilities: [gpu]    
+  diffusion:
+    # Image generation (text -> image and image -> image editing); see
+    # diffusionservice/. Queued (one image at a time), minimal VRAM (sd-turbo +
+    # CPU offload by default; img2img shares the loaded components).
+    # Needs a GPU; comment this service out (and set IMAGE_GEN_ENABLED=0 in
+    # .env) to run the bot without it.
+    build: ./diffusionservice
+    volumes:
+      - ./diffusionservice:/app
+      - diffusers_data:/models
+    ports:
+      - "8000:8000"
+    environment:
+      # Model cache on a volume so the download survives redeploys
+      - HF_HOME=/models
+      # Smallest practical SD model; override in .env to try something else
+      - IMAGE_MODEL=${IMAGE_MODEL:-stabilityai/sd-turbo}
+      # sd-turbo: 1-4 steps; lower = faster, slightly worse quality
+      - IMAGE_STEPS=${IMAGE_STEPS:-4}
+      - IMAGE_WIDTH=${IMAGE_WIDTH:-512}
+      - IMAGE_HEIGHT=${IMAGE_HEIGHT:-512}
+      # model | sequential | none — see diffusionservice/main.py
+      - IMAGE_OFFLOAD=${IMAGE_OFFLOAD:-model}
+      - IMAGE_QUEUE_SIZE=${IMAGE_QUEUE_SIZE:-16}
+      # img2img: 0-1 exclusive, higher = more changes (default 0.5)
+      - IMAGE_EDIT_STRENGTH=${IMAGE_EDIT_STRENGTH:-0.5}
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 40
+      start_period: 5m
 volumes:
   data:
   ollama_data:

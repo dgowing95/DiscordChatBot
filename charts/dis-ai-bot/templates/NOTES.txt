@@ -3,3 +3,9 @@
 2. LLM service (llama.cpp, OpenAI-compatible API):
    kubectl get svc <release>-llamacpp-service
    curl http://<node>:31434/v1/models   # the model name the bot must use (MODEL value)
+
+3. Image generation (when diffusion.enabled=true): separate pod + service,
+   called in-cluster by the bot's generate_image tool. /health returns 200
+   once the model is downloaded/loaded (first boot can take a few minutes):
+   kubectl get svc <release>-diffusion-service
+   kubectl logs deploy/<release>-diffusion-deployment

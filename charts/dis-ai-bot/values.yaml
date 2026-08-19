@@ -23,9 +23,35 @@ llm_host: "http://dchatbot-llamacpp-service.dchatbot.svc.cluster.local:8080"
 # llama.cpp does not authenticate; this is a non-empty placeholder for the OpenAI client
 llm_pass: "llamacpp"
 
-image_model: "stable-diffusion-v1-5/stable-diffusion-v1-5"
-diffusion_url: "localhost"
-diffusersGpuLimit: 8
+# Image generation (diffusion): separate pod (see diffusionservice/) + the
+# generate_image LLM tool. enabled: false removes the pod/PVC and switches
+# the tool off in core (IMAGE_GEN_ENABLED=false).
+diffusion:
+  enabled: true
+  # Container image: built by the release workflow (diffusion-<tag> tags)
+  image: ghcr.io/dgowing95/discordchatbot
+  port: 8000
+  # Optional: point core at a diffusion service outside the cluster
+  # (default: the in-cluster {{ .Release.Name }}-diffusion-service)
+  url: ""
+  # HF repo id of the text-to-image model. sd-turbo is the smallest practical
+  # one (~500MB, made for 1-4 step generation).
+  model: stabilityai/sd-turbo
+  # Sampler steps (sd-turbo: 1-4); lower = faster, slightly worse quality
+  steps: 4
+  width: 512
+  height: 512
+  # GPU memory mode: model = one pipeline component on the GPU at a time
+  # (text encoder runs in CPU RAM — default); sequential = lowest VRAM,
+  # slowest; none = everything on the GPU (needs ~4GB)
+  offload: model
+  # Max queued image requests (images are always generated one at a time)
+  queueSize: 16
+  # Default image-to-image strength (0-1, exclusive): higher = more changes,
+  # lower = closer to the original
+  editStrength: 0.5
+  # Optional: fixed seed for reproducible images (empty = random)
+  seed: ""
 
 # llama.cpp server (replaces Ollama); which model it serves: the `model` value below
 llamacpp:

@@ -1,0 +1,80 @@
+{{- if .Values.diffusion.enabled }}
+# Image generation service (diffusionservice/): separate pod, requests queued
+# (one image at a time), minimal VRAM (small model + CPU offload).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-diffusion-deployment
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-diffusion
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-diffusion
+    spec:
+      runtimeClassName: nvidia
+      volumes:
+        - name: diffusers-data
+          persistentVolumeClaim:
+            claimName: diffusers-pv-claim
+      containers:
+      - name: diffusion
+        image: "{{ .Values.diffusion.image }}:diffusion-{{ .Values.image.tag | default .Chart.AppVersion }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        ports:
+        - name: http
+          containerPort: {{ .Values.diffusion.port }}
+        volumeMounts:
+          - name: diffusers-data
+            mountPath: /models
+        # HF_HOME = model cache on the preserved volume (downloaded once);
+        # the IMAGE_* generation settings come from the shared configmap
+        envFrom:
+        - configMapRef:
+            name: {{ .Release.Name }}-configmap
+        env:
+        - name: HF_HOME
+          value: /models
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: all
+        - name: NVIDIA_DRIVER_CAPABILITIES
+          value: all
+        # First boot downloads the model (a few minutes): allow a long
+        # window before the pod is considered failed to start
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          failureThreshold: 90
+        resources:
+          limits:
+            cpu: {{ .Values.diffusionResources.limits.cpu }}
+            memory: {{ .Values.diffusionResources.limits.memory }}
+            nvidia.com/gpu: {{ .Values.diffusionResources.gpu }}
+          requests:
+            cpu: {{ .Values.diffusionResources.requests.cpu }}
+            memory: {{ .Values.diffusionResources.requests.memory }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-diffusion-service
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: {{ .Release.Name }}-diffusion
+  ports:
+    - port: {{ .Values.diffusion.port }}
+      targetPort: {{ .Values.diffusion.port }}
+      protocol: TCP
+      name: http
+  type: ClusterIP
+{{- end }}

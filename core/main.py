@@ -6,6 +6,7 @@ import io
 from classes.message_handler import MessageHandler
 from classes.text_llm_handler import TextLLMHandler
 from classes.config_manager import configManager
+from classes.image_generation import generate_image_from_api, image_generation_enabled
 
 
 intents = discord.Intents.default()
@@ -45,6 +46,58 @@ async def register_commands():
         chance = config.get_setting("response_chance", ctx.guild.id) or 5
         await ctx.response.send_message(content=f"Response chance is currently: \"{chance}%\"")  
     
+    # Only offered when the diffusion service is enabled (IMAGE_GEN_ENABLED;
+    # set from the helm chart's diffusion.enabled).
+    if image_generation_enabled():
+
+        @command_tree.command(name="generate_image", description="Generate an image from a text prompt using the image service")
+        async def generate_image_cmd(ctx, prompt: str):
+            # Image generation is slow (queue + GPU): defer first (spinner) so
+            # the command doesn't time out, then respond to the deferred
+            # interaction via the webhook. ctx is a raw discord.Interaction
+            # (the bot is a discord.Client), so: ctx.response.defer() to defer
+            # and ctx.edit_original_response() to answer it later — NOT
+            # ctx.response.edit_message(), which raises InteractionResponded.
+            await ctx.response.defer()
+            print(f"Slash command: generating image for prompt: {prompt}")
+            try:
+                image_bytes = await generate_image_from_api(prompt)
+            except Exception as e:
+                print(f"Image generation failed: {e}")
+                await ctx.edit_original_response(
+                    content="❌ Image generation failed — the image service may be down or busy. Try again later."
+                )
+                return
+            await ctx.edit_original_response(
+                content="🎨",
+                attachments=[discord.File(io.BytesIO(image_bytes), filename="generated-image.png")],
+            )
+
+        @command_tree.command(name="edit_image", description="Edit an image with a text prompt (image-to-image)")
+        async def edit_image_cmd(
+            ctx,
+            image: discord.Attachment,
+            prompt: str,
+            strength: discord.app_commands.Range[float, 0.1, 0.9] | None = None,
+        ):
+            await ctx.response.defer()
+            print(f"Slash command: editing image with prompt: {prompt}")
+            try:
+                source = await image.read()
+                image_bytes = await generate_image_from_api(
+                    prompt, image=source, strength=strength
+                )
+            except Exception as e:
+                print(f"Image editing failed: {e}")
+                await ctx.edit_original_response(
+                    content="❌ Image editing failed — the image service may be down or busy, or the image could not be read. Try again later."
+                )
+                return
+            await ctx.edit_original_response(
+                content="🎨",
+                attachments=[discord.File(io.BytesIO(image_bytes), filename="edited-image.png")],
+            )
+
     synced_commands = await command_tree.sync()
     for synced_command in synced_commands:
         print(f"Command '{synced_command.name}' synced")

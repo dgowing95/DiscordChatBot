@@ -8,10 +8,22 @@ data:
   REDIS_HOST: {{ .Values.redisHost | toString | quote }}
   LLM_HOST: {{ .Values.llm_host }}
   LLM_PASS: {{ .Values.llm_pass }}
-  IMAGE_MODEL: {{ .Values.image_model }}
   MODEL: {{ .Values.model }}
   MSG_HISTORY_LIMIT: {{ .Values.message_history | toString | quote }}
-  DIFFUSION_URL: {{ .Values.diffusion_url }}
+  # Image generation (diffusion): core only registers the generate_image tool
+  # when IMAGE_GEN_ENABLED is true; the diffusion pod reads the IMAGE_* settings
+  DIFFUSION_URL: {{ if .Values.diffusion.url }}{{ .Values.diffusion.url }}{{ else }}http://{{ .Release.Name }}-diffusion-service.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.diffusion.port }}{{ end }}
+  IMAGE_GEN_ENABLED: {{ .Values.diffusion.enabled | quote }}
+  IMAGE_MODEL: {{ .Values.diffusion.model }}
+  IMAGE_STEPS: {{ .Values.diffusion.steps | toString | quote }}
+  IMAGE_WIDTH: {{ .Values.diffusion.width | toString | quote }}
+  IMAGE_HEIGHT: {{ .Values.diffusion.height | toString | quote }}
+  IMAGE_OFFLOAD: {{ .Values.diffusion.offload }}
+  IMAGE_QUEUE_SIZE: {{ .Values.diffusion.queueSize | toString | quote }}
+  IMAGE_EDIT_STRENGTH: {{ .Values.diffusion.editStrength | toString | quote }}
+  {{- if .Values.diffusion.seed }}
+  IMAGE_SEED: {{ .Values.diffusion.seed | toString | quote }}
+  {{- end }}
   {{- if .Values.openaiApiKey }}
   OPENAI_API_KEY: {{ .Values.openaiApiKey }}
   {{- end }}
