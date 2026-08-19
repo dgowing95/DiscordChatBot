@@ -143,8 +143,13 @@ def load_pipeline():
     # model_index.json, so IMAGE_MODEL can be swapped without code changes.
     # use_safetensors=None: auto-detect per component — prefer safetensors
     # when the repo ships them, fall back to .bin (e.g. Lykon/DreamShaper's
-    # unet/vae/text_encoder are .bin-only).
-    p = DiffusionPipeline.from_pretrained(MODEL, torch_dtype=dtype)
+    # unet/vae/text_encoder are .bin-only). safety_checker=None: the legacy
+    # SD1.5 NSFW checker that some repos ship (e.g. DreamShaper) false-positives
+    # and blanks images to pure black; this is a local/homelab deployment and
+    # the bot's own content guard covers the LLM tool path.
+    p = DiffusionPipeline.from_pretrained(
+        MODEL, torch_dtype=dtype, safety_checker=None
+    )
     if has_cuda and OFFLOAD != "none":
         if OFFLOAD == "sequential":
             p.enable_sequential_cpu_offload()
