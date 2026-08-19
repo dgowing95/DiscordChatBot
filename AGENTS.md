@@ -53,7 +53,7 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
    `guild:<id>:user:<id>`.
 6. Image generation: when enabled (`IMAGE_GEN_ENABLED`, set from the chart's
    `diffusion.enabled`), the agent gets two tools — `generate_image(prompt)` and
-   `edit_image(prompt, image_url, strength?)` — plus `/generate_image <prompt>`
+   `edit_image(prompt, image_ref?, strength?)` — plus `/generate_image <prompt>`
    and `/edit_image <attachment> <prompt> [strength]` slash commands (registered
    in `main.py`). All of them POST to the standalone diffusion service
    (`DIFFUSION_URL/generate`), which runs in its own pod/container, queues
@@ -61,7 +61,10 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
    Discord channel. `edit_image`/`/edit_image` send the source image as base64
    (img2img; the service derives its img2img pipeline from the SAME loaded
    components, so no extra model/RAM/VRAM). `build_messages()` lists attached
-   image URLs in the prompt so the LLM can pass them to `edit_image`. Generation
+   images by a short label (`[1]`, `[2]`, …) — NOT the signed CDN URL, because
+   the model corrupts the 64-char hex signature when copying it into a tool
+   arg (the fetch then 404s). `edit_image` resolves `image_ref` (a label, or
+   "latest") to the real URL via the `attachment_refs` run context. Generation
    settings (`IMAGE_MODEL`, `IMAGE_STEPS`, `IMAGE_WIDTH`/`HEIGHT`, `IMAGE_OFFLOAD`,
    `IMAGE_QUEUE_SIZE`, `IMAGE_EDIT_STRENGTH`) live in the same configmap/env the
    diffusion pod reads.

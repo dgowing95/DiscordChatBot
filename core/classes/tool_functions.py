@@ -214,24 +214,42 @@ async def generate_image(wrapper: RunContextWrapper[dict], prompt: str) -> str:
 async def edit_image(
     wrapper: RunContextWrapper[dict],
     prompt: str,
-    image_url: str,
+    image_ref: str = "latest",
     strength: float | None = None,
 ) -> str:
     """Edits an existing image with a text prompt (image-to-image) and sends
     the result to the channel. Use it when the user asks to modify, restyle
-    or transform an image they attached.
+    or transform an image attached in the conversation.
     The edited image is sent automatically; never try to send it yourself.
     Args:
         prompt: What to change or create (e.g. "make it snowy").
-        image_url: URL of the source image (the attached image URLs listed
-            in the message, e.g. a https://cdn.discordapp.com/... URL).
+        image_ref: Label of the image to edit, from the "Attached images"
+            list in the message (e.g. "1"), or "latest" for the most recent
+            image (default). Never paste or guess URLs — the bot resolves
+            the label to the real image on its side.
         strength: Optional, 0-1 (exclusive). Higher = more changes, lower =
             closer to the original. Omit for a sensible default.
     """
     from classes.image_generation import generate_image_from_api
 
+    # Resolve the short label to the real signed CDN URL (the LLM must never
+    # copy the URL itself — it corrupts the 64-char hex signature).
+    refs = wrapper.context.get("attachment_refs") or []
+    if not refs:
+        return ("No image is attached in this conversation. Ask the user to "
+                "attach the image they want edited, then try again.")
+    if image_ref in (None, "", "latest"):
+        entry = refs[-1]
+    else:
+        entry = next((r for r in refs if r["ref"] == str(image_ref)), None)
+        if entry is None:
+            available = ", ".join(f"'{r['ref']}'" for r in refs)
+            return (f"No attached image with label '{image_ref}'. "
+                    f"Available image labels: {available}.")
+    image_url = entry["url"]
+
     message = wrapper.context.get("original_message")
-    print(f"Editing image {image_url} with prompt: {prompt}")
+    print(f"Editing image [{entry['ref']}] {entry['filename']} with prompt: {prompt}")
     await add_emoji_to_message(message, "🎨")
     await Common.send_tool_discord_embed(
         message.channel,
