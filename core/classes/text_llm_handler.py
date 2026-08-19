@@ -6,6 +6,8 @@ from classes.config_manager import configManager
 
 
 
+from classes.image_generation import image_generation_enabled
+
 from classes.tool_functions import *
 
 class TextLLMHandler:
@@ -56,24 +58,29 @@ class TextLLMHandler:
                 api_key=os.environ.get("LLM_PASS", "ollama")
             )
         )
+        tools = [
+            web_search,
+            fetch_url,
+            fetch_weather,
+            store_memory,
+            remove_memory,
+            clear_memories,
+            change_personality,
+        ]
+        # Image tools only exist when the diffusion service is enabled
+        # (IMAGE_GEN_ENABLED; set from the helm chart's diffusion.enabled).
+        if image_generation_enabled():
+            tools.extend([generate_image, edit_image])
+
         self.agent = Agent(
             name="Assistant",
             instructions=self.system,
             model=main_model_client,
-            tools=[
-                web_search,
-                fetch_url,
-                fetch_weather,
-                store_memory,
-                remove_memory,
-                clear_memories,
-                change_personality,
-            ],
+            tools=tools,
             model_settings=ModelSettings(
                 temperature=self.options["temperature"],
                 frequency_penalty=1.1,
                 top_p=1.0,
-                max_tokens=5000,
                 reasoning={"effort": "low"}
             ),
         )

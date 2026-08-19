@@ -1,26 +1,65 @@
-import aiohttp, os, discord
-async def generate_image_from_api(prompt: str) -> bytes:
+"""Client for the standalone image-generation (diffusion) service.
+
+The service runs in its own pod/container (see diffusionservice/); this module
+only knows whether the generate_image tool is enabled and how to ask the
+service for an image.
+"""
+import base64
+import os
+
+import aiohttp
+
+# Image generation is slow (queue wait + GPU generation); be generous.
+GENERATION_TIMEOUT = int(os.environ.get("IMAGE_GEN_TIMEOUT", 300))
+
+# Discord attachment cap; the service resizes the source anyway, so anything
+# bigger than this is wasted bandwidth rather than better quality.
+MAX_SOURCE_IMAGE_BYTES = 10 * 1024 * 1024
+
+
+def image_generation_enabled() -> bool:
+    """True when the generate_image tool should be offered to the LLM.
+
+    Controlled by IMAGE_GEN_ENABLED (set from the helm chart's
+    diffusion.enabled, or .env locally); defaults to enabled for local dev.
+    """
+    raw = os.environ.get("IMAGE_GEN_ENABLED", "1")
+    return raw.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def diffusion_base_url() -> str:
+    """Base URL of the diffusion service (no trailing slash)."""
+    return os.environ.get("DIFFUSION_URL", "http://diffusion:8000").rstrip("/")
+
+
+async def generate_image_from_api(
+    prompt: str,
+    image: bytes | None = None,
+    strength: float | None = None,
+) -> bytes:
+    """Ask the diffusion service for a PNG.
+
+    Without `image`: text-to-image. With `image` (raw image bytes):
+    image-to-image; `strength` (0-1, exclusive) controls how far the result
+    moves from the source (service default when omitted).
+
+    Raises on HTTP errors or connection failures; the caller (the
+    generate_image / edit_image tools) turns that into a friendly message
+    for the LLM."""
+    payload = {"prompt": prompt}
+    if image is not None:
+        if len(image) > MAX_SOURCE_IMAGE_BYTES:
+            raise Exception("source image is larger than 10MB")
+        payload["image"] = base64.b64encode(image).decode()
+        if strength is not None:
+            payload["strength"] = strength
     async with aiohttp.ClientSession(auto_decompress=False) as session:
         async with session.post(
-            f"http://{os.environ.get("DIFFUSION_URL", 5)}:8000/text-image",
-            json={"prompt": prompt}
+            f"{diffusion_base_url()}/generate",
+            json=payload,
+            timeout=aiohttp.ClientTimeout(total=GENERATION_TIMEOUT),
         ) as resp:
             if resp.status != 200:
-                raise Exception(f"API failed with status {resp.status}")
-            return await resp.read()
-    
-
-async def modify_image_from_api(prompt: str, image: discord.Attachment) -> bytes:
-    async with aiohttp.ClientSession(auto_decompress=False) as session:
-        image_bytes = await image.read()
-        data = aiohttp.FormData()
-        data.add_field('prompt', prompt)
-        data.add_field('file', image_bytes)
-
-        async with session.post(
-            f"http://{os.environ.get("DIFFUSION_URL", 5)}:8000/image-image",
-            data=data
-        ) as resp:
-            if resp.status != 200:
-                raise Exception(f"API failed with status {resp.status}")
+                detail = (await resp.text())[:200]
+                raise Exception(f"diffusion service returned {resp.status}: {detail}")
             return await resp.read()

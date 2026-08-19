@@ -21,15 +21,17 @@ core/                  # the main bot (the app that runs in production)
     content_guard.py       # OpenAI Moderations-based safety guard for web_search/fetch_url
     user_memory.py         # JSON lists in Redis per (guild, user)
     config_manager.py      # per-guild settings in Redis (system prompt, temperature, ...)
-    tool_functions.py      # agent function tools: web_search, fetch_url, weather, memory tools
-    image_generation.py / common.py
+    tool_functions.py      # agent function tools: web_search, fetch_url, weather, memory tools, generate_image
+    image_generation.py    # client for the diffusion service + IMAGE_GEN_ENABLED flag
+    common.py              # shared helpers (Discord tool embeds)
   tests/               # pytest suite (see Testing below)
   Dockerfile           # python:3.13-slim image, runs main.py
   requirements.txt
-diffusionservice/      # optional image-generation sidecar (text/image to image), currently commented out in docker-compose
+diffusionservice/      # standalone image service (text->image AND image->image/editing;
+                       #   FastAPI + diffusers, queued single-worker, sd-turbo by default,
+                       #   CPU-offloaded for low VRAM; img2img shares the loaded components)
 charts/dis-ai-bot/     # Helm chart
-kube/                  # raw k8s manifests (app/configmap/pvc)
-docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + core (mounts ./core)
+docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusion (GPU) + core (mounts ./core)
 .env / .env.example    # environment configuration (never commit .env)
 ```
 
@@ -49,6 +51,20 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + core (mo
    (`textwrap.wrap`, one `asyncio.sleep(1)` between sends).
 5. Per-guild settings live in Redis under the `dcb` namespace; per-user memories under
    `guild:<id>:user:<id>`.
+6. Image generation: when enabled (`IMAGE_GEN_ENABLED`, set from the chart's
+   `diffusion.enabled`), the agent gets two tools — `generate_image(prompt)` and
+   `edit_image(prompt, image_url, strength?)` — plus `/generate_image <prompt>`
+   and `/edit_image <attachment> <prompt> [strength]` slash commands (registered
+   in `main.py`). All of them POST to the standalone diffusion service
+   (`DIFFUSION_URL/generate`), which runs in its own pod/container, queues
+   requests (one image at a time) and replies with a PNG that is sent to the
+   Discord channel. `edit_image`/`/edit_image` send the source image as base64
+   (img2img; the service derives its img2img pipeline from the SAME loaded
+   components, so no extra model/RAM/VRAM). `build_messages()` lists attached
+   image URLs in the prompt so the LLM can pass them to `edit_image`. Generation
+   settings (`IMAGE_MODEL`, `IMAGE_STEPS`, `IMAGE_WIDTH`/`HEIGHT`, `IMAGE_OFFLOAD`,
+   `IMAGE_QUEUE_SIZE`, `IMAGE_EDIT_STRENGTH`) live in the same configmap/env the
+   diffusion pod reads.
 
 ### Environment variables
 
@@ -64,7 +80,14 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + core (mo
 | `CONTENT_GUARD_DEBUG` | `0`/`false` silences content-guard debug logging (default: on) |
 | `MSG_HISTORY_LIMIT` | how many prior channel messages to include, default 5 |
 | `LLAMA_ARG_CACHE_TYPE_K`, `LLAMA_ARG_CACHE_TYPE_V` | optional; compose `llamacpp` service only: KV cache quantization type (llama.cpp `-ctk`/`-ctv`), default `q4_0`; in the Helm chart set via `llamacpp.cacheTypeK`/`cacheTypeV` |
-| `IMAGE_MODEL`, `DIFFUSION_URL` | only for the (optional) diffusion service |
+| `IMAGE_GEN_ENABLED` | `0`/`false` removes the `generate_image` tool from the LLM (default: on). Chart: `diffusion.enabled` also removes the diffusion pod/PVC |
+| `DIFFUSION_URL` | base URL of the diffusion service (core appends `/generate`); compose `diffusion` service on :8000 in dev, in-cluster `*-diffusion-service` in the chart; in-code fallback `http://diffusion:8000` |
+| `IMAGE_MODEL` | HF repo id for the diffusion service (default `stabilityai/sd-turbo` — smallest practical model); the service downloads it into its `HF_HOME` volume on first boot |
+| `IMAGE_STEPS` / `IMAGE_WIDTH` / `IMAGE_HEIGHT` | generation settings for the diffusion service (defaults: 4 steps, 512x512) |
+| `IMAGE_OFFLOAD` | `model` (default: one pipeline component on GPU at a time, text encoder in CPU RAM) / `sequential` (lowest VRAM, slowest) / `none` (all on GPU) |
+| `IMAGE_QUEUE_SIZE` | max queued image requests in the diffusion service (default 16); over that it returns 503 |
+| `IMAGE_EDIT_STRENGTH` | default img2img strength, 0-1 exclusive: higher = more changes, lower = closer to the original (default 0.5) |
+| `IMAGE_GEN_TIMEOUT` | seconds core waits on the diffusion service (default 300) |
 
 ## Testing
 
@@ -118,4 +141,10 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + core (mo
   (hostPath `…/ollama`) on purpose, so data survives the Ollama → llama.cpp switch and keeps
   matching on upgrade — do not rename; the llamacpp pod mounts it at `/models`, which is also
   its `LLAMA_CACHE`, so the GGUF model (downloaded once via `--hf-repo`) persists across redeploys.
+- The diffusion pod, its PVC and the `generate_image` tool are all gated by one switch:
+  `diffusion.enabled` in the chart (→ `IMAGE_GEN_ENABLED` in the configmap). The service
+  downloads its model into the `diffusers` volume on first boot, so first start is slow
+  (the readiness probe on `/health` allows ~15 min); changing `IMAGE_MODEL` needs a pod
+  restart (same as llamacpp: `compose restart`/`helm upgrade` re-uses the cached model,
+  a new one is downloaded into the volume).
 - Never commit `.env`; copy `.env.example` and fill in locally.

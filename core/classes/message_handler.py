@@ -76,6 +76,7 @@ class MessageHandler:
           text = f"Message from '{message.author.name}': {message.content.replace(f'<@{self.client.user.id}>', '').strip()}"
           # With images the content becomes a list of parts (base64 images + text);
           # the agents SDK forwards them as multimodal chat-completions input.
+          text = self._with_image_urls(text, message.attachments)
           formatted_history.append({
              'role': "assistant" if message.author.id == self.client.user.id else "user",
              'content': [*image_parts, {"type": "text", "text": text}] if image_parts else text
@@ -85,12 +86,37 @@ class MessageHandler:
        self.message.content = self.clean_message_content(self.message)
        image_parts = await self.download_image_parts(self.message.attachments)
        user_text = f"Message from '{self.message.author.name}': {self.message.content}"
+       user_text = self._with_image_urls(user_text, self.message.attachments)
        formatted_history.append({
             'role': 'user',
             'content': [*image_parts, {"type": "text", "text": user_text}] if image_parts else user_text
        })
        self.messages = formatted_history
 
+
+    def _attachment_image_urls(self, attachments) -> list:
+        """CDN URLs of image attachments (same cap/order as download_image_parts).
+
+        The LLM sees the images as multimodal parts, but the edit_image tool
+        needs a URL it can fetch, so the URLs are also listed in the text."""
+        urls = []
+        for attachment in attachments or []:
+            if len(urls) >= MAX_IMAGES_PER_MESSAGE:
+                break
+            content_type = (attachment.content_type or "").lower()
+            if not content_type.startswith("image/"):
+                continue
+            url = attachment.proxy_url or attachment.url
+            if url:
+                urls.append(url)
+        return urls
+
+    def _with_image_urls(self, text: str, attachments) -> str:
+        urls = self._attachment_image_urls(attachments)
+        if not urls:
+            return text
+        return (f"{text}\nAttached image URL(s) (pass one to the edit_image "
+                f"tool to modify it): {', '.join(urls)}")
 
     async def download_image_parts(self, attachments) -> list:
         """Download image attachments and return them as chat-content image parts.

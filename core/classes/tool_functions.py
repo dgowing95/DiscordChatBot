@@ -1,3 +1,5 @@
+import io
+
 from agents import FunctionTool, function_tool,RunContextWrapper
 from classes.common import Common
 from classes.content_guard import check_web_request
@@ -172,6 +174,97 @@ async def clear_memories(wrapper: RunContextWrapper[dict]) -> str:
     except Exception as e:
         print(f"An error occurred while clearing user memories: {e}")
         return "Error clearing user memories."
+
+
+@function_tool
+async def generate_image(wrapper: RunContextWrapper[dict], prompt: str) -> str:
+    """Generates an image from a text description and sends it to the channel.
+    Use it when the user asks for art, illustrations, pictures or drawings.
+    The image is sent automatically; never try to send it yourself.
+    Args:
+        prompt: The text description of the image to generate.
+    """
+    from classes.image_generation import generate_image_from_api
+
+    message = wrapper.context.get("original_message")
+    print(f"Generating image for prompt: {prompt}")
+    await add_emoji_to_message(message, "🎨")
+    await Common.send_tool_discord_embed(
+        message.channel,
+        f"Generating image: {prompt}",
+    )
+    try:
+        image_bytes = await generate_image_from_api(prompt)
+    except Exception as e:
+        print(f"Image generation failed: {e}")
+        return ("Image generation failed. Tell the user the image service is "
+                "unavailable right now and do not retry.")
+    try:
+        await message.channel.send(
+            file=discord.File(io.BytesIO(image_bytes), filename="generated-image.png")
+        )
+    except Exception as e:
+        print(f"Image generated but failed to send to Discord: {e}")
+        return "The image was generated but could not be sent to the channel."
+    return ("Image generated and sent to the channel. The user can already see "
+            "it; do not send the image again or describe it as if pending.")
+
+
+@function_tool
+async def edit_image(
+    wrapper: RunContextWrapper[dict],
+    prompt: str,
+    image_url: str,
+    strength: float | None = None,
+) -> str:
+    """Edits an existing image with a text prompt (image-to-image) and sends
+    the result to the channel. Use it when the user asks to modify, restyle
+    or transform an image they attached.
+    The edited image is sent automatically; never try to send it yourself.
+    Args:
+        prompt: What to change or create (e.g. "make it snowy").
+        image_url: URL of the source image (the attached image URLs listed
+            in the message, e.g. a https://cdn.discordapp.com/... URL).
+        strength: Optional, 0-1 (exclusive). Higher = more changes, lower =
+            closer to the original. Omit for a sensible default.
+    """
+    from classes.image_generation import generate_image_from_api
+
+    message = wrapper.context.get("original_message")
+    print(f"Editing image {image_url} with prompt: {prompt}")
+    await add_emoji_to_message(message, "🎨")
+    await Common.send_tool_discord_embed(
+        message.channel,
+        f"Editing image: {prompt}",
+    )
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                image_url, timeout=aiohttp.ClientTimeout(total=30)
+            ) as resp:
+                if resp.status != 200:
+                    return (f"Could not download the image to edit (HTTP {resp.status}). "
+                            "Tell the user the image could not be fetched.")
+                source = await resp.read()
+    except Exception as e:
+        print(f"Failed to download image {image_url}: {e}")
+        return ("Could not download the image to edit. "
+                "Tell the user the image could not be fetched.")
+    try:
+        image_bytes = await generate_image_from_api(prompt, image=source, strength=strength)
+    except Exception as e:
+        print(f"Image editing failed: {e}")
+        return ("Image editing failed. Tell the user the image service is "
+                "unavailable right now and do not retry.")
+    try:
+        await message.channel.send(
+            file=discord.File(io.BytesIO(image_bytes), filename="edited-image.png")
+        )
+    except Exception as e:
+        print(f"Image edited but failed to send to Discord: {e}")
+        return "The image was edited but could not be sent to the channel."
+    return ("The image was edited and sent to the channel. The user can already "
+            "see it; do not send the image again or describe it as if pending.")
 
 
 @function_tool
