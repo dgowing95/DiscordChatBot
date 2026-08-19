@@ -37,6 +37,7 @@ Configuration (all env vars optional):
 """
 import asyncio
 import base64
+import copy
 import io
 import os
 from contextlib import asynccontextmanager
@@ -108,13 +109,15 @@ def build_img2img_pipeline(base):
     """Derive the img2img pipeline from the already-loaded txt2img components.
 
     Shares the exact same unet/vae/text_encoder modules (no extra weights,
-    CPU RAM or VRAM); only the scheduler is cloned. Safe because the
-    single-worker queue guarantees only one pipeline is ever in flight.
+    CPU RAM or VRAM); only the scheduler is copied (deepcopy — the diffusers
+    schedulers have no clone() method, and deepcopy of a scheduler config
+    object is cheap and side-effect free). Safe because the single-worker
+    queue guarantees only one pipeline is ever in flight.
     Returns None for model families without a matching img2img class.
     """
     try:
         components = dict(base.components)
-        components["scheduler"] = base.scheduler.clone()
+        components["scheduler"] = copy.deepcopy(base.scheduler)
         if isinstance(base, StableDiffusionXLPipeline):
             cls = StableDiffusionXLImg2ImgPipeline
         else:
@@ -138,8 +141,14 @@ def load_pipeline():
           f"(steps={STEPS}, {WIDTH}x{HEIGHT}, offload={OFFLOAD}, seed={SEED})")
     # DiffusionPipeline picks the right class (SD1.5/SDXL/...) from the repo's
     # model_index.json, so IMAGE_MODEL can be swapped without code changes.
+    # use_safetensors=None: auto-detect per component — prefer safetensors
+    # when the repo ships them, fall back to .bin (e.g. Lykon/DreamShaper's
+    # unet/vae/text_encoder are .bin-only). safety_checker=None: the legacy
+    # SD1.5 NSFW checker that some repos ship (e.g. DreamShaper) false-positives
+    # and blanks images to pure black; this is a local/homelab deployment and
+    # the bot's own content guard covers the LLM tool path.
     p = DiffusionPipeline.from_pretrained(
-        MODEL, torch_dtype=dtype, use_safetensors=True
+        MODEL, torch_dtype=dtype, safety_checker=None
     )
     if has_cuda and OFFLOAD != "none":
         if OFFLOAD == "sequential":
