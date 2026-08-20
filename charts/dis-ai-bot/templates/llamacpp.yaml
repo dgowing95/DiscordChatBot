@@ -44,6 +44,11 @@ spec:
         - name: LLAMA_ARG_HF_REPO
           # == .Values.model: the one model value shared with core's MODEL
           value: "{{ .Values.model }}"
+        {{- if .Values.llamacpp.hfToken }}
+        - name: HF_TOKEN
+          # read token for gated HF repos (llama.cpp reads HF_TOKEN when downloading)
+          value: {{ .Values.llamacpp.hfToken | quote }}
+        {{- end }}
         - name: LLAMA_ARG_N_GPU_LAYERS
           value: {{ .Values.llamacpp.gpuLayers | quote }}
         - name: LLAMA_ARG_CACHE_TYPE_K
