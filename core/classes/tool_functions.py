@@ -182,7 +182,18 @@ async def generate_image(wrapper: RunContextWrapper[dict], prompt: str) -> str:
     Use it when the user asks for art, illustrations, pictures or drawings.
     The image is sent automatically; never try to send it yourself.
     Args:
-        prompt: The text description of the image to generate.
+        prompt: The text description of the image to generate. The image
+            model (Juggernaut XI) responds best to precise, specific
+            prompts: put the main subject in the first sentence, then add
+            the setting, the subject's action, secondary objects, colors,
+            lighting, style/medium, mood and camera angle; name textures
+            and materials explicitly (e.g. "coarse fur", "polished
+            steel"); for people, describe their clothing and emphasize
+            the emotion they should show; keep it tight - a couple of
+            short sentences with no filler, since long prompts reduce
+            adherence; append "high resolution"; for any text that must
+            appear in the image, use a short phrase in quotes near the
+            start (long text is often misspelled).
     """
     from classes.image_generation import generate_image_from_api
 
