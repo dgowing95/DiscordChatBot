@@ -7,6 +7,7 @@ from classes.message_handler import MessageHandler
 from classes.text_llm_handler import TextLLMHandler
 from classes.config_manager import configManager
 from classes.image_generation import generate_image_from_api, image_generation_enabled
+from classes.sandbox_agent import sandbox_enabled
 
 
 intents = discord.Intents.default()
@@ -45,6 +46,19 @@ async def register_commands():
     async def get_chance(ctx):
         chance = config.get_setting("response_chance", ctx.guild.id) or 5
         await ctx.response.send_message(content=f"Response chance is currently: \"{chance}%\"")  
+    
+    # Only offered when the code sandbox is enabled (SANDBOX_ENABLED; set
+    # from the helm chart's sandbox.enabled). Per-guild toggle, default off:
+    # when true, run_code_sandbox streams the sandbox's commands and output
+    # to the channel in a live-updating message; when false it only sends
+    # the one static "Running in sandbox" embed.
+    if sandbox_enabled():
+
+        @command_tree.command(name="sandbox_progress_updates",
+                              description="Enable/disable live progress updates (commands & output) for code sandbox runs in this server")
+        async def change_sandbox_progress_updates(ctx, enabled: bool):
+            config.update_setting("sandbox_progress_updates", str(enabled), ctx.guild.id)
+            await ctx.response.send_message(content=f"Sandbox progress updates are now: \"{enabled}\"")
     
     # Only offered when the diffusion service is enabled (IMAGE_GEN_ENABLED;
     # set from the helm chart's diffusion.enabled).

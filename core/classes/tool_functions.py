@@ -308,7 +308,10 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
     directly. The sandbox starts completely empty and is destroyed when the
     task finishes, so the task must be fully self-contained: include any
     code, data or context the sandbox needs, and state exactly what the
-    final result must contain.
+    final result must contain. When the guild has live progress updates
+    enabled (/sandbox_progress_updates, default off), the commands the
+    sandbox runs and their output are streamed to the channel in a
+    live-updating message.
     Args:
         task: A precise, self-contained description of what to do in the
             sandbox, including any code or data involved and what the final
@@ -322,24 +325,58 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
         return ("I can't run that in the sandbox — it was blocked by the safety "
                 "guard. Please rephrase with a safe, non-harmful task.")
 
-    await Common.send_tool_discord_embed(
-        wrapper.context.get("original_message").channel,
-        f"Running in sandbox: {task}",
+    from classes.config_manager import configManager
+    from classes.sandbox_agent import run_sandbox_task
+    from classes.sandbox_progress import (
+        SandboxProgressHooks,
+        sandbox_progress_updates_enabled,
     )
 
-    from classes.sandbox_agent import run_sandbox_task
+    channel = wrapper.context.get("original_message").channel
+    progress = None
+    # Per-guild toggle (/sandbox_progress_updates, default off). A config
+    # read failure falls back to off — progress is a nice-to-have, not a
+    # dependency of the run itself.
     try:
-        return await run_sandbox_task(task)
+        raw = configManager().get_setting(
+            "sandbox_progress_updates", wrapper.context.get("guild_id"))
+    except Exception as e:
+        print(f"Could not read sandbox_progress_updates setting: {e}")
+        raw = False
+    if sandbox_progress_updates_enabled(raw):
+        # Live progress: one Discord message, edited in place, showing each
+        # command the sandbox runs and its output (throttled for Discord's
+        # 5-edits/minute limit). start() is exception-safe (swallows send
+        # failures), so a progress problem never blocks the run.
+        progress = SandboxProgressHooks(channel, task)
+        await progress.start()
+    else:
+        await Common.send_tool_discord_embed(
+            channel,
+            f"Running in sandbox: {task}",
+        )
+
+    try:
+        result = await run_sandbox_task(task, progress)
     except asyncio.TimeoutError:
         print("Sandbox task timed out")
+        if progress is not None:
+            await progress.finalize("⏱ Stopped: the task timed out.")
         return ("The sandbox task took too long and was stopped. Tell the user "
                 "the task timed out; you may retry with a smaller or more "
                 "focused task.")
     except Exception as e:
         print(f"Sandbox task failed: {e}")
+        if progress is not None:
+            await progress.finalize("❌ Stopped: the sandbox run failed.")
         return ("The sandbox task failed (the code sandbox may be unavailable). "
                 "Tell the user the sandbox is not working right now and do "
                 "not retry the same task.")
+    if progress is not None:
+        # give the live message its final state (it would otherwise sit on
+        # the last "still running" / thinking snapshot)
+        await progress.finalize("✅ Done.")
+    return result
 
 
 @function_tool

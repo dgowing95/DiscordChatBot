@@ -157,6 +157,20 @@ def test_build_sandbox_agent_defaults_to_main_llm(monkeypatch):
     assert agent.model._client.api_key == "llamacpp"
 
 
+def test_build_sandbox_agent_suppresses_default_base_instructions(monkeypatch):
+    # Regression: with the SDK default base prompt the model is told to
+    # use an apply_patch tool we do not expose (Shell capability only),
+    # and the run aborts with ModelBehaviorError("Model produced
+    # apply_patch call without an apply_patch tool."). The empty string
+    # suppresses the SDK default entirely.
+    agent = sandbox_agent.build_sandbox_agent()
+    assert agent.base_instructions == ""
+    # and our instructions make the tool set explicit so the model has no
+    # reason to invent tools
+    assert "ONLY tools are the shell tools" in sandbox_agent.SANDBOX_INSTRUCTIONS
+    assert "apply_patch" not in sandbox_agent.SANDBOX_INSTRUCTIONS
+
+
 # ---------------------- run_sandbox_task ----------------------
 
 @pytest.mark.asyncio
@@ -213,6 +227,25 @@ async def test_run_sandbox_task_timeout_raises(monkeypatch):
             await prod_sandbox_agent.run_sandbox_task("sleep forever")
 
 
+@pytest.mark.asyncio
+async def test_run_sandbox_task_forwards_progress_hooks(monkeypatch):
+    hooks = object()
+    agent = MagicMock(name="agent")
+    run_config = MagicMock(name="run_config")
+    result = MagicMock()
+    result.final_output = "ok"
+    runner = MagicMock()
+    runner.run = AsyncMock(return_value=result)
+
+    with patch.object(prod_sandbox_agent, "Runner", runner), \
+         patch.object(prod_sandbox_agent, "build_sandbox_agent", return_value=agent), \
+         patch.object(prod_sandbox_agent, "build_sandbox_run_config", return_value=run_config):
+        await prod_sandbox_agent.run_sandbox_task("t", hooks)
+
+    args, kwargs = runner.run.call_args
+    assert kwargs["hooks"] is hooks
+
+
 # ---------------------- tool registration in the LLM agent ----------------------
 
 async def _agent_tool_names(monkeypatch, enabled_value):
@@ -261,13 +294,39 @@ def _tool_context(message):
     )
 
 
+def _fake_progress_factory():
+    """Returns (factory, instances): a SandboxProgressHooks replacement
+    that records every constructed hook."""
+    instances = []
+
+    def factory(channel, task, **kwargs):
+        fake = MagicMock(name="sandbox-progress")
+        fake.start = AsyncMock()
+        fake.finalize = AsyncMock()
+        instances.append(fake)
+        return fake
+
+    return factory, instances
+
+
+def _stub_config(get_value=False):
+    """A configManager stub whose get_setting returns get_value
+    (False = setting unset, like a fresh guild)."""
+    cm = MagicMock(name="configManager")
+    cm.return_value.get_setting = MagicMock(return_value=get_value)
+    return cm
+
+
 @pytest.mark.asyncio
-async def test_tool_runs_task_and_returns_report(monkeypatch):
+async def test_tool_runs_task_and_streams_progress_when_enabled(monkeypatch):
     message = MagicMock()
     task_api = AsyncMock(return_value="done: 42")
+    factory, instances = _fake_progress_factory()
 
     with patch.object(prod_tool_functions, "check_web_request",
                       new=AsyncMock(return_value=(True, ""))), \
+         patch("classes.config_manager.configManager", _stub_config("True")), \
+         patch("classes.sandbox_progress.SandboxProgressHooks", side_effect=factory) as hook_cls, \
          patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()) as embed, \
          patch.object(prod_sandbox_agent, "run_sandbox_task", task_api):
         result = await prod_tool_functions.run_code_sandbox.on_invoke_tool(
@@ -276,9 +335,90 @@ async def test_tool_runs_task_and_returns_report(monkeypatch):
         )
 
     assert result == "done: 42"
-    task_api.assert_awaited_once_with("print 42")
+    # one live-progress message is started and passed into the sandbox run
+    hook_cls.assert_called_once()
+    assert len(instances) == 1
+    instances[0].start.assert_awaited_once()
+    task_api.assert_awaited_once_with("print 42", instances[0])
+    # the run finished, so the live message gets its final state
+    instances[0].finalize.assert_awaited_once()
+    assert "Done" in instances[0].finalize.await_args.args[0]
+    # with progress on, the static embed is not sent
+    embed.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_tool_progress_disabled_by_default_sends_embed(monkeypatch):
+    message = MagicMock()
+    task_api = AsyncMock(return_value="done: 42")
+    factory, instances = _fake_progress_factory()
+
+    with patch.object(prod_tool_functions, "check_web_request",
+                      new=AsyncMock(return_value=(True, ""))), \
+         patch("classes.config_manager.configManager", _stub_config(False)), \
+         patch("classes.sandbox_progress.SandboxProgressHooks", side_effect=factory) as hook_cls, \
+         patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()) as embed, \
+         patch.object(prod_sandbox_agent, "run_sandbox_task", task_api):
+        result = await prod_tool_functions.run_code_sandbox.on_invoke_tool(
+            _tool_context(message),
+            json.dumps({"task": "print 42"}),
+        )
+
+    assert result == "done: 42"
+    # progress is off by default: no hooks, just the static embed
+    hook_cls.assert_not_called()
+    assert instances == []
     embed.assert_awaited_once()
-    assert "print 42" in embed.await_args.args[1]
+    assert "Running in sandbox: print 42" in embed.await_args.args[1]
+    task_api.assert_awaited_once_with("print 42", None)
+
+
+@pytest.mark.asyncio
+async def test_tool_progress_disabled_when_setting_false(monkeypatch):
+    message = MagicMock()
+    task_api = AsyncMock(return_value="done: 42")
+    factory, instances = _fake_progress_factory()
+
+    with patch.object(prod_tool_functions, "check_web_request",
+                      new=AsyncMock(return_value=(True, ""))), \
+         patch("classes.config_manager.configManager", _stub_config("False")), \
+         patch("classes.sandbox_progress.SandboxProgressHooks", side_effect=factory) as hook_cls, \
+         patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()) as embed, \
+         patch.object(prod_sandbox_agent, "run_sandbox_task", task_api):
+        result = await prod_tool_functions.run_code_sandbox.on_invoke_tool(
+            _tool_context(message),
+            json.dumps({"task": "print 42"}),
+        )
+
+    assert result == "done: 42"
+    hook_cls.assert_not_called()
+    embed.assert_awaited_once()
+    task_api.assert_awaited_once_with("print 42", None)
+
+
+@pytest.mark.asyncio
+async def test_tool_progress_falls_back_to_off_on_config_error(monkeypatch):
+    message = MagicMock()
+    task_api = AsyncMock(return_value="done: 42")
+    cm = MagicMock(name="configManager")
+    cm.return_value.get_setting = MagicMock(side_effect=Exception("redis down"))
+    factory, instances = _fake_progress_factory()
+
+    with patch.object(prod_tool_functions, "check_web_request",
+                      new=AsyncMock(return_value=(True, ""))), \
+         patch("classes.config_manager.configManager", cm), \
+         patch("classes.sandbox_progress.SandboxProgressHooks", side_effect=factory) as hook_cls, \
+         patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()) as embed, \
+         patch.object(prod_sandbox_agent, "run_sandbox_task", task_api):
+        result = await prod_tool_functions.run_code_sandbox.on_invoke_tool(
+            _tool_context(message),
+            json.dumps({"task": "print 42"}),
+        )
+
+    assert result == "done: 42"  # the run still happens
+    hook_cls.assert_not_called()
+    embed.assert_awaited_once()
+    task_api.assert_awaited_once_with("print 42", None)
 
 
 @pytest.mark.asyncio
@@ -303,8 +443,11 @@ async def test_tool_blocked_by_content_guard(monkeypatch):
 async def test_tool_reports_timeout(monkeypatch):
     message = MagicMock()
 
+    factory, instances = _fake_progress_factory()
     with patch.object(prod_tool_functions, "check_web_request",
                       new=AsyncMock(return_value=(True, ""))), \
+         patch("classes.config_manager.configManager", _stub_config("True")), \
+         patch("classes.sandbox_progress.SandboxProgressHooks", side_effect=factory), \
          patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()), \
          patch.object(prod_sandbox_agent, "run_sandbox_task",
                       new=AsyncMock(side_effect=asyncio.TimeoutError)):
@@ -314,14 +457,20 @@ async def test_tool_reports_timeout(monkeypatch):
         )
 
     assert "timed out" in result
+    # the live message is closed with a timeout note
+    instances[0].finalize.assert_awaited_once()
+    assert "timed out" in instances[0].finalize.await_args.args[0]
 
 
 @pytest.mark.asyncio
 async def test_tool_reports_failure(monkeypatch):
     message = MagicMock()
 
+    factory, instances = _fake_progress_factory()
     with patch.object(prod_tool_functions, "check_web_request",
                       new=AsyncMock(return_value=(True, ""))), \
+         patch("classes.config_manager.configManager", _stub_config("True")), \
+         patch("classes.sandbox_progress.SandboxProgressHooks", side_effect=factory), \
          patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()), \
          patch.object(prod_sandbox_agent, "run_sandbox_task",
                       new=AsyncMock(side_effect=Exception("no docker daemon"))):
@@ -331,3 +480,6 @@ async def test_tool_reports_failure(monkeypatch):
         )
 
     assert "failed" in result
+    # the live message is closed with a failure note
+    instances[0].finalize.assert_awaited_once()
+    assert "failed" in instances[0].finalize.await_args.args[0]

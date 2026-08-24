@@ -27,10 +27,18 @@ DEFAULT_TIMEOUT_SECONDS = 600
 
 # Instructions for the nested sandbox agent. The workspace is always empty,
 # so the task text is its only input — it must behave self-sufficiently.
+# It MUST explicitly name the shell tools: the SDK's default sandbox prompt
+# (suppressed — see build_sandbox_agent) tells the model to use an
+# apply_patch tool we do not expose, and a model that calls it aborts the
+# whole run with ModelBehaviorError.
 SANDBOX_INSTRUCTIONS = """You work inside a fresh, isolated Linux sandbox (a minimal
-Python container) with shell and filesystem tools. You receive one
-self-contained task.
+Python container) with shell tools. You receive one self-contained task.
 
+- Your ONLY tools are the shell tools: `exec_command` (run a command) and
+  `write_stdin` (interact with a running process). There is NO file-editing,
+  patching or editor tool — create and modify files through the shell
+  (heredocs: `cat > file.py << 'EOF' ... EOF`, or python one-liners), then
+  run and verify them.
 - The workspace starts completely empty. Never assume files, packages or
   context exist unless the task provides them; install what you need
   (e.g. `pip install ...`).
@@ -121,6 +129,14 @@ def build_sandbox_agent() -> "object":
     — does not support (the converter raises "Hosted tools are not supported").
     exec_command already gives full filesystem access (heredocs, cat, pip, …),
     which is the pattern the SDK's own docker_runner.py example uses.
+
+    base_instructions is an empty string ON PURPOSE: with the default (None)
+    the SDK injects its bundled computer-use prompt, which repeatedly tells
+    the model to use the apply_patch tool — which we do not expose. A model
+    that obeys it aborts the run with ModelBehaviorError ("Model produced
+    apply_patch call without an apply_patch tool"). Empty string suppresses
+    the default entirely; our instructions + the Shell capability's own
+    instructions are all the model needs.
     """
     from agents.sandbox import SandboxAgent
     from agents.sandbox.capabilities import Shell
@@ -135,6 +151,7 @@ def build_sandbox_agent() -> "object":
             ),
         ),
         instructions=SANDBOX_INSTRUCTIONS,
+        base_instructions="",
         capabilities=[Shell()],
         # Slightly cooler than the chat agent: code tasks want determinism.
         model_settings=ModelSettings(temperature=0.5),
@@ -161,13 +178,17 @@ def build_sandbox_run_config() -> RunConfig:
     )
 
 
-async def run_sandbox_task(task: str) -> str:
+async def run_sandbox_task(task: str, progress_hooks=None) -> str:
     """Run one self-contained task in a fresh Docker sandbox.
 
-    Returns the sandbox agent's final report (string). Raises
-    asyncio.TimeoutError if the task outlives sandbox_timeout() seconds
-    (the SDK still tears the container down when the run is cancelled);
-    other errors propagate to the caller (the run_code_sandbox tool).
+    Returns the sandbox agent's final report (string). progress_hooks is
+    an optional agents.RunHooks instance (e.g. classes.sandbox_progress.
+    SandboxProgressHooks) attached to the nested run so every tool call
+    (exec_command/write_stdin) and its output can be observed — e.g. to
+    stream them to Discord. Raises asyncio.TimeoutError if the task
+    outlives sandbox_timeout() seconds (the SDK still tears the container
+    down when the run is cancelled); other errors propagate to the caller
+    (the run_code_sandbox tool).
     """
     result = await asyncio.wait_for(
         Runner.run(
@@ -175,6 +196,7 @@ async def run_sandbox_task(task: str) -> str:
             task,
             max_turns=sandbox_max_turns(),
             run_config=build_sandbox_run_config(),
+            hooks=progress_hooks,
         ),
         timeout=sandbox_timeout(),
     )

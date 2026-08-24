@@ -23,6 +23,9 @@ core/                  # the main bot (the app that runs in production)
     config_manager.py      # per-guild settings in Redis (system prompt, temperature, ...)
     tool_functions.py      # agent function tools: web_search, fetch_url, weather, memory tools, generate_image
     image_generation.py    # client for the diffusion service + IMAGE_GEN_ENABLED flag
+    sandbox_agent.py       # nested SandboxAgent + run_sandbox_task (throwaway Docker sandbox)
+    sandbox_progress.py    # streams sandbox commands/output to one edited Discord message
+                           #   (single embed: one field per command, state-coloured)
     common.py              # shared helpers (Discord tool embeds)
   tests/               # pytest suite (see Testing below)
   Dockerfile           # python:3.13-slim image, runs main.py
@@ -75,10 +78,28 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
    can point it at a different OpenAI-compatible API, e.g. OpenRouter;
    Shell capability only — the Filesystem capability's `apply_patch` is a
    grammar tool the ChatCompletions API does not support, and exec_command
-   already gives full filesystem access, empty workspace) inside a THROWAWAY
+   already gives full filesystem access, empty workspace; the SDK's default
+   sandbox base prompt is suppressed with `base_instructions=""` because it
+   tells the model to call apply_patch, which aborts the run with
+   ModelBehaviorError when the tool is absent) inside a THROWAWAY
    Docker container via `agents.sandbox.DockerSandboxClient` and returns the
    sandbox agent's final report. A fresh container is created and deleted for
-   every call (nothing persists); the task must be self-contained. The core
+   every call (nothing persists); the task must be self-contained. Live
+   progress is a per-guild opt-in: the `/sandbox_progress_updates true|false`
+   slash command stores the setting in Redis (default OFF — then only the one
+   static "Running in sandbox" embed is sent). When on, a `RunHooks` attached
+   to the nested run observes each `exec_command`/`write_stdin` call and its
+   output and mirrors them into ONE Discord message edited in place: a
+   single embed styled like the static "Tool Usage" embed (title "🐳
+   Sandbox", description "Running in sandbox: {task}"), with ONE FIELD PER
+   COMMAND — one-liners as the bold field name (`$ cmd`), heredocs under
+   `⌨ Command` with their text and the fenced output in the value — and the
+   accent colour reflecting state (yellow running / red failure / cyan
+   idle); events are queued and the whole queue is batched into every
+   throttled edit (15s to stay under Discord's 5-edits/minute limit; oldest
+   fields evicted as a unit under the 25-field/6000-char embed budget —
+   see `sandbox_progress.py`). The run's final state (done/timeout/failed)
+   is flushed via `finalize()` before the tool returns. The core
    container needs the Docker daemon socket mounted (compose: socket bind
    mount; chart: hostPath volume gated on `sandbox.enabled`) plus the
    `docker`/`websocket-client` Python packages. Tasks go through the content
