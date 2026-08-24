@@ -53,6 +53,22 @@ diffusion:
   # Optional: fixed seed for reproducible images (empty = random)
   seed: ""
 
+# Code sandbox (run_code_sandbox LLM tool): a nested SandboxAgent runs each
+# task in a throwaway Docker container ON THE NODE (agents.sandbox
+# DockerSandboxClient). Requires a Docker daemon on the node: its socket is
+# mounted into the core pod via hostPath (sandbox.dockerSocketPath).
+# enabled: false removes the mount and switches the tool off (SANDBOX_ENABLED=false).
+sandbox:
+  enabled: true
+  # Container image for the sandbox workspace (pulled once onto the node)
+  image: python:3.14-slim
+  # Max model turns for one sandbox task
+  maxTurns: 10
+  # Wall-clock seconds before a sandbox task is stopped (container is removed)
+  timeout: 600
+  # Node path of the Docker socket to mount into the core pod
+  dockerSocketPath: /var/run/docker.sock
+
 # llama.cpp server (replaces Ollama); which model it serves: the `model` value below
 llamacpp:
   image: ghcr.io/ggml-org/llama.cpp:server-cuda  # CUDA build; the template sets the nvidia runtime class
