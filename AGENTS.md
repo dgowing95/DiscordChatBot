@@ -70,7 +70,9 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
    diffusion pod reads.
 7. Code sandbox: when enabled (`SANDBOX_ENABLED`, set from the chart's
    `sandbox.enabled`), the agent gets a `run_code_sandbox(task)` tool
-   (no slash command). It runs a nested `SandboxAgent` (same local LLM,
+   (no slash command). It runs a nested `SandboxAgent` (same LLM as the main
+   agent by default — `SANDBOX_MODEL`/`SANDBOX_LLM_HOST`/`SANDBOX_LLM_API_KEY`
+   can point it at a different OpenAI-compatible API, e.g. OpenRouter;
    Shell capability only — the Filesystem capability's `apply_patch` is a
    grammar tool the ChatCompletions API does not support, and exec_command
    already gives full filesystem access, empty workspace) inside a THROWAWAY
@@ -104,6 +106,9 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
 | `IMAGE_QUEUE_SIZE` | max queued image requests in the diffusion service (default 16); over that it returns 503 |
 | `IMAGE_EDIT_STRENGTH` | default img2img strength, 0-1 exclusive: higher = more changes, lower = closer to the original (default 0.5) |
 | `IMAGE_GEN_TIMEOUT` | seconds core waits on the diffusion service (default 300) |
+| `SANDBOX_MODEL` | model id for the nested sandbox agent; empty (default) = the main bot's `MODEL`. Chart: `sandbox.model` |
+| `SANDBOX_LLM_HOST` | base URL of the sandbox agent's LLM (core appends `/v1`); empty (default) = the main `LLM_HOST`. E.g. `https://openrouter.ai/api` for OpenRouter. Chart: `sandbox.llmHost` |
+| `SANDBOX_LLM_API_KEY` | API key for the sandbox agent's LLM; empty (default) = the main `LLM_PASS` placeholder. Chart: `sandbox.apiKey` |
 
 ## Testing
 

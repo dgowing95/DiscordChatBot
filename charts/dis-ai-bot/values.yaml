@@ -68,6 +68,15 @@ sandbox:
   timeout: 600
   # Node path of the Docker socket to mount into the core pod
   dockerSocketPath: /var/run/docker.sock
+  # LLM for the nested sandbox agent. Empty (default) = the main bot's LLM
+  # (model / llm_host / llm_pass, i.e. the local llama.cpp server). To use a
+  # hosted OpenAI-compatible API instead (e.g. OpenRouter), set all three:
+  #   model: deepseek/deepseek-v4-flash-0731
+  #   llmHost: https://openrouter.ai/api   (core appends /v1 itself)
+  #   apiKey: sk-or-...
+  model: ""
+  llmHost: ""
+  apiKey: ""
 
 # llama.cpp server (replaces Ollama); which model it serves: the `model` value below
 llamacpp:

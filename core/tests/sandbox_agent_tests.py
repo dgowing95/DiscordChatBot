@@ -89,6 +89,74 @@ def test_timeout_invalid_falls_back(monkeypatch):
         assert sandbox_agent.sandbox_timeout() == 600, bad
 
 
+# ---------------------- sandbox LLM (model / host / api key) ----------------------
+
+def _clear_llm_env(monkeypatch):
+    for var in ("SANDBOX_MODEL", "SANDBOX_LLM_HOST", "SANDBOX_LLM_API_KEY",
+                "MODEL", "LLM_HOST", "LLM_PASS"):
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_sandbox_llm_defaults_to_main_llm(monkeypatch):
+    _clear_llm_env(monkeypatch)
+    monkeypatch.setenv("MODEL", "orcarouter/Qwen3.8-27B-Uncensored-GGUF:Q4_K_M")
+    monkeypatch.setenv("LLM_HOST", "http://llamacpp:8080")
+    monkeypatch.setenv("LLM_PASS", "llamacpp")
+    assert sandbox_agent.sandbox_model() == "orcarouter/Qwen3.8-27B-Uncensored-GGUF:Q4_K_M"
+    assert sandbox_agent.sandbox_llm_host() == "http://llamacpp:8080"
+    assert sandbox_agent.sandbox_llm_api_key() == "llamacpp"
+
+
+def test_sandbox_llm_falls_back_to_incode_defaults(monkeypatch):
+    _clear_llm_env(monkeypatch)
+    assert sandbox_agent.sandbox_model() == "qwen3:4b"
+    assert sandbox_agent.sandbox_llm_host() == "http://llamacpp:8080"
+    assert sandbox_agent.sandbox_llm_api_key() == "llamacpp"
+
+
+def test_sandbox_llm_openrouter_override(monkeypatch):
+    _clear_llm_env(monkeypatch)
+    monkeypatch.setenv("MODEL", "some/local-model")
+    monkeypatch.setenv("SANDBOX_MODEL", "deepseek/deepseek-v4-flash-0731")
+    monkeypatch.setenv("SANDBOX_LLM_HOST", "https://openrouter.ai/api")
+    monkeypatch.setenv("SANDBOX_LLM_API_KEY", "sk-or-test")
+    assert sandbox_agent.sandbox_model() == "deepseek/deepseek-v4-flash-0731"
+    assert sandbox_agent.sandbox_llm_host() == "https://openrouter.ai/api"
+    assert sandbox_agent.sandbox_llm_api_key() == "sk-or-test"
+
+
+def test_sandbox_llm_empty_override_falls_back(monkeypatch):
+    _clear_llm_env(monkeypatch)
+    monkeypatch.setenv("MODEL", "some/local-model")
+    for empty in ("", "  "):
+        monkeypatch.setenv("SANDBOX_MODEL", empty)
+        assert sandbox_agent.sandbox_model() == "some/local-model", repr(empty)
+
+
+def test_build_sandbox_agent_uses_configured_llm(monkeypatch):
+    _clear_llm_env(monkeypatch)
+    monkeypatch.setenv("SANDBOX_MODEL", "deepseek/deepseek-v4-flash-0731")
+    monkeypatch.setenv("SANDBOX_LLM_HOST", "https://openrouter.ai/api")
+    monkeypatch.setenv("SANDBOX_LLM_API_KEY", "sk-or-test")
+    agent = sandbox_agent.build_sandbox_agent()
+    assert agent.model.model == "deepseek/deepseek-v4-flash-0731"
+    # the client stores the base URL with /v1 appended by the core
+    # (the openai client normalizes it to a trailing-slash URL)
+    assert agent.model._client.base_url == "https://openrouter.ai/api/v1/"
+    assert agent.model._client.api_key == "sk-or-test"
+
+
+def test_build_sandbox_agent_defaults_to_main_llm(monkeypatch):
+    _clear_llm_env(monkeypatch)
+    monkeypatch.setenv("MODEL", "some/local-model")
+    monkeypatch.setenv("LLM_HOST", "http://llamacpp:8080")
+    monkeypatch.setenv("LLM_PASS", "llamacpp")
+    agent = sandbox_agent.build_sandbox_agent()
+    assert agent.model.model == "some/local-model"
+    assert agent.model._client.base_url == "http://llamacpp:8080/v1/"
+    assert agent.model._client.api_key == "llamacpp"
+
+
 # ---------------------- run_sandbox_task ----------------------
 
 @pytest.mark.asyncio

@@ -58,6 +58,36 @@ def sandbox_image() -> str:
     return os.environ.get("SANDBOX_IMAGE", DEFAULT_PYTHON_SANDBOX_IMAGE)
 
 
+def _env_or(primary: str, fallback: str, default: str) -> str:
+    """First non-empty of: env var `primary`, env var `fallback`, `default`."""
+    for name in (primary, fallback):
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return default
+
+
+def sandbox_model() -> str:
+    """Model id for the nested sandbox agent (SANDBOX_MODEL; default: the
+    main bot's MODEL — i.e. the local llama.cpp model unless SANDBOX_MODEL
+    points the sandbox at a different OpenAI-compatible API, e.g.
+    OpenRouter)."""
+    return _env_or("SANDBOX_MODEL", "MODEL", "qwen3:4b")
+
+
+def sandbox_llm_host() -> str:
+    """Base URL of the LLM the sandbox agent talks to (SANDBOX_LLM_HOST;
+    default: the main bot's LLM_HOST). The core appends /v1 itself, so this
+    must not include it (OpenRouter: https://openrouter.ai/api)."""
+    return _env_or("SANDBOX_LLM_HOST", "LLM_HOST", "http://llamacpp:8080")
+
+
+def sandbox_llm_api_key() -> str:
+    """API key for the sandbox agent's LLM (SANDBOX_LLM_API_KEY; default:
+    the main bot's LLM_PASS placeholder)."""
+    return _env_or("SANDBOX_LLM_API_KEY", "LLM_PASS", "llamacpp")
+
+
 def _positive_int(raw: str | None, default: int) -> int:
     try:
         value = int(str(raw).strip())
@@ -80,7 +110,10 @@ def sandbox_timeout() -> int:
 def build_sandbox_agent() -> "object":
     """The nested SandboxAgent that does the work inside the sandbox.
 
-    Uses the same local LLM as the main agent (MODEL / LLM_HOST / LLM_PASS).
+    Uses the same LLM as the main agent by default (MODEL / LLM_HOST /
+    LLM_PASS); SANDBOX_MODEL / SANDBOX_LLM_HOST / SANDBOX_LLM_API_KEY point
+    it at a different OpenAI-compatible API instead (e.g. an OpenRouter
+    model — see .env.example / the chart's sandbox.model/llmHost/apiKey).
     No default manifest, so the workspace starts empty.
 
     Capabilities: Shell ONLY. The Filesystem capability adds `apply_patch`, a
@@ -95,10 +128,10 @@ def build_sandbox_agent() -> "object":
     return SandboxAgent(
         name="Code Sandbox",
         model=OpenAIChatCompletionsModel(
-            model=os.environ.get("MODEL", "qwen3:4b"),
+            model=sandbox_model(),
             openai_client=AsyncOpenAI(
-                base_url=os.environ.get("LLM_HOST", "http://llamacpp:8080") + "/v1",
-                api_key=os.environ.get("LLM_PASS", "llamacpp"),
+                base_url=sandbox_llm_host() + "/v1",
+                api_key=sandbox_llm_api_key(),
             ),
         ),
         instructions=SANDBOX_INSTRUCTIONS,

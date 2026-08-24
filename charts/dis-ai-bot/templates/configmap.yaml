@@ -31,6 +31,15 @@ data:
   SANDBOX_IMAGE: {{ .Values.sandbox.image }}
   SANDBOX_MAX_TURNS: {{ .Values.sandbox.maxTurns | toString | quote }}
   SANDBOX_TIMEOUT: {{ .Values.sandbox.timeout | toString | quote }}
+  {{- if .Values.sandbox.model }}
+  SANDBOX_MODEL: {{ .Values.sandbox.model }}
+  {{- end }}
+  {{- if .Values.sandbox.llmHost }}
+  SANDBOX_LLM_HOST: {{ .Values.sandbox.llmHost }}
+  {{- end }}
+  {{- if .Values.sandbox.apiKey }}
+  SANDBOX_LLM_API_KEY: {{ .Values.sandbox.apiKey }}
+  {{- end }}
   {{- if .Values.openaiApiKey }}
   OPENAI_API_KEY: {{ .Values.openaiApiKey }}
   {{- end }}
