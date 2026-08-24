@@ -28,3 +28,18 @@ spec:
           requests:
             cpu: {{ .Values.coreResources.requests.cpu }}
             memory: {{ .Values.coreResources.requests.memory }}
+        {{- if .Values.sandbox.enabled }}
+        # Code sandbox: the run_code_sandbox tool drives the node's Docker
+        # daemon (agents.sandbox DockerSandboxClient) through this socket.
+        # Security note: this gives the core pod control of the node's Docker.
+        volumeMounts:
+        - name: docker-socket
+          mountPath: /var/run/docker.sock
+        {{- end }}
+      {{- if .Values.sandbox.enabled }}
+      volumes:
+      - name: docker-socket
+        hostPath:
+          path: {{ .Values.sandbox.dockerSocketPath }}
+          type: Socket
+      {{- end }}
