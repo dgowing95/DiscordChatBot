@@ -68,6 +68,19 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
    settings (`IMAGE_MODEL`, `IMAGE_STEPS`, `IMAGE_WIDTH`/`HEIGHT`, `IMAGE_OFFLOAD`,
    `IMAGE_QUEUE_SIZE`, `IMAGE_EDIT_STRENGTH`) live in the same configmap/env the
    diffusion pod reads.
+7. Code sandbox: when enabled (`SANDBOX_ENABLED`, set from the chart's
+   `sandbox.enabled`), the agent gets a `run_code_sandbox(task)` tool
+   (no slash command). It runs a nested `SandboxAgent` (same local LLM,
+   Shell capability only — the Filesystem capability's `apply_patch` is a
+   grammar tool the ChatCompletions API does not support, and exec_command
+   already gives full filesystem access, empty workspace) inside a THROWAWAY
+   Docker container via `agents.sandbox.DockerSandboxClient` and returns the
+   sandbox agent's final report. A fresh container is created and deleted for
+   every call (nothing persists); the task must be self-contained. The core
+   container needs the Docker daemon socket mounted (compose: socket bind
+   mount; chart: hostPath volume gated on `sandbox.enabled`) plus the
+   `docker`/`websocket-client` Python packages. Tasks go through the content
+   guard first; `SANDBOX_MAX_TURNS`/`SANDBOX_TIMEOUT` bound each run.
 
 ### Environment variables
 

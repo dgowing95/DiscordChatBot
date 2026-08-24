@@ -1,3 +1,4 @@
+import asyncio
 import io
 
 from agents import FunctionTool, function_tool,RunContextWrapper
@@ -182,7 +183,18 @@ async def generate_image(wrapper: RunContextWrapper[dict], prompt: str) -> str:
     Use it when the user asks for art, illustrations, pictures or drawings.
     The image is sent automatically; never try to send it yourself.
     Args:
-        prompt: The text description of the image to generate.
+        prompt: The text description of the image to generate. The image
+            model (Juggernaut XI) responds best to precise, specific
+            prompts: put the main subject in the first sentence, then add
+            the setting, the subject's action, secondary objects, colors,
+            lighting, style/medium, mood and camera angle; name textures
+            and materials explicitly (e.g. "coarse fur", "polished
+            steel"); for people, describe their clothing and emphasize
+            the emotion they should show; keep it tight - a couple of
+            short sentences with no filler, since long prompts reduce
+            adherence; append "high resolution"; for any text that must
+            appear in the image, use a short phrase in quotes near the
+            start (long text is often misspelled).
     """
     from classes.image_generation import generate_image_from_api
 
@@ -283,6 +295,51 @@ async def edit_image(
         return "The image was edited but could not be sent to the channel."
     return ("The image was edited and sent to the channel. The user can already "
             "see it; do not send the image again or describe it as if pending.")
+
+
+@function_tool
+async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
+    """Runs a task in an isolated code sandbox: a fresh, disposable Linux
+    container (Python + shell) where code is written and actually executed.
+    Use it when the answer depends on running code or commands, not just
+    reasoning about it: writing or debugging a program, computing a value,
+    processing or analyzing data, converting files, checking that a library
+    or API behaves as expected. Do not use it for questions you can answer
+    directly. The sandbox starts completely empty and is destroyed when the
+    task finishes, so the task must be fully self-contained: include any
+    code, data or context the sandbox needs, and state exactly what the
+    final result must contain.
+    Args:
+        task: A precise, self-contained description of what to do in the
+            sandbox, including any code or data involved and what the final
+            answer should contain.
+    """
+    print(f"Running sandbox task: {task}")
+
+    allowed, reason = await check_web_request(task)
+    if not allowed:
+        print(f"Sandbox task blocked by content guard: {reason}")
+        return ("I can't run that in the sandbox — it was blocked by the safety "
+                "guard. Please rephrase with a safe, non-harmful task.")
+
+    await Common.send_tool_discord_embed(
+        wrapper.context.get("original_message").channel,
+        f"Running in sandbox: {task}",
+    )
+
+    from classes.sandbox_agent import run_sandbox_task
+    try:
+        return await run_sandbox_task(task)
+    except asyncio.TimeoutError:
+        print("Sandbox task timed out")
+        return ("The sandbox task took too long and was stopped. Tell the user "
+                "the task timed out; you may retry with a smaller or more "
+                "focused task.")
+    except Exception as e:
+        print(f"Sandbox task failed: {e}")
+        return ("The sandbox task failed (the code sandbox may be unavailable). "
+                "Tell the user the sandbox is not working right now and do "
+                "not retry the same task.")
 
 
 @function_tool

@@ -9,3 +9,11 @@
    once the model is downloaded/loaded (first boot can take a few minutes):
    kubectl get svc <release>-diffusion-service
    kubectl logs deploy/<release>-diffusion-deployment
+
+4. Code sandbox (when sandbox.enabled=true): the bot's run_code_sandbox tool
+   runs each task in a throwaway container on this node. The node needs a
+   Docker daemon; its socket is mounted into the core pod via hostPath
+   (sandbox.dockerSocketPath, default /var/run/docker.sock). First use pulls
+   the sandbox image (sandbox.image). If the node has no Docker daemon, set
+   sandbox.enabled=false — otherwise the core pod will not start (hostPath
+   Socket type requires the socket to exist).

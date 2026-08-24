@@ -8,6 +8,8 @@ from classes.config_manager import configManager
 
 from classes.image_generation import image_generation_enabled
 
+from classes.sandbox_agent import sandbox_enabled
+
 from classes.tool_functions import *
 
 class TextLLMHandler:
@@ -75,6 +77,11 @@ class TextLLMHandler:
         # (IMAGE_GEN_ENABLED; set from the helm chart's diffusion.enabled).
         if image_generation_enabled():
             tools.extend([generate_image, edit_image])
+
+        # Sandbox tool (nested SandboxAgent in a throwaway Docker container);
+        # needs the Docker socket mounted (SANDBOX_ENABLED; chart sandbox.enabled).
+        if sandbox_enabled():
+            tools.append(run_code_sandbox)
 
         self.agent = Agent(
             name="Assistant",
