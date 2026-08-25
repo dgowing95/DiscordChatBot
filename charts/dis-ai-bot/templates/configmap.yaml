@@ -10,6 +10,9 @@ data:
   LLM_PASS: {{ .Values.llm_pass }}
   MODEL: {{ .Values.model }}
   MSG_HISTORY_LIMIT: {{ .Values.message_history | toString | quote }}
+  # Queue concurrency: worker task count + bounded queue size (see core/main.py)
+  WORKER_COUNT: {{ .Values.worker_count | toString | quote }}
+  QUEUE_MAX_SIZE: {{ .Values.queue_max_size | toString | quote }}
   # Image generation (diffusion): core only registers the generate_image tool
   # when IMAGE_GEN_ENABLED is true; the diffusion pod reads the IMAGE_* settings
   DIFFUSION_URL: {{ if .Values.diffusion.url }}{{ .Values.diffusion.url }}{{ else }}http://{{ .Release.Name }}-diffusion-service.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.diffusion.port }}{{ end }}

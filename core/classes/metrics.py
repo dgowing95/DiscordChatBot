@@ -10,7 +10,9 @@ Metrics (scraped by Prometheus from the /metrics HTTP endpoint):
 
   Counter  discord_bot_messages_received_total{guild_id,user_id}
            Messages that passed the reply filter (bot mentioned, or the
-           random reply chance rolled successfully) and entered handling.
+           random reply chance rolled successfully) and were enqueued for
+           handling (messages dropped for a full queue are not counted here;
+           see discord_bot_message_queue_drops_total).
   Counter  discord_bot_messages_processed_total{guild_id,user_id}
            Messages whose handler completed without raising.
   Counter  discord_bot_llm_errors_total{guild_id}
@@ -31,6 +33,9 @@ Metrics (scraped by Prometheus from the /metrics HTTP endpoint):
            image_to_image.
   Gauge    discord_bot_message_queue_size
            Current number of messages waiting on the asyncio queue.
+  Counter  discord_bot_message_queue_drops_total{guild_id}
+           Messages dropped because the processing queue was full (bounded
+           queue, QUEUE_MAX_SIZE in main.py).
 
 Environment:
   METRICS_PORT  port to serve /metrics on (default 9464). Empty or 0
@@ -121,6 +126,12 @@ message_queue_size = Gauge(
     "Number of messages waiting on the processing queue",
 )
 
+queue_drops_total = Counter(
+    "discord_bot_message_queue_drops_total",
+    "Messages dropped because the processing queue was full",
+    ["guild_id"],
+)
+
 # ---------------------------------------------------------------------------
 # Convenience helpers (labels are always strings; IDs come in as ints)
 # ---------------------------------------------------------------------------
@@ -164,6 +175,10 @@ def observe_image_generation(mode: str, seconds: float) -> None:
 
 def set_message_queue_size(n: int) -> None:
     message_queue_size.set(n)
+
+
+def inc_queue_drop(guild_id) -> None:
+    queue_drops_total.labels(guild_id=_guild_label(guild_id)).inc()
 
 
 # ---------------------------------------------------------------------------

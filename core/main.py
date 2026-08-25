@@ -1,5 +1,4 @@
 import discord
-import asyncio
 import os
 import random
 import aiohttp
@@ -9,9 +8,11 @@ from classes.text_llm_handler import TextLLMHandler
 from classes.config_manager import configManager
 from classes.image_generation import generate_image_from_api, image_generation_enabled
 from classes.sandbox_agent import sandbox_enabled
+from classes.message_queue import make_message_queue, worker_count
 from classes.metrics import (
     inc_messages_processed,
     inc_messages_received,
+    inc_queue_drop,
     set_message_queue_size,
     start_metrics_server_from_env,
 )
@@ -21,8 +22,12 @@ intents = discord.Intents.default()
 intents.message_content = True
 
 client = discord.Client(intents=intents)
-message_queue = asyncio.Queue()
 config = configManager()
+
+# Bounded queue shared by the worker pool. Sizing (WORKER_COUNT /
+# QUEUE_MAX_SIZE), the per-channel locks and the concurrency model live in
+# classes/message_queue.py (pure, unit-tested in core/tests/).
+message_queue = make_message_queue()
 
 
 async def register_commands():
@@ -128,10 +133,13 @@ async def on_ready():
     print(f'Logged in as {client.user}')
     # Prometheus /metrics endpoint (METRICS_PORT; empty/0 disables).
     start_metrics_server_from_env()
-    # Start the queue worker immediately so the bot still consumes messages
+    # Start the worker pool immediately so the bot still consumes messages
     # even if the model check or command sync fails (e.g. server not up yet
     # after a power cycle).
-    client.loop.create_task(process_messages())
+    count = worker_count()
+    print(f"Starting {count} queue worker(s)")
+    for _ in range(count):
+        client.loop.create_task(process_messages())
     try:
         model = os.environ.get("MODEL", "gemma3:4b")
         await TextLLMHandler.check_model_ready(model)
@@ -146,11 +154,28 @@ async def on_ready():
 async def on_message(message):
     # The reply filter runs at receive time so only messages the bot will
     # actually handle ever enter the queue. "Received" = passed this filter
-    # (mentioned or random-chance hit); discarded messages are not counted.
+    # and was enqueued (mentioned or random-chance hit); discarded and
+    # queue-full messages are not counted.
     if not should_handle_message(message):
         return
     guild_id = message.guild.id if message.guild else 0
     user_id = message.author.id
+
+    # Backpressure: the queue is bounded (QUEUE_MAX_SIZE). When it's full the
+    # bot is behind (e.g. a 10-minute sandbox run) — dropping beats answering
+    # stale messages against stale history. Mentioned messages get a short
+    # busy reply so they aren't silently ignored; random-chance messages
+    # drop quietly.
+    if message_queue.full():
+        print(f"Message queue full ({message_queue.maxsize}); dropping message {message.id}")
+        inc_queue_drop(guild_id)
+        if client.user in message.mentions:
+            try:
+                await message.reply("⏳ I'm still working through my queue — try me again in a moment.")
+            except Exception as e:
+                print(f"Could not send busy reply to {message.id}: {e}")
+        return
+
     inc_messages_received(guild_id, user_id)
     await message_queue.put(message)
     set_message_queue_size(message_queue.qsize())
@@ -195,11 +220,17 @@ async def process_messages():
         user_id = message.author.id
         print("Picking up message from queue")
         try:
+            # The per-channel lock is SCOPED inside handle_message to the two
+            # fast phases (build + send) — see classes/message_queue.py — so
+            # the worker loop itself never serializes channels or
+            # same-channel messages around the LLM run. The typing indicator
+            # spans the whole handle, so the channel keeps showing "typing"
+            # during the (unlocked) LLM/tool phase.
             async with message.channel.typing():
                 await handler.handle_message()
-                inc_messages_processed(guild_id, user_id)
-                message_queue.task_done()
-                print("Done with message from queue")
+            inc_messages_processed(guild_id, user_id)
+            message_queue.task_done()
+            print("Done with message from queue")
         except Exception as e:
             print("Error handling message: " + str(e))
             message_queue.task_done()

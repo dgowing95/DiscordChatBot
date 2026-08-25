@@ -16,6 +16,9 @@ core/                  # the main bot (the app that runs in production)
   main.py              # entrypoint: discord.Client, message queue, slash commands
   classes/
     message_handler.py     # per-message orchestration: history build, send/chunking
+    message_queue.py       # PURE (stdlib-only) queue sizing (WORKER_COUNT / QUEUE_MAX_SIZE),
+                           #   bounded queue factory + per-channel locks (scoped to build+send)
+                           #   + in-flight task registry (prompt hint for still-running slow tools)
     text_llm_handler.py    # builds an `agents` Agent against the LLM server's (llama.cpp) OpenAI-compat API
     response_filter.py     # PURE (stdlib-only) response cleaning / thinking-block stripping
     content_guard.py       # OpenAI Moderations-based safety guard for web_search/fetch_url
@@ -45,8 +48,23 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
 1. `main.py:` every Discord message is first checked by `should_handle_message()`
    in `on_message` (has content/embeds/attachments, not from the bot, not
    `!reset_history`, and either the bot is mentioned or the per-guild random
-   reply-chance roll hits); only messages that pass go on an `asyncio.Queue`, and
-   a single worker loop pops messages, builds a `MessageHandler`, and handles it.
+   reply-chance roll hits); only messages that pass go on a BOUNDED
+   `asyncio.Queue` (`QUEUE_MAX_SIZE`, default 10 — once full, new messages are
+   dropped and a mention gets a short "busy" reply), and a POOL of worker
+   tasks (`WORKER_COUNT`, default 2) pops messages, builds a `MessageHandler`,
+   and handles them. A per-channel `asyncio.Lock` (keyed by channel id) is
+   SCOPED to the two fast phases of a handle — prompt build and the chunked
+   send (`MessageHandler.handle_message`) — so the slow LLM/tool phase runs
+   UNLOCKED: different channels run concurrently, AND a free worker can
+   answer a NEW message in the SAME channel while the first is stuck in a
+   slow tool (no interleaved chunks, consistent `channel.history()`
+   snapshots, no deadlock — the lock is never held across an LLM/tool
+   await). While a slow tool (sandbox / image gen) is running,
+   `ToolMetricsHooks` registers it in the per-channel IN-FLIGHT REGISTRY
+   (`classes/message_queue.py`) and any newer same-channel message's prompt
+   gets a one-line hint ("🐳 code sandbox running for 4m 12s — <task>").
+   Sizing, the queue factory, the lock registry and the in-flight registry
+   live in `core/classes/message_queue.py` (pure, unit-tested).
 2. `MessageHandler.handle_message()` builds the prompt
    (channel history -- most recent `MSG_HISTORY_LIMIT` (default 5) messages; the
    user's stored Redis memories are exposed to the agent through its function
@@ -123,6 +141,8 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
 | `CONTENT_GUARD_DEBUG` | `0`/`false` silences content-guard debug logging (default: on) |
 | `METRICS_PORT` | port to serve the Prometheus `/metrics` endpoint on (default 9464); empty/`0` disables. Chart: `metrics.enabled`/`metrics.port` also add a ClusterIP Service, the pod port, and a kube-prometheus-stack ServiceMonitor (labelled `release: kube-prometheus-stack` — the operator only imports ServiceMonitors with that label) |
 | `MSG_HISTORY_LIMIT` | how many prior channel messages to include, default 5 |
+| `WORKER_COUNT` | queue worker tasks (default 2, min 1); each handles one message at a time, a per-channel lock keeps same-channel order. Chart: `worker_count` |
+| `QUEUE_MAX_SIZE` | max messages waiting on the bounded queue (default 10, min 1); when full new messages are dropped (a mention gets a short "busy" reply). Chart: `queue_max_size` |
 | `LLAMA_ARG_CACHE_TYPE_K`, `LLAMA_ARG_CACHE_TYPE_V` | optional; compose `llamacpp` service only: KV cache quantization type (llama.cpp `-ctk`/`-ctv`), default `q4_0`; in the Helm chart set via `llamacpp.cacheTypeK`/`cacheTypeV` |
 | `IMAGE_GEN_ENABLED` | `0`/`false` removes the `generate_image` tool from the LLM (default: on). Chart: `diffusion.enabled` also removes the diffusion pod/PVC |
 | `DIFFUSION_URL` | base URL of the diffusion service (core appends `/generate`); compose `diffusion` service on :8000 in dev, in-cluster `*-diffusion-service` in the chart; in-code fallback `http://diffusion:8000` |
@@ -147,7 +167,8 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
   modules use both `core.classes...` and `classes...` import styles):
 
   ```bash
-  PYTHONPATH=$(pwd) pytest core/tests/user_memory_tests.py core/tests/response_filter_tests.py core/tests/metrics_tests.py
+  # same file list as the CI workflow (.github/workflows/tests.yaml)
+  PYTHONPATH=$(pwd) pytest core/tests/user_memory_tests.py core/tests/response_filter_tests.py core/tests/content_guard_tests.py core/tests/message_handler_tests.py core/tests/image_generation_tests.py core/tests/sandbox_agent_tests.py core/tests/sandbox_progress_tests.py core/tests/metrics_tests.py core/tests/message_queue_tests.py core/tests/task_registry_tests.py
   ```
 
   (On Windows PowerShell use `$env:PYTHONPATH=$(Get-Location)` — or
@@ -157,7 +178,7 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
   `response_filter.py`) is the intended pattern for anything you want to unit test —
   `MessageHandler` itself drags in `discord`, `agents`, Redis, etc.
 - **CI:** `.github/workflows/tests.yaml` runs on every push to non-main branches,
-  installs `core/requirements.txt` on Python 3.12, and calls the same pytest command
+  installs `core/requirements.txt` on Python 3.13, and calls the same pytest command
   as above. **When you add a new test file, add it to that command.**
 - Conventions seen in existing tests: `pytest` fixtures + `unittest.mock` to stub
   Redis; docstring-style comments at the top of test files documenting how to run them.
@@ -172,6 +193,18 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
   with an optional tab after the bracket). All stripping/regex logic lives in
   `core/classes/response_filter.py` — keep it pure, and cover new behaviour in
   `core/tests/response_filter_tests.py`.
+- The queue worker pool, bounded-queue sizing (WORKER_COUNT / QUEUE_MAX_SIZE),
+  the per-channel locks (SCOPED to build+send — the LLM/tool phase runs
+  unlocked) and the in-flight task registry (register_task_run /
+  in_flight_hint) live in `core/classes/message_queue.py` — keep it pure
+  (stdlib only). Cover changes to the concurrency model in
+  `core/tests/message_queue_tests.py` (which also tests the `on_message` /
+  `process_messages` wiring in `main.py` via the `_import_main()` pattern
+  from `image_generation_tests.py`), the registry itself in
+  `core/tests/task_registry_tests.py`, the scoped-lock behaviour of
+  `MessageHandler.handle_message` (concurrent generations, serialized sends,
+  prompt hint) in `core/tests/message_handler_tests.py`, and the slow-tool
+  registration in `ToolMetricsHooks` in `core/tests/metrics_tests.py`.
 - The free OpenAI Moderations endpoint is aggressively rate-limited (HTTP 429):
   `content_guard.py` retries 429/5xx with backoff, caches verdicts per input, and
   fails open when it cannot get an answer. Tunables are documented at the top of

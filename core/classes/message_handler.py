@@ -9,6 +9,7 @@ pillow_heif.register_heif_opener()
 from classes.text_llm_handler import TextLLMHandler
 from classes.response_filter import filter_response as clean_response
 from classes.metrics import observe_response_generation
+from classes.message_queue import get_channel_lock, in_flight_hint
 
 # Max image attachments forwarded to the LLM per message (keeps prompts a sane size).
 MAX_IMAGES_PER_MESSAGE = 3
@@ -204,7 +205,29 @@ class MessageHandler:
         # Observed on both outcomes (the ❌ path is still a timed attempt;
         # its failures are separately counted in llm_errors).
         start = time.monotonic()
-        await self.build_messages()
+        # SCOPED per-channel lock (see classes/message_queue.py): the lock
+        # guards only the two FAST phases — build and send — never the LLM
+        # run or tool calls. A free worker can therefore answer a NEW message
+        # in this same channel while this one is stuck in a slow tool, the
+        # chunked replies never interleave, and every history snapshot is
+        # consistent. The lock is never held across an LLM/tool await, so no
+        # deadlock is possible. (channel.typing() is held by
+        # main.process_messages for the whole handle, so the channel keeps
+        # showing "typing" during the unlocked LLM phase.)
+        async with get_channel_lock(self.message.channel.id):
+            # 1) Build the prompt under the lock: the channel.history() read
+            #    is a consistent snapshot (no half-sent replies from a
+            #    concurrent same-channel handle).
+            await self.build_messages()
+            # If an earlier message's slow tool is still running (or just
+            # finished) in this channel, tell the model — it can then answer
+            # follow-ups honestly ("it's still running") instead of guessing
+            # that the previous request went unanswered.
+            hint = in_flight_hint(self.message.channel.id)
+            if hint:
+                self.messages.append({"role": "user", "content": hint})
+        # 2) LLM run + tool calls UNLOCKED (the slow phase; other messages —
+        #    same channel or not — can build/generate concurrently).
         ollama = TextLLMHandler(self.messages, self.message.guild.id, self.message, self.attachment_refs)
         response = await ollama.generate()
 
@@ -212,5 +235,8 @@ class MessageHandler:
             await self.message.add_reaction('❌')
         else:
             response = self.filter_response(response)
-            await self.handle_message_send(response)
+            # 3) Send under the lock: serializes the chunked replies of
+            #    concurrent same-channel handles (no interleaved chunks).
+            async with get_channel_lock(self.message.channel.id):
+                await self.handle_message_send(response)
         observe_response_generation(self.message.guild.id, time.monotonic() - start)

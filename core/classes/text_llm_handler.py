@@ -8,22 +8,44 @@ from classes.config_manager import configManager
 
 from classes.image_generation import image_generation_enabled
 
+from classes.message_queue import (
+    SLOW_TOOL_NAMES,
+    TOOL_DISPLAY,
+    register_task_run,
+    unregister_task_run,
+)
+
 from classes.sandbox_agent import sandbox_enabled
 
 from classes.tool_functions import *
 
 
 class ToolMetricsHooks(RunHooks):
-    """RunHooks that record per-tool call counts, durations and failures.
+    """RunHooks that record per-tool metrics AND track the long tools in the
+    in-flight registry (classes.message_queue).
 
     Attached to Runner.run instead of wrapping every tool. Tool-level error
     detection relies on the SDK's default failure handler: the tools in
     tool_functions.py catch their own exceptions and return friendly strings,
     so only unexpected tool exceptions reach the SDK handler (whose default
     result starts with the prefix below).
+
+    In-flight tracking: the slow tools (SLOW_TOOL_NAMES) register themselves
+    at start and unregister at end, so a NEWER message in the same channel
+    (the per-channel lock only guards build+send) gets a hint in its prompt
+    that the older one is still being processed. A run that ends in the SDK
+    failure prefix is unregistered WITHOUT the recently-done note — the user
+    didn't receive a result to refer to.
     """
 
     _SDK_FAILURE_PREFIX = "An error occurred while running the tool"
+    # The tool argument that identifies what a slow tool is doing (shown,
+    # truncated, in the in-flight hint).
+    _SOURCE_FIELDS = {
+        "run_code_sandbox": "task",
+        "generate_image": "prompt",
+        "edit_image": "prompt",
+    }
 
     def __init__(self, guild_id):
         self.guild_id = guild_id
@@ -37,17 +59,44 @@ class ToolMetricsHooks(RunHooks):
     def _tool_name(self, context, tool) -> str:
         return getattr(context, "tool_name", None) or getattr(tool, "name", "unknown")
 
+    def _task_source(self, context, name: str) -> str:
+        """The tool argument shown in the in-flight hint (task/prompt)."""
+        raw = getattr(context, "tool_input", None)
+        field = self._SOURCE_FIELDS.get(name)
+        if field is not None and isinstance(raw, dict):
+            return str(raw.get(field) or "")
+        if isinstance(raw, str):
+            return raw
+        return ""
+
+    def _channel_id(self, context) -> int:
+        # The user_info dict passed to Runner.run(context=...) carries the
+        # original message; the hook's `context` is the RunContextWrapper,
+        # so the dict lives on context.context.
+        return context.context.get("original_message").channel.id
+
     # Hook failures must never abort the run (same rule as sandbox_progress).
 
     async def on_tool_start(self, context, agent, tool) -> None:
+        name = self._tool_name(context, tool)
         try:
-            self._starts[self._key(context, tool)] = (time.monotonic(), self._tool_name(context, tool))
+            self._starts[self._key(context, tool)] = (time.monotonic(), name)
         except Exception as e:
             print(f"Metrics tool_start hook failed: {e}")
+        if name in SLOW_TOOL_NAMES:
+            try:
+                register_task_run(
+                    self._channel_id(context),
+                    TOOL_DISPLAY.get(name, name),
+                    self._task_source(context, name),
+                    run_key=self._key(context, tool),
+                )
+            except Exception as e:
+                print(f"In-flight registry tool_start failed: {e}")
 
     async def on_tool_end(self, context, agent, tool, result) -> None:
+        name = self._tool_name(context, tool)
         try:
-            name = self._tool_name(context, tool)
             started = self._starts.pop(self._key(context, tool), None)
             inc_tool_call(name, self.guild_id)
             if started is not None:
@@ -56,6 +105,18 @@ class ToolMetricsHooks(RunHooks):
                 inc_tool_error(name, self.guild_id)
         except Exception as e:
             print(f"Metrics tool_end hook failed: {e}")
+        if name in SLOW_TOOL_NAMES:
+            try:
+                failed = isinstance(result, str) and result.startswith(self._SDK_FAILURE_PREFIX)
+                unregister_task_run(
+                    self._channel_id(context),
+                    run_key=self._key(context, tool),
+                    # No "just finished" note when the run failed — the user
+                    # didn't receive a result to refer to.
+                    finish=not failed,
+                )
+            except Exception as e:
+                print(f"In-flight registry tool_end failed: {e}")
 
 class TextLLMHandler:
 
