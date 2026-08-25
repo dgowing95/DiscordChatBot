@@ -9,7 +9,12 @@ kind: ServiceMonitor
 metadata:
   name: {{ .Release.Name }}-core
   namespace: {{ .Release.Namespace }}
+  labels:
+    # Required by the cluster's Prometheus operator (iac-homelab), which
+    # only imports ServiceMonitors labelled release: kube-prometheus-stack.
+    release: kube-prometheus-stack
 spec:
+  serviceName: {{ .Release.Name }}-core-service
   selector:
     matchLabels:
       app: {{ .Release.Name }}-core
