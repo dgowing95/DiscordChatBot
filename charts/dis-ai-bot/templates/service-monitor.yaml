@@ -14,7 +14,10 @@ metadata:
     # only imports ServiceMonitors labelled release: kube-prometheus-stack.
     release: kube-prometheus-stack
 spec:
-  serviceName: {{ .Release.Name }}-core-service
+  # No serviceName here: the cluster's Prometheus operator runs a newer
+  # ServiceMonitor CRD that has no such field (it is silently pruned by the
+  # API server). Instead, `selector` matches Services by label — the
+  # dchatbot-core-service (core-service.yaml) carries app: dchatbot-core.
   selector:
     matchLabels:
       app: {{ .Release.Name }}-core
