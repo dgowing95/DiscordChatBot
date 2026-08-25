@@ -13,6 +13,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from unittest.mock import MagicMock
 
 # Same dual-import setup as image_generation_tests.py: the app imports
 # classes.* (cwd = core/) while most tests import core.classes.*.
@@ -49,6 +50,7 @@ def test_metric_names():
     assert m.tool_errors_total._name == "discord_bot_tool_errors"
     assert m.image_generation_seconds._name == "discord_bot_image_generation_seconds"
     assert m.message_queue_size._name == "discord_bot_message_queue_size"
+    assert m.queue_drops_total._name == "discord_bot_message_queue_drops"
 
 
 def test_message_counters_and_generation_histogram():
@@ -89,11 +91,15 @@ def test_tool_and_image_helpers():
     assert m.image_generation_seconds.labels(mode="text_to_image")._sum.get() == before + 7.0
 
 
-def test_queue_gauge():
+def test_queue_gauge_and_drops():
     m.set_message_queue_size(4)
     assert m.message_queue_size._value.get() == 4
     m.set_message_queue_size(0)
     assert m.message_queue_size._value.get() == 0
+
+    before = _counter_value(m.queue_drops_total, guild_id=GUILD)
+    m.inc_queue_drop(GUILD)
+    assert _counter_value(m.queue_drops_total, guild_id=GUILD) == before + 1
 
 
 def test_guild_label_defaults():
@@ -134,3 +140,85 @@ def test_start_from_env_disabled(monkeypatch):
     assert m.start_metrics_server_from_env() is None
     monkeypatch.setenv("METRICS_PORT", "")
     assert m.start_metrics_server_from_env() is None
+
+
+# ---------------------- ToolMetricsHooks x in-flight registry ----------------------
+#
+# The slow tools (SLOW_TOOL_NAMES) register themselves in the per-channel
+# in-flight registry (core/classes/message_queue.py) through the hooks, so a
+# newer same-channel message's prompt gets the hint. These tests drive the
+# REAL hooks (core.classes.text_llm_handler) against the REAL registry.
+
+
+def _hook_context(channel_id, tool_name, tool_input, call_id):
+    """A RunContextWrapper-like mock: the hooks read .tool_call_id /
+    .tool_name / .tool_input off it and the user_info dict (carrying the
+    original message) off .context."""
+    message = MagicMock()
+    message.channel = MagicMock()
+    message.channel.id = channel_id
+    context = MagicMock()
+    context.context = {"original_message": message}
+    context.tool_call_id = call_id
+    context.tool_name = tool_name
+    context.tool_input = tool_input
+    return context
+
+
+def _hook_tool(name):
+    tool = MagicMock()
+    tool.name = name
+    return tool
+
+
+def test_tool_hooks_register_slow_tool_in_flight():
+    import asyncio
+    from core.classes import message_queue as mq
+    from core.classes import text_llm_handler as tlh
+
+    hooks = tlh.ToolMetricsHooks(GUILD)
+    ctx = _hook_context(300, "run_code_sandbox", {"task": "compute pi"}, "call_1")
+    tool = _hook_tool("run_code_sandbox")
+
+    asyncio.run(hooks.on_tool_start(ctx, None, tool))
+    hint = mq.in_flight_hint(300)
+    assert "🐳 code sandbox" in hint
+    assert "compute pi" in hint
+    assert "running for" in hint
+
+    asyncio.run(hooks.on_tool_end(ctx, None, tool, "Done: 3.14159"))
+    hint = mq.in_flight_hint(300)
+    assert "running for" not in hint
+    assert "finished" in hint  # recently-done note for follow-up prompts
+
+
+def test_tool_hooks_failed_run_leaves_no_recently_done_note():
+    import asyncio
+    from core.classes import message_queue as mq
+    from core.classes import text_llm_handler as tlh
+
+    hooks = tlh.ToolMetricsHooks(GUILD)
+    ctx = _hook_context(301, "generate_image", {"prompt": "a red fox"}, "call_2")
+    tool = _hook_tool("generate_image")
+
+    asyncio.run(hooks.on_tool_start(ctx, None, tool))
+    asyncio.run(hooks.on_tool_end(
+        ctx, None, tool,
+        tlh.ToolMetricsHooks._SDK_FAILURE_PREFIX + " boom",))
+    # the run vanished (no more "running"), and there is NO "finished" note —
+    # the user never received a result to refer to
+    assert mq.in_flight_hint(301) == ""
+
+
+def test_tool_hooks_ignore_fast_tools():
+    import asyncio
+    from core.classes import message_queue as mq
+    from core.classes import text_llm_handler as tlh
+
+    hooks = tlh.ToolMetricsHooks(GUILD)
+    ctx = _hook_context(302, "web_search", {"search_request": "python asyncio"}, "call_3")
+    tool = _hook_tool("web_search")
+
+    asyncio.run(hooks.on_tool_start(ctx, None, tool))
+    asyncio.run(hooks.on_tool_end(ctx, None, tool, "results"))
+    assert mq.in_flight_hint(302) == ""

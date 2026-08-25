@@ -99,6 +99,12 @@ llamacppContextLength: 40000
 # first boot, reported back exactly in /v1/models). To swap models change only this.
 model: ggml-org/Qwen3.8-27B-GGUF:Q4_K_M
 message_history: 5
+# core queue concurrency (see core/main.py): how many queue worker tasks run
+# (each handles one message at a time; a per-channel lock keeps same-channel
+# order) and the max messages waiting in the bounded queue (once full, new
+# messages are dropped; a mention gets a short "busy" reply).
+worker_count: 2
+queue_max_size: 10
 
 # Prometheus metrics: core serves /metrics on metrics.port and a
 # ServiceMonitor (kube-prometheus-stack) scrapes it.
