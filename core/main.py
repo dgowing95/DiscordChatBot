@@ -1,6 +1,7 @@
 import discord
 import asyncio
 import os
+import random
 import aiohttp
 import io
 from classes.message_handler import MessageHandler
@@ -143,8 +144,44 @@ async def on_ready():
 
 @client.event
 async def on_message(message):
+    # The reply filter runs at receive time so only messages the bot will
+    # actually handle ever enter the queue. "Received" = passed this filter
+    # (mentioned or random-chance hit); discarded messages are not counted.
+    if not should_handle_message(message):
+        return
+    guild_id = message.guild.id if message.guild else 0
+    user_id = message.author.id
+    inc_messages_received(guild_id, user_id)
     await message_queue.put(message)
     set_message_queue_size(message_queue.qsize())
+
+
+def should_handle_message(message) -> bool:
+    # Decides whether the bot should reply to a message; called from
+    # on_message before enqueueing, so no-reply messages never reach the
+    # queue. Rules (in order): must have content/embeds/attachments, must
+    # not be from the bot, must not be a history reset, mentions always
+    # reply, otherwise roll the per-guild response chance (default 5%).
+    if len(message.content) == 0 and len(message.embeds) == 0 and not message.attachments:
+        return False
+    if message.author == client.user:
+        return False
+    if message.content.lower() == "!reset_history":
+        return False
+    if client.user in message.mentions:
+        return True
+    return random_chance_reply(message)
+
+
+def random_chance_reply(message) -> bool:
+    guild_id = message.guild.id if message.guild else 0
+    chance = config.get_setting("response_chance", guild_id) or 5
+    try:
+        chance = min(max(float(chance), 0), 50)
+    except (ValueError, TypeError):
+        chance = 5
+    return random.uniform(0, 100) < chance
+
 
 async def process_messages():
     while True:
@@ -152,14 +189,10 @@ async def process_messages():
         set_message_queue_size(message_queue.qsize())
         handler = MessageHandler(message, client)
 
-        if handler.should_process_message() == False:
-            continue
-
-        # "Received" = passed the reply filter (mentioned or random-chance
-        # hit); messages that don't pass it are not counted.
+        # Every queued message already passed should_handle_message() in
+        # on_message, so handle it directly.
         guild_id = message.guild.id if message.guild else 0
         user_id = message.author.id
-        inc_messages_received(guild_id, user_id)
         print("Picking up message from queue")
         try:
             async with message.channel.typing():

@@ -1,4 +1,4 @@
-import random, asyncio, re, json, time, os, io, base64
+import asyncio, re, json, time, os, io, base64
 import aiohttp
 import pillow_heif
 from PIL import Image
@@ -7,7 +7,6 @@ from PIL import Image
 # further down (Ollama cannot decode HEIF), so format detection just needs to work.
 pillow_heif.register_heif_opener()
 from classes.text_llm_handler import TextLLMHandler
-from classes.config_manager import configManager
 from classes.response_filter import filter_response as clean_response
 from classes.metrics import observe_response_generation
 
@@ -47,7 +46,6 @@ class MessageHandler:
         self.client = client
         self.text_response = ""
         self.discord_message_object = None
-        self.config = configManager()
 
 
     async def build_messages(self):
@@ -178,27 +176,6 @@ class MessageHandler:
         return parts
 
 
-    def should_process_message(self):
-        if len(self.message.content) == 0 and len(self.message.embeds) == 0 and not self.message.attachments:
-            return False
-        if self.message.author == self.client.user:
-            return False
-        if self.message.content.lower() == "!reset_history":
-            return False
-        if self.client.user in self.message.mentions:
-            return True
-        return self.random_chance_reply()
-    
-    def random_chance_reply(self):
-        guild_id = self.message.guild.id if self.message.guild else 0
-        chance = self.config.get_setting("response_chance", guild_id) or 5
-        try:
-            chance = min(max(float(chance), 0), 50)
-        except (ValueError, TypeError):
-            chance = 5
-        return random.uniform(0, 100) < chance
-    
-    
     def clean_message_content(self, message):
         return message.content.replace(f'<@{self.client.user.id}>', '').strip()
     
