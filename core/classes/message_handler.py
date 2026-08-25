@@ -9,6 +9,7 @@ pillow_heif.register_heif_opener()
 from classes.text_llm_handler import TextLLMHandler
 from classes.config_manager import configManager
 from classes.response_filter import filter_response as clean_response
+from classes.metrics import observe_response_generation
 
 # Max image attachments forwarded to the LLM per message (keeps prompts a sane size).
 MAX_IMAGES_PER_MESSAGE = 3
@@ -222,13 +223,17 @@ class MessageHandler:
 
     async def handle_message(self):
         print(f'Handling message: {self.message.content}')
+        # Histogram covers the whole handling: prompt build + LLM run + send.
+        # Observed on both outcomes (the ❌ path is still a timed attempt;
+        # its failures are separately counted in llm_errors).
+        start = time.monotonic()
         await self.build_messages()
         ollama = TextLLMHandler(self.messages, self.message.guild.id, self.message, self.attachment_refs)
         response = await ollama.generate()
 
         if response == "Error":
             await self.message.add_reaction('❌')
-            return
-
-        response = self.filter_response(response)
-        await self.handle_message_send(response)
+        else:
+            response = self.filter_response(response)
+            await self.handle_message_send(response)
+        observe_response_generation(self.message.guild.id, time.monotonic() - start)

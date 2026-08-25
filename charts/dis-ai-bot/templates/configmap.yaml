@@ -52,3 +52,6 @@ data:
   CONTENT_GUARD_MAX_RETRIES: {{ .Values.guardMaxRetries | toString | quote }}
   CONTENT_GUARD_RETRY_BACKOFF: {{ .Values.guardRetryBackoff | toString | quote }}
   MODERATION_CACHE_TTL: {{ .Values.moderationCacheTtl | toString | quote }}
+  # Prometheus metrics: core serves /metrics on METRICS_PORT; empty disables
+  # the metrics server (helm: metrics.enabled)
+  METRICS_PORT: {{ if .Values.metrics.enabled }}{{ .Values.metrics.port | toString | quote }}{{ else }}""{{ end }}

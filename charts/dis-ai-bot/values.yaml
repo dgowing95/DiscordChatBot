@@ -100,6 +100,16 @@ llamacppContextLength: 40000
 model: ggml-org/Qwen3.8-27B-GGUF:Q4_K_M
 message_history: 5
 
+# Prometheus metrics: core serves /metrics on metrics.port and a
+# ServiceMonitor (kube-prometheus-stack) scrapes it.
+# enabled: false removes the pod port + ServiceMonitor and sets METRICS_PORT
+# empty in the configmap (metrics disabled in the app).
+metrics:
+  enabled: true
+  port: 9464
+  # Prometheus scrape interval for the ServiceMonitor
+  scrapeInterval: 30s
+
 # Web-tool safety guard (OpenAI Moderations endpoint, see .env.example)
 openaiApiKey: ""
 # Optional: defaults to https://api.openai.com/v1 when empty

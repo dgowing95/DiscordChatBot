@@ -21,6 +21,11 @@ spec:
         envFrom:
         - configMapRef:
             name: {{ .Release.Name }}-configmap
+        {{- if .Values.metrics.enabled }}
+        ports:
+        - name: metrics
+          containerPort: {{ .Values.metrics.port }}
+        {{- end }}
         resources:
           limits:
             cpu: {{ .Values.coreResources.limits.cpu }}
