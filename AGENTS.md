@@ -19,6 +19,8 @@ core/                  # the main bot (the app that runs in production)
     text_llm_handler.py    # builds an `agents` Agent against the LLM server's (llama.cpp) OpenAI-compat API
     response_filter.py     # PURE (stdlib-only) response cleaning / thinking-block stripping
     content_guard.py       # OpenAI Moderations-based safety guard for web_search/fetch_url
+    metrics.py             # PURE (stdlib + prometheus_client) Prometheus metrics:
+                           #   all metric definitions + /metrics HTTP server (METRICS_PORT)
     user_memory.py         # JSON lists in Redis per (guild, user)
     config_manager.py      # per-guild settings in Redis (system prompt, temperature, ...)
     tool_functions.py      # agent function tools: web_search, fetch_url, weather, memory tools, generate_image
@@ -117,6 +119,7 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
 | `OPENAI_API_KEY` | API key for the free OpenAI Moderations endpoint (web-tool guard); fail-open if unset |
 | `CONTENT_GUARD_ENABLED` | `0`/`false` disables the content guard on web tools (default: on) |
 | `CONTENT_GUARD_DEBUG` | `0`/`false` silences content-guard debug logging (default: on) |
+| `METRICS_PORT` | port to serve the Prometheus `/metrics` endpoint on (default 9464); empty/`0` disables. Chart: `metrics.enabled`/`metrics.port` also add the pod port + a kube-prometheus-stack ServiceMonitor |
 | `MSG_HISTORY_LIMIT` | how many prior channel messages to include, default 5 |
 | `LLAMA_ARG_CACHE_TYPE_K`, `LLAMA_ARG_CACHE_TYPE_V` | optional; compose `llamacpp` service only: KV cache quantization type (llama.cpp `-ctk`/`-ctv`), default `q4_0`; in the Helm chart set via `llamacpp.cacheTypeK`/`cacheTypeV` |
 | `IMAGE_GEN_ENABLED` | `0`/`false` removes the `generate_image` tool from the LLM (default: on). Chart: `diffusion.enabled` also removes the diffusion pod/PVC |
@@ -142,7 +145,7 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
   modules use both `core.classes...` and `classes...` import styles):
 
   ```bash
-  PYTHONPATH=$(pwd) pytest core/tests/user_memory_tests.py core/tests/response_filter_tests.py
+  PYTHONPATH=$(pwd) pytest core/tests/user_memory_tests.py core/tests/response_filter_tests.py core/tests/metrics_tests.py
   ```
 
   (On Windows PowerShell use `$env:PYTHONPATH=$(Get-Location)` — or

@@ -6,8 +6,11 @@ service for an image.
 """
 import base64
 import os
+import time
 
 import aiohttp
+
+from classes.metrics import observe_image_generation
 
 # Image generation is slow (queue wait + GPU generation); be generous.
 GENERATION_TIMEOUT = int(os.environ.get("IMAGE_GEN_TIMEOUT", 300))
@@ -53,13 +56,21 @@ async def generate_image_from_api(
         payload["image"] = base64.b64encode(image).decode()
         if strength is not None:
             payload["strength"] = strength
-    async with aiohttp.ClientSession(auto_decompress=False) as session:
-        async with session.post(
-            f"{diffusion_base_url()}/generate",
-            json=payload,
-            timeout=aiohttp.ClientTimeout(total=GENERATION_TIMEOUT),
-        ) as resp:
-            if resp.status != 200:
-                detail = (await resp.text())[:200]
-                raise Exception(f"diffusion service returned {resp.status}: {detail}")
-            return await resp.read()
+    # Timed from the caller's perspective: queue wait + generation. Observed
+    # in finally so timeouts/HTTP errors are measured too; the tool layer
+    # turns those into friendly LLM-facing strings.
+    mode = "image_to_image" if image is not None else "text_to_image"
+    start = time.monotonic()
+    try:
+        async with aiohttp.ClientSession(auto_decompress=False) as session:
+            async with session.post(
+                f"{diffusion_base_url()}/generate",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=GENERATION_TIMEOUT),
+            ) as resp:
+                if resp.status != 200:
+                    detail = (await resp.text())[:200]
+                    raise Exception(f"diffusion service returned {resp.status}: {detail}")
+                return await resp.read()
+    finally:
+        observe_image_generation(mode, time.monotonic() - start)

@@ -8,6 +8,12 @@ from classes.text_llm_handler import TextLLMHandler
 from classes.config_manager import configManager
 from classes.image_generation import generate_image_from_api, image_generation_enabled
 from classes.sandbox_agent import sandbox_enabled
+from classes.metrics import (
+    inc_messages_processed,
+    inc_messages_received,
+    set_message_queue_size,
+    start_metrics_server_from_env,
+)
 
 
 intents = discord.Intents.default()
@@ -119,6 +125,8 @@ async def register_commands():
 @client.event
 async def on_ready():
     print(f'Logged in as {client.user}')
+    # Prometheus /metrics endpoint (METRICS_PORT; empty/0 disables).
+    start_metrics_server_from_env()
     # Start the queue worker immediately so the bot still consumes messages
     # even if the model check or command sync fails (e.g. server not up yet
     # after a power cycle).
@@ -136,19 +144,27 @@ async def on_ready():
 @client.event
 async def on_message(message):
     await message_queue.put(message)
-    
+    set_message_queue_size(message_queue.qsize())
+
 async def process_messages():
     while True:
         message = await message_queue.get()
+        set_message_queue_size(message_queue.qsize())
         handler = MessageHandler(message, client)
 
         if handler.should_process_message() == False:
             continue
-        
+
+        # "Received" = passed the reply filter (mentioned or random-chance
+        # hit); messages that don't pass it are not counted.
+        guild_id = message.guild.id if message.guild else 0
+        user_id = message.author.id
+        inc_messages_received(guild_id, user_id)
         print("Picking up message from queue")
         try:
             async with message.channel.typing():
                 await handler.handle_message()
+                inc_messages_processed(guild_id, user_id)
                 message_queue.task_done()
                 print("Done with message from queue")
         except Exception as e:

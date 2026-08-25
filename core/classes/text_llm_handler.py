@@ -1,7 +1,7 @@
-import os,aiohttp, discord, io
+import os,aiohttp, discord, io, time
 from classes.user_memory import UserMemory
-
-from agents import Agent, Runner, OpenAIChatCompletionsModel, AsyncOpenAI, FunctionTool, function_tool, RunContextWrapper, ModelSettings
+from classes.metrics import inc_llm_error, inc_tool_call, inc_tool_error, observe_tool_duration
+from agents import Agent, Runner, OpenAIChatCompletionsModel, AsyncOpenAI, FunctionTool, function_tool, RunContextWrapper, ModelSettings, RunHooks
 from classes.config_manager import configManager
 
 
@@ -11,6 +11,51 @@ from classes.image_generation import image_generation_enabled
 from classes.sandbox_agent import sandbox_enabled
 
 from classes.tool_functions import *
+
+
+class ToolMetricsHooks(RunHooks):
+    """RunHooks that record per-tool call counts, durations and failures.
+
+    Attached to Runner.run instead of wrapping every tool. Tool-level error
+    detection relies on the SDK's default failure handler: the tools in
+    tool_functions.py catch their own exceptions and return friendly strings,
+    so only unexpected tool exceptions reach the SDK handler (whose default
+    result starts with the prefix below).
+    """
+
+    _SDK_FAILURE_PREFIX = "An error occurred while running the tool"
+
+    def __init__(self, guild_id):
+        self.guild_id = guild_id
+        self._starts: dict[str, tuple[float, str]] = {}
+
+    def _key(self, context, tool) -> str:
+        # ToolContext carries a tool_call_id; several concurrent calls of the
+        # same tool are distinguished by it. Fall back to the tool name.
+        return getattr(context, "tool_call_id", None) or getattr(tool, "name", "unknown")
+
+    def _tool_name(self, context, tool) -> str:
+        return getattr(context, "tool_name", None) or getattr(tool, "name", "unknown")
+
+    # Hook failures must never abort the run (same rule as sandbox_progress).
+
+    async def on_tool_start(self, context, agent, tool) -> None:
+        try:
+            self._starts[self._key(context, tool)] = (time.monotonic(), self._tool_name(context, tool))
+        except Exception as e:
+            print(f"Metrics tool_start hook failed: {e}")
+
+    async def on_tool_end(self, context, agent, tool, result) -> None:
+        try:
+            name = self._tool_name(context, tool)
+            started = self._starts.pop(self._key(context, tool), None)
+            inc_tool_call(name, self.guild_id)
+            if started is not None:
+                observe_tool_duration(name, self.guild_id, time.monotonic() - started[0])
+            if isinstance(result, str) and result.startswith(self._SDK_FAILURE_PREFIX):
+                inc_tool_error(name, self.guild_id)
+        except Exception as e:
+            print(f"Metrics tool_end hook failed: {e}")
 
 class TextLLMHandler:
 
@@ -113,12 +158,14 @@ class TextLLMHandler:
       """
       await self.get_client()
       try:
-         response = await Runner.run(self.agent, self.messages, context=user_info)
+         response = await Runner.run(self.agent, self.messages, context=user_info,
+                                     hooks=ToolMetricsHooks(self.guild_id))
          print(f'Response generated')
          print(response)
          return response.final_output
       except Exception as e:
          print('Failed to get response from LLM: ' + str(e))
+         inc_llm_error(self.guild_id)
          return "Error"
       
   
