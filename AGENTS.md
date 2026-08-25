@@ -42,9 +42,11 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
 
 ## Runtime architecture
 
-1. `main.py:` every Discord message goes on an `asyncio.Queue`; a single worker loop
-   pops messages, builds a `MessageHandler`, and (if `should_process_message()`
-   passes: mentioned, or passes the random reply-chance check) handles it.
+1. `main.py:` every Discord message is first checked by `should_handle_message()`
+   in `on_message` (has content/embeds/attachments, not from the bot, not
+   `!reset_history`, and either the bot is mentioned or the per-guild random
+   reply-chance roll hits); only messages that pass go on an `asyncio.Queue`, and
+   a single worker loop pops messages, builds a `MessageHandler`, and handles it.
 2. `MessageHandler.handle_message()` builds the prompt
    (channel history -- most recent `MSG_HISTORY_LIMIT` (default 5) messages; the
    user's stored Redis memories are exposed to the agent through its function
