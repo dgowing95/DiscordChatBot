@@ -171,7 +171,75 @@ def test_build_sandbox_agent_suppresses_default_base_instructions(monkeypatch):
     assert "apply_patch" not in sandbox_agent.SANDBOX_INSTRUCTIONS
 
 
+# ---------------------- artifact helpers (pure) ----------------------
+
+def test_parse_find_output_parses_size_and_path():
+    raw = "1234 /workspace/out/plot.png\n56 /workspace/out/data.csv\n"
+    assert sandbox_agent._parse_find_output(raw) == [
+        ("/workspace/out/plot.png", 1234),
+        ("/workspace/out/data.csv", 56),
+    ]
+
+
+def test_parse_find_output_ignores_blank_and_malformed_lines():
+    raw = "1234 /workspace/out/plot.png\n\n   \nnotanumber /workspace/out/bad\n"
+    assert sandbox_agent._parse_find_output(raw) == [("/workspace/out/plot.png", 1234)]
+
+
+def test_relative_artifact_name_strips_out_dir_and_flattens_subdirs():
+    assert sandbox_agent._relative_artifact_name("/out/plot.png", "/out") == "plot.png"
+    assert sandbox_agent._relative_artifact_name(
+        "/out/nested/data.csv", "/out"
+    ) == "nested_data.csv"
+
+
+def test_relative_artifact_name_falls_back_when_empty():
+    assert sandbox_agent._relative_artifact_name("/out", "/out") == "artifact"
+
+
+def test_select_artifacts_accepts_files_under_the_caps():
+    listed = [("/workspace/out/a.png", 100), ("/workspace/out/b.png", 200)]
+    to_fetch, skipped = sandbox_agent._select_artifacts(listed, max_files=10, max_bytes=1000)
+    assert to_fetch == ["/workspace/out/a.png", "/workspace/out/b.png"]
+    assert skipped == []
+
+
+def test_select_artifacts_rejects_oversized_file():
+    listed = [("/workspace/out/huge.bin", 5000)]
+    to_fetch, skipped = sandbox_agent._select_artifacts(listed, max_files=10, max_bytes=1000)
+    assert to_fetch == []
+    assert len(skipped) == 1 and "huge.bin" in skipped[0]
+
+
+def test_select_artifacts_enforces_running_total_cap():
+    listed = [("/workspace/out/a.bin", 600), ("/workspace/out/b.bin", 600)]
+    to_fetch, skipped = sandbox_agent._select_artifacts(listed, max_files=10, max_bytes=1000)
+    assert to_fetch == ["/workspace/out/a.bin"]
+    assert len(skipped) == 1 and "b.bin" in skipped[0]
+
+
+def test_select_artifacts_enforces_file_count_cap():
+    listed = [(f"/workspace/out/{i}.txt", 1) for i in range(5)]
+    to_fetch, skipped = sandbox_agent._select_artifacts(listed, max_files=2, max_bytes=1000)
+    assert to_fetch == ["/workspace/out/0.txt", "/workspace/out/1.txt"]
+    assert len(skipped) == 3
+
+
 # ---------------------- run_sandbox_task ----------------------
+
+def _patch_session_lifecycle(client=None, session=None, delete=None):
+    """Patches the client/session creation+teardown helpers so
+    run_sandbox_task tests don't touch Docker. Returns the patch context
+    managers to use in a `with`."""
+    client = client if client is not None else MagicMock(name="client")
+    session = session if session is not None else MagicMock(name="session")
+    return (
+        patch.object(prod_sandbox_agent, "build_sandbox_client", return_value=client),
+        patch.object(prod_sandbox_agent, "_create_sandbox_session", AsyncMock(return_value=session)),
+        patch.object(prod_sandbox_agent, "_delete_sandbox_session",
+                     delete if delete is not None else AsyncMock()),
+    )
+
 
 @pytest.mark.asyncio
 async def test_run_sandbox_task_returns_final_output(monkeypatch):
@@ -182,13 +250,17 @@ async def test_run_sandbox_task_returns_final_output(monkeypatch):
     result.final_output = "done: 42"
     runner = MagicMock()
     runner.run = AsyncMock(return_value=result)
+    p_client, p_session, p_delete = _patch_session_lifecycle()
 
     with patch.object(prod_sandbox_agent, "Runner", runner), \
          patch.object(prod_sandbox_agent, "build_sandbox_agent", return_value=agent), \
-         patch.object(prod_sandbox_agent, "build_sandbox_run_config", return_value=run_config):
+         patch.object(prod_sandbox_agent, "build_sandbox_run_config", return_value=run_config), \
+         patch.object(prod_sandbox_agent, "_collect_artifacts", AsyncMock(return_value=[])), \
+         p_client, p_session, p_delete:
         output = await prod_sandbox_agent.run_sandbox_task("print 42")
 
-    assert output == "done: 42"
+    assert output.text == "done: 42"
+    assert output.artifacts == []
     runner.run.assert_awaited_once()
     args, kwargs = runner.run.call_args
     assert args[0] is agent
@@ -203,15 +275,38 @@ async def test_run_sandbox_task_non_string_output_coerced(monkeypatch):
     result.final_output = 1234
     runner = MagicMock()
     runner.run = AsyncMock(return_value=result)
+    p_client, p_session, p_delete = _patch_session_lifecycle()
 
     with patch.object(prod_sandbox_agent, "Runner", runner), \
          patch.object(prod_sandbox_agent, "build_sandbox_agent"), \
-         patch.object(prod_sandbox_agent, "build_sandbox_run_config"):
-        assert await prod_sandbox_agent.run_sandbox_task("t") == "1234"
+         patch.object(prod_sandbox_agent, "build_sandbox_run_config"), \
+         patch.object(prod_sandbox_agent, "_collect_artifacts", AsyncMock(return_value=[])), \
+         p_client, p_session, p_delete:
+        output = await prod_sandbox_agent.run_sandbox_task("t")
+    assert output.text == "1234"
 
 
 @pytest.mark.asyncio
-async def test_run_sandbox_task_timeout_raises(monkeypatch):
+async def test_run_sandbox_task_returns_collected_artifacts(monkeypatch):
+    result = MagicMock()
+    result.final_output = "done"
+    runner = MagicMock()
+    runner.run = AsyncMock(return_value=result)
+    artifacts = [sandbox_agent.SandboxArtifact(name="plot.png", data=b"\x89PNG...")]
+    p_client, p_session, p_delete = _patch_session_lifecycle()
+
+    with patch.object(prod_sandbox_agent, "Runner", runner), \
+         patch.object(prod_sandbox_agent, "build_sandbox_agent"), \
+         patch.object(prod_sandbox_agent, "build_sandbox_run_config"), \
+         patch.object(prod_sandbox_agent, "_collect_artifacts", AsyncMock(return_value=artifacts)), \
+         p_client, p_session, p_delete:
+        output = await prod_sandbox_agent.run_sandbox_task("t")
+
+    assert output.artifacts == artifacts
+
+
+@pytest.mark.asyncio
+async def test_run_sandbox_task_timeout_raises_and_still_deletes_session(monkeypatch):
     monkeypatch.setenv("SANDBOX_TIMEOUT", "1")
 
     async def slow_run(*args, **kwargs):
@@ -219,12 +314,35 @@ async def test_run_sandbox_task_timeout_raises(monkeypatch):
 
     runner = MagicMock()
     runner.run = slow_run
+    delete = AsyncMock()
+    p_client, p_session, p_delete = _patch_session_lifecycle(delete=delete)
 
     with patch.object(prod_sandbox_agent, "Runner", runner), \
          patch.object(prod_sandbox_agent, "build_sandbox_agent"), \
-         patch.object(prod_sandbox_agent, "build_sandbox_run_config"):
+         patch.object(prod_sandbox_agent, "build_sandbox_run_config"), \
+         p_client, p_session, p_delete:
         with pytest.raises(asyncio.TimeoutError):
             await prod_sandbox_agent.run_sandbox_task("sleep forever")
+
+    # the container must never be left running, even on timeout
+    delete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_run_sandbox_task_deletes_session_on_run_exception(monkeypatch):
+    runner = MagicMock()
+    runner.run = AsyncMock(side_effect=RuntimeError("boom"))
+    delete = AsyncMock()
+    p_client, p_session, p_delete = _patch_session_lifecycle(delete=delete)
+
+    with patch.object(prod_sandbox_agent, "Runner", runner), \
+         patch.object(prod_sandbox_agent, "build_sandbox_agent"), \
+         patch.object(prod_sandbox_agent, "build_sandbox_run_config"), \
+         p_client, p_session, p_delete:
+        with pytest.raises(RuntimeError):
+            await prod_sandbox_agent.run_sandbox_task("t")
+
+    delete.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -236,14 +354,92 @@ async def test_run_sandbox_task_forwards_progress_hooks(monkeypatch):
     result.final_output = "ok"
     runner = MagicMock()
     runner.run = AsyncMock(return_value=result)
+    p_client, p_session, p_delete = _patch_session_lifecycle()
 
     with patch.object(prod_sandbox_agent, "Runner", runner), \
          patch.object(prod_sandbox_agent, "build_sandbox_agent", return_value=agent), \
-         patch.object(prod_sandbox_agent, "build_sandbox_run_config", return_value=run_config):
+         patch.object(prod_sandbox_agent, "build_sandbox_run_config", return_value=run_config), \
+         patch.object(prod_sandbox_agent, "_collect_artifacts", AsyncMock(return_value=[])), \
+         p_client, p_session, p_delete:
         await prod_sandbox_agent.run_sandbox_task("t", hooks)
 
     args, kwargs = runner.run.call_args
     assert kwargs["hooks"] is hooks
+
+
+@pytest.mark.asyncio
+async def test_delete_sandbox_session_swallows_errors():
+    client = MagicMock()
+    client.delete = AsyncMock(side_effect=RuntimeError("daemon gone"))
+    # must not raise: cleanup failures are logged, never propagated
+    await prod_sandbox_agent._delete_sandbox_session(client, MagicMock())
+    client.delete.assert_awaited_once()
+
+
+def _exec_result(stdout: bytes, ok: bool = True):
+    r = MagicMock(stdout=stdout, stderr=b"", exit_code=0 if ok else 1)
+    r.ok.return_value = ok
+    return r
+
+
+@pytest.mark.asyncio
+async def test_sandbox_output_dir_joins_live_cwd():
+    session = MagicMock()
+    session.exec = AsyncMock(return_value=_exec_result(b"/root\n"))
+    assert await prod_sandbox_agent._sandbox_output_dir(session) == "/root/out"
+    session.exec.assert_awaited_once_with("pwd", shell=False)
+
+
+@pytest.mark.asyncio
+async def test_sandbox_output_dir_none_when_pwd_fails():
+    session = MagicMock()
+    session.exec = AsyncMock(return_value=_exec_result(b"", ok=False))
+    assert await prod_sandbox_agent._sandbox_output_dir(session) is None
+
+
+@pytest.mark.asyncio
+async def test_collect_artifacts_returns_empty_when_out_dir_missing():
+    session = MagicMock()
+    # pwd succeeds, then `find` fails (no such directory)
+    session.exec = AsyncMock(side_effect=[_exec_result(b"/\n"), _exec_result(b"", ok=False)])
+
+    artifacts = await prod_sandbox_agent._collect_artifacts(session)
+    assert artifacts == []
+
+
+@pytest.mark.asyncio
+async def test_collect_artifacts_reads_listed_files():
+    session = MagicMock()
+    # Regression: with the Shell-only capability, the SDK's nominal
+    # "/workspace" root is never created — the sandbox's real cwd (here
+    # "/") must be queried live, not assumed (see _sandbox_output_dir), and
+    # files must be read via plain exec("cat", ...), not session.read()
+    # (which validates paths against that never-created "/workspace" root
+    # and rejects ours as "not relative to the manifest").
+    session.exec = AsyncMock(side_effect=[
+        _exec_result(b"/\n"),
+        _exec_result(b"3 /out/a.txt\n"),
+        _exec_result(b"hi!"),
+    ])
+
+    artifacts = await prod_sandbox_agent._collect_artifacts(session)
+    assert len(artifacts) == 1
+    assert artifacts[0].name == "a.txt"
+    assert artifacts[0].data == b"hi!"
+    session.exec.assert_awaited_with("cat", "--", "/out/a.txt", shell=False)
+
+
+@pytest.mark.asyncio
+async def test_collect_artifacts_skips_file_that_fails_to_read():
+    session = MagicMock()
+    session.exec = AsyncMock(side_effect=[
+        _exec_result(b"/\n"),
+        _exec_result(b"3 /out/a.txt\n"),
+        _exec_result(b"", ok=False),  # cat fails
+    ])
+
+    artifacts = await prod_sandbox_agent._collect_artifacts(session)
+    assert artifacts == []
 
 
 # ---------------------- tool registration in the LLM agent ----------------------
@@ -294,6 +490,12 @@ def _tool_context(message):
     )
 
 
+def _text_result(text, artifacts=None):
+    """A SandboxResult with no artifacts, for tool tests that only care
+    about the text path."""
+    return sandbox_agent.SandboxResult(text=text, artifacts=artifacts or [])
+
+
 def _fake_progress_factory():
     """Returns (factory, instances): a SandboxProgressHooks replacement
     that records every constructed hook."""
@@ -320,7 +522,7 @@ def _stub_config(get_value=False):
 @pytest.mark.asyncio
 async def test_tool_runs_task_and_streams_progress_when_enabled(monkeypatch):
     message = MagicMock()
-    task_api = AsyncMock(return_value="done: 42")
+    task_api = AsyncMock(return_value=_text_result("done: 42"))
     factory, instances = _fake_progress_factory()
 
     with patch.object(prod_tool_functions, "check_web_request",
@@ -350,7 +552,7 @@ async def test_tool_runs_task_and_streams_progress_when_enabled(monkeypatch):
 @pytest.mark.asyncio
 async def test_tool_progress_disabled_by_default_sends_embed(monkeypatch):
     message = MagicMock()
-    task_api = AsyncMock(return_value="done: 42")
+    task_api = AsyncMock(return_value=_text_result("done: 42"))
     factory, instances = _fake_progress_factory()
 
     with patch.object(prod_tool_functions, "check_web_request",
@@ -376,7 +578,7 @@ async def test_tool_progress_disabled_by_default_sends_embed(monkeypatch):
 @pytest.mark.asyncio
 async def test_tool_progress_disabled_when_setting_false(monkeypatch):
     message = MagicMock()
-    task_api = AsyncMock(return_value="done: 42")
+    task_api = AsyncMock(return_value=_text_result("done: 42"))
     factory, instances = _fake_progress_factory()
 
     with patch.object(prod_tool_functions, "check_web_request",
@@ -399,7 +601,7 @@ async def test_tool_progress_disabled_when_setting_false(monkeypatch):
 @pytest.mark.asyncio
 async def test_tool_progress_falls_back_to_off_on_config_error(monkeypatch):
     message = MagicMock()
-    task_api = AsyncMock(return_value="done: 42")
+    task_api = AsyncMock(return_value=_text_result("done: 42"))
     cm = MagicMock(name="configManager")
     cm.return_value.get_setting = AsyncMock(side_effect=Exception("redis down"))
     factory, instances = _fake_progress_factory()
@@ -483,3 +685,48 @@ async def test_tool_reports_failure(monkeypatch):
     # the live message is closed with a failure note
     instances[0].finalize.assert_awaited_once()
     assert "failed" in instances[0].finalize.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_tool_sends_artifacts_and_tells_llm_they_were_sent(monkeypatch):
+    message = MagicMock()
+    message.channel.send = AsyncMock()
+    artifacts = [sandbox_agent.SandboxArtifact(name="plot.png", data=b"\x89PNG...")]
+    task_api = AsyncMock(return_value=_text_result("done: 42", artifacts))
+
+    with patch.object(prod_tool_functions, "check_web_request",
+                      new=AsyncMock(return_value=(True, ""))), \
+         patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()), \
+         patch.object(prod_sandbox_agent, "run_sandbox_task", task_api):
+        result = await prod_tool_functions.run_code_sandbox.on_invoke_tool(
+            _tool_context(message),
+            json.dumps({"task": "plot something"}),
+        )
+
+    message.channel.send.assert_awaited_once()
+    _, kwargs = message.channel.send.await_args
+    assert kwargs["file"].filename == "plot.png"
+    assert "done: 42" in result
+    assert "plot.png" in result
+    assert "already sent" in result
+
+
+@pytest.mark.asyncio
+async def test_tool_returns_plain_text_when_an_artifact_fails_to_send(monkeypatch):
+    message = MagicMock()
+    message.channel.send = AsyncMock(side_effect=Exception("discord is down"))
+    artifacts = [sandbox_agent.SandboxArtifact(name="plot.png", data=b"data")]
+    task_api = AsyncMock(return_value=_text_result("done: 42", artifacts))
+
+    with patch.object(prod_tool_functions, "check_web_request",
+                      new=AsyncMock(return_value=(True, ""))), \
+         patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()), \
+         patch.object(prod_sandbox_agent, "run_sandbox_task", task_api):
+        result = await prod_tool_functions.run_code_sandbox.on_invoke_tool(
+            _tool_context(message),
+            json.dumps({"task": "plot something"}),
+        )
+
+    # the send failed, so the text result is returned as-is (no false claim
+    # that a file was sent)
+    assert result == "done: 42"

@@ -313,10 +313,13 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
     directly. The sandbox starts completely empty and is destroyed when the
     task finishes, so the task must be fully self-contained: include any
     code, data or context the sandbox needs, and state exactly what the
-    final result must contain. When the guild has live progress updates
-    enabled (/sandbox_progress_updates, default off), the commands the
-    sandbox runs and their output are streamed to the channel in a
-    live-updating message.
+    final result must contain. If the task should produce a file (a plot,
+    a converted document, generated data), tell the sandbox what to name
+    it and save it under out/ — it is sent to the channel automatically.
+    When the guild has live progress updates enabled
+    (/sandbox_progress_updates, default off), the commands the sandbox
+    runs and their output are streamed to the channel in a live-updating
+    message.
     Args:
         task: A precise, self-contained description of what to do in the
             sandbox, including any code or data involved and what the final
@@ -381,7 +384,25 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
         # give the live message its final state (it would otherwise sit on
         # the last "still running" / thinking snapshot)
         await progress.finalize("✅ Done.")
-    return result
+
+    sent_names = []
+    for artifact in result.artifacts:
+        try:
+            await channel.send(
+                file=discord.File(io.BytesIO(artifact.data), filename=artifact.name)
+            )
+            print(f"Sandbox artifact sent to channel: {artifact.name} ({len(artifact.data)} bytes)")
+            sent_names.append(artifact.name)
+        except Exception as e:
+            print(f"Sandbox artifact {artifact.name} generated but failed to send: {e}")
+    if not sent_names:
+        return result.text
+    return (
+        f"{result.text}\n\n"
+        f"{len(sent_names)} file(s) were generated and already sent to the "
+        f"channel: {', '.join(sent_names)}. Do not claim they are pending or "
+        "describe sending them yourself."
+    )
 
 
 @function_tool
