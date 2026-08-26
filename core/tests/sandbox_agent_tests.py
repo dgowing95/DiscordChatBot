@@ -171,16 +171,28 @@ def test_build_sandbox_agent_suppresses_default_base_instructions(monkeypatch):
     assert "apply_patch" not in agent.instructions
 
 
-def test_build_sandbox_agent_injects_resolved_output_path():
-    # Regression: left unguided, the model defaults to a nonexistent
-    # "/workspace" path (see SANDBOX_OUTPUT_DIRNAME comment) — when the real
-    # path is known up front it must be named exactly once, not alongside a
-    # separate "cwd is ..." sentence (that class of bug double-appends the
-    # out dirname).
+def test_build_sandbox_agent_never_tells_model_an_absolute_output_path():
+    # Regression (found live in production): exec_command's `workdir`
+    # argument is validated by the SDK's manifest system, which rejects ANY
+    # absolute path outright ("manifest path must be relative: ..."), even
+    # a real, already-created one. A model told an absolute path reused it
+    # as `workdir` and the tool call failed. The model must only ever see
+    # the relative `out/` dirname, whether or not the real path was
+    # resolved and mkdir -p'd server-side.
+    for out_dir in ("/root/out", "/out", None):
+        agent = sandbox_agent.build_sandbox_agent(out_dir)
+        assert "/root/out" not in agent.instructions
+        assert not any(
+            line.strip().startswith("/") for line in agent.instructions.splitlines()
+        )
+        assert "do not assume `/workspace` exists" in agent.instructions.lower()
+
+
+def test_build_sandbox_agent_resolved_output_path_warns_against_workdir():
     agent = sandbox_agent.build_sandbox_agent("/root/out")
-    assert "/root/out" in agent.instructions
-    assert agent.instructions.count("/root/out") == 1
-    assert "already exists" in agent.instructions
+    assert "already been created for you" in agent.instructions
+    assert "workdir" in agent.instructions
+    assert "out/" in agent.instructions
 
 
 def test_build_sandbox_agent_falls_back_when_output_path_unresolved():

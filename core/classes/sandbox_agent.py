@@ -42,9 +42,16 @@ SANDBOX_RECOVERY_TIMEOUT_SECONDS = 30  # bound on best-effort artifact recovery 
 # image), so we resolve `out/` the same way: by asking the live session
 # for its own cwd (_sandbox_output_dir). We now do this resolution BEFORE
 # Runner.run starts (not just post-hoc to collect artifacts afterward), so
-# the absolute path can be told to the model directly instead of guessed —
-# left unguided, models default to a "/workspace" path that this setup
-# never creates.
+# we can mkdir -p it before the model's first turn — but we deliberately
+# never tell the model the resolved ABSOLUTE path (see SANDBOX_INSTRUCTIONS
+# below): exec_command's own `workdir` argument is validated by the SDK's
+# manifest system, which unconditionally rejects absolute paths
+# (InvalidManifestPathError: "manifest path must be relative: ...") even
+# when the path genuinely exists — confirmed in production, where a model
+# told the absolute path reused it as `workdir` and the tool call failed
+# outright. The model only ever gets the relative name; we resolve/track
+# the absolute form ourselves for our own raw session.exec() calls, which
+# bypass that manifest check entirely (see _collect_artifacts).
 SANDBOX_OUTPUT_DIRNAME = "out"
 MAX_ARTIFACT_FILES = 10
 # Discord's own non-boosted upload cap is ~25MB; enforcing it here fails
@@ -59,11 +66,12 @@ MAX_ARTIFACT_BYTES = 25_000_000
 # apply_patch tool we do not expose, and a model that calls it aborts the
 # whole run with ModelBehaviorError.
 #
-# {output_bullet} is filled in by build_sandbox_agent(out_dir): when the
-# sandbox's real absolute output path was resolved up front, it names that
-# exact path so the model never has to guess (left unguided, models default
-# to a nonexistent "/workspace"); otherwise it falls back to the original
-# relative-path wording, unchanged from before this path was resolved.
+# {output_bullet} is filled in by build_sandbox_agent(out_dir): both
+# variants explicitly rule out "/workspace" (left unguided, models default
+# to that nonexistent path) while only ever naming the RELATIVE `out/`
+# dirname — never the resolved absolute path (see SANDBOX_OUTPUT_DIRNAME
+# comment above for why: exec_command's `workdir` argument rejects
+# absolute paths outright).
 SANDBOX_INSTRUCTIONS = """You work inside a fresh, isolated Linux sandbox (a minimal
 Python container) with shell tools. You receive one self-contained task.
 
@@ -88,14 +96,20 @@ Python container) with shell tools. You receive one self-contained task.
   The final report is all the caller sees, so make it self-contained."""
 
 _OUTPUT_BULLET_RESOLVED = (
-    "To return a FILE (a plot, a converted document, generated data, etc.), "
-    "save it under `{out_dir}` — this exact path already exists. Anything "
-    "saved there is sent back to the user automatically. Do not print file "
-    "contents to stdout — only files under that path are returned; nothing "
+    "Do NOT assume `/workspace` exists — it does not in this sandbox. To "
+    "return a FILE (a plot, a converted document, generated data, etc.), "
+    "save it under the relative path `out/` from wherever you already are — "
+    "that directory has already been created for you, no `cd` or `mkdir` "
+    "needed. Never pass an absolute path (e.g. as exec_command's `workdir` "
+    "argument) — only relative paths like `out/` are accepted; an absolute "
+    "one will be rejected even though the directory is real. Anything saved "
+    "under `out/` is sent back to the user automatically. Do not print file "
+    "contents to stdout — only files under `out/` are returned; nothing "
     "else in the workspace persists."
 )
 _OUTPUT_BULLET_FALLBACK = (
-    "To return a FILE (a plot, a converted document, generated data, etc.), "
+    "Do NOT assume `/workspace` exists — it does not in this sandbox. To "
+    "return a FILE (a plot, a converted document, generated data, etc.), "
     "save it under the `out/` directory relative to your working directory "
     "(create it first: `mkdir -p out`). Anything saved there is sent back to "
     "the user automatically. Do not print file contents to stdout — only "
@@ -170,10 +184,12 @@ def sandbox_timeout() -> int:
 def build_sandbox_agent(out_dir: str | None) -> "object":
     """The nested SandboxAgent that does the work inside the sandbox.
 
-    out_dir: the sandbox's real absolute output path, resolved up front by
-    the caller (see run_sandbox_task) — injected into the instructions so
-    the model is told exactly where to save files instead of guessing.
-    None falls back to the original relative `out/` wording unchanged.
+    out_dir: whether the sandbox's real output path was already resolved
+    and mkdir -p'd by the caller (see run_sandbox_task) — only used to pick
+    between wording variants (both say "out/", never the absolute value:
+    see SANDBOX_OUTPUT_DIRNAME comment for why). None means resolution
+    failed and out/ hasn't been created yet, so the model is told to
+    create it itself.
 
     Uses the same LLM as the main agent by default (MODEL / LLM_HOST /
     LLM_PASS); SANDBOX_MODEL / SANDBOX_LLM_HOST / SANDBOX_LLM_API_KEY point
@@ -198,11 +214,7 @@ def build_sandbox_agent(out_dir: str | None) -> "object":
     from agents.sandbox import SandboxAgent
     from agents.sandbox.capabilities import Shell
 
-    output_bullet = (
-        _OUTPUT_BULLET_RESOLVED.format(out_dir=out_dir)
-        if out_dir is not None
-        else _OUTPUT_BULLET_FALLBACK
-    )
+    output_bullet = _OUTPUT_BULLET_RESOLVED if out_dir is not None else _OUTPUT_BULLET_FALLBACK
 
     return SandboxAgent(
         name="Code Sandbox",

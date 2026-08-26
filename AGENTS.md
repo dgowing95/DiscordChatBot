@@ -124,10 +124,15 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
    is flushed via `finalize()` before the tool returns. On timeout, the
    container is still read before teardown: any file already saved and
    verified under the output dir is recovered and delivered instead of
-   being discarded with the container. The sandbox agent is also told the
-   container's real absolute output path up front (resolved via `pwd`
-   before the run starts) instead of guessing one, since left unguided
-   models default to a "/workspace" path this setup never creates. The core
+   being discarded with the container. The output dir is also resolved
+   (via `pwd`) and mkdir -p'd before the run starts, but the sandbox agent
+   is only ever told the RELATIVE `out/` dirname, never the resolved
+   absolute path: exec_command's own `workdir` argument is validated by
+   the SDK's manifest system, which rejects any absolute path outright
+   (confirmed in production — a model told the absolute path reused it as
+   `workdir` and the call failed). The instructions do explicitly rule out
+   "/workspace", since left unguided models default to that nonexistent
+   path. The core
    container needs the Docker daemon socket mounted (compose: socket bind
    mount; chart: hostPath volume gated on `sandbox.enabled`) plus the
    `docker`/`websocket-client` Python packages. Tasks go through the content
