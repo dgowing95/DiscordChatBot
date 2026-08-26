@@ -174,6 +174,37 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
   (On Windows PowerShell use `$env:PYTHONPATH=$(Get-Location)` — or
   `PYTHONPATH=$PWD pytest ...` in bash.)
 
+### Manual/live testing via a Discord webhook
+
+Beyond pytest, the bot can be driven end-to-end (tool calls, sandbox runs,
+image generation) against a real, running deployment by POSTing a message
+through a Discord webhook — no real Discord account/client needed:
+
+```bash
+curl -sS -X POST "$TEST_WEBHOOK_URL" \
+  -H "Content-Type: application/json" \
+  -d '{"content": "<@BOT_USER_ID> your test message here"}'
+```
+
+- The bot only reacts to messages that pass `should_handle_message()`
+  (`core/main.py`), so the content needs a real `<@id>` mention of the
+  bot's Discord user ID — Discord parses `mentions` from that numeric ID
+  in the content itself, regardless of who/what posted the message, so a
+  plain `@botname` text string does nothing. Get the ID from Discord
+  (right-click the bot → Copy User ID).
+- `TEST_WEBHOOK_URL` (`.env`, local dev only) holds a webhook for the dev
+  server/channel this points at. It is **not read by the app** — it's a
+  standing convenience for curling test messages so it doesn't need
+  rediscovering each session.
+- Watch it process: `docker compose logs core -f` (local dev) or
+  `kubectl -n <namespace> logs deployment/<release>-core-deployment -f`
+  (a cluster deploy). `core`'s source is bind-mounted in docker-compose
+  (`./core:/app`), so `docker compose restart core` alone picks up local
+  code edits — no rebuild needed.
+- **Never** commit a webhook URL, and never point `TEST_WEBHOOK_URL` (or
+  any webhook pasted into a session) at a production channel — a webhook
+  post is indistinguishable from real user traffic once it lands.
+
 - Keeping a module **pure and importable without the discord/agents SDKs** (like
   `response_filter.py`) is the intended pattern for anything you want to unit test —
   `MessageHandler` itself drags in `discord`, `agents`, Redis, etc.
