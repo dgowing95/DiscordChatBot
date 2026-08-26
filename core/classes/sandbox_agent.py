@@ -27,6 +27,7 @@ from agents.sandbox.config import DEFAULT_PYTHON_SANDBOX_IMAGE
 DEFAULT_MAX_TURNS = 10
 DEFAULT_TIMEOUT_SECONDS = 600
 SANDBOX_DELETE_TIMEOUT_SECONDS = 30  # bound on tearing down our own container
+SANDBOX_RECOVERY_TIMEOUT_SECONDS = 30  # bound on best-effort artifact recovery after a timeout
 
 # Directory (relative to the sandbox's own shell cwd) where the sandbox
 # agent must save anything it wants returned as a file. Everything else in
@@ -39,7 +40,11 @@ SANDBOX_DELETE_TIMEOUT_SECONDS = 30  # bound on tearing down our own container
 # model's exec_command calls run with whatever cwd the image itself
 # defaults to (verified empirically to be "/" for the default sandbox
 # image), so we resolve `out/` the same way: by asking the live session
-# for its own cwd (_sandbox_output_dir) rather than assuming a path.
+# for its own cwd (_sandbox_output_dir). We now do this resolution BEFORE
+# Runner.run starts (not just post-hoc to collect artifacts afterward), so
+# the absolute path can be told to the model directly instead of guessed —
+# left unguided, models default to a "/workspace" path that this setup
+# never creates.
 SANDBOX_OUTPUT_DIRNAME = "out"
 MAX_ARTIFACT_FILES = 10
 # Discord's own non-boosted upload cap is ~25MB; enforcing it here fails
@@ -53,6 +58,12 @@ MAX_ARTIFACT_BYTES = 25_000_000
 # (suppressed — see build_sandbox_agent) tells the model to use an
 # apply_patch tool we do not expose, and a model that calls it aborts the
 # whole run with ModelBehaviorError.
+#
+# {output_bullet} is filled in by build_sandbox_agent(out_dir): when the
+# sandbox's real absolute output path was resolved up front, it names that
+# exact path so the model never has to guess (left unguided, models default
+# to a nonexistent "/workspace"); otherwise it falls back to the original
+# relative-path wording, unchanged from before this path was resolved.
 SANDBOX_INSTRUCTIONS = """You work inside a fresh, isolated Linux sandbox (a minimal
 Python container) with shell tools. You receive one self-contained task.
 
@@ -68,14 +79,28 @@ Python container) with shell tools. You receive one self-contained task.
   task is done. If a step fails, read the error, fix it and retry.
 - If the task includes code or data, create it exactly as given.
 - Do not ask questions: make reasonable assumptions and state them.
-- To return a FILE (a plot, a converted document, generated data, etc.),
-  save it under the `out/` directory relative to your working directory
-  (create it first: `mkdir -p out`). Anything saved there is sent back to
-  the user automatically. Do not print file contents to stdout — only
-  files under `out/` are returned; nothing else in the workspace persists.
+- {output_bullet}
+- Once you've run a check and confirmed a result is correct, stop — do not
+  repeat the same or similar verification again on output you've already
+  confirmed is correct.
 - When done, end with a concise final report: what you did, the key results
   (exact numbers/outputs where they matter), and any failures or assumptions.
   The final report is all the caller sees, so make it self-contained."""
+
+_OUTPUT_BULLET_RESOLVED = (
+    "To return a FILE (a plot, a converted document, generated data, etc.), "
+    "save it under `{out_dir}` — this exact path already exists. Anything "
+    "saved there is sent back to the user automatically. Do not print file "
+    "contents to stdout — only files under that path are returned; nothing "
+    "else in the workspace persists."
+)
+_OUTPUT_BULLET_FALLBACK = (
+    "To return a FILE (a plot, a converted document, generated data, etc.), "
+    "save it under the `out/` directory relative to your working directory "
+    "(create it first: `mkdir -p out`). Anything saved there is sent back to "
+    "the user automatically. Do not print file contents to stdout — only "
+    "files under `out/` are returned; nothing else in the workspace persists."
+)
 
 
 def sandbox_enabled() -> bool:
@@ -142,8 +167,13 @@ def sandbox_timeout() -> int:
     return _positive_int(os.environ.get("SANDBOX_TIMEOUT"), DEFAULT_TIMEOUT_SECONDS)
 
 
-def build_sandbox_agent() -> "object":
+def build_sandbox_agent(out_dir: str | None) -> "object":
     """The nested SandboxAgent that does the work inside the sandbox.
+
+    out_dir: the sandbox's real absolute output path, resolved up front by
+    the caller (see run_sandbox_task) — injected into the instructions so
+    the model is told exactly where to save files instead of guessing.
+    None falls back to the original relative `out/` wording unchanged.
 
     Uses the same LLM as the main agent by default (MODEL / LLM_HOST /
     LLM_PASS); SANDBOX_MODEL / SANDBOX_LLM_HOST / SANDBOX_LLM_API_KEY point
@@ -168,6 +198,12 @@ def build_sandbox_agent() -> "object":
     from agents.sandbox import SandboxAgent
     from agents.sandbox.capabilities import Shell
 
+    output_bullet = (
+        _OUTPUT_BULLET_RESOLVED.format(out_dir=out_dir)
+        if out_dir is not None
+        else _OUTPUT_BULLET_FALLBACK
+    )
+
     return SandboxAgent(
         name="Code Sandbox",
         model=OpenAIChatCompletionsModel(
@@ -177,7 +213,7 @@ def build_sandbox_agent() -> "object":
                 api_key=sandbox_llm_api_key(),
             ),
         ),
-        instructions=SANDBOX_INSTRUCTIONS,
+        instructions=SANDBOX_INSTRUCTIONS.format(output_bullet=output_bullet),
         base_instructions="",
         capabilities=[Shell()],
         # Slightly cooler than the chat agent: code tasks want determinism.
@@ -195,9 +231,16 @@ class SandboxArtifact:
 @dataclass
 class SandboxResult:
     """What run_sandbox_task returns: the agent's text report plus any
-    files it saved under out/ (empty when it returned none)."""
+    files it saved under out/ (empty when it returned none).
+
+    ok is False only when the run timed out; artifacts may still be
+    populated in that case (best-effort recovery — see run_sandbox_task),
+    and text is empty since Runner.run never returned a final report.
+    Every other failure mode still raises instead of returning ok=False."""
     text: str
     artifacts: list[SandboxArtifact] = field(default_factory=list)
+    ok: bool = True
+    error: str | None = None
 
 
 def build_sandbox_client() -> "object":
@@ -327,8 +370,13 @@ async def _sandbox_output_dir(session) -> str | None:
     return posixpath.join(cwd, SANDBOX_OUTPUT_DIRNAME) if cwd else None
 
 
-async def _collect_artifacts(session) -> list[SandboxArtifact]:
-    """Reads back whatever the sandbox agent saved under out/.
+async def _collect_artifacts(session, out_dir: str | None) -> list[SandboxArtifact]:
+    """Reads back whatever the sandbox agent saved under out_dir.
+
+    out_dir is resolved once by the caller (run_sandbox_task, via
+    _sandbox_output_dir) up front — before Runner.run starts — rather than
+    re-queried here, so the same path used to tell the model where to save
+    files is also the one we look in afterward.
 
     Uses `find`+`exec("cat", ...)` directly — not session.read(), and not
     the exec_command/write_stdin tool path the model's own turns go
@@ -342,7 +390,6 @@ async def _collect_artifacts(session) -> list[SandboxArtifact]:
     the same primitive session.read() uses internally, just without the
     manifest-relative check that doesn't apply to our setup.
     """
-    out_dir = await _sandbox_output_dir(session)
     if out_dir is None:
         return []
     res = await session.exec(
@@ -376,7 +423,7 @@ async def run_sandbox_task(task: str, progress_hooks=None) -> SandboxResult:
     """Run one self-contained task in a fresh Docker sandbox.
 
     Returns a SandboxResult: the agent's final report (text) plus any
-    files it saved under SANDBOX_OUTPUT_DIR (artifacts, possibly empty).
+    files it saved under the output dir (artifacts, possibly empty).
     progress_hooks is an optional agents.RunHooks instance (e.g.
     classes.sandbox_progress.SandboxProgressHooks) attached to the nested
     run so every tool call (exec_command/write_stdin) and its output can be
@@ -386,27 +433,51 @@ async def run_sandbox_task(task: str, progress_hooks=None) -> SandboxResult:
     RunConfig(sandbox=...) manage it) so we can read artifacts out of it
     after the run finishes but before it is destroyed; the container is
     always deleted in `finally`, including on timeout or any other error.
-    Raises asyncio.TimeoutError if the task outlives sandbox_timeout()
-    seconds; other errors propagate to the caller (the run_code_sandbox
-    tool) — in both cases no artifacts are collected, since the run did
-    not produce a trustworthy final report.
+
+    On timeout (the task outliving sandbox_timeout() seconds), we do NOT
+    raise: the container is still alive at that point, and a task that ran
+    out of time may already have produced and verified a good file, so we
+    make a bounded, best-effort attempt to recover whatever is under the
+    output dir before teardown and return SandboxResult(ok=False,
+    error="timeout", artifacts=<recovered>) instead — recovery failures are
+    swallowed, since it's strictly better-than-nothing on top of today's
+    "discard everything" behavior. Every other error (e.g.
+    ModelBehaviorError, MaxTurnsExceeded, a sandbox that's unavailable)
+    still propagates to the caller unchanged: those are run/configuration
+    failures with no verified-good artifact behind them.
     """
     client = build_sandbox_client()
     session = await _create_sandbox_session(client)
     try:
-        run_result = await asyncio.wait_for(
-            Runner.run(
-                build_sandbox_agent(),
-                task,
-                max_turns=sandbox_max_turns(),
-                run_config=build_sandbox_run_config(client, session),
-                hooks=progress_hooks,
-            ),
-            timeout=sandbox_timeout(),
-        )
+        out_dir = await _sandbox_output_dir(session)
+        if out_dir is not None:
+            await session.exec("mkdir", "-p", out_dir, shell=False)
+        agent = build_sandbox_agent(out_dir)
+        try:
+            run_result = await asyncio.wait_for(
+                Runner.run(
+                    agent,
+                    task,
+                    max_turns=sandbox_max_turns(),
+                    run_config=build_sandbox_run_config(client, session),
+                    hooks=progress_hooks,
+                ),
+                timeout=sandbox_timeout(),
+            )
+        except asyncio.TimeoutError:
+            print("Sandbox: task timed out, attempting best-effort artifact recovery")
+            artifacts: list[SandboxArtifact] = []
+            try:
+                artifacts = await asyncio.wait_for(
+                    _collect_artifacts(session, out_dir),
+                    timeout=SANDBOX_RECOVERY_TIMEOUT_SECONDS,
+                )
+            except Exception as e:
+                print(f"Sandbox: artifact recovery after timeout failed: {e}")
+            return SandboxResult(text="", artifacts=artifacts, ok=False, error="timeout")
         final_output = run_result.final_output
         text = final_output if isinstance(final_output, str) else str(final_output)
-        artifacts = await _collect_artifacts(session)
+        artifacts = await _collect_artifacts(session, out_dir)
         return SandboxResult(text=text, artifacts=artifacts)
     finally:
         await _delete_sandbox_session(client, session)

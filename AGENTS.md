@@ -121,7 +121,13 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
    throttled edit (15s to stay under Discord's 5-edits/minute limit; oldest
    fields evicted as a unit under the 25-field/6000-char embed budget —
    see `sandbox_progress.py`). The run's final state (done/timeout/failed)
-   is flushed via `finalize()` before the tool returns. The core
+   is flushed via `finalize()` before the tool returns. On timeout, the
+   container is still read before teardown: any file already saved and
+   verified under the output dir is recovered and delivered instead of
+   being discarded with the container. The sandbox agent is also told the
+   container's real absolute output path up front (resolved via `pwd`
+   before the run starts) instead of guessing one, since left unguided
+   models default to a "/workspace" path this setup never creates. The core
    container needs the Docker daemon socket mounted (compose: socket bind
    mount; chart: hostPath volume gated on `sandbox.enabled`) plus the
    `docker`/`websocket-client` Python packages. Tasks go through the content
@@ -168,7 +174,7 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
 
   ```bash
   # same file list as the CI workflow (.github/workflows/tests.yaml)
-  PYTHONPATH=$(pwd) pytest core/tests/user_memory_tests.py core/tests/response_filter_tests.py core/tests/content_guard_tests.py core/tests/message_handler_tests.py core/tests/image_generation_tests.py core/tests/sandbox_agent_tests.py core/tests/sandbox_progress_tests.py core/tests/metrics_tests.py core/tests/message_queue_tests.py core/tests/task_registry_tests.py
+  PYTHONPATH=$(pwd) pytest core/tests/user_memory_tests.py core/tests/response_filter_tests.py core/tests/content_guard_tests.py core/tests/message_handler_tests.py core/tests/image_generation_tests.py core/tests/sandbox_agent_tests.py core/tests/sandbox_progress_tests.py core/tests/metrics_tests.py core/tests/message_queue_tests.py core/tests/task_registry_tests.py core/tests/common_tests.py
   ```
 
   (On Windows PowerShell use `$env:PYTHONPATH=$(Get-Location)` — or

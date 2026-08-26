@@ -366,13 +366,6 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
 
     try:
         result = await run_sandbox_task(task, progress)
-    except asyncio.TimeoutError:
-        print("Sandbox task timed out")
-        if progress is not None:
-            await progress.finalize("⏱ Stopped: the task timed out.")
-        return ("The sandbox task took too long and was stopped. Tell the user "
-                "the task timed out; you may retry with a smaller or more "
-                "focused task.")
     except Exception as e:
         print(f"Sandbox task failed: {e}")
         if progress is not None:
@@ -383,7 +376,7 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
     if progress is not None:
         # give the live message its final state (it would otherwise sit on
         # the last "still running" / thinking snapshot)
-        await progress.finalize("✅ Done.")
+        await progress.finalize("✅ Done." if result.ok else "⏱ Stopped: the task timed out.")
 
     sent_names = []
     for artifact in result.artifacts:
@@ -395,6 +388,20 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
             sent_names.append(artifact.name)
         except Exception as e:
             print(f"Sandbox artifact {artifact.name} generated but failed to send: {e}")
+
+    if not result.ok:
+        if sent_names:
+            return (
+                "The sandbox task timed out, but before it was stopped it had "
+                f"already produced and verified {len(sent_names)} file(s), which "
+                f"were recovered and sent to the channel: {', '.join(sent_names)}. "
+                "Tell the user the file(s) were delivered despite the timeout. "
+                "Do not retry this task and do not claim the files are pending."
+            )
+        return ("The sandbox task took too long and was stopped. Tell the user "
+                "the task timed out; you may retry with a smaller or more "
+                "focused task.")
+
     if not sent_names:
         return result.text
     return (
