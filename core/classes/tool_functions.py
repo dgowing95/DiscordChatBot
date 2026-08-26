@@ -46,7 +46,7 @@ async def web_search(wrapper: RunContextWrapper[dict], search_request: str) -> s
         f"Searching the web for: {search_request}",
     )
     try:
-        results = DDGS().text(search_request, max_results=5)
+        results = await asyncio.to_thread(DDGS().text, search_request, max_results=5)
     except Exception as e:
         print(f"An error occurred while searching: {e}")
         return "Error fetching search results."
@@ -79,16 +79,21 @@ async def fetch_url(wrapper: RunContextWrapper[dict], url: str) -> str:
         print(f"An error occurred while fetching the URL: {e}")
         return "Error fetching URL content."
 
+    text = await asyncio.to_thread(_extract_page_text, html)
+    print(f"Fetched content from {url} successfully.")
+    return text
+
+
+def _extract_page_text(html: str) -> str:
+    """CPU-bound HTML->text extraction, run off the event loop via asyncio.to_thread."""
     soup = BeautifulSoup(html, features='html.parser')
     for script in soup(["script", "style"]):
         script.extract()  # remove all javascript and stylesheet code
-    
+
     text = soup.body.get_text()
     lines = (line.strip() for line in text.splitlines())
     chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-    text = '\n'.join(chunk for chunk in chunks if chunk)
-    print(f"Fetched content from {url} successfully.")
-    return text
+    return '\n'.join(chunk for chunk in chunks if chunk)
 
 async def get_current_datetime() -> str:
     """Returns the current date and time."""
@@ -124,7 +129,7 @@ async def store_memory(wrapper: RunContextWrapper[dict], data: str) -> str:
     try:
         print(f"Storing data for user {user_id} in guild {guild_id}: {data}")
         user_memory = UserMemory(user_id, guild_id)
-        user_memory.append(data)
+        await user_memory.append(data)
         await add_emoji_to_message(wrapper.context.get("original_message"), "💾")
         await Common.send_tool_discord_embed(
             wrapper.context.get("original_message").channel,
@@ -150,7 +155,7 @@ async def remove_memory(wrapper: RunContextWrapper[dict], data: str) -> str:
     guild_id = wrapper.context.get("guild_id")
     try:
         user_memory = UserMemory(user_id, guild_id)
-        removed = user_memory.remove(data)
+        removed = await user_memory.remove(data)
         if removed:
             await add_emoji_to_message(wrapper.context.get("original_message"), "🗑️")
             return f"Removed memory: {data}"
@@ -169,7 +174,7 @@ async def clear_memories(wrapper: RunContextWrapper[dict]) -> str:
     guild_id = wrapper.context.get("guild_id")
     try:
         user_memory = UserMemory(user_id, guild_id)
-        user_memory.clear()
+        await user_memory.clear()
         await add_emoji_to_message(wrapper.context.get("original_message"), "🧹")
         return "All memories cleared."
     except Exception as e:
@@ -338,7 +343,7 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
     # read failure falls back to off — progress is a nice-to-have, not a
     # dependency of the run itself.
     try:
-        raw = configManager().get_setting(
+        raw = await configManager().get_setting(
             "sandbox_progress_updates", wrapper.context.get("guild_id"))
     except Exception as e:
         print(f"Could not read sandbox_progress_updates setting: {e}")
@@ -399,7 +404,7 @@ async def change_personality(wrapper: RunContextWrapper[dict], personality: str)
     print(f"Changing personality to: {personality}")
     try:
         configmanager = configManager()
-        configmanager.update_setting("system", personality, wrapper.context.get("guild_id"))
+        await configmanager.update_setting("system", personality, wrapper.context.get("guild_id"))
         print(f"Changed personality to: {personality}")
 
         embed = discord.Embed(title="Personality Updated",

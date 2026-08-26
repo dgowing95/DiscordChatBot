@@ -20,6 +20,27 @@ from classes.sandbox_agent import sandbox_enabled
 from classes.tool_functions import *
 
 
+# The LLM host/model/key never change at runtime, so the AsyncOpenAI client
+# (its own httpx connection pool) is built once and reused across every
+# message instead of per-message. Safe without locking: no `await` between
+# the check and the set, so no race is possible even with concurrent worker
+# tasks (the event loop is single-threaded).
+_main_model_client = None
+
+
+def _get_main_model_client() -> OpenAIChatCompletionsModel:
+    global _main_model_client
+    if _main_model_client is None:
+        _main_model_client = OpenAIChatCompletionsModel(
+            model=os.environ.get("MODEL", "qwen3:4b"),
+            openai_client=AsyncOpenAI(
+                base_url=os.environ.get("LLM_HOST", "http://llamacpp:8080") + "/v1",
+                api_key=os.environ.get("LLM_PASS", "ollama"),
+            ),
+        )
+    return _main_model_client
+
+
 class ToolMetricsHooks(RunHooks):
     """RunHooks that record per-tool metrics AND track the long tools in the
     in-flight registry (classes.message_queue).
@@ -130,7 +151,6 @@ class TextLLMHandler:
         self.attachment_refs = attachment_refs or []
         self.config = configManager()
         self.user_memory = UserMemory(original_message.author.id, guild_id)
-        self.get_settings()
 
 
     @staticmethod
@@ -155,21 +175,15 @@ class TextLLMHandler:
         except Exception as e:
             print(f"Could not reach LLM server at {url}: {e}")
       
-    def get_settings(self):
-        self.system = self.config.get_setting("system", self.guild_id) or "An AI Story Teller"
+    async def get_settings(self):
+        self.system = await self.config.get_setting("system", self.guild_id) or "An AI Story Teller"
         self.model = os.environ.get("MODEL", "qwen3:4b")
         self.options = {
-         "temperature": float(self.config.get_setting("temperature", self.guild_id)) or 1.0
+         "temperature": float(await self.config.get_setting("temperature", self.guild_id)) or 1.0
         }
 
     async def get_client(self):
-        main_model_client = OpenAIChatCompletionsModel(
-            model=self.model,
-            openai_client=AsyncOpenAI(
-                base_url=os.environ.get("LLM_HOST", "http://llamacpp:8080") + "/v1",
-                api_key=os.environ.get("LLM_PASS", "ollama")
-            )
-        )
+        main_model_client = _get_main_model_client()
         tools = [
             web_search,
             fetch_url,
@@ -203,8 +217,9 @@ class TextLLMHandler:
         )
 
     async def generate(self):
+      await self.get_settings()
       user_info = {
-        "data": self.user_memory.get() or [],
+        "data": await self.user_memory.get() or [],
         "user_id": self.original_message.author.id,
         "guild_id": self.guild_id,
         "original_message": self.original_message,
@@ -213,13 +228,20 @@ class TextLLMHandler:
         "personality_tool_calls": 0,
       }
       datetime = await get_current_datetime()
-      self.system = f"""
-        The current datetime is {datetime}.
-        Answer as if you are {self.system}.
-      """
+      self.system = f"Answer as if you are {self.system}."
       await self.get_client()
+      # The datetime is appended as a trailing message rather than folded
+      # into the system prompt: the system prompt + growing history stays
+      # byte-identical across turns of the same conversation, so llama.cpp's
+      # prefix cache only has to prefill the new tail instead of the whole
+      # prompt every time. role="user" (not "system"): some chat templates
+      # (e.g. this model's) raise a Jinja error ("System message must be at
+      # the beginning") for any system message that isn't the very first one.
+      messages_for_run = self.messages + [
+          {"role": "user", "content": f"(Current datetime: {datetime})"}
+      ]
       try:
-         response = await Runner.run(self.agent, self.messages, context=user_info,
+         response = await Runner.run(self.agent, messages_for_run, context=user_info,
                                      hooks=ToolMetricsHooks(self.guild_id))
          print(f'Response generated')
          print(response)

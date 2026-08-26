@@ -33,9 +33,9 @@ def encode_image_for_llm(data: bytes):
     except Exception:
         return None
     if fmt in _OLLAMA_FRIENDLY:
-        out = io.BytesIO()
-        img.save(out, format=fmt)
-        return out.getvalue(), _OLLAMA_FRIENDLY[fmt]
+        # Already decodable by Ollama as-is; re-encoding through PIL would
+        # just burn CPU for no behavioural difference.
+        return data, _OLLAMA_FRIENDLY[fmt]
     out = io.BytesIO()
     img.convert("RGBA").save(out, format="PNG")
     return out.getvalue(), "image/png"
@@ -55,38 +55,42 @@ class MessageHandler:
 
        formatted_history = []
        self.attachment_refs = []
-       for message in self.history:
-          
-          if message.content.lower() == "!reset_history":
-              break
-          
-          
-          for embed in message.embeds:
-              embed_dict = embed.to_dict()
-              embed_dict.pop('fields', None)
-              content = json.dumps(embed_dict)
-              formatted_history.append({
-                  'role': "assistant" if message.author.id == self.client.user.id else "user",
-                  'content': f"Discord Embed from '{message.author.name}' converted to JSON: {content}"
-              })
-            
-          image_parts = await self.download_image_parts(message.attachments)
-          if len(message.content) == 0 and not image_parts:
-             continue        
-          
-          text = f"Message from '{message.author.name}': {message.content.replace(f'<@{self.client.user.id}>', '').strip()}"
-          # With images the content becomes a list of parts (base64 images + text);
-          # the agents SDK forwards them as multimodal chat-completions input.
-          text = self._with_image_labels(text, message, message.attachments)
-          formatted_history.append({
-             'role': "assistant" if message.author.id == self.client.user.id else "user",
-             'content': [*image_parts, {"type": "text", "text": text}] if image_parts else text
-          })
-       formatted_history.reverse()  # Reverse the history to have the oldest message first
-       self.attachment_refs.reverse()  # keep ref order aligned with the history
+       # One shared session for every attachment download in this build
+       # (across all history messages + the current message), instead of a
+       # fresh aiohttp.ClientSession per attachment.
+       async with aiohttp.ClientSession() as session:
+           for message in self.history:
 
-       self.message.content = self.clean_message_content(self.message)
-       image_parts = await self.download_image_parts(self.message.attachments)
+              if message.content.lower() == "!reset_history":
+                  break
+
+
+              for embed in message.embeds:
+                  embed_dict = embed.to_dict()
+                  embed_dict.pop('fields', None)
+                  content = json.dumps(embed_dict)
+                  formatted_history.append({
+                      'role': "assistant" if message.author.id == self.client.user.id else "user",
+                      'content': f"Discord Embed from '{message.author.name}' converted to JSON: {content}"
+                  })
+
+              image_parts = await self.download_image_parts(message.attachments, session=session)
+              if len(message.content) == 0 and not image_parts:
+                 continue
+
+              text = f"Message from '{message.author.name}': {message.content.replace(f'<@{self.client.user.id}>', '').strip()}"
+              # With images the content becomes a list of parts (base64 images + text);
+              # the agents SDK forwards them as multimodal chat-completions input.
+              text = self._with_image_labels(text, message, message.attachments)
+              formatted_history.append({
+                 'role': "assistant" if message.author.id == self.client.user.id else "user",
+                 'content': [*image_parts, {"type": "text", "text": text}] if image_parts else text
+              })
+           formatted_history.reverse()  # Reverse the history to have the oldest message first
+           self.attachment_refs.reverse()  # keep ref order aligned with the history
+
+           self.message.content = self.clean_message_content(self.message)
+           image_parts = await self.download_image_parts(self.message.attachments, session=session)
        user_text = f"Message from '{self.message.author.name}': {self.message.content}"
        user_text = self._with_image_labels(user_text, self.message, self.message.attachments)
        formatted_history.append({
@@ -137,15 +141,21 @@ class MessageHandler:
         return (f"{text}\nAttached images — to modify one, call edit_image with "
                 f"its label as image_ref (e.g. image_ref=\"1\"): {listing}")
 
-    async def download_image_parts(self, attachments) -> list:
+    async def download_image_parts(self, attachments, session=None) -> list:
         """Download image attachments and return them as chat-content image parts.
 
         Each part is {'type': 'input_image', 'image_url': '<base64 data URL>'} which
         the agents SDK converts to the OpenAI 'image_url' wire format for the LLM.
-        Non-image attachments and failed downloads are skipped."""
-        parts = []
+        Non-image attachments and failed downloads are skipped.
+
+        `session` lets a caller (build_messages) share one aiohttp session
+        across every attachment of every message in a build instead of
+        opening a fresh one per attachment; when omitted, one is opened
+        just for this call. Downloads for this call's attachments run
+        concurrently."""
+        targets = []  # (url, content_type)
         for attachment in attachments or []:
-            if len(parts) >= MAX_IMAGES_PER_MESSAGE:
+            if len(targets) >= MAX_IMAGES_PER_MESSAGE:
                 break
             content_type = (attachment.content_type or "").lower()
             if not content_type.startswith("image/"):
@@ -153,19 +163,33 @@ class MessageHandler:
             url = attachment.proxy_url or attachment.url
             if not url:
                 continue
+            targets.append((url, content_type))
+
+        if not targets:
+            return []
+
+        async def _download(sess, url):
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                        if resp.status != 200:
-                            print(f"Failed to download image {url}: HTTP {resp.status}")
-                            continue
-                        data = await resp.read()
+                async with sess.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    if resp.status != 200:
+                        print(f"Failed to download image {url}: HTTP {resp.status}")
+                        return None
+                    return await resp.read()
             except Exception as e:
                 print(f"Failed to download image {url}: {e}")
-                continue
+                return None
+
+        if session is not None:
+            downloads = await asyncio.gather(*(_download(session, url) for url, _ in targets))
+        else:
+            async with aiohttp.ClientSession() as own_session:
+                downloads = await asyncio.gather(*(_download(own_session, url) for url, _ in targets))
+
+        parts = []
+        for (url, content_type), data in zip(targets, downloads):
             if not data:
                 continue
-            encoded = encode_image_for_llm(data)
+            encoded = await asyncio.to_thread(encode_image_for_llm, data)
             if encoded is None:
                 print(f"Skipping image {url}: not a decodable image (format={content_type!r})")
                 continue
@@ -191,11 +215,13 @@ class MessageHandler:
     async def handle_message_send(self, message_content):
         from textwrap import wrap
         chunks = wrap(message_content, 2000, break_long_words=False, replace_whitespace=False)
-        for chunk in chunks:
+        last = len(chunks) - 1
+        for i, chunk in enumerate(chunks):
             if len(chunk) == 0:
                 continue
             await self.message.channel.send(chunk)
-            await asyncio.sleep(1)
+            if i < last:
+                await asyncio.sleep(1)
         
 
 

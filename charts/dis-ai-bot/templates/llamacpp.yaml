@@ -55,6 +55,8 @@ spec:
           value: {{ .Values.llamacpp.cacheTypeK | quote }}
         - name: LLAMA_ARG_CACHE_TYPE_V
           value: {{ .Values.llamacpp.cacheTypeV | quote }}
+        - name: LLAMA_ARG_CTX_CHECKPOINTS
+          value: {{ .Values.llamacpp.ctxCheckpoints | quote }}
         - name: LLAMA_ARG_CTX_SIZE
           value: {{ .Values.llamacppContextLength | quote }}
         - name: LLAMA_ARG_PORT
