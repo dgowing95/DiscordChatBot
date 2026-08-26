@@ -90,6 +90,15 @@ llamacpp:
   # KV cache quantization type for K/V context (llama.cpp -ctk / -ctv)
   cacheTypeK: q4_0
   cacheTypeV: q4_0
+  # Max SWA context-checkpoints per slot (llama.cpp -ctxcp, default upstream: 32).
+  # Checkpoints live inside the --cache-ram prompt-cache budget (host RAM, not
+  # VRAM), ~150MiB each on top of a conversation's base state. For a multi-guild
+  # bot with parallel=1, more resident conversations beats deeper rewind
+  # granularity within one conversation — 32 saturates the default 8GiB
+  # cache-ram budget after only ~9 conversations (observed evicting on almost
+  # every request in prod). 6 keeps rewind useful (message_history windows are
+  # small) while leaving much more headroom before eviction.
+  ctxCheckpoints: 6
   # Verbosity threshold (llama.cpp -lv); 4 = debug, logs the offload/buffer summary at startup
   verbosity: 4
 # Prompt context window (server --ctx-size)
