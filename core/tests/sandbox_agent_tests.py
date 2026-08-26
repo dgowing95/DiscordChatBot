@@ -313,7 +313,7 @@ def _stub_config(get_value=False):
     """A configManager stub whose get_setting returns get_value
     (False = setting unset, like a fresh guild)."""
     cm = MagicMock(name="configManager")
-    cm.return_value.get_setting = MagicMock(return_value=get_value)
+    cm.return_value.get_setting = AsyncMock(return_value=get_value)
     return cm
 
 
@@ -401,7 +401,7 @@ async def test_tool_progress_falls_back_to_off_on_config_error(monkeypatch):
     message = MagicMock()
     task_api = AsyncMock(return_value="done: 42")
     cm = MagicMock(name="configManager")
-    cm.return_value.get_setting = MagicMock(side_effect=Exception("redis down"))
+    cm.return_value.get_setting = AsyncMock(side_effect=Exception("redis down"))
     factory, instances = _fake_progress_factory()
 
     with patch.object(prod_tool_functions, "check_web_request",

@@ -36,28 +36,28 @@ async def register_commands():
 
     @command_tree.command(name="system", description="Change the behaviour/personality of the bot")
     async def change_system(ctx, system: str):
-        config.update_setting("system", system, ctx.guild.id)
+        await config.update_setting("system", system, ctx.guild.id)
         await ctx.response.send_message(content=f"System updated to: \"{system}\"")
 
     @command_tree.command(name="get_system", description="See the existing behaviour/personality of the bot")
     async def get_system(ctx):
-        system = config.get_setting("system", ctx.guild.id)
+        system = await config.get_setting("system", ctx.guild.id)
         await ctx.response.send_message(content=f"System is currently: \"{system}\"")
 
     @command_tree.command(name="temperature", description="Change the randomness of responses, max of 2.0 is max random")
     async def change_temperature(ctx, temperature: float):
-        config.update_setting("temperature", temperature, ctx.guild.id)
+        await config.update_setting("temperature", temperature, ctx.guild.id)
         await ctx.response.send_message(content=f"Temperature updated to: \"{temperature}\"")
-  
+
     @command_tree.command(name="chance", description="Change the chance (0-50%) that the bot replies without being mentioned, default 5%")
     async def change_chance(ctx, chance: discord.app_commands.Range[int, 0, 50]):
-        config.update_setting("response_chance", chance, ctx.guild.id)
+        await config.update_setting("response_chance", chance, ctx.guild.id)
         await ctx.response.send_message(content=f"Response chance updated to: \"{chance}%\"")
-  
+
     @command_tree.command(name="get_chance", description="See the current chance that the bot replies without being mentioned")
     async def get_chance(ctx):
-        chance = config.get_setting("response_chance", ctx.guild.id) or 5
-        await ctx.response.send_message(content=f"Response chance is currently: \"{chance}%\"")  
+        chance = await config.get_setting("response_chance", ctx.guild.id) or 5
+        await ctx.response.send_message(content=f"Response chance is currently: \"{chance}%\"")
     
     # Only offered when the code sandbox is enabled (SANDBOX_ENABLED; set
     # from the helm chart's sandbox.enabled). Per-guild toggle, default off:
@@ -69,7 +69,7 @@ async def register_commands():
         @command_tree.command(name="sandbox_progress_updates",
                               description="Enable/disable live progress updates (commands & output) for code sandbox runs in this server")
         async def change_sandbox_progress_updates(ctx, enabled: bool):
-            config.update_setting("sandbox_progress_updates", str(enabled), ctx.guild.id)
+            await config.update_setting("sandbox_progress_updates", str(enabled), ctx.guild.id)
             await ctx.response.send_message(content=f"Sandbox progress updates are now: \"{enabled}\"")
     
     # Only offered when the diffusion service is enabled (IMAGE_GEN_ENABLED;
@@ -156,7 +156,7 @@ async def on_message(message):
     # actually handle ever enter the queue. "Received" = passed this filter
     # and was enqueued (mentioned or random-chance hit); discarded and
     # queue-full messages are not counted.
-    if not should_handle_message(message):
+    if not await should_handle_message(message):
         return
     guild_id = message.guild.id if message.guild else 0
     user_id = message.author.id
@@ -181,7 +181,7 @@ async def on_message(message):
     set_message_queue_size(message_queue.qsize())
 
 
-def should_handle_message(message) -> bool:
+async def should_handle_message(message) -> bool:
     # Decides whether the bot should reply to a message; called from
     # on_message before enqueueing, so no-reply messages never reach the
     # queue. Rules (in order): must have content/embeds/attachments, must
@@ -195,12 +195,12 @@ def should_handle_message(message) -> bool:
         return False
     if client.user in message.mentions:
         return True
-    return random_chance_reply(message)
+    return await random_chance_reply(message)
 
 
-def random_chance_reply(message) -> bool:
+async def random_chance_reply(message) -> bool:
     guild_id = message.guild.id if message.guild else 0
-    chance = config.get_setting("response_chance", guild_id) or 5
+    chance = await config.get_setting("response_chance", guild_id) or 5
     try:
         chance = min(max(float(chance), 0), 50)
     except (ValueError, TypeError):

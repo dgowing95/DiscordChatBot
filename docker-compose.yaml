@@ -22,7 +22,7 @@ services:
       # KV cache quantization for K/V context (llama.cpp -ctk/-ctv); override in .env
       - LLAMA_ARG_CACHE_TYPE_K=${LLAMA_ARG_CACHE_TYPE_K:-q4_0}
       - LLAMA_ARG_CACHE_TYPE_V=${LLAMA_ARG_CACHE_TYPE_V:-q4_0}
-      - LLAMA_ARG_CTX_SIZE=4000
+      - LLAMA_ARG_CTX_SIZE=80000
       - LLAMA_ARG_PORT=8081
       - LLAMA_ARG_N_PARALLEL=1
       # -lv: 3 (default) hides the offload/buffer summary; 4 (debug) logs it at startup
