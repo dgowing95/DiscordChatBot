@@ -181,6 +181,63 @@ def sandbox_timeout() -> int:
     return _positive_int(os.environ.get("SANDBOX_TIMEOUT"), DEFAULT_TIMEOUT_SECONDS)
 
 
+def _tolerant_tool_invoke(original_invoke):
+    """Wraps a shell tool's on_invoke_tool so a malformed tool call (missing
+    a required argument) becomes a model-visible error turn instead of
+    aborting the whole run.
+
+    Needed because both shell tools are built with strict_json_schema=False
+    (see build_sandbox_agent's docstring: the grammar-enforced strict mode
+    isn't available over ChatCompletions), so nothing stops the sandbox LLM
+    — often a small local model — from emitting a tool call with required
+    arguments missing entirely (e.g. exec_command with no `cmd`). The
+    underlying *Tool._invoke does `args_model.model_validate_json(raw_input)`
+    with no guard, so that surfaces as a raw pydantic ValidationError.
+    FunctionTool.on_invoke_tool's own contract (see agents.tool) is explicit
+    that raising fails the whole run while returning a string is fed back to
+    the model as a normal tool result — confirmed in production, where an
+    empty exec_command call propagated all the way out of Runner.run as
+    UserError and aborted an otherwise-working sandbox task. We opt into the
+    string-result half of that contract here so the model can just retry.
+
+    Deliberately narrow to ValidationError: transport/session failures
+    (ExecTransportError, a dead container, ...) must still raise, or a
+    genuinely broken sandbox would spend every remaining turn being told
+    to "try again" instead of failing fast.
+    """
+    from pydantic import ValidationError
+
+    async def _invoke(ctx, raw_input):
+        try:
+            return await original_invoke(ctx, raw_input)
+        except ValidationError as e:
+            missing = [
+                ".".join(str(p) for p in err["loc"])
+                for err in e.errors()
+                if err["type"] == "missing"
+            ]
+            if missing:
+                detail = f"missing required argument(s): {', '.join(missing)}"
+            else:
+                detail = "arguments did not match the tool's schema"
+            return f"Tool call rejected: {detail}. Retry with a corrected call."
+
+    return _invoke
+
+
+def _make_shell_tools_tolerant(toolset) -> None:
+    """configure_tools callback (see agents.sandbox.capabilities.Shell):
+    makes both shell tools tolerant of malformed calls. See
+    _tolerant_tool_invoke for why this is needed."""
+    toolset.exec_command.on_invoke_tool = _tolerant_tool_invoke(
+        toolset.exec_command.on_invoke_tool
+    )
+    if toolset.write_stdin is not None:
+        toolset.write_stdin.on_invoke_tool = _tolerant_tool_invoke(
+            toolset.write_stdin.on_invoke_tool
+        )
+
+
 def build_sandbox_agent(out_dir: str | None) -> "object":
     """The nested SandboxAgent that does the work inside the sandbox.
 
@@ -227,7 +284,7 @@ def build_sandbox_agent(out_dir: str | None) -> "object":
         ),
         instructions=SANDBOX_INSTRUCTIONS.format(output_bullet=output_bullet),
         base_instructions="",
-        capabilities=[Shell()],
+        capabilities=[Shell(configure_tools=_make_shell_tools_tolerant)],
         # Slightly cooler than the chat agent: code tasks want determinism.
         model_settings=ModelSettings(temperature=0.5),
     )

@@ -207,6 +207,92 @@ def test_sandbox_instructions_tells_model_to_stop_after_verification():
     assert "confirmed a result is correct, stop" in agent.instructions
 
 
+# ---------------------- tolerant shell tool wrapping ----------------------
+# Regression (found live in production): the sandbox LLM is often a small
+# local model, and both shell tools are built with strict_json_schema=False
+# (no grammar enforcement over ChatCompletions), so a tool call missing a
+# required argument (e.g. exec_command with no `cmd`) reaches
+# args_model.model_validate_json unguarded and raises a bare pydantic
+# ValidationError. Uncaught, that propagates out of Runner.run as UserError
+# ("Error running tool exec_command: 1 validation error for
+# ExecCommandArgs\ncmd\n  Field required") and aborts the whole sandbox
+# task. _tolerant_tool_invoke must turn that into a string tool result
+# instead, per FunctionTool.on_invoke_tool's own documented contract.
+
+def _validation_error():
+    from pydantic import BaseModel, ValidationError
+
+    class _Args(BaseModel):
+        cmd: str
+
+    try:
+        _Args.model_validate({})
+    except ValidationError as e:
+        return e
+    raise AssertionError("expected ValidationError")
+
+
+@pytest.mark.asyncio
+async def test_tolerant_invoke_passes_through_on_success():
+    original = AsyncMock(return_value="ok")
+    wrapped = sandbox_agent._tolerant_tool_invoke(original)
+    result = await wrapped("ctx", '{"cmd": "ls"}')
+    assert result == "ok"
+    original.assert_awaited_once_with("ctx", '{"cmd": "ls"}')
+
+
+@pytest.mark.asyncio
+async def test_tolerant_invoke_turns_missing_arg_into_tool_result():
+    async def raiser(ctx, raw_input):
+        raise _validation_error()
+
+    wrapped = sandbox_agent._tolerant_tool_invoke(raiser)
+    result = await wrapped("ctx", "{}")
+    assert isinstance(result, str)
+    assert "cmd" in result
+    assert "retry" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_tolerant_invoke_reraises_non_validation_errors():
+    # A dead container/transport failure must still abort the run rather
+    # than being told "try again" for every remaining turn.
+    async def raiser(ctx, raw_input):
+        raise RuntimeError("session wedged")
+
+    wrapped = sandbox_agent._tolerant_tool_invoke(raiser)
+    with pytest.raises(RuntimeError):
+        await wrapped("ctx", "{}")
+
+
+def test_make_shell_tools_tolerant_wraps_both_tools():
+    exec_tool = MagicMock()
+    exec_tool.on_invoke_tool = AsyncMock(return_value="exec ok")
+    write_tool = MagicMock()
+    write_tool.on_invoke_tool = AsyncMock(return_value="write ok")
+    toolset = MagicMock(exec_command=exec_tool, write_stdin=write_tool)
+
+    sandbox_agent._make_shell_tools_tolerant(toolset)
+
+    assert exec_tool.on_invoke_tool is not exec_tool  # sanity: reassigned
+    assert write_tool.on_invoke_tool is not write_tool
+
+
+def test_make_shell_tools_tolerant_handles_no_write_stdin():
+    exec_tool = MagicMock()
+    exec_tool.on_invoke_tool = AsyncMock(return_value="exec ok")
+    toolset = MagicMock(exec_command=exec_tool, write_stdin=None)
+
+    sandbox_agent._make_shell_tools_tolerant(toolset)  # must not raise
+    assert toolset.write_stdin is None
+
+
+def test_build_sandbox_agent_registers_tolerant_shell_tools():
+    agent = sandbox_agent.build_sandbox_agent(None)
+    shell = agent.capabilities[0]
+    assert shell.configure_tools is sandbox_agent._make_shell_tools_tolerant
+
+
 # ---------------------- artifact helpers (pure) ----------------------
 
 def test_parse_find_output_parses_size_and_path():
