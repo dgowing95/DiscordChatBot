@@ -37,8 +37,10 @@ spec:
         env:
         - name: LLAMA_CACHE
           value: /models
+        # See diffusion.yaml: empty = "all" (device plugin decides), or
+        # CDI-qualified device names to pin this pod to specific physical cards.
         - name: NVIDIA_VISIBLE_DEVICES
-          value: all
+          value: {{ .Values.llamacpp.visibleDevices | default "all" | quote }}
         - name: NVIDIA_DRIVER_CAPABILITIES
           value: all
         - name: LLAMA_ARG_HF_REPO
@@ -69,7 +71,10 @@ spec:
           limits:
             cpu: {{ .Values.llamacppResources.limits.cpu }}
             memory: {{ .Values.llamacppResources.limits.memory }}
+            # Mutually exclusive with llamacpp.visibleDevices — see diffusion.yaml
+            {{- if not .Values.llamacpp.visibleDevices }}
             nvidia.com/gpu: {{ .Values.llamacppResources.gpu }}
+            {{- end }}
           requests:
             cpu: {{ .Values.llamacppResources.requests.cpu }}
             memory: {{ .Values.llamacppResources.requests.memory }}

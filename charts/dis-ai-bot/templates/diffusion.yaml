@@ -41,8 +41,12 @@ spec:
         env:
         - name: HF_HOME
           value: /models
+        # Which GPUs this container sees. Empty = "all", i.e. whatever the
+        # device plugin injects for the nvidia.com/gpu request below. Set to
+        # CDI-qualified device names ("nvidia.com/gpu=GPU-<uuid>[,...]") to pin
+        # the pod to specific physical cards instead — see diffusion.visibleDevices.
         - name: NVIDIA_VISIBLE_DEVICES
-          value: all
+          value: {{ .Values.diffusion.visibleDevices | default "all" | quote }}
         - name: NVIDIA_DRIVER_CAPABILITIES
           value: all
         # First boot downloads the model (a few minutes): allow a long
@@ -58,11 +62,13 @@ spec:
           limits:
             cpu: {{ .Values.diffusionResources.limits.cpu }}
             memory: {{ .Values.diffusionResources.limits.memory }}
-            # Resource NAME as well as count: on a node whose device plugin
-            # advertises per-card resources (homelab: nvidia.com/gpu.2070), this
-            # is what pins the pod to a specific physical GPU instead of taking
-            # any free time-slice slot. See diffusionResources.gpuResourceName.
-            {{ .Values.diffusionResources.gpuResourceName | default "nvidia.com/gpu" }}: {{ .Values.diffusionResources.gpu }}
+            # Omitted when the GPUs are pinned by UUID (diffusion.visibleDevices):
+            # a nvidia.com/gpu request makes the device plugin inject its own CDI
+            # devices and OVERWRITE NVIDIA_VISIBLE_DEVICES with "void", undoing
+            # the pin. The two mechanisms are mutually exclusive.
+            {{- if not .Values.diffusion.visibleDevices }}
+            nvidia.com/gpu: {{ .Values.diffusionResources.gpu }}
+            {{- end }}
           requests:
             cpu: {{ .Values.diffusionResources.requests.cpu }}
             memory: {{ .Values.diffusionResources.requests.memory }}
