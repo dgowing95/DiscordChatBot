@@ -58,7 +58,11 @@ spec:
           limits:
             cpu: {{ .Values.diffusionResources.limits.cpu }}
             memory: {{ .Values.diffusionResources.limits.memory }}
-            nvidia.com/gpu: {{ .Values.diffusionResources.gpu }}
+            # Resource NAME as well as count: on a node whose device plugin
+            # advertises per-card resources (homelab: nvidia.com/gpu.2070), this
+            # is what pins the pod to a specific physical GPU instead of taking
+            # any free time-slice slot. See diffusionResources.gpuResourceName.
+            {{ .Values.diffusionResources.gpuResourceName | default "nvidia.com/gpu" }}: {{ .Values.diffusionResources.gpu }}
           requests:
             cpu: {{ .Values.diffusionResources.requests.cpu }}
             memory: {{ .Values.diffusionResources.requests.memory }}

@@ -168,6 +168,14 @@ diffusionResources:
     cpu: 6000m
     memory: 8000Mi
   gpu: 8
+  # Extended-resource NAME the diffusion pod requests. The default pool
+  # (nvidia.com/gpu) is fungible: with GPU time-slicing the scheduler hands out
+  # any free slot on any card, so the pod can land on a GPU another workload has
+  # already filled and every generation then fails with CUDA OOM. Where the
+  # node's device plugin advertises a per-card resource, name it here to pin the
+  # pod to that physical GPU (homelab dobby: nvidia.com/gpu.2070, the 8GB RTX
+  # 2070 — see iac-homelab custom/gpu-device-plugin-sharing/).
+  gpuResourceName: nvidia.com/gpu
 
 
 # This is for setting Kubernetes Annotations to a Pod.
