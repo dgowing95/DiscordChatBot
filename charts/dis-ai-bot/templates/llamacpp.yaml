@@ -79,6 +79,12 @@ spec:
           value: {{ .Values.llamacpp.parallel | quote }}
         - name: LLAMA_ARG_LOG_VERBOSITY
           value: {{ .Values.llamacpp.verbosity | quote }}
+        {{- range $name, $value := .Values.llamacpp.extraEnv }}
+        # llamacpp.extraEnv — rendered last so a repeated name wins (the
+        # kubelet takes the final occurrence).
+        - name: {{ $name }}
+          value: {{ $value | quote }}
+        {{- end }}
         resources:
           limits:
             cpu: {{ .Values.llamacppResources.limits.cpu }}

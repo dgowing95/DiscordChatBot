@@ -127,6 +127,17 @@ llamacpp:
   ctxCheckpoints: 6
   # Verbosity threshold (llama.cpp -lv); 4 = debug, logs the offload/buffer summary at startup
   verbosity: 4
+  # Escape hatch for any llama.cpp setting this chart does not model: every
+  # CLI flag has a LLAMA_ARG_* env var, so put it here as name: value rather
+  # than growing a value + template branch per flag. Rendered after everything
+  # above, so repeating one of those names overrides it.
+  #
+  # The env names do NOT track the flag names — check `llama-server --help`
+  # for the exact one (--reasoning-format is LLAMA_ARG_THINK, --reasoning-budget
+  # is LLAMA_ARG_THINK_BUDGET). Example, for a model whose thinking is unusable:
+  #   extraEnv:
+  #     LLAMA_ARG_CHAT_TEMPLATE_KWARGS: '{"enable_thinking":false}'
+  extraEnv: {}
   # Optional: pin to specific physical GPUs by CDI device name — same mechanism
   # and same trade-off as diffusion.visibleDevices (see there). Empty = request
   # llamacppResources.gpu slots from the device plugin. Relevant because
