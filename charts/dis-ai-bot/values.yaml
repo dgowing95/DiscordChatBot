@@ -105,6 +105,14 @@ llamacpp:
   # Hugging Face read token (hf_...) for gated model repos; empty = none.
   # Accept the repo's terms on HF first, then paste a read token here.
   hfToken: ""
+  # Serve a GGUF file already on the volume instead of downloading from HF.
+  # Path INSIDE the container: the llama.cpp PVC (hostPath .../ollama) is
+  # mounted at /models, so a file copied to <pvc.hostPath>/ollama/foo.gguf is
+  # /models/foo.gguf here. When set, the template swaps LLAMA_ARG_HF_REPO for
+  # LLAMA_ARG_MODEL + LLAMA_ARG_ALIAS (the two are mutually exclusive, HF_REPO
+  # wins) and `model` below becomes purely the name served in /v1/models —
+  # still the one value core requests as MODEL. Empty = download from HF.
+  modelPath: ""
   # KV cache quantization type for K/V context (llama.cpp -ctk / -ctv)
   cacheTypeK: q4_0
   cacheTypeV: q4_0
@@ -130,7 +138,9 @@ llamacppContextLength: 40000
 # Model — single value for the whole chart: core requests it (MODEL) and llama.cpp
 # serves it (LLAMA_ARG_HF_REPO; <org>/<repo>[:quant], downloaded to the volume on
 # first boot, reported back exactly in /v1/models). To swap models change only this.
-model: ggml-org/Qwen3.8-27B-GGUF:Q4_K_M
+# With llamacpp.modelPath set this is just the served name/alias — any string,
+# as long as it is the same one core asks for.
+model: "ggml-org/Qwen3.8-27B-GGUF:Q4_K_M"
 message_history: 5
 # core queue concurrency (see core/main.py): how many queue worker tasks run
 # (each handles one message at a time; a per-channel lock keeps same-channel
