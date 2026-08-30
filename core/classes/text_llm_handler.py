@@ -212,7 +212,7 @@ class TextLLMHandler:
                 temperature=self.options["temperature"],
                 frequency_penalty=1.1,
                 top_p=1.0,
-                reasoning={"effort": "low"}
+                reasoning={"effort": os.environ.get("REASONING_EFFORT", "medium")}
             ),
         )
 

@@ -9,6 +9,7 @@ data:
   LLM_HOST: {{ .Values.llm_host }}
   LLM_PASS: {{ .Values.llm_pass }}
   MODEL: {{ .Values.model }}
+  REASONING_EFFORT: {{ .Values.reasoningEffort | quote }}
   MSG_HISTORY_LIMIT: {{ .Values.message_history | toString | quote }}
   # Queue concurrency: worker task count + bounded queue size (see core/main.py)
   WORKER_COUNT: {{ .Values.worker_count | toString | quote }}

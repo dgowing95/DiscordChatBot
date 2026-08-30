@@ -152,6 +152,9 @@ llamacppContextLength: 40000
 # With llamacpp.modelPath set this is just the served name/alias — any string,
 # as long as it is the same one core asks for.
 model: "ggml-org/Qwen3.8-27B-GGUF:Q4_K_M"
+# Reasoning effort sent to the LLM as the OpenAI-compat "reasoning_effort"
+# field (low/medium/high).
+reasoningEffort: "medium"
 message_history: 5
 # core queue concurrency (see core/main.py): how many queue worker tasks run
 # (each handles one message at a time; a per-channel lock keeps same-channel
