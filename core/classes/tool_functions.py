@@ -334,7 +334,13 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
                 "guard. Please rephrase with a safe, non-harmful task.")
 
     from classes.config_manager import configManager
-    from classes.sandbox_agent import run_sandbox_task
+    from classes.sandbox_agent import (
+        run_sandbox_task,
+        sandbox_max_turns,
+        sandbox_timeout,
+        MAX_ARTIFACT_BYTES,
+        MAX_ARTIFACT_FILES,
+    )
     from classes.sandbox_progress import (
         SandboxProgressHooks,
         sandbox_progress_updates_enabled,
@@ -373,10 +379,46 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
         return ("The sandbox task failed (the code sandbox may be unavailable). "
                 "Tell the user the sandbox is not working right now and do "
                 "not retry the same task.")
+
+    # Per-failure-reason wording so the caller (the outer LLM) knows what,
+    # if anything, to change before retrying — a bare "it failed" gives it
+    # nothing to act on. See SandboxResult.error for the reason codes.
+    finalize_notes = {
+        "timeout": "⏱ Stopped: the task timed out.",
+        "max_turns": "🔁 Stopped: the task ran out of turns.",
+        "model_error": "⚠️ Stopped: the sandbox's model misbehaved.",
+    }
+    no_artifact_messages = {
+        "timeout": (
+            f"The sandbox task took too long and was stopped after the "
+            f"{sandbox_timeout()}s time limit. Tell the user the task timed "
+            "out; you may retry with a smaller or more focused task."
+        ),
+        "max_turns": (
+            f"The sandbox task ran out of turns ({sandbox_max_turns()} max) "
+            "before finishing. Tell the user it needs a smaller, more "
+            "focused task: split it into a narrower step and retry with "
+            "just that step, rather than retrying the same task unchanged."
+        ),
+        "model_error": (
+            "The sandbox's own model produced an invalid action mid-task "
+            "and the run was stopped before finishing. Retry once with a "
+            "more explicit, step-by-step task description; if it fails "
+            "again, tell the user the sandbox could not complete this task "
+            "and do not retry further."
+        ),
+    }
+    failure_reason = {
+        "timeout": "it timed out",
+        "max_turns": "it ran out of turns",
+        "model_error": "the sandbox's model misbehaved",
+    }
+
     if progress is not None:
         # give the live message its final state (it would otherwise sit on
         # the last "still running" / thinking snapshot)
-        await progress.finalize("✅ Done." if result.ok else "⏱ Stopped: the task timed out.")
+        note = "✅ Done." if result.ok else finalize_notes.get(result.error, "❌ Stopped.")
+        await progress.finalize(note)
 
     sent_names = []
     for artifact in result.artifacts:
@@ -389,26 +431,39 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
         except Exception as e:
             print(f"Sandbox artifact {artifact.name} generated but failed to send: {e}")
 
+    skip_note = ""
+    if result.skipped_artifacts:
+        skip_note = (
+            f"\n\n{len(result.skipped_artifacts)} output file(s) were NOT sent "
+            f"(over the {MAX_ARTIFACT_FILES}-file / {MAX_ARTIFACT_BYTES}-byte "
+            f"limit): {', '.join(result.skipped_artifacts)}. Tell the user "
+            "which file(s) could not be delivered and why; if it matters, "
+            "retry producing a smaller or fewer files."
+        )
+
     if not result.ok:
         if sent_names:
             return (
-                "The sandbox task timed out, but before it was stopped it had "
-                f"already produced and verified {len(sent_names)} file(s), which "
-                f"were recovered and sent to the channel: {', '.join(sent_names)}. "
-                "Tell the user the file(s) were delivered despite the timeout. "
-                "Do not retry this task and do not claim the files are pending."
+                f"The sandbox task did not finish ({failure_reason.get(result.error, 'it failed')}), "
+                f"but before it was stopped it had already produced and verified "
+                f"{len(sent_names)} file(s), which were recovered and sent to the "
+                f"channel: {', '.join(sent_names)}. Tell the user the file(s) were "
+                "delivered despite the task not finishing. Do not retry this task "
+                "and do not claim the files are pending." + skip_note
             )
-        return ("The sandbox task took too long and was stopped. Tell the user "
-                "the task timed out; you may retry with a smaller or more "
-                "focused task.")
+        return no_artifact_messages.get(
+            result.error,
+            "The sandbox task was stopped before finishing. Tell the user the "
+            "task failed and do not retry the same task unchanged.",
+        ) + skip_note
 
     if not sent_names:
-        return result.text
+        return result.text + skip_note
     return (
         f"{result.text}\n\n"
         f"{len(sent_names)} file(s) were generated and already sent to the "
         f"channel: {', '.join(sent_names)}. Do not claim they are pending or "
-        "describe sending them yourself."
+        "describe sending them yourself." + skip_note
     )
 
 

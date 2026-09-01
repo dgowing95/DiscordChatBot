@@ -155,7 +155,16 @@ model: "ggml-org/Qwen3.8-27B-GGUF:Q4_K_M"
 # Reasoning effort sent to the LLM as the OpenAI-compat "reasoning_effort"
 # field (low/medium/high).
 reasoningEffort: "medium"
+# Max model turns for ONE reply from the main agent (a turn = one model
+# response, however many tool calls it carries). The SDK default of 10 is
+# easily overrun by a reply that chains several sandbox/image calls, and
+# overrunning loses the whole answer.
+llmMaxTurns: 20
 message_history: 5
+# Send the model's <think> reasoning to Discord as spoiler-hidden follow-up
+# message(s) (closed by default - click to reveal) instead of discarding it.
+# Off by default: the reasoning is dropped.
+showThinking: false
 # core queue concurrency (see core/main.py): how many queue worker tasks run
 # (each handles one message at a time; a per-channel lock keeps same-channel
 # order) and the max messages waiting in the bounded queue (once full, new

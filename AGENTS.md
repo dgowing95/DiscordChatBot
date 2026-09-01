@@ -73,7 +73,30 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
    server's OpenAI-compatible endpoint (`LLM_HOST/v1`) with function tools attached.
 4. The returned text is cleaned by `MessageHandler.filter_response()` (delegate:
    `core/classes/response_filter.py`, a pure module) and sent in **2000-char chunks**
-   (`textwrap.wrap`, one `asyncio.sleep(1)` between sends).
+   (`textwrap.wrap`, one `asyncio.sleep(1)` between sends). The model's reasoning
+   is kept out of that answer and, by default, dropped; with `SHOW_THINKING=1` it is
+   sent as follow-up message(s) wrapped in a spoiler-hidden code block
+   (`||```...```||`, closed by default — click to reveal), chunked the same way
+   (`response_filter.format_thinking_for_discord`, capped at
+   `MAX_THINKING_CHUNKS` messages — a tool-calling run reasons on every turn).
+   **The reasoning does not travel in the answer string.** With llama.cpp's
+   default `--reasoning-format auto` and a thinking-enabled template, the server
+   returns it out of band in `reasoning_content`; the SDK turns that into its own
+   `reasoning_item` in `RunResult.new_items`, so `final_output` is already clean
+   and there are no `<think>` tags left to find. `TextLLMHandler.generate()`
+   therefore collects it with `response_filter.extract_reasoning_items(new_items)`
+   (all turns, in order) and exposes it as `self.reasoning` for `MessageHandler`
+   to send — `generate()` still returns the plain answer string, so its `"Error"`
+   sentinel is unchanged. `extract_thinking()` on the answer text remains as a
+   fallback for a server running `--reasoning-format none`, which does inline the
+   tags. **The reasoning also survives a failed run**: when `Runner.run` raises
+   (`MaxTurnsExceeded` after a reply chains several tool calls is the common one)
+   `generate()` returns the `"Error"` sentinel as before, but first recovers the
+   reasoning from the completed turns the SDK hangs off the exception
+   (`AgentsException.run_data.new_items`), and `MessageHandler` sends it after the
+   ❌. Without that, a failed tool run left the tool's embeds and files in the
+   channel — posted during the unlocked phase, before the failure — with no answer
+   and no reasoning, which reads as the bot going quiet mid-task.
 5. Per-guild settings live in Redis under the `dcb` namespace; per-user memories under
    `guild:<id>:user:<id>`.
 6. Image generation: when enabled (`IMAGE_GEN_ENABLED`, set from the chart's
@@ -120,11 +143,28 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
    idle); events are queued and the whole queue is batched into every
    throttled edit (15s to stay under Discord's 5-edits/minute limit; oldest
    fields evicted as a unit under the 25-field/6000-char embed budget —
-   see `sandbox_progress.py`). The run's final state (done/timeout/failed)
-   is flushed via `finalize()` before the tool returns. On timeout, the
-   container is still read before teardown: any file already saved and
-   verified under the output dir is recovered and delivered instead of
-   being discarded with the container. The output dir is also resolved
+   see `sandbox_progress.py`). The run's final state (done/timeout/turns
+   exhausted/model error/failed) is flushed via `finalize()` before the
+   tool returns. `run_sandbox_task` never lets `asyncio.TimeoutError`,
+   `MaxTurnsExceeded` or `ModelBehaviorError`/`ModelRefusalError` propagate:
+   each becomes `SandboxResult(ok=False, error="timeout"|"max_turns"|
+   "model_error")`, and the container is still read before teardown in all
+   three cases — any file already saved and verified under the output dir
+   is recovered and delivered instead of being discarded with the
+   container. `run_code_sandbox` (tool_functions.py) turns `error` into
+   reason-specific guidance for the calling agent (e.g. "max_turns" says to
+   split the task smaller, not just retry it unchanged) instead of one
+   generic "may be unavailable" message for every failure — that generic
+   message is now reserved for errors that actually propagate (a dead
+   container/Docker daemon, `UserError`, ...), which mean the sandbox
+   itself is unusable rather than a task that ran out of budget. Output
+   files skipped by the artifact caps (`MAX_ARTIFACT_FILES`/
+   `MAX_ARTIFACT_BYTES`) are reported back the same way, on both success
+   and failure, instead of only being logged. The sandbox agent's own
+   instructions state its exact turn/time budget
+   (`SANDBOX_MAX_TURNS`/`SANDBOX_TIMEOUT`) and tell it to save partial
+   output under `out/` before a forced cutoff rather than risk losing
+   everything. The output dir is also resolved
    (via `pwd`) and mkdir -p'd before the run starts, but the sandbox agent
    is only ever told the RELATIVE `out/` dirname, never the resolved
    absolute path: exec_command's own `workdir` argument is validated by
@@ -152,6 +192,8 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
 | `CONTENT_GUARD_DEBUG` | `0`/`false` silences content-guard debug logging (default: on) |
 | `METRICS_PORT` | port to serve the Prometheus `/metrics` endpoint on (default 9464); empty/`0` disables. Chart: `metrics.enabled`/`metrics.port` also add a ClusterIP Service, the pod port, and a kube-prometheus-stack ServiceMonitor (labelled `release: kube-prometheus-stack` — the operator only imports ServiceMonitors with that label) |
 | `MSG_HISTORY_LIMIT` | how many prior channel messages to include, default 5 |
+| `LLM_MAX_TURNS` | max model turns for ONE reply from the main agent (helm: `llmMaxTurns`), default 20. A turn is one model response, however many tool calls it carries. Passed explicitly to `Runner.run` because the SDK's own default of 10 is easily overrun by a reply that chains several sandbox/image calls — and overrunning raises `MaxTurnsExceeded`, which costs the whole answer |
+| `SHOW_THINKING` | `1`/`true` sends the model's reasoning as spoiler-hidden follow-up message(s); default (off) drops it entirely. Chart: `showThinking` |
 | `WORKER_COUNT` | queue worker tasks (default 2, min 1); each handles one message at a time, a per-channel lock keeps same-channel order. Chart: `worker_count` |
 | `QUEUE_MAX_SIZE` | max messages waiting on the bounded queue (default 10, min 1); when full new messages are dropped (a mention gets a short "busy" reply). Chart: `queue_max_size` |
 | `LLAMA_ARG_CACHE_TYPE_K`, `LLAMA_ARG_CACHE_TYPE_V` | optional; compose `llamacpp` service only: KV cache quantization type (llama.cpp `-ctk`/`-ctv`), default `q4_0`; in the Helm chart set via `llamacpp.cacheTypeK`/`cacheTypeV` |
@@ -231,9 +273,12 @@ curl -sS -X POST "$TEST_WEBHOOK_URL" \
   siblings as `from classes.X import ...` (works because the app runs with cwd `/app`
   in the container), while tests import as `from core.classes.X import ...`. Both
   resolve as namespace packages; preserve the existing style when editing.
-- LLM responses may contain internal "thinking" reasoning blocks (open/close think-tags
-  with an optional tab after the bracket). All stripping/regex logic lives in
-  `core/classes/response_filter.py` — keep it pure, and cover new behaviour in
+- A reasoning model delivers its thinking in one of two shapes: out of band in
+  `reasoning_content` (llama.cpp's default — becomes a `reasoning_item` on the run
+  result), or inline as open/close think-tags with an optional tab after the
+  bracket. Both are handled in `core/classes/response_filter.py` — keep it pure
+  (stdlib only; `extract_reasoning_items` duck-types the SDK's run items rather
+  than importing them) and cover new behaviour in
   `core/tests/response_filter_tests.py`.
 - The queue worker pool, bounded-queue sizing (WORKER_COUNT / QUEUE_MAX_SIZE),
   the per-channel locks (SCOPED to build+send — the LLM/tool phase runs

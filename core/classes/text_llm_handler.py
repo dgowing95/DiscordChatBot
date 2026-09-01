@@ -3,6 +3,23 @@ from classes.user_memory import UserMemory
 from classes.metrics import inc_llm_error, inc_tool_call, inc_tool_error, observe_tool_duration
 from agents import Agent, Runner, OpenAIChatCompletionsModel, AsyncOpenAI, FunctionTool, function_tool, RunContextWrapper, ModelSettings, RunHooks
 from classes.config_manager import configManager
+from classes.response_filter import extract_reasoning_items, extract_thinking
+
+# Max turns for ONE reply from the main agent (a turn = one model response,
+# however many tool calls it carries). The SDK's own default is 10, which a
+# chained tool run overruns easily - three sandbox calls plus the reasoning
+# turns around them is already most of it - and overrunning raises
+# MaxTurnsExceeded, which costs the user the whole answer.
+DEFAULT_LLM_MAX_TURNS = 20
+
+
+def llm_max_turns() -> int:
+    """Max model turns for one reply (LLM_MAX_TURNS, default 20)."""
+    try:
+        value = int(str(os.environ.get("LLM_MAX_TURNS")).strip())
+        return value if value > 0 else DEFAULT_LLM_MAX_TURNS
+    except (TypeError, ValueError):
+        return DEFAULT_LLM_MAX_TURNS
 
 
 
@@ -151,6 +168,14 @@ class TextLLMHandler:
         self.attachment_refs = attachment_refs or []
         self.config = configManager()
         self.user_memory = UserMemory(original_message.author.id, guild_id)
+        # Filled in by generate(): the model's internal reasoning for this
+        # run, which the caller sends to Discord behind a spoiler when
+        # SHOW_THINKING is on. It cannot be recovered from the returned
+        # answer - our llama.cpp server strips it out of the visible content
+        # into reasoning_content - so it is handed over separately here
+        # rather than by changing generate()'s string return (and its
+        # "Error" sentinel).
+        self.reasoning = ""
 
 
     @staticmethod
@@ -242,13 +267,46 @@ class TextLLMHandler:
       ]
       try:
          response = await Runner.run(self.agent, messages_for_run, context=user_info,
+                                     max_turns=llm_max_turns(),
                                      hooks=ToolMetricsHooks(self.guild_id))
          print(f'Response generated')
          print(response)
-         return response.final_output
+         final_output = response.final_output
+         self._capture_reasoning(response.new_items, final_output)
+         return final_output
       except Exception as e:
          print('Failed to get response from LLM: ' + str(e))
+         # A run that died part-way (MaxTurnsExceeded after a few chained
+         # tool calls is the common one) still reasoned before it broke, and
+         # its tools have already posted their embeds/files to the channel.
+         # The SDK hangs the completed turns off the exception as
+         # RunErrorDetails, so recover the reasoning from there rather than
+         # leaving the user with a bare ❌ and no idea what happened.
+         run_data = getattr(e, "run_data", None)
+         self._capture_reasoning(getattr(run_data, "new_items", None), None)
          inc_llm_error(self.guild_id)
          return "Error"
+
+    def _capture_reasoning(self, items, final_output):
+        """Store this run's reasoning on self.reasoning (never raises).
+
+        Reasoning comes back one of two ways depending on the server's
+        --reasoning-format: out of band as reasoning_content (our llama.cpp
+        default, and the only source that survives into the run items), or
+        inline as think tags in the answer itself. Try the run items first
+        and fall back to the tags.
+
+        Fully guarded: reasoning is a nice-to-have, so a surprise in the
+        run-item shape must not turn a good answer into the "Error" sentinel
+        (nor mask the real failure on the error path).
+        """
+        try:
+            self.reasoning = extract_reasoning_items(items)
+            if not self.reasoning and isinstance(final_output, str):
+                self.reasoning = extract_thinking(final_output)
+        except Exception as e:
+            print('Could not extract reasoning from the response: ' + str(e))
+            self.reasoning = ""
+        print(f'Reasoning captured: {len(self.reasoning)} chars')
       
   

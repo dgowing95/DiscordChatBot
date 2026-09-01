@@ -21,7 +21,16 @@ import os
 import posixpath
 from dataclasses import dataclass, field
 
-from agents import AsyncOpenAI, ModelSettings, OpenAIChatCompletionsModel, Runner, RunConfig
+from agents import (
+    AsyncOpenAI,
+    MaxTurnsExceeded,
+    ModelBehaviorError,
+    ModelRefusalError,
+    ModelSettings,
+    OpenAIChatCompletionsModel,
+    Runner,
+    RunConfig,
+)
 from agents.sandbox.config import DEFAULT_PYTHON_SANDBOX_IMAGE
 
 DEFAULT_MAX_TURNS = 10
@@ -88,6 +97,7 @@ Python container) with shell tools. You receive one self-contained task.
 - If the task includes code or data, create it exactly as given.
 - Do not ask questions: make reasonable assumptions and state them.
 - {output_bullet}
+- {budget_bullet}
 - Once you've run a check and confirmed a result is correct, stop — do not
   repeat the same or similar verification again on output you've already
   confirmed is correct.
@@ -114,6 +124,37 @@ _OUTPUT_BULLET_FALLBACK = (
     "(create it first: `mkdir -p out`). Anything saved there is sent back to "
     "the user automatically. Do not print file contents to stdout — only "
     "files under `out/` are returned; nothing else in the workspace persists."
+)
+
+# {budget_bullet}: tells the model its hard turn/time budget so it can pace
+# itself instead of getting cut off mid-task with nothing to show. A turn is
+# one model response (which may include one or more tool calls); running
+# out of either turns or wall-clock seconds ends the run immediately with
+# no chance to write a final report (see run_sandbox_task's
+# MaxTurnsExceeded/timeout handling) — anything not already saved under
+# out/ at that point is lost. Filled in by build_sandbox_agent with the
+# live sandbox_max_turns()/sandbox_timeout() values so this always matches
+# what the caller actually enforces.
+#
+# The model has no built-in sense of elapsed wall-clock time (unlike turns,
+# which it can just count), so the bullet tells it to check a real clock
+# itself via `date +%s` rather than just saying "track the time" and
+# leaving it with no way to do so.
+_BUDGET_BULLET = (
+    "You have a hard budget of {max_turns} turns (each response you give "
+    "counts as one turn, however many tool calls it includes) and "
+    "{timeout_seconds} seconds of wall-clock time for this entire task — "
+    "whichever runs out first ends the run immediately, with no chance to "
+    "write a final report. Count your turns as you go. For time, you have "
+    "no internal clock, so check a real one: run `date +%s` as your very "
+    "first command and note the number, then re-run it every few turns and "
+    "subtract to see how many of the {timeout_seconds} seconds have passed. "
+    "If you are within a couple of turns of {max_turns}, or have used "
+    "roughly 80% of the {timeout_seconds}-second budget, and do not yet "
+    "have a finished result, STOP iterating: save your best current partial "
+    "output under `out/` right away and end with a final report describing "
+    "what is done, what is missing, and why — do not risk losing everything "
+    "to a forced cutoff."
 )
 
 
@@ -248,6 +289,11 @@ def build_sandbox_agent(out_dir: str | None) -> "object":
     failed and out/ hasn't been created yet, so the model is told to
     create it itself.
 
+    Also tells the model its turn/time budget (sandbox_max_turns() /
+    sandbox_timeout(), i.e. SANDBOX_MAX_TURNS / SANDBOX_TIMEOUT) so it can
+    pace itself and save partial output before a forced cutoff — see
+    _BUDGET_BULLET.
+
     Uses the same LLM as the main agent by default (MODEL / LLM_HOST /
     LLM_PASS); SANDBOX_MODEL / SANDBOX_LLM_HOST / SANDBOX_LLM_API_KEY point
     it at a different OpenAI-compatible API instead (e.g. an OpenRouter
@@ -272,6 +318,9 @@ def build_sandbox_agent(out_dir: str | None) -> "object":
     from agents.sandbox.capabilities import Shell
 
     output_bullet = _OUTPUT_BULLET_RESOLVED if out_dir is not None else _OUTPUT_BULLET_FALLBACK
+    budget_bullet = _BUDGET_BULLET.format(
+        max_turns=sandbox_max_turns(), timeout_seconds=sandbox_timeout()
+    )
 
     return SandboxAgent(
         name="Code Sandbox",
@@ -282,7 +331,9 @@ def build_sandbox_agent(out_dir: str | None) -> "object":
                 api_key=sandbox_llm_api_key(),
             ),
         ),
-        instructions=SANDBOX_INSTRUCTIONS.format(output_bullet=output_bullet),
+        instructions=SANDBOX_INSTRUCTIONS.format(
+            output_bullet=output_bullet, budget_bullet=budget_bullet
+        ),
         base_instructions="",
         capabilities=[Shell(configure_tools=_make_shell_tools_tolerant)],
         # Slightly cooler than the chat agent: code tasks want determinism.
@@ -302,14 +353,26 @@ class SandboxResult:
     """What run_sandbox_task returns: the agent's text report plus any
     files it saved under out/ (empty when it returned none).
 
-    ok is False only when the run timed out; artifacts may still be
-    populated in that case (best-effort recovery — see run_sandbox_task),
-    and text is empty since Runner.run never returned a final report.
-    Every other failure mode still raises instead of returning ok=False."""
+    ok is False when the run was stopped before producing a final report:
+    error identifies why, as one of "timeout" (wall-clock budget exceeded),
+    "max_turns" (turn budget exceeded) or "model_error" (the nested model
+    misbehaved, e.g. an invalid tool call or an outright refusal). In all
+    three cases artifacts may still be populated (best-effort recovery — see
+    run_sandbox_task) and text is empty since Runner.run never returned a
+    final report. Every other failure (docker/session errors, UserError,
+    ...) still raises instead of returning ok=False — those mean the
+    sandbox itself is unusable, not that the task ran out of budget.
+
+    skipped_artifacts holds a human-readable reason for each output file
+    that was found under out/ but NOT fetched (over MAX_ARTIFACT_FILES /
+    MAX_ARTIFACT_BYTES) — populated on both success and failure, empty when
+    nothing was skipped, so the caller can tell the model what was dropped
+    and why instead of it going unexplained."""
     text: str
     artifacts: list[SandboxArtifact] = field(default_factory=list)
     ok: bool = True
     error: str | None = None
+    skipped_artifacts: list[str] = field(default_factory=list)
 
 
 def build_sandbox_client() -> "object":
@@ -439,8 +502,19 @@ async def _sandbox_output_dir(session) -> str | None:
     return posixpath.join(cwd, SANDBOX_OUTPUT_DIRNAME) if cwd else None
 
 
-async def _collect_artifacts(session, out_dir: str | None) -> list[SandboxArtifact]:
+async def _collect_artifacts(
+    session, out_dir: str | None
+) -> tuple[list[SandboxArtifact], list[str]]:
     """Reads back whatever the sandbox agent saved under out_dir.
+
+    Returns (artifacts, skip_notes): skip_notes is one human-readable
+    reason per output file that was found but not fetched (over
+    MAX_ARTIFACT_FILES / MAX_ARTIFACT_BYTES — see _select_artifacts), with
+    the container's absolute path replaced by the same relative, Discord-
+    safe name used for artifacts (_relative_artifact_name) — the model must
+    never see the sandbox's real absolute filesystem paths (see
+    SANDBOX_OUTPUT_DIRNAME comment for why: it has previously reused one as
+    an exec_command `workdir` argument and failed outright).
 
     out_dir is resolved once by the caller (run_sandbox_task, via
     _sandbox_output_dir) up front — before Runner.run starts — rather than
@@ -460,17 +534,22 @@ async def _collect_artifacts(session, out_dir: str | None) -> list[SandboxArtifa
     manifest-relative check that doesn't apply to our setup.
     """
     if out_dir is None:
-        return []
+        return [], []
     res = await session.exec(
         "find", out_dir, "-maxdepth", "3", "-type", "f", "-printf", "%s %p\n",
         shell=False,
     )
     if not res.ok():
-        return []  # a missing/empty out/ dir is not an error
+        return [], []  # a missing/empty out/ dir is not an error
     listed = _parse_find_output(res.stdout.decode("utf-8", errors="replace"))
     to_fetch, skipped = _select_artifacts(listed)
+    skip_notes: list[str] = []
     for note in skipped:
         print(f"Sandbox: {note}")
+        # split on the " (skipped: " marker, not plain whitespace — a path
+        # under out/ can itself contain spaces (e.g. "my plot.png")
+        path, _, reason = note.partition(" (skipped: ")
+        skip_notes.append(f"{_relative_artifact_name(path, out_dir)} (skipped: {reason}")
 
     artifacts: list[SandboxArtifact] = []
     for path in to_fetch:
@@ -485,7 +564,7 @@ async def _collect_artifacts(session, out_dir: str | None) -> list[SandboxArtifa
         artifacts.append(
             SandboxArtifact(name=_relative_artifact_name(path, out_dir), data=read_result.stdout)
         )
-    return artifacts
+    return artifacts, skip_notes
 
 
 async def run_sandbox_task(task: str, progress_hooks=None) -> SandboxResult:
@@ -510,10 +589,13 @@ async def run_sandbox_task(task: str, progress_hooks=None) -> SandboxResult:
     output dir before teardown and return SandboxResult(ok=False,
     error="timeout", artifacts=<recovered>) instead — recovery failures are
     swallowed, since it's strictly better-than-nothing on top of today's
-    "discard everything" behavior. Every other error (e.g.
-    ModelBehaviorError, MaxTurnsExceeded, a sandbox that's unavailable)
-    still propagates to the caller unchanged: those are run/configuration
-    failures with no verified-good artifact behind them.
+    "discard everything" behavior. The same applies to MaxTurnsExceeded
+    (error="max_turns") and ModelBehaviorError/ModelRefusalError
+    (error="model_error") — see SandboxResult and _failure_result. Every
+    OTHER error (a sandbox that's unavailable, UserError, a dead
+    container/transport) still propagates to the caller unchanged: those
+    are infra/configuration failures the sandbox itself can't recover from,
+    not a task that simply ran out of budget.
     """
     client = build_sandbox_client()
     session = await _create_sandbox_session(client)
@@ -534,19 +616,44 @@ async def run_sandbox_task(task: str, progress_hooks=None) -> SandboxResult:
                 timeout=sandbox_timeout(),
             )
         except asyncio.TimeoutError:
-            print("Sandbox: task timed out, attempting best-effort artifact recovery")
-            artifacts: list[SandboxArtifact] = []
-            try:
-                artifacts = await asyncio.wait_for(
-                    _collect_artifacts(session, out_dir),
-                    timeout=SANDBOX_RECOVERY_TIMEOUT_SECONDS,
-                )
-            except Exception as e:
-                print(f"Sandbox: artifact recovery after timeout failed: {e}")
-            return SandboxResult(text="", artifacts=artifacts, ok=False, error="timeout")
+            return await _failure_result(session, out_dir, "timeout")
+        except MaxTurnsExceeded:
+            return await _failure_result(session, out_dir, "max_turns")
+        except (ModelBehaviorError, ModelRefusalError) as e:
+            return await _failure_result(session, out_dir, "model_error", str(e))
         final_output = run_result.final_output
         text = final_output if isinstance(final_output, str) else str(final_output)
-        artifacts = await _collect_artifacts(session, out_dir)
-        return SandboxResult(text=text, artifacts=artifacts)
+        artifacts, skip_notes = await _collect_artifacts(session, out_dir)
+        return SandboxResult(text=text, artifacts=artifacts, skipped_artifacts=skip_notes)
     finally:
         await _delete_sandbox_session(client, session)
+
+
+async def _failure_result(
+    session, out_dir: str | None, error: str, detail: str | None = None
+) -> SandboxResult:
+    """Builds the SandboxResult for a run stopped before it produced a
+    final report (timeout / max_turns / model_error — see SandboxResult).
+
+    The container is still alive at this point, so we make a bounded,
+    best-effort attempt to recover whatever was already saved under out_dir
+    before the caller tears it down; recovery failures are swallowed, since
+    it's strictly better-than-nothing on top of returning no artifacts at
+    all. `detail` (e.g. the ModelBehaviorError message) is logged only —
+    never put in SandboxResult.text or shown to the outer model, which
+    should be told to retry with a clearer task, not fed the raw error.
+    """
+    print(f"Sandbox: run stopped ({error}), attempting best-effort artifact recovery"
+          + (f": {detail}" if detail else ""))
+    artifacts: list[SandboxArtifact] = []
+    skip_notes: list[str] = []
+    try:
+        artifacts, skip_notes = await asyncio.wait_for(
+            _collect_artifacts(session, out_dir),
+            timeout=SANDBOX_RECOVERY_TIMEOUT_SECONDS,
+        )
+    except Exception as e:
+        print(f"Sandbox: artifact recovery after {error} failed: {e}")
+    return SandboxResult(
+        text="", artifacts=artifacts, ok=False, error=error, skipped_artifacts=skip_notes
+    )

@@ -7,12 +7,20 @@ from PIL import Image
 # further down (Ollama cannot decode HEIF), so format detection just needs to work.
 pillow_heif.register_heif_opener()
 from classes.text_llm_handler import TextLLMHandler
-from classes.response_filter import filter_response as clean_response
+from classes.response_filter import (
+    filter_response as clean_response,
+    format_thinking_for_discord,
+)
 from classes.metrics import observe_response_generation
 from classes.message_queue import get_channel_lock, in_flight_hint
 
 # Max image attachments forwarded to the LLM per message (keeps prompts a sane size).
 MAX_IMAGES_PER_MESSAGE = 3
+
+# 1/0: send the model's <think> reasoning to Discord, collapsed behind a
+# spoiler-hidden code block (default: off — the reasoning is dropped).
+# Set to 1/true to send it as spoiler-hidden follow-up message(s).
+SHOW_THINKING = os.environ.get("SHOW_THINKING", "0").lower() not in ("0", "false")
 
 # Formats Ollama's image decoder can actually handle (Go's image/* + a few extras).
 # Anything else (e.g. WebP) is re-encoded to PNG before being sent.
@@ -222,7 +230,23 @@ class MessageHandler:
             await self.message.channel.send(chunk)
             if i < last:
                 await asyncio.sleep(1)
-        
+
+
+    async def handle_thinking_send(self, thinking):
+        # Sent as follow-up message(s) after the answer, each a spoiler-hidden
+        # code block (closed by default - click to reveal), instead of being
+        # discarded like the rest of the <think> block.
+        chunks = format_thinking_for_discord(thinking)
+        if not chunks:
+            return
+        await self.message.channel.send("-# Reasoning (click to expand):")
+        last = len(chunks) - 1
+        for i, chunk in enumerate(chunks):
+            await self.message.channel.send(chunk)
+            if i < last:
+                await asyncio.sleep(1)
+
+
 
 
     async def handle_message(self):
@@ -257,12 +281,29 @@ class MessageHandler:
         ollama = TextLLMHandler(self.messages, self.message.guild.id, self.message, self.attachment_refs)
         response = await ollama.generate()
 
+        # generate() collects the reasoning itself: our llama.cpp server
+        # returns it in reasoning_content, not as think tags inside the
+        # answer, so it is gone from `response` by the time we get here.
+        # Read the attribute directly (no getattr default) so dropping it
+        # from TextLLMHandler breaks a test instead of silently killing the
+        # feature again.
+        thinking = ollama.reasoning if SHOW_THINKING else ""
+
         if response == "Error":
+            # The run broke part-way (e.g. it ran out of turns chaining tool
+            # calls). Its tools have already posted their embeds and files,
+            # so a bare ❌ reads as "the tool worked but the bot went quiet" —
+            # send the reasoning it did produce so the failure is legible.
             await self.message.add_reaction('❌')
+            if thinking:
+                async with get_channel_lock(self.message.channel.id):
+                    await self.handle_thinking_send(thinking)
         else:
             response = self.filter_response(response)
             # 3) Send under the lock: serializes the chunked replies of
             #    concurrent same-channel handles (no interleaved chunks).
             async with get_channel_lock(self.message.channel.id):
                 await self.handle_message_send(response)
+                if thinking:
+                    await self.handle_thinking_send(thinking)
         observe_response_generation(self.message.guild.id, time.monotonic() - start)

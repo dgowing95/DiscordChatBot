@@ -10,7 +10,9 @@ data:
   LLM_PASS: {{ .Values.llm_pass }}
   MODEL: {{ .Values.model }}
   REASONING_EFFORT: {{ .Values.reasoningEffort | quote }}
+  LLM_MAX_TURNS: {{ .Values.llmMaxTurns | toString | quote }}
   MSG_HISTORY_LIMIT: {{ .Values.message_history | toString | quote }}
+  SHOW_THINKING: {{ .Values.showThinking | quote }}
   # Queue concurrency: worker task count + bounded queue size (see core/main.py)
   WORKER_COUNT: {{ .Values.worker_count | toString | quote }}
   QUEUE_MAX_SIZE: {{ .Values.queue_max_size | toString | quote }}

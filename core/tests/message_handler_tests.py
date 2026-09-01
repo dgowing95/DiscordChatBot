@@ -290,6 +290,7 @@ async def test_handle_message_scoped_lock_generates_concurrently_sends_serially(
 
         def __init__(self, messages, guild_id, original_message, attachment_refs=None):
             self.original_message = original_message
+            self.reasoning = ""
 
         async def generate(self):
             mid = self.original_message.id
@@ -341,6 +342,7 @@ async def test_handle_message_appends_in_flight_hint_to_prompt():
     class _FakeLLM:
         def __init__(self, messages, guild_id, original_message, attachment_refs=None):
             captured["prompt"] = messages
+            self.reasoning = ""
 
         async def generate(self):
             return "ok"
@@ -373,6 +375,7 @@ async def test_handle_message_no_hint_when_channel_idle():
     class _FakeLLM:
         def __init__(self, messages, guild_id, original_message, attachment_refs=None):
             captured["prompt"] = messages
+            self.reasoning = ""
 
         async def generate(self):
             return "ok"
@@ -387,3 +390,234 @@ async def test_handle_message_no_hint_when_channel_idle():
 
     assert len(captured["prompt"]) == 1  # nothing appended
     assert captured["prompt"][0]["content"] == "hello"
+
+
+# --------------------------- reasoning follow-up (SHOW_THINKING) --------------------------
+
+def _reasoning_llm(reasoning, answer="the answer"):
+    """A TextLLMHandler stand-in that reports reasoning the way the real one
+    does: as an attribute set during generate(), NOT as think tags inside
+    the returned answer (our llama.cpp server strips those out into
+    reasoning_content, so the answer text never carries them)."""
+
+    class _FakeLLM:
+        def __init__(self, messages, guild_id, original_message, attachment_refs=None):
+            self.reasoning = ""
+
+        async def generate(self):
+            self.reasoning = reasoning
+            return answer
+
+    return _FakeLLM
+
+
+async def _run_with_llm(fake_llm, channel_id, sends):
+    handler = _handled(
+        _handler(), _llm_message(30, channel_id),
+        lambda h: setattr(h, "messages", []),
+    )
+    handler.client.user.id = 1234
+    handler.message.channel.send = AsyncMock(side_effect=lambda text, *a, **k: sends.append(text))
+    handler.message.add_reaction = AsyncMock()
+    with patch("core.classes.message_handler.TextLLMHandler", fake_llm):
+        await handler.handle_message()
+    return handler
+
+
+@pytest.mark.asyncio
+async def test_handle_message_sends_out_of_band_reasoning_as_spoiler():
+    """Regression: the reasoning arrives on the handler, not in the answer
+    text. Reading it off the response string instead (as extract_thinking
+    did) silently sent nothing at all."""
+    sends = []
+    with patch("core.classes.message_handler.SHOW_THINKING", True):
+        await _run_with_llm(_reasoning_llm("i reasoned about it"), 300, sends)
+
+    assert sends[0] == "the answer"
+    assert sends[1].startswith("-# Reasoning")
+    assert "i reasoned about it" in sends[2]
+    assert sends[2].startswith("||```\n") and sends[2].endswith("\n```||")
+
+
+@pytest.mark.asyncio
+async def test_handle_message_sends_no_reasoning_when_show_thinking_off():
+    sends = []
+    with patch("core.classes.message_handler.SHOW_THINKING", False):
+        await _run_with_llm(_reasoning_llm("i reasoned about it"), 301, sends)
+
+    assert sends == ["the answer"]
+
+
+@pytest.mark.asyncio
+async def test_handle_message_sends_no_reasoning_when_model_did_not_think():
+    sends = []
+    with patch("core.classes.message_handler.SHOW_THINKING", True):
+        await _run_with_llm(_reasoning_llm(""), 302, sends)
+
+    assert sends == ["the answer"]
+
+
+# --------------------------- TextLLMHandler.generate reasoning capture --------------------------
+#
+# The other half of the pipeline: generate() must pull the reasoning off the
+# run result, because it is NOT in the answer string it returns.
+
+def _generate_handler(run_result):
+    from core.classes.text_llm_handler import TextLLMHandler
+
+    handler = TextLLMHandler.__new__(TextLLMHandler)  # __init__ needs Redis
+    handler.messages = [{"role": "user", "content": "hi"}]
+    handler.guild_id = 1
+    handler.reasoning = ""
+    handler.system = "a bot"
+    handler.agent = MagicMock()
+    handler.attachment_refs = []
+    handler.original_message = _llm_message(40)
+    handler.user_memory = MagicMock()
+    handler.user_memory.get = AsyncMock(return_value=[])
+    handler.get_settings = AsyncMock()
+    handler.get_client = AsyncMock()
+    return handler
+
+
+def _run_result(final_output, items=()):
+    result = MagicMock()
+    result.final_output = final_output
+    result.new_items = list(items)
+    return result
+
+
+async def _generate(run_result):
+    handler = _generate_handler(run_result)
+    with patch("core.classes.text_llm_handler.Runner") as runner, \
+         patch("core.classes.text_llm_handler.get_current_datetime", AsyncMock(return_value="now")):
+        runner.run = AsyncMock(return_value=run_result)
+        answer = await handler.generate()
+    return answer, handler.reasoning
+
+
+@pytest.mark.asyncio
+async def test_generate_captures_reasoning_from_run_items():
+    """The llama.cpp shape: reasoning_content becomes its own run item and
+    the answer text is clean, so the run items are the only source."""
+    from core.tests.response_filter_tests import _reasoning_item
+
+    answer, reasoning = await _generate(
+        _run_result("the clean answer", [_reasoning_item(summary=["thought hard"])])
+    )
+    assert answer == "the clean answer"
+    assert reasoning == "thought hard"
+
+
+@pytest.mark.asyncio
+async def test_generate_falls_back_to_inline_think_tags():
+    """A server on --reasoning-format none leaves the reasoning inline and
+    emits no reasoning item; the tag path still has to work."""
+    from core.tests.response_filter_tests import _think_open, _think_close
+
+    text = _think_open(tab=False) + "inline thought" + _think_close(tab=False) + "the answer"
+    answer, reasoning = await _generate(_run_result(text))
+    assert reasoning == "inline thought"
+    assert answer == text  # filtering the tags out stays message_handler's job
+
+
+@pytest.mark.asyncio
+async def test_generate_leaves_reasoning_empty_when_model_did_not_think():
+    answer, reasoning = await _generate(_run_result("just an answer"))
+    assert answer == "just an answer"
+    assert reasoning == ""
+
+
+# --------------------------- reasoning survives a failed run --------------------------
+#
+# A run that dies part-way (MaxTurnsExceeded while chaining tool calls is the
+# common one) has already let its tools post embeds/files to the channel. The
+# reasoning it produced before breaking must still reach the user, or the ❌
+# reads as "the tool call worked but the bot went quiet".
+
+@pytest.mark.asyncio
+async def test_generate_recovers_reasoning_from_a_failed_run():
+    from core.tests.response_filter_tests import _reasoning_item
+    from agents import MaxTurnsExceeded
+
+    handler = _generate_handler(None)
+    exc = MaxTurnsExceeded("Max turns (20) exceeded")
+    exc.run_data = MagicMock()
+    exc.run_data.new_items = [_reasoning_item(summary=["i kept calling the sandbox"])]
+
+    with patch("core.classes.text_llm_handler.Runner") as runner, \
+         patch("core.classes.text_llm_handler.get_current_datetime", AsyncMock(return_value="now")), \
+         patch("core.classes.text_llm_handler.inc_llm_error", MagicMock()):
+        runner.run = AsyncMock(side_effect=exc)
+        answer = await handler.generate()
+
+    assert answer == "Error"  # sentinel unchanged
+    assert handler.reasoning == "i kept calling the sandbox"
+
+
+@pytest.mark.asyncio
+async def test_generate_survives_a_failure_carrying_no_run_data():
+    from agents import MaxTurnsExceeded
+
+    handler = _generate_handler(None)
+    with patch("core.classes.text_llm_handler.Runner") as runner, \
+         patch("core.classes.text_llm_handler.get_current_datetime", AsyncMock(return_value="now")), \
+         patch("core.classes.text_llm_handler.inc_llm_error", MagicMock()):
+        runner.run = AsyncMock(side_effect=MaxTurnsExceeded("boom"))
+        answer = await handler.generate()
+
+    assert answer == "Error"
+    assert handler.reasoning == ""
+
+
+@pytest.mark.asyncio
+async def test_generate_passes_an_explicit_max_turns():
+    """The SDK's own default is 10, which a chained tool run overruns."""
+    from core.classes.text_llm_handler import llm_max_turns
+
+    handler = _generate_handler(None)
+    with patch("core.classes.text_llm_handler.Runner") as runner, \
+         patch("core.classes.text_llm_handler.get_current_datetime", AsyncMock(return_value="now")):
+        runner.run = AsyncMock(return_value=_run_result("ok"))
+        await handler.generate()
+
+    assert runner.run.await_args.kwargs["max_turns"] == llm_max_turns()
+    assert llm_max_turns() > 10
+
+
+@pytest.mark.asyncio
+async def test_handle_message_sends_reasoning_even_when_the_run_failed():
+    sends = []
+
+    class _FailingLLM:
+        def __init__(self, messages, guild_id, original_message, attachment_refs=None):
+            self.reasoning = ""
+
+        async def generate(self):
+            self.reasoning = "i was thinking when it broke"
+            return "Error"
+
+    with patch("core.classes.message_handler.SHOW_THINKING", True):
+        handler = await _run_with_llm(_FailingLLM, 310, sends)
+
+    handler.message.add_reaction.assert_awaited_with('❌')
+    assert sends[0].startswith("-# Reasoning")
+    assert "i was thinking when it broke" in sends[1]
+
+
+@pytest.mark.asyncio
+async def test_handle_message_failed_run_with_no_reasoning_just_reacts():
+    sends = []
+
+    class _FailingLLM:
+        def __init__(self, messages, guild_id, original_message, attachment_refs=None):
+            self.reasoning = ""
+
+        async def generate(self):
+            return "Error"
+
+    with patch("core.classes.message_handler.SHOW_THINKING", True):
+        handler = await _run_with_llm(_FailingLLM, 311, sends)
+
+    handler.message.add_reaction.assert_awaited_with('❌')
+    assert sends == []
