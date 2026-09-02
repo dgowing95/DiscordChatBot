@@ -3,14 +3,7 @@
 Small FastAPI app run as its own pod/container (separate from the bot core):
 
     POST /generate   {"prompt": "..."}  ->  image/png          (text-to-image)
-    POST /generate   {"prompt": "...", "image": "<base64>", "strength": 0.6}
-                    ->  image/png          (image-to-image / editing)
     GET  /health     ->  200 once the model is loaded, 503 while loading
-
-The img2img pipeline is derived from the SAME loaded components (shared
-unet/vae/text_encoder; only the scheduler is cloned), so it costs no extra
-model download, CPU RAM or VRAM — and it runs fewer steps than txt2img
-(int(steps * (1 - strength))).
 
 Design goals:
   * As little VRAM as possible: fp16 weights and model CPU offload so only
@@ -37,40 +30,29 @@ Configuration (all env vars optional):
   IMAGE_OFFLOAD    model | sequential | none (default: model)
   IMAGE_QUEUE_SIZE max queued requests, then 503 (default: 16)
   IMAGE_SEED       fixed seed for reproducible images (default: random)
-  IMAGE_EDIT_STRENGTH  default img2img strength 0<s<1 (default: 0.5)
   HF_HOME          model cache dir (set to /models in k8s/compose; the model
                    is downloaded once and survives redeploys on the volume)
 """
 import asyncio
-import base64
-import copy
 import io
 import os
 from contextlib import asynccontextmanager
-from typing import Optional
 
 import torch
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
-from PIL import Image
 
 from diffusers import (
     DiffusionPipeline,
     DPMSolverMultistepScheduler,
-    StableDiffusionImg2ImgPipeline,
     StableDiffusionPipeline,
     StableDiffusionXLPipeline,
-    StableDiffusionXLImg2ImgPipeline,
 )
 
 
 class GenerateRequest(BaseModel):
     prompt: str
-    # base64-encoded source image; when set, the request becomes img2img
-    image: Optional[str] = None
-    # 0 < strength < 1: how far the result moves from the source image
-    strength: Optional[float] = None
 
 
 def _env_positive_int(name: str, default: int) -> int:
@@ -98,18 +80,11 @@ HEIGHT = _env_positive_int("IMAGE_HEIGHT", 512)
 OFFLOAD = os.environ.get("IMAGE_OFFLOAD", "model").strip().lower()
 QUEUE_SIZE = _env_positive_int("IMAGE_QUEUE_SIZE", 16)
 SEED = _env_optional_int("IMAGE_SEED")
-try:
-    EDIT_STRENGTH = float(os.environ.get("IMAGE_EDIT_STRENGTH", "0.5"))
-    if not 0.0 < EDIT_STRENGTH < 1.0:
-        EDIT_STRENGTH = 0.5
-except ValueError:
-    EDIT_STRENGTH = 0.5
 
 if os.environ.get("HF_HOME"):
     os.makedirs(os.environ["HF_HOME"], exist_ok=True)
 
 pipe = None
-img2img_pipe = None
 ready = False
 
 
@@ -166,34 +141,9 @@ def _hf_single_file_path(repo_id: str):
     return hf_hub_download(repo_id=repo_id, filename=name)
 
 
-def build_img2img_pipeline(base):
-    """Derive the img2img pipeline from the already-loaded txt2img components.
-
-    Shares the exact same unet/vae/text_encoder modules (no extra weights,
-    CPU RAM or VRAM); only the scheduler is copied (deepcopy — the diffusers
-    schedulers have no clone() method, and deepcopy of a scheduler config
-    object is cheap and side-effect free). Safe because the single-worker
-    queue guarantees only one pipeline is ever in flight.
-    Returns None for model families without a matching img2img class.
-    """
-    try:
-        components = dict(base.components)
-        components["scheduler"] = copy.deepcopy(base.scheduler)
-        if isinstance(base, StableDiffusionXLPipeline):
-            cls = StableDiffusionXLImg2ImgPipeline
-        else:
-            cls = StableDiffusionImg2ImgPipeline
-        built = cls(**components)
-        print("img2img pipeline ready (shares components with the txt2img pipeline)")
-        return built
-    except Exception as e:
-        print(f"img2img not available for model {MODEL!r}: {e}")
-        return None
-
-
 def load_pipeline():
     """Load the diffusion pipeline once, at boot (blocking)."""
-    global pipe, img2img_pipe, ready
+    global pipe, ready
     has_cuda = torch.cuda.is_available()
     if not has_cuda:
         print("No CUDA device found; running on CPU (slow, dev only)")
@@ -254,28 +204,17 @@ def load_pipeline():
     else:
         p = p.to("cuda" if has_cuda else "cpu")
     pipe = p
-    img2img_pipe = build_img2img_pipeline(p)
     ready = True
     print("Diffusion pipeline ready")
 
 
-def generate_bytes(prompt: str, source: bytes | None, strength: float) -> bytes:
-    """Blocking single-image generation; runs in a worker thread.
-
-    source=None -> text-to-image; otherwise image-to-image (source is
-    re-encoded to the output size, so input dimensions are irrelevant)."""
+def generate_bytes(prompt: str) -> bytes:
+    """Blocking single-image generation (text-to-image); runs in a worker thread."""
     assert pipe is not None, "pipeline not loaded yet"
     kwargs = dict(prompt=prompt, num_inference_steps=STEPS, width=WIDTH, height=HEIGHT)
     if SEED is not None:
         kwargs["generator"] = torch.Generator().manual_seed(SEED)
-    if source is None:
-        result = pipe(**kwargs)
-    else:
-        assert img2img_pipe is not None, "img2img pipeline not available"
-        img = Image.open(io.BytesIO(source)).convert("RGB")
-        if (img.width, img.height) != (WIDTH, HEIGHT):
-            img = img.resize((WIDTH, HEIGHT), Image.Resampling.LANCZOS)
-        result = img2img_pipe(image=img, strength=strength, **kwargs)
+    result = pipe(**kwargs)
     image = result.images[0]
     buf = io.BytesIO()
     image.save(buf, format="PNG")
@@ -288,9 +227,9 @@ def generate_bytes(prompt: str, source: bytes | None, strength: float) -> bytes:
 async def worker(queue: asyncio.Queue):
     """The single consumer: images are generated strictly one at a time."""
     while True:
-        prompt, source, strength, future = await queue.get()
+        prompt, future = await queue.get()
         try:
-            data = await asyncio.to_thread(generate_bytes, prompt, source, strength)
+            data = await asyncio.to_thread(generate_bytes, prompt)
             future.set_result(data)
         except Exception as e:
             future.set_exception(e)
@@ -327,40 +266,16 @@ async def generate(request: GenerateRequest):
     if not prompt:
         raise HTTPException(status_code=422, detail="prompt must not be empty")
 
-    source = None
-    if request.image:
-        try:
-            source = base64.b64decode(request.image, validate=True)
-        except Exception:
-            raise HTTPException(status_code=422, detail="image must be valid base64")
-        if not source:
-            raise HTTPException(status_code=422, detail="image is empty")
-        try:
-            Image.open(io.BytesIO(source)).verify()
-        except Exception:
-            raise HTTPException(status_code=422, detail="image is not a decodable image")
-        if img2img_pipe is None:
-            raise HTTPException(
-                status_code=503,
-                detail="image-to-image is not supported for the configured model",
-            )
-
-    strength = EDIT_STRENGTH if request.strength is None else float(request.strength)
-    if not 0.0 < strength < 1.0:
-        raise HTTPException(status_code=422, detail="strength must be between 0 and 1 (exclusive)")
-
     future = asyncio.get_running_loop().create_future()
     try:
-        queue.put_nowait((prompt, source, strength, future))
+        queue.put_nowait((prompt, future))
     except asyncio.QueueFull:
         raise HTTPException(status_code=503, detail="image queue is full, try again later")
-    kind = "img2img " if source is not None else ""
-    print(f"Queued {kind}image generation (queue depth {queue.qsize()}): {prompt[:80]!r}")
+    print(f"Queued image generation (queue depth {queue.qsize()}): {prompt[:80]!r}")
     try:
         data = await future
     except Exception as e:
         print(f"Image generation failed: {e}")
         raise HTTPException(status_code=500, detail=f"image generation failed: {e}")
-    kind = "Edited " if source is not None else "Generated "
-    print(f"{kind}image ({len(data)} bytes) for: {prompt[:80]!r}")
+    print(f"Generated image ({len(data)} bytes) for: {prompt[:80]!r}")
     return Response(content=data, media_type="image/png")

@@ -34,7 +34,7 @@ def test_slow_tool_names_match_tool_functions():
     # These must stay in sync with the FunctionTool names in
     # core/classes/tool_functions.py — the registry only tracks the long
     # tools automatically.
-    assert mq.SLOW_TOOL_NAMES == {"run_code_sandbox", "generate_image", "edit_image"}
+    assert mq.SLOW_TOOL_NAMES == {"run_code_sandbox", "generate_image"}
     for name in mq.SLOW_TOOL_NAMES:
         assert name in mq.TOOL_DISPLAY, f"{name} needs a display label"
 

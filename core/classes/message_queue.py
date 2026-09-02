@@ -43,13 +43,12 @@ DEFAULT_QUEUE_MAX_SIZE = 10
 # must match the FunctionTool names in tool_functions.py. The registry is
 # generic (register/unregister work for any label); this set only drives
 # which tools get tracked automatically by the metrics hooks.
-SLOW_TOOL_NAMES = frozenset({"run_code_sandbox", "generate_image", "edit_image"})
+SLOW_TOOL_NAMES = frozenset({"run_code_sandbox", "generate_image"})
 
 # Human-facing labels for the hint (emoji + short name).
 TOOL_DISPLAY = {
     "run_code_sandbox": "🐳 code sandbox",
     "generate_image": "🎨 image generation",
-    "edit_image": "🖌️ image editing",
 }
 
 # Source text (the tool's argument: sandbox task / image prompt) kept per

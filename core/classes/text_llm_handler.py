@@ -82,7 +82,6 @@ class ToolMetricsHooks(RunHooks):
     _SOURCE_FIELDS = {
         "run_code_sandbox": "task",
         "generate_image": "prompt",
-        "edit_image": "prompt",
     }
 
     def __init__(self, guild_id):
@@ -158,7 +157,7 @@ class ToolMetricsHooks(RunHooks):
 
 class TextLLMHandler:
 
-    def __init__(self, messages, guild_id, original_message, attachment_refs=None, client=None):
+    def __init__(self, messages, guild_id, original_message, client=None):
         self.original_message = original_message
         self.messages = messages
         self.guild_id = guild_id
@@ -167,10 +166,6 @@ class TextLLMHandler:
         # ask_user tool for client.wait_for(). Optional/None for callers
         # (and tests) that don't need sandbox HITL.
         self.client = client
-        # Short labels -> real CDN URLs for attached images (see
-        # MessageHandler._collect_attachment_refs). The edit_image tool
-        # resolves a label here instead of the LLM copying a full signed URL.
-        self.attachment_refs = attachment_refs or []
         self.config = configManager()
         self.user_memory = UserMemory(original_message.author.id, guild_id)
         # Filled in by generate(): the model's internal reasoning for this
@@ -228,10 +223,10 @@ class TextLLMHandler:
             clear_memories,
             change_personality,
         ]
-        # Image tools only exist when the diffusion service is enabled
+        # The image tool only exists when the diffusion service is enabled
         # (IMAGE_GEN_ENABLED; set from the helm chart's diffusion.enabled).
         if image_generation_enabled():
-            tools.extend([generate_image, edit_image])
+            tools.append(generate_image)
 
         # Sandbox tool (nested SandboxAgent in a throwaway Docker container);
         # needs the Docker socket mounted (SANDBOX_ENABLED; chart sandbox.enabled).
@@ -258,7 +253,6 @@ class TextLLMHandler:
         "user_id": self.original_message.author.id,
         "guild_id": self.guild_id,
         "original_message": self.original_message,
-        "attachment_refs": self.attachment_refs,
         "discord_client": self.client,
         "redis_save_tool_calls": 0,
         "personality_tool_calls": 0,

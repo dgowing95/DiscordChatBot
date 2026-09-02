@@ -266,7 +266,6 @@ def _handled(handler, msg, set_messages):
     """Wire a _handler() instance to a message and a fake (sync-setting) build."""
     handler.message = msg
     handler.client = MagicMock()
-    handler.attachment_refs = []  # normally set by build_messages
 
     async def _build():
         set_messages(handler)
@@ -288,7 +287,7 @@ async def test_handle_message_scoped_lock_generates_concurrently_sends_serially(
     class _FakeLLM:
         gen_events = []  # (msg_id, phase, monotonic)
 
-        def __init__(self, messages, guild_id, original_message, attachment_refs=None, client=None):
+        def __init__(self, messages, guild_id, original_message, client=None):
             self.original_message = original_message
             self.reasoning = ""
 
@@ -340,7 +339,7 @@ async def test_handle_message_appends_in_flight_hint_to_prompt():
     captured = {}
 
     class _FakeLLM:
-        def __init__(self, messages, guild_id, original_message, attachment_refs=None, client=None):
+        def __init__(self, messages, guild_id, original_message, client=None):
             captured["prompt"] = messages
             self.reasoning = ""
 
@@ -373,7 +372,7 @@ async def test_handle_message_no_hint_when_channel_idle():
     captured = {}
 
     class _FakeLLM:
-        def __init__(self, messages, guild_id, original_message, attachment_refs=None, client=None):
+        def __init__(self, messages, guild_id, original_message, client=None):
             captured["prompt"] = messages
             self.reasoning = ""
 
@@ -400,7 +399,7 @@ async def test_handle_message_passes_client_to_text_llm_handler():
     captured = {}
 
     class _FakeLLM:
-        def __init__(self, messages, guild_id, original_message, attachment_refs=None, client=None):
+        def __init__(self, messages, guild_id, original_message, client=None):
             captured["client"] = client
             self.reasoning = ""
 
@@ -429,7 +428,7 @@ async def test_handle_message_sends_final_reply_to_sandbox_thread_when_set():
     thread.send = AsyncMock()
 
     class _FakeLLM:
-        def __init__(self, messages, guild_id, original_message, attachment_refs=None, client=None):
+        def __init__(self, messages, guild_id, original_message, client=None):
             self.reasoning = ""
             self.sandbox_thread = thread
 
@@ -455,7 +454,7 @@ async def test_handle_message_sends_reasoning_to_sandbox_thread_when_set():
     thread.send = AsyncMock()
 
     class _FakeLLM:
-        def __init__(self, messages, guild_id, original_message, attachment_refs=None, client=None):
+        def __init__(self, messages, guild_id, original_message, client=None):
             self.reasoning = ""
             self.sandbox_thread = thread
 
@@ -482,7 +481,7 @@ async def test_handle_message_sends_reasoning_to_sandbox_thread_when_set():
 @pytest.mark.asyncio
 async def test_handle_message_falls_back_to_original_channel_without_sandbox_thread():
     class _FakeLLM:
-        def __init__(self, messages, guild_id, original_message, attachment_refs=None, client=None):
+        def __init__(self, messages, guild_id, original_message, client=None):
             self.reasoning = ""
             self.sandbox_thread = None
 
@@ -510,7 +509,7 @@ def _reasoning_llm(reasoning, answer="the answer"):
     reasoning_content, so the answer text never carries them)."""
 
     class _FakeLLM:
-        def __init__(self, messages, guild_id, original_message, attachment_refs=None, client=None):
+        def __init__(self, messages, guild_id, original_message, client=None):
             self.reasoning = ""
 
         async def generate(self):
@@ -581,7 +580,6 @@ def _generate_handler(run_result):
     handler.client = MagicMock()
     handler.system = "a bot"
     handler.agent = MagicMock()
-    handler.attachment_refs = []
     handler.original_message = _llm_message(40)
     handler.user_memory = MagicMock()
     handler.user_memory.get = AsyncMock(return_value=[])
@@ -760,7 +758,7 @@ async def test_handle_message_sends_reasoning_even_when_the_run_failed():
     sends = []
 
     class _FailingLLM:
-        def __init__(self, messages, guild_id, original_message, attachment_refs=None, client=None):
+        def __init__(self, messages, guild_id, original_message, client=None):
             self.reasoning = ""
 
         async def generate(self):
@@ -780,7 +778,7 @@ async def test_handle_message_failed_run_with_no_reasoning_just_reacts():
     sends = []
 
     class _FailingLLM:
-        def __init__(self, messages, guild_id, original_message, attachment_refs=None, client=None):
+        def __init__(self, messages, guild_id, original_message, client=None):
             self.reasoning = ""
 
         async def generate(self):

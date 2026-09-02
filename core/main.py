@@ -100,31 +100,6 @@ async def register_commands():
                 attachments=[discord.File(io.BytesIO(image_bytes), filename="generated-image.png")],
             )
 
-        @command_tree.command(name="edit_image", description="Edit an image with a text prompt (image-to-image)")
-        async def edit_image_cmd(
-            ctx,
-            image: discord.Attachment,
-            prompt: str,
-            strength: discord.app_commands.Range[float, 0.1, 0.9] | None = None,
-        ):
-            await ctx.response.defer()
-            print(f"Slash command: editing image with prompt: {prompt}")
-            try:
-                source = await image.read()
-                image_bytes = await generate_image_from_api(
-                    prompt, image=source, strength=strength
-                )
-            except Exception as e:
-                print(f"Image editing failed: {e}")
-                await ctx.edit_original_response(
-                    content="❌ Image editing failed — the image service may be down or busy, or the image could not be read. Try again later."
-                )
-                return
-            await ctx.edit_original_response(
-                content="🎨",
-                attachments=[discord.File(io.BytesIO(image_bytes), filename="edited-image.png")],
-            )
-
     synced_commands = await command_tree.sync()
     for synced_command in synced_commands:
         print(f"Command '{synced_command.name}' synced")

@@ -37,9 +37,9 @@ core/                  # the main bot (the app that runs in production)
   tests/               # pytest suite (see Testing below)
   Dockerfile           # python:3.13-slim image, runs main.py
   requirements.txt
-diffusionservice/      # standalone image service (text->image AND image->image/editing;
-                       #   FastAPI + diffusers, queued single-worker, sd-turbo by default,
-                       #   CPU-offloaded for low VRAM; img2img shares the loaded components)
+diffusionservice/      # standalone image service (text->image; FastAPI + diffusers,
+                       #   queued single-worker, sd-turbo by default,
+                       #   CPU-offloaded for low VRAM)
 charts/dis-ai-bot/     # Helm chart
 docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusion (GPU) + core (mounts ./core)
 .env / .env.example    # environment configuration (never commit .env)
@@ -102,22 +102,14 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
 5. Per-guild settings live in Redis under the `dcb` namespace; per-user memories under
    `guild:<id>:user:<id>`.
 6. Image generation: when enabled (`IMAGE_GEN_ENABLED`, set from the chart's
-   `diffusion.enabled`), the agent gets two tools — `generate_image(prompt)` and
-   `edit_image(prompt, image_ref?, strength?)` — plus `/generate_image <prompt>`
-   and `/edit_image <attachment> <prompt> [strength]` slash commands (registered
-   in `main.py`). All of them POST to the standalone diffusion service
-   (`DIFFUSION_URL/generate`), which runs in its own pod/container, queues
-   requests (one image at a time) and replies with a PNG that is sent to the
-   Discord channel. `edit_image`/`/edit_image` send the source image as base64
-   (img2img; the service derives its img2img pipeline from the SAME loaded
-   components, so no extra model/RAM/VRAM). `build_messages()` lists attached
-   images by a short label (`[1]`, `[2]`, …) — NOT the signed CDN URL, because
-   the model corrupts the 64-char hex signature when copying it into a tool
-   arg (the fetch then 404s). `edit_image` resolves `image_ref` (a label, or
-   "latest") to the real URL via the `attachment_refs` run context. Generation
-   settings (`IMAGE_MODEL`, `IMAGE_STEPS`, `IMAGE_WIDTH`/`HEIGHT`, `IMAGE_OFFLOAD`,
-   `IMAGE_QUEUE_SIZE`, `IMAGE_EDIT_STRENGTH`) live in the same configmap/env the
-   diffusion pod reads.
+   `diffusion.enabled`), the agent gets a `generate_image(prompt)` tool plus a
+   `/generate_image <prompt>` slash command (registered in `main.py`). Both POST
+   to the standalone diffusion service (`DIFFUSION_URL/generate`), which runs in
+   its own pod/container, queues requests (one image at a time) and replies with
+   a PNG that is sent to the Discord channel. It is text-to-image only; there is
+   no image-editing path. Generation settings (`IMAGE_MODEL`, `IMAGE_STEPS`,
+   `IMAGE_WIDTH`/`HEIGHT`, `IMAGE_OFFLOAD`, `IMAGE_QUEUE_SIZE`) live in the same
+   configmap/env the diffusion pod reads.
 7. Code sandbox: when enabled (`SANDBOX_ENABLED`, set from the chart's
    `sandbox.enabled`), the agent gets a `run_code_sandbox(task)` tool
    (no slash command). It runs a nested `SandboxAgent` (same LLM as the main
@@ -444,7 +436,6 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
 | `IMAGE_STEPS` / `IMAGE_WIDTH` / `IMAGE_HEIGHT` | generation settings for the diffusion service (defaults: 4 steps, 512x512) |
 | `IMAGE_OFFLOAD` | `model` (default: one pipeline component on GPU at a time, text encoder in CPU RAM) / `sequential` (lowest VRAM, slowest) / `none` (all on GPU) |
 | `IMAGE_QUEUE_SIZE` | max queued image requests in the diffusion service (default 16); over that it returns 503 |
-| `IMAGE_EDIT_STRENGTH` | default img2img strength, 0-1 exclusive: higher = more changes, lower = closer to the original (default 0.5) |
 | `IMAGE_GEN_TIMEOUT` | seconds core waits on the diffusion service (default 300) |
 | `SANDBOX_MODEL` | model id for the nested sandbox agent; empty (default) = the main bot's `MODEL`. Chart: `sandbox.model` |
 | `SANDBOX_LLM_HOST` | base URL of the sandbox agent's LLM (core appends `/v1`); empty (default) = the main `LLM_HOST`. E.g. `https://openrouter.ai/api` for OpenRouter. Chart: `sandbox.llmHost` |

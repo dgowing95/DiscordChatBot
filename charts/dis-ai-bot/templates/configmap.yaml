@@ -26,7 +26,6 @@ data:
   IMAGE_HEIGHT: {{ .Values.diffusion.height | toString | quote }}
   IMAGE_OFFLOAD: {{ .Values.diffusion.offload }}
   IMAGE_QUEUE_SIZE: {{ .Values.diffusion.queueSize | toString | quote }}
-  IMAGE_EDIT_STRENGTH: {{ .Values.diffusion.editStrength | toString | quote }}
   {{- if .Values.diffusion.seed }}
   IMAGE_SEED: {{ .Values.diffusion.seed | toString | quote }}
   {{- end }}

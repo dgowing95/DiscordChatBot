@@ -26,11 +26,10 @@ Metrics (scraped by Prometheus from the /metrics HTTP endpoint):
            Per-agent-tool invocation count / duration / failures (the
            generate_image tool also shows up here; image_generation_seconds
            additionally measures the raw diffusion-service call, including
-           the /generate_image & /edit_image slash commands that bypass the
-           LLM).
+           the /generate_image slash command that bypasses the LLM).
   Histogram discord_bot_image_generation_seconds{mode}
-           Duration of one diffusion-service call, mode = text_to_image |
-           image_to_image.
+           Duration of one diffusion-service call; mode is always
+           text_to_image.
   Gauge    discord_bot_message_queue_size
            Current number of messages waiting on the asyncio queue.
   Counter  discord_bot_message_queue_drops_total{guild_id}

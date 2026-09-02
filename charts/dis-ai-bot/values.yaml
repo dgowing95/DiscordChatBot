@@ -47,9 +47,6 @@ diffusion:
   offload: model
   # Max queued image requests (images are always generated one at a time)
   queueSize: 16
-  # Default image-to-image strength (0-1, exclusive): higher = more changes,
-  # lower = closer to the original
-  editStrength: 0.5
   # Optional: fixed seed for reproducible images (empty = random)
   seed: ""
   # Optional: pin this pod to specific physical GPUs by CDI device name,

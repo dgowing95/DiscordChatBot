@@ -51,9 +51,8 @@ services:
       - llamacpp
       
   diffusion:
-    # Image generation (text -> image and image -> image editing); see
-    # diffusionservice/. Queued (one image at a time), minimal VRAM (sd-turbo +
-    # CPU offload by default; img2img shares the loaded components).
+    # Image generation (text -> image); see diffusionservice/. Queued (one
+    # image at a time), minimal VRAM (sd-turbo + CPU offload by default).
     # Needs a GPU; comment this service out (and set IMAGE_GEN_ENABLED=0 in
     # .env) to run the bot without it.
     build: ./diffusionservice
@@ -74,8 +73,6 @@ services:
       # model | sequential | none — see diffusionservice/main.py
       - IMAGE_OFFLOAD=${IMAGE_OFFLOAD:-model}
       - IMAGE_QUEUE_SIZE=${IMAGE_QUEUE_SIZE:-16}
-      # img2img: 0-1 exclusive, higher = more changes (default 0.5)
-      - IMAGE_EDIT_STRENGTH=${IMAGE_EDIT_STRENGTH:-0.5}
     runtime: nvidia
     deploy:
       resources:
