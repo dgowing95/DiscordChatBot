@@ -196,8 +196,13 @@ class SandboxTranscript:
     queue is bigger, the OLDEST fields are dropped.
     """
 
-    def __init__(self, task: str):
+    def __init__(self, task: str, *, workspace_note: str = ""):
         self._task = " ".join((task or "").split())
+        # One line above the task saying whether this run started from an
+        # empty workspace or resumed the thread's saved one (built by
+        # sandbox_agent.sandbox_workspace_note). Empty renders nothing, so
+        # the no-thread fallback path looks exactly as it did before.
+        self._workspace_note = " ".join((workspace_note or "").split())
         self._blocks: list[_Block] = []
         self._notes: list[str] = []
         self._thinking = False
@@ -317,6 +322,8 @@ class SandboxTranscript:
     def _render_embed(self) -> EmbedSpec:
         title = "🐳 Sandbox"
         description = f"Running in sandbox: {_tail(self._task, DESCRIPTION_CHARS)}"
+        if self._workspace_note:
+            description = f"{self._workspace_note}\n{description}"
         # newest first: keep whole fields while they fit Discord's embed
         # budget; older fields are evicted as a unit so a command never
         # ends up separated from its output
@@ -344,10 +351,10 @@ class SandboxProgressHooks(RunHooks):
     run loop, and a raised hook would abort the sandbox run.
     """
 
-    def __init__(self, channel, task: str, *,
+    def __init__(self, channel, task: str, *, workspace_note: str = "",
                  edit_interval: float = EDIT_INTERVAL_SECONDS):
         self.channel = channel
-        self.transcript = SandboxTranscript(task)
+        self.transcript = SandboxTranscript(task, workspace_note=workspace_note)
         self.edit_interval = edit_interval
         self._message: discord.Message | None = None
         self._dirty = False

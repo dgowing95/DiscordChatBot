@@ -220,29 +220,31 @@ class MessageHandler:
         return clean_response(text_response, mention=str(self.client.user.id))
 
 
-    async def handle_message_send(self, message_content):
+    async def handle_message_send(self, message_content, channel=None):
         from textwrap import wrap
+        channel = channel or self.message.channel
         chunks = wrap(message_content, 2000, break_long_words=False, replace_whitespace=False)
         last = len(chunks) - 1
         for i, chunk in enumerate(chunks):
             if len(chunk) == 0:
                 continue
-            await self.message.channel.send(chunk)
+            await channel.send(chunk)
             if i < last:
                 await asyncio.sleep(1)
 
 
-    async def handle_thinking_send(self, thinking):
+    async def handle_thinking_send(self, thinking, channel=None):
         # Sent as follow-up message(s) after the answer, each a spoiler-hidden
         # code block (closed by default - click to reveal), instead of being
         # discarded like the rest of the <think> block.
+        channel = channel or self.message.channel
         chunks = format_thinking_for_discord(thinking)
         if not chunks:
             return
-        await self.message.channel.send("-# Reasoning (click to expand):")
+        await channel.send("-# Reasoning (click to expand):")
         last = len(chunks) - 1
         for i, chunk in enumerate(chunks):
-            await self.message.channel.send(chunk)
+            await channel.send(chunk)
             if i < last:
                 await asyncio.sleep(1)
 
@@ -278,7 +280,10 @@ class MessageHandler:
                 self.messages.append({"role": "user", "content": hint})
         # 2) LLM run + tool calls UNLOCKED (the slow phase; other messages —
         #    same channel or not — can build/generate concurrently).
-        ollama = TextLLMHandler(self.messages, self.message.guild.id, self.message, self.attachment_refs)
+        ollama = TextLLMHandler(
+            self.messages, self.message.guild.id, self.message, self.attachment_refs,
+            client=self.client,
+        )
         response = await ollama.generate()
 
         # generate() collects the reasoning itself: our llama.cpp server
@@ -288,6 +293,11 @@ class MessageHandler:
         # from TextLLMHandler breaks a test instead of silently killing the
         # feature again.
         thinking = ollama.reasoning if SHOW_THINKING else ""
+        # If run_code_sandbox created/reused a thread this run, the sandbox's
+        # own output already lives there — send the outer agent's reply
+        # there too instead of the original channel, so the conversation
+        # doesn't end up split across two places.
+        target_channel = getattr(ollama, "sandbox_thread", None) or self.message.channel
 
         if response == "Error":
             # The run broke part-way (e.g. it ran out of turns chaining tool
@@ -297,13 +307,13 @@ class MessageHandler:
             await self.message.add_reaction('❌')
             if thinking:
                 async with get_channel_lock(self.message.channel.id):
-                    await self.handle_thinking_send(thinking)
+                    await self.handle_thinking_send(thinking, channel=target_channel)
         else:
             response = self.filter_response(response)
             # 3) Send under the lock: serializes the chunked replies of
             #    concurrent same-channel handles (no interleaved chunks).
             async with get_channel_lock(self.message.channel.id):
-                await self.handle_message_send(response)
+                await self.handle_message_send(response, channel=target_channel)
                 if thinking:
-                    await self.handle_thinking_send(thinking)
+                    await self.handle_thinking_send(thinking, channel=target_channel)
         observe_response_generation(self.message.guild.id, time.monotonic() - start)

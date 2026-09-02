@@ -246,19 +246,28 @@ def in_flight_hint(channel_id: int, now: float | None = None) -> str:
     MessageHandler.build_messages(); it only READS the registry (plus
     prunes stale recently-done entries), so it is safe to call either
     inside or outside the per-channel lock.
+
+    The two groups get SEPARATE headers. A single header covering both
+    ("...still being processed or finished very recently") made the model
+    announce completed work as still on its way: it saw the words "still
+    being processed" in the freshest user-role turn and ignored the
+    qualifier. When nothing is actually running, the note now says so
+    outright and tells the model not to promise a result that already
+    landed.
     """
     now = time.monotonic() if now is None else now
-    lines: list[str] = []
+    running: list[str] = []
     runs = _in_flight.get(channel_id)
     if runs:
         for key in _in_flight_order.get(channel_id, []):
             entry = runs.get(key)
             if entry is None:
                 continue
-            lines.append(
+            running.append(
                 f"- {entry['label']} running for {_format_elapsed(now - entry['started'])}"
                 f" — {entry['source']}"
             )
+    done: list[str] = []
     recent = _recent_done.get(channel_id)
     if recent:
         kept: list[dict] = []
@@ -267,7 +276,7 @@ def in_flight_hint(channel_id: int, now: float | None = None) -> str:
             if age > RECENT_DONE_SECONDS:
                 continue  # stale: drop it
             kept.append(record)
-            lines.append(
+            done.append(
                 f"- {record['label']} finished {_format_elapsed(age)} ago — {record['source']}"
                 f" (result already sent to the channel)"
             )
@@ -275,7 +284,22 @@ def in_flight_hint(channel_id: int, now: float | None = None) -> str:
             _recent_done[channel_id] = kept
         if not kept:
             _recent_done.pop(channel_id, None)
-    if not lines:
+    if not running and not done:
         return ""
-    return ("Note: an earlier request in this channel is still being processed"
-            " or finished very recently:\n" + "\n".join(lines))
+
+    # Always opens with "Note:" — it is injected as a user-role turn (the
+    # chat template rejects a late system message), so it has to announce
+    # itself as a status note rather than something the user said.
+    parts = ["Note: this is an automatic status note about this channel, not"
+             " a message from the user."]
+    if running:
+        parts.append("Earlier request(s) still being processed right now:")
+        parts.extend(running)
+    if done:
+        parts.append(
+            "Already FINISHED (nothing left to wait for — the result is"
+            " already in the channel above; never say this work is still"
+            " coming, on its way, or will arrive shortly):"
+        )
+        parts.extend(done)
+    return "\n".join(parts)

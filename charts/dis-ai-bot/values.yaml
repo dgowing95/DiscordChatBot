@@ -84,6 +84,28 @@ sandbox:
   maxTurns: 10
   # Wall-clock seconds before a sandbox task is stopped (container is removed)
   timeout: 600
+  # Max seconds the sandbox's ask_user tool waits for a reply in its Discord
+  # thread before telling the model to proceed on its own judgement
+  askUserTimeout: 300
+  # Wall-clock seconds allowed to persist a thread's workspace snapshot to
+  # Redis on container teardown (runs AFTER timeout above; generous because,
+  # with the Memory capability, this is also where its own two extra
+  # local-model calls run)
+  persistTimeout: 180
+  # Seconds of silence on one HTTP request to the sandbox's LLM before the
+  # client gives up on it (down from the OpenAI client's 600s default).
+  # Catches a hung connection or a server that sends nothing; a server that
+  # dribbles keep-alive padding while it works (e.g. OpenRouter's
+  # non-streaming responses) resets this timer and is bounded only by the
+  # timeout above.
+  requestTimeout: 180
+  # How many times that client retries a failed request (0 disables retries).
+  # Worst-case latency for one model call is (1 + this) x requestTimeout.
+  maxRetries: 2
+  # Max size (bytes) of one thread's stored workspace snapshot in Redis
+  snapshotMaxBytes: 50000000
+  # How long an unused thread's workspace snapshot survives in Redis (seconds)
+  snapshotTtlSeconds: 604800
   # Node path of the Docker socket to mount into the core pod
   dockerSocketPath: /var/run/docker.sock
   # LLM for the nested sandbox agent. Empty (default) = the main bot's LLM

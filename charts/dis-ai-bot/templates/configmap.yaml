@@ -37,6 +37,12 @@ data:
   SANDBOX_IMAGE: {{ .Values.sandbox.image }}
   SANDBOX_MAX_TURNS: {{ .Values.sandbox.maxTurns | toString | quote }}
   SANDBOX_TIMEOUT: {{ .Values.sandbox.timeout | toString | quote }}
+  SANDBOX_ASK_USER_TIMEOUT: {{ .Values.sandbox.askUserTimeout | toString | quote }}
+  SANDBOX_PERSIST_TIMEOUT_SECONDS: {{ .Values.sandbox.persistTimeout | toString | quote }}
+  SANDBOX_REQUEST_TIMEOUT_SECONDS: {{ .Values.sandbox.requestTimeout | toString | quote }}
+  SANDBOX_MAX_RETRIES: {{ .Values.sandbox.maxRetries | toString | quote }}
+  SANDBOX_SNAPSHOT_MAX_BYTES: {{ .Values.sandbox.snapshotMaxBytes | toString | quote }}
+  SANDBOX_SNAPSHOT_TTL_SECONDS: {{ .Values.sandbox.snapshotTtlSeconds | toString | quote }}
   {{- if .Values.sandbox.model }}
   SANDBOX_MODEL: {{ .Values.sandbox.model }}
   {{- end }}

@@ -288,7 +288,7 @@ async def test_handle_message_scoped_lock_generates_concurrently_sends_serially(
     class _FakeLLM:
         gen_events = []  # (msg_id, phase, monotonic)
 
-        def __init__(self, messages, guild_id, original_message, attachment_refs=None):
+        def __init__(self, messages, guild_id, original_message, attachment_refs=None, client=None):
             self.original_message = original_message
             self.reasoning = ""
 
@@ -340,7 +340,7 @@ async def test_handle_message_appends_in_flight_hint_to_prompt():
     captured = {}
 
     class _FakeLLM:
-        def __init__(self, messages, guild_id, original_message, attachment_refs=None):
+        def __init__(self, messages, guild_id, original_message, attachment_refs=None, client=None):
             captured["prompt"] = messages
             self.reasoning = ""
 
@@ -373,7 +373,7 @@ async def test_handle_message_no_hint_when_channel_idle():
     captured = {}
 
     class _FakeLLM:
-        def __init__(self, messages, guild_id, original_message, attachment_refs=None):
+        def __init__(self, messages, guild_id, original_message, attachment_refs=None, client=None):
             captured["prompt"] = messages
             self.reasoning = ""
 
@@ -392,6 +392,115 @@ async def test_handle_message_no_hint_when_channel_idle():
     assert captured["prompt"][0]["content"] == "hello"
 
 
+@pytest.mark.asyncio
+async def test_handle_message_passes_client_to_text_llm_handler():
+    # Regression: TextLLMHandler needs the discord.Client (forwarded to tool
+    # context as "discord_client") so run_code_sandbox's ask_user tool can
+    # call client.wait_for() — handle_message must not silently drop it.
+    captured = {}
+
+    class _FakeLLM:
+        def __init__(self, messages, guild_id, original_message, attachment_refs=None, client=None):
+            captured["client"] = client
+            self.reasoning = ""
+
+        async def generate(self):
+            return "ok"
+
+    handler = _handled(
+        _handler(), _llm_message(50),
+        lambda h: setattr(h, "messages", [{"role": "user", "content": "hi"}]),
+    )
+
+    with patch("core.classes.message_handler.TextLLMHandler", _FakeLLM):
+        await handler.handle_message()
+
+    assert captured["client"] is handler.client
+
+
+@pytest.mark.asyncio
+async def test_handle_message_sends_final_reply_to_sandbox_thread_when_set():
+    # Regression: run_code_sandbox posts its output to a Discord thread, but
+    # the outer agent's own final reply used to always go to
+    # self.message.channel regardless — landing outside the thread. When
+    # TextLLMHandler.generate() resolved a sandbox_thread this run, the reply
+    # must go there instead.
+    thread = MagicMock()
+    thread.send = AsyncMock()
+
+    class _FakeLLM:
+        def __init__(self, messages, guild_id, original_message, attachment_refs=None, client=None):
+            self.reasoning = ""
+            self.sandbox_thread = thread
+
+        async def generate(self):
+            return "here's your result"
+
+    handler = _handled(
+        _handler(), _llm_message(60),
+        lambda h: setattr(h, "messages", [{"role": "user", "content": "hi"}]),
+    )
+    handler.message.channel.send = AsyncMock()
+
+    with patch("core.classes.message_handler.TextLLMHandler", _FakeLLM):
+        await handler.handle_message()
+
+    thread.send.assert_awaited_once_with("here's your result")
+    handler.message.channel.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handle_message_sends_reasoning_to_sandbox_thread_when_set():
+    thread = MagicMock()
+    thread.send = AsyncMock()
+
+    class _FakeLLM:
+        def __init__(self, messages, guild_id, original_message, attachment_refs=None, client=None):
+            self.reasoning = ""
+            self.sandbox_thread = thread
+
+        async def generate(self):
+            self.reasoning = "i thought about it"
+            return "the answer"
+
+    handler = _handled(
+        _handler(), _llm_message(61),
+        lambda h: setattr(h, "messages", [{"role": "user", "content": "hi"}]),
+    )
+    handler.message.channel.send = AsyncMock()
+
+    with patch("core.classes.message_handler.SHOW_THINKING", True), \
+         patch("core.classes.message_handler.TextLLMHandler", _FakeLLM):
+        await handler.handle_message()
+
+    sent_texts = [call.args[0] for call in thread.send.await_args_list]
+    assert sent_texts[0] == "the answer"
+    assert any("i thought about it" in t for t in sent_texts)
+    handler.message.channel.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handle_message_falls_back_to_original_channel_without_sandbox_thread():
+    class _FakeLLM:
+        def __init__(self, messages, guild_id, original_message, attachment_refs=None, client=None):
+            self.reasoning = ""
+            self.sandbox_thread = None
+
+        async def generate(self):
+            return "the answer"
+
+    handler = _handled(
+        _handler(), _llm_message(62),
+        lambda h: setattr(h, "messages", [{"role": "user", "content": "hi"}]),
+    )
+    handler.message.channel.send = AsyncMock()
+
+    with patch("core.classes.message_handler.TextLLMHandler", _FakeLLM):
+        await handler.handle_message()
+
+    handler.message.channel.send.assert_awaited_once_with("the answer")
+
+
 # --------------------------- reasoning follow-up (SHOW_THINKING) --------------------------
 
 def _reasoning_llm(reasoning, answer="the answer"):
@@ -401,7 +510,7 @@ def _reasoning_llm(reasoning, answer="the answer"):
     reasoning_content, so the answer text never carries them)."""
 
     class _FakeLLM:
-        def __init__(self, messages, guild_id, original_message, attachment_refs=None):
+        def __init__(self, messages, guild_id, original_message, attachment_refs=None, client=None):
             self.reasoning = ""
 
         async def generate(self):
@@ -469,6 +578,7 @@ def _generate_handler(run_result):
     handler.messages = [{"role": "user", "content": "hi"}]
     handler.guild_id = 1
     handler.reasoning = ""
+    handler.client = MagicMock()
     handler.system = "a bot"
     handler.agent = MagicMock()
     handler.attachment_refs = []
@@ -528,6 +638,38 @@ async def test_generate_leaves_reasoning_empty_when_model_did_not_think():
     assert reasoning == ""
 
 
+@pytest.mark.asyncio
+async def test_generate_captures_sandbox_thread_set_by_a_tool_call():
+    # run_code_sandbox (tool_functions.py) mutates the shared run context
+    # dict in place, setting "sandbox_thread" to whatever channel it
+    # resolved. generate() must read that back after Runner.run returns so
+    # MessageHandler can route the final reply there.
+    thread = MagicMock()
+    handler = _generate_handler(None)
+    result = _run_result("the answer")
+
+    async def _fake_run(agent, messages, context=None, **kwargs):
+        context["sandbox_thread"] = thread
+        return result
+
+    with patch("core.classes.text_llm_handler.Runner") as runner, \
+         patch("core.classes.text_llm_handler.get_current_datetime", AsyncMock(return_value="now")):
+        runner.run = AsyncMock(side_effect=_fake_run)
+        await handler.generate()
+
+    assert handler.sandbox_thread is thread
+
+
+@pytest.mark.asyncio
+async def test_generate_has_no_sandbox_thread_when_no_tool_ran():
+    handler = _generate_handler(None)
+    with patch("core.classes.text_llm_handler.Runner") as runner, \
+         patch("core.classes.text_llm_handler.get_current_datetime", AsyncMock(return_value="now")):
+        runner.run = AsyncMock(return_value=_run_result("just an answer"))
+        await handler.generate()
+    assert handler.sandbox_thread is None
+
+
 # --------------------------- reasoning survives a failed run --------------------------
 #
 # A run that dies part-way (MaxTurnsExceeded while chaining tool calls is the
@@ -553,6 +695,34 @@ async def test_generate_recovers_reasoning_from_a_failed_run():
 
     assert answer == "Error"  # sentinel unchanged
     assert handler.reasoning == "i kept calling the sandbox"
+
+
+@pytest.mark.asyncio
+async def test_generate_captures_sandbox_thread_even_when_run_failed():
+    # A tool call (e.g. run_code_sandbox) may run and mutate the shared
+    # context before a LATER turn raises (e.g. MaxTurnsExceeded chaining
+    # further tool calls) - the thread it resolved must still be picked up
+    # so the ❌/reasoning fallback in MessageHandler lands in the same thread
+    # as whatever the sandbox already posted, not the original channel.
+    from agents import MaxTurnsExceeded
+
+    thread = MagicMock()
+    handler = _generate_handler(None)
+    exc = MaxTurnsExceeded("Max turns (20) exceeded")
+    exc.run_data = None
+
+    async def _fake_run(agent, messages, context=None, **kwargs):
+        context["sandbox_thread"] = thread
+        raise exc
+
+    with patch("core.classes.text_llm_handler.Runner") as runner, \
+         patch("core.classes.text_llm_handler.get_current_datetime", AsyncMock(return_value="now")), \
+         patch("core.classes.text_llm_handler.inc_llm_error", MagicMock()):
+        runner.run = AsyncMock(side_effect=_fake_run)
+        answer = await handler.generate()
+
+    assert answer == "Error"
+    assert handler.sandbox_thread is thread
 
 
 @pytest.mark.asyncio
@@ -590,7 +760,7 @@ async def test_handle_message_sends_reasoning_even_when_the_run_failed():
     sends = []
 
     class _FailingLLM:
-        def __init__(self, messages, guild_id, original_message, attachment_refs=None):
+        def __init__(self, messages, guild_id, original_message, attachment_refs=None, client=None):
             self.reasoning = ""
 
         async def generate(self):
@@ -610,7 +780,7 @@ async def test_handle_message_failed_run_with_no_reasoning_just_reacts():
     sends = []
 
     class _FailingLLM:
-        def __init__(self, messages, guild_id, original_message, attachment_refs=None):
+        def __init__(self, messages, guild_id, original_message, attachment_refs=None, client=None):
             self.reasoning = ""
 
         async def generate(self):

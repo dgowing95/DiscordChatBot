@@ -8,6 +8,7 @@ from classes.text_llm_handler import TextLLMHandler
 from classes.config_manager import configManager
 from classes.image_generation import generate_image_from_api, image_generation_enabled
 from classes.sandbox_agent import sandbox_enabled
+from classes import sandbox_thread_inbox
 from classes.message_queue import make_message_queue, worker_count
 from classes.metrics import (
     inc_messages_processed,
@@ -152,6 +153,29 @@ async def on_ready():
 
 @client.event
 async def on_message(message):
+    # A sandbox run in flight in this thread takes the message instead of
+    # the outer LLM, so people can steer a run while it happens ("make it
+    # blue instead") without an @mention. Returning here is also the
+    # concurrency guard: a second run in the same thread would race the
+    # first to persist dcb:sandbox_snapshot:{thread_id} on teardown and
+    # silently clobber it. The reaction is the acknowledgement.
+    #
+    # This does NOT break the sandbox's ask_user, which waits on
+    # client.wait_for: discord.py's Client.dispatch resolves wait_for
+    # futures separately from scheduling on_message, so the reply reaches
+    # it either way (sandbox_thread_inbox.consume then de-duplicates it).
+    if (message.author != client.user and not message.author.bot
+            and sandbox_thread_inbox.is_run_active(message.channel.id)):
+        delivered = sandbox_thread_inbox.deliver(
+            message.channel.id, message.id,
+            message.author.display_name, message.content,
+        )
+        try:
+            await message.add_reaction("📨" if delivered else "🚫")
+        except Exception as e:
+            print(f"Sandbox inbox: could not acknowledge {message.id}: {e}")
+        return
+
     # The reply filter runs at receive time so only messages the bot will
     # actually handle ever enter the queue. "Received" = passed this filter
     # and was enqueued (mentioned or random-chance hit); discarded and

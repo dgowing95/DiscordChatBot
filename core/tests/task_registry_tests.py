@@ -87,6 +87,27 @@ def test_unregister_finish_adds_recently_done_hint():
     assert "already sent to the channel" in hint
     # nothing is in flight anymore
     assert "running for" not in hint
+    # ...and the note must not claim anything is still being processed:
+    # that wording made the model promise an image that had already been
+    # posted ("that edit is still on its way").
+    assert "still being processed" not in hint
+    assert "Already FINISHED" in hint
+
+
+def test_hint_separates_running_from_finished():
+    """A channel with one live run and one just-finished run gets both
+    groups under their own headers, so "still being processed" can never
+    be read as covering the finished one."""
+    ch = 51
+    mq.register_task_run(ch, "🐳 code sandbox", "compute pi", run_key="c1", started=BASE)
+    mq.register_task_run(ch, "🖌️ image editing", "add a red hat", run_key="c2", started=BASE)
+    mq.unregister_task_run(ch, run_key="c2", ended=BASE)
+    hint = mq.in_flight_hint(ch, now=BASE + 10)
+    running_at = hint.index("still being processed")
+    done_at = hint.index("Already FINISHED")
+    assert running_at < hint.index("compute pi") < done_at
+    assert done_at < hint.index("add a red hat")
+
 
 
 def test_recently_done_ages_out():

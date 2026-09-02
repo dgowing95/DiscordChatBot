@@ -23,4 +23,4 @@ jobs:
       
       - name: Run tests
         run: |
-          PYTHONPATH=$(pwd) pytest core/tests/user_memory_tests.py core/tests/response_filter_tests.py core/tests/content_guard_tests.py core/tests/message_handler_tests.py core/tests/image_generation_tests.py core/tests/sandbox_agent_tests.py core/tests/sandbox_progress_tests.py core/tests/metrics_tests.py core/tests/message_queue_tests.py core/tests/task_registry_tests.py core/tests/common_tests.py
+          PYTHONPATH=$(pwd) pytest core/tests/user_memory_tests.py core/tests/response_filter_tests.py core/tests/content_guard_tests.py core/tests/message_handler_tests.py core/tests/image_generation_tests.py core/tests/sandbox_agent_tests.py core/tests/sandbox_progress_tests.py core/tests/sandbox_snapshot_store_tests.py core/tests/sandbox_thread_inbox_tests.py core/tests/metrics_tests.py core/tests/message_queue_tests.py core/tests/task_registry_tests.py core/tests/common_tests.py

@@ -8,17 +8,6 @@ import discord, aiohttp
 from ddgs import DDGS
 from bs4 import BeautifulSoup
 
-@function_tool
-async def fetch_weather(location: str) -> str:
-    """Fetch the weather for a given location.
-
-    Args:
-        location: The location to fetch the weather for.
-    """
-    print(f"Fetching weather for location: {location}")
-    return "15°C, clear skies"
-
-
 async def add_emoji_to_message(message: discord.Message, emoji: str) -> None:
     try:
         await message.add_reaction(emoji)
@@ -106,10 +95,12 @@ async def get_current_datetime() -> str:
 
 @function_tool
 async def store_memory(wrapper: RunContextWrapper[dict], data: str) -> str:
-    """Stores a memory about the user. This could be anything from preferences to personal information.
-    Returns True if successful, False otherwise.
+    """Stores a lasting fact about the user — a preference, a personal
+    detail, anything worth recalling in a later conversation. Not for
+    one-off context that only matters in this thread.
+
     Args:
-        data: The data to store. e.g. User's name, preferences, etc.
+        data: The fact to store, e.g. "prefers metric units".
     """
 
     # Sometimes OpenAI repeats a tool call.
@@ -145,7 +136,8 @@ async def store_memory(wrapper: RunContextWrapper[dict], data: str) -> str:
 
 @function_tool
 async def remove_memory(wrapper: RunContextWrapper[dict], data: str) -> str:
-    """Removes a specific memory for the user.
+    """Removes one stored memory, matched on its exact stored text.
+
     Args:
         data: The specific memory to remove.
     """
@@ -167,7 +159,8 @@ async def remove_memory(wrapper: RunContextWrapper[dict], data: str) -> str:
 
 @function_tool
 async def clear_memories(wrapper: RunContextWrapper[dict]) -> str:
-    """Clears all memories for the user."""
+    """Deletes EVERY stored memory for this user. Only when they ask to be
+    forgotten — it cannot be undone. To drop just one, use remove_memory."""
     
     from classes.user_memory import UserMemory
     user_id = wrapper.context.get("user_id")
@@ -302,28 +295,76 @@ async def edit_image(
             "see it; do not send the image again or describe it as if pending.")
 
 
+async def _send_sandbox_closing_note(
+    channel, snapshot_id, in_thread: bool, outcome: str = "",
+) -> int | None:
+    """Posts the sandbox's closing embed: how the run ended, and (in a thread)
+    how much longer it can be resumed from here.
+
+    Returns the remaining resume window in seconds, or None when there is no
+    resumable workspace — the caller uses it to keep what it tells the outer
+    model in step with what this embed just told the user, so the two can
+    never disagree about whether a follow-up here picks the work back up.
+
+    Without it the only signal that a run has ended is the ABSENCE of a
+    delivery reaction on your next message, which you cannot see until after
+    you've sent one — so people can't tell whether they're steering a live
+    sandbox or talking to the bot again.
+
+    Exception-safe and posted on every path where a "Running in sandbox"
+    embed already went out: a failure to post this must never change what
+    the tool returns to the model.
+    """
+    from classes.sandbox_agent import (
+        sandbox_closing_note,
+        sandbox_snapshot_remaining_seconds,
+    )
+
+    remaining = None
+    try:
+        remaining = await sandbox_snapshot_remaining_seconds(snapshot_id)
+        await Common.send_tool_discord_embed(
+            channel,
+            sandbox_closing_note(remaining, in_thread, outcome),
+            color=0x99AAB5,  # muted grey: this run is over, unlike the cyan "running" embed
+            title="Sandbox closed",
+        )
+    except Exception as e:
+        print(f"Sandbox: failed to post the closing note: {e}")
+    return remaining
+
+
 @function_tool
 async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
-    """Runs a task in an isolated code sandbox: a fresh, disposable Linux
-    container (Python + shell) where code is written and actually executed.
-    Use it when the answer depends on running code or commands, not just
-    reasoning about it: writing or debugging a program, computing a value,
-    processing or analyzing data, converting files, checking that a library
-    or API behaves as expected. Do not use it for questions you can answer
-    directly. The sandbox starts completely empty and is destroyed when the
-    task finishes, so the task must be fully self-contained: include any
-    code, data or context the sandbox needs, and state exactly what the
-    final result must contain. If the task should produce a file (a plot,
-    a converted document, generated data), tell the sandbox what to name
-    it and save it under out/ — it is sent to the channel automatically.
-    When the guild has live progress updates enabled
-    (/sandbox_progress_updates, default off), the commands the sandbox
-    runs and their output are streamed to the channel in a live-updating
-    message.
+    """Hands a request to a code-sandbox agent: a Linux container (Python +
+    shell) with its own model, which writes and actually runs code. Use it
+    when the answer depends on running something rather than reasoning about
+    it — writing or debugging a program, computing a value, processing data,
+    generating or converting files. Not for questions you can answer
+    directly.
+
+    The sandbox agent designs it, not you — it can run code and look at the
+    output, you can't. Pass the user's request in their own words, plus only
+    what the sandbox cannot see for itself: results or filenames from earlier
+    runs in this thread, attachment contents, and constraints the user
+    actually stated. Nothing else. For "can you make me a gif of a cow doing
+    a backflip", the whole task is `Generate a gif of a cow doing a backflip.`
+
+    Usually runs in a Discord thread and sends any files it produces there
+    itself; a call from inside an existing sandbox thread resumes that
+    thread's workspace, so follow-ups build on earlier work.
+
+    This call is fully synchronous: by the time it returns, the sandbox run
+    is already completely finished (whether it succeeded, partially
+    succeeded, or failed) and any file it produced has already been sent to
+    the thread — there is no follow-up after this. Never tell the user to
+    wait, that a file is still being generated, or that it will "pop up" or
+    "arrive shortly".
+
     Args:
-        task: A precise, self-contained description of what to do in the
-            sandbox, including any code or data involved and what the final
-            answer should contain.
+        task: The user's request in their own words, plus context from this
+            conversation the sandbox cannot see. Short, and with no
+            implementation details of your own.
     """
     print(f"Running sandbox task: {task}")
 
@@ -335,18 +376,81 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
 
     from classes.config_manager import configManager
     from classes.sandbox_agent import (
+        ensure_sandbox_thread,
         run_sandbox_task,
         sandbox_max_turns,
+        sandbox_closing_note,
+        sandbox_snapshot_exists,
+        sandbox_snapshot_id_for,
+        sandbox_snapshot_remaining_seconds,
         sandbox_timeout,
+        sandbox_workspace_note,
         MAX_ARTIFACT_BYTES,
         MAX_ARTIFACT_FILES,
     )
     from classes.sandbox_progress import (
+        DESCRIPTION_CHARS,
         SandboxProgressHooks,
         sandbox_progress_updates_enabled,
     )
+    from classes import sandbox_thread_inbox
 
-    channel = wrapper.context.get("original_message").channel
+    original_message = wrapper.context.get("original_message")
+    discord_client = wrapper.context.get("discord_client")
+    requesting_user_id = wrapper.context.get("user_id")
+    # A sandbox thread this outer turn already resolved. The context dict is
+    # one object for the whole Runner.run (text_llm_handler builds it once),
+    # so a second call in the same turn — the outer model retrying a run that
+    # was stopped — finds the thread the first one opened. Without this it
+    # would ask ensure_sandbox_thread for a thread off a message that already
+    # has one, be refused by Discord, and run in the PARENT CHANNEL instead:
+    # away from the work it meant to continue, and unsnapshotted, so the
+    # partial workspace the stopped run saved is silently abandoned.
+    previous = wrapper.context.get("sandbox_thread")
+    if isinstance(previous, discord.Thread):
+        channel, thread_created = previous, False
+    else:
+        channel, thread_created = await ensure_sandbox_thread(original_message, task)
+    # The outer agent's own final reply is sent by MessageHandler after this
+    # tool returns, to self.message.channel by default — which would post it
+    # outside the thread the sandbox's output actually lives in. Recording
+    # the resolved channel back onto the shared run context (read by
+    # TextLLMHandler.generate() after Runner.run returns) lets the caller
+    # redirect that final reply into the same thread.
+    wrapper.context["sandbox_thread"] = channel
+    in_thread = isinstance(channel, discord.Thread)
+    # Backstop for the concurrency guard in main.py's on_message. Two paths
+    # get past that one: queue lag (two mentions land before either worker
+    # starts, so both see no active run) and the outer model emitting two
+    # run_code_sandbox calls in a single turn. Either way two containers
+    # would race to persist to dcb:sandbox_snapshot:{thread_id} on teardown
+    # and the last to finish would clobber the other — so forward the task
+    # into the run already in flight instead of starting a second one.
+    if in_thread and sandbox_thread_inbox.is_run_active(channel.id):
+        sandbox_thread_inbox.deliver(
+            channel.id, getattr(original_message, "id", 0),
+            getattr(getattr(original_message, "author", None), "display_name", "the user"),
+            task,
+        )
+        return ("A sandbox is already running in this thread, so this request was "
+                "handed to the run in progress instead of starting a second one. "
+                "Tell the user it was passed along to the sandbox that's already "
+                "working, and do not retry.")
+    if thread_created:
+        try:
+            await Common.send_tool_discord_embed(
+                original_message.channel,
+                f"🧵 Started a sandbox thread: {channel.mention}",
+            )
+        except Exception as e:
+            print(f"Sandbox: failed to notify the original channel of the new thread: {e}")
+    # Whether this run will resume the thread's saved workspace or start
+    # empty. Asked before the run so the embed below can say which — the SDK
+    # exposes no way to find out afterwards (see sandbox_snapshot_exists).
+    snapshot_id = sandbox_snapshot_id_for(channel)
+    resumed = await sandbox_snapshot_exists(snapshot_id)
+    workspace_note = sandbox_workspace_note(resumed)
+
     progress = None
     # Per-guild toggle (/sandbox_progress_updates, default off). A config
     # read failure falls back to off — progress is a nice-to-have, not a
@@ -362,23 +466,67 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
         # command the sandbox runs and its output (throttled for Discord's
         # 5-edits/minute limit). start() is exception-safe (swallows send
         # failures), so a progress problem never blocks the run.
-        progress = SandboxProgressHooks(channel, task)
+        progress = SandboxProgressHooks(channel, task, workspace_note=workspace_note)
         await progress.start()
     else:
+        # The task is capped here the same way the live-progress embed caps
+        # it, so a verbose task degrades to a truncated line rather than a
+        # screenful of embed.
+        shown = task if len(task) <= DESCRIPTION_CHARS else task[: DESCRIPTION_CHARS - 1] + "…"
         await Common.send_tool_discord_embed(
             channel,
-            f"Running in sandbox: {task}",
+            f"{workspace_note}\nRunning in sandbox: {shown}",
         )
 
+    if in_thread:
+        sandbox_thread_inbox.begin_run(channel.id)
     try:
-        result = await run_sandbox_task(task, progress)
+        result = await run_sandbox_task(
+            task,
+            progress,
+            thread=channel,
+            client=discord_client,
+            requesting_user_id=requesting_user_id,
+            resumed=resumed,
+        )
     except Exception as e:
         print(f"Sandbox task failed: {e}")
         if progress is not None:
-            await progress.finalize("❌ Stopped: the sandbox run failed.")
+            await progress.finalize("❌ Stopped: the sandbox itself failed.")
+        # The "Running in sandbox" embed already went out, so this path needs
+        # a closing note too or the thread is left looking mid-run forever.
+        await _send_sandbox_closing_note(
+            channel, snapshot_id, in_thread, "❌ Stopped: the sandbox itself failed.")
         return ("The sandbox task failed (the code sandbox may be unavailable). "
                 "Tell the user the sandbox is not working right now and do "
                 "not retry the same task.")
+    finally:
+        # Must be in a finally: leaving the thread registered would silently
+        # swallow every later message posted there (main.py routes them to a
+        # run that no longer exists) instead of answering them.
+        if in_thread:
+            sandbox_thread_inbox.end_run(channel.id)
+
+    # Ground truth from the run itself. It only disagrees with the badge
+    # already posted above when the saved workspace turned out not to be
+    # restorable and was dropped (see _create_sandbox_session), so correct
+    # the record rather than leaving a wrong "Resumed" standing.
+    resume_correction = ""
+    if resumed and not result.resumed:
+        resume_correction = (
+            "\n\n(This thread's saved workspace could not be restored, so the "
+            "sandbox started empty despite what the status message said. Tell "
+            "the user their earlier work in this thread was lost; this run's "
+            "work has been saved, so further follow-ups will resume normally.)"
+        )
+        try:
+            await channel.send(
+                "⚠️ This thread's saved workspace couldn't be restored, so the "
+                "sandbox started fresh. It's been reset — the next run in this "
+                "thread will pick up from this one."
+            )
+        except Exception as e:
+            print(f"Sandbox: failed to post the resume correction: {e}")
 
     # Per-failure-reason wording so the caller (the outer LLM) knows what,
     # if anything, to change before retrying — a bare "it failed" gives it
@@ -388,24 +536,29 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
         "max_turns": "🔁 Stopped: the task ran out of turns.",
         "model_error": "⚠️ Stopped: the sandbox's model misbehaved.",
     }
+    # Deliberately none of these tells the model to retry. A retry starts the
+    # whole task over in a new container, so on a run stopped part way it
+    # throws away the partial workspace teardown just saved — and in practice
+    # the outer model answers "retry, more focused" by writing the
+    # implementation spec this tool's docstring exists to prevent (observed:
+    # a timed-out cow GIF retried with an invented canvas size, frame count
+    # and library choice). The resumable follow-up below is strictly better
+    # and costs nothing but asking.
     no_artifact_messages = {
         "timeout": (
-            f"The sandbox task took too long and was stopped after the "
-            f"{sandbox_timeout()}s time limit. Tell the user the task timed "
-            "out; you may retry with a smaller or more focused task."
+            f"The sandbox task ran out of time and was stopped at the "
+            f"{sandbox_timeout()}s limit before it finished. Tell the user "
+            "it timed out."
         ),
         "max_turns": (
             f"The sandbox task ran out of turns ({sandbox_max_turns()} max) "
-            "before finishing. Tell the user it needs a smaller, more "
-            "focused task: split it into a narrower step and retry with "
-            "just that step, rather than retrying the same task unchanged."
+            "before finishing. Tell the user it did not finish in the number "
+            "of steps it had."
         ),
         "model_error": (
             "The sandbox's own model produced an invalid action mid-task "
-            "and the run was stopped before finishing. Retry once with a "
-            "more explicit, step-by-step task description; if it fails "
-            "again, tell the user the sandbox could not complete this task "
-            "and do not retry further."
+            "and the run was stopped before finishing. Tell the user the "
+            "sandbox could not complete this task."
         ),
     }
     failure_reason = {
@@ -441,29 +594,62 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
             "retry producing a smaller or fewer files."
         )
 
+    # After the artifacts, before every return below: the thread's "here is
+    # how the run ended, and how long you can pick it back up" marker. The
+    # outcome line only goes out when the run did NOT finish normally.
+    outcome = "" if result.ok else finalize_notes.get(result.error, "❌ Stopped.")
+    remaining = await _send_sandbox_closing_note(
+        channel, snapshot_id, in_thread, outcome)
+
     if not result.ok:
+        # What the model should do about it, kept in step with the closing
+        # embed: only offer a resume when there is genuinely a saved workspace
+        # to resume (persisting is best-effort — _persist_sandbox_snapshot).
+        if in_thread and remaining is not None:
+            unfinished_note = (
+                " Its workspace WAS saved, so do NOT retry: a retry starts the "
+                "whole task again from scratch in an empty sandbox, while the "
+                "user simply asking again in THIS thread carries on from where "
+                "it stopped. Offer them that, and do not add build instructions "
+                "of your own when you do."
+            )
+        else:
+            unfinished_note = (
+                " Do not retry the same task unchanged; ask the user how they "
+                "want to proceed."
+            )
         if sent_names:
             return (
                 f"The sandbox task did not finish ({failure_reason.get(result.error, 'it failed')}), "
                 f"but before it was stopped it had already produced and verified "
                 f"{len(sent_names)} file(s), which were recovered and sent to the "
                 f"channel: {', '.join(sent_names)}. Tell the user the file(s) were "
-                "delivered despite the task not finishing. Do not retry this task "
-                "and do not claim the files are pending." + skip_note
+                "delivered despite the task not finishing, and do not claim they "
+                "are pending." + unfinished_note + skip_note + resume_correction
             )
         return no_artifact_messages.get(
             result.error,
             "The sandbox task was stopped before finishing. Tell the user the "
-            "task failed and do not retry the same task unchanged.",
-        ) + skip_note
+            "task failed.",
+        ) + unfinished_note + skip_note + resume_correction
 
     if not sent_names:
-        return result.text + skip_note
+        # Only warn when nothing was produced at all — an artifact that WAS
+        # found but failed to send (Discord error) is a different case and
+        # already correctly described by the exception log above; claiming
+        # "no files were found" there would be false.
+        no_file_note = (
+            "\n\n(No output files were found under out/ for this run. If "
+            "one was expected, it was not produced — tell the user that "
+            "plainly. Do not claim a file exists, was sent, or is still "
+            "being generated.)"
+        ) if not result.artifacts else ""
+        return result.text + no_file_note + skip_note + resume_correction
     return (
         f"{result.text}\n\n"
         f"{len(sent_names)} file(s) were generated and already sent to the "
         f"channel: {', '.join(sent_names)}. Do not claim they are pending or "
-        "describe sending them yourself." + skip_note
+        "describe sending them yourself." + skip_note + resume_correction
     )
 
 

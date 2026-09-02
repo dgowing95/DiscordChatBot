@@ -158,10 +158,15 @@ class ToolMetricsHooks(RunHooks):
 
 class TextLLMHandler:
 
-    def __init__(self, messages, guild_id, original_message, attachment_refs=None):
+    def __init__(self, messages, guild_id, original_message, attachment_refs=None, client=None):
         self.original_message = original_message
         self.messages = messages
         self.guild_id = guild_id
+        # The discord.Client, forwarded to tool-run context as
+        # "discord_client" (see generate()) — needed by run_code_sandbox's
+        # ask_user tool for client.wait_for(). Optional/None for callers
+        # (and tests) that don't need sandbox HITL.
+        self.client = client
         # Short labels -> real CDN URLs for attached images (see
         # MessageHandler._collect_attachment_refs). The edit_image tool
         # resolves a label here instead of the LLM copying a full signed URL.
@@ -176,6 +181,12 @@ class TextLLMHandler:
         # rather than by changing generate()'s string return (and its
         # "Error" sentinel).
         self.reasoning = ""
+        # Filled in by generate() from the shared run context: the Discord
+        # thread run_code_sandbox resolved/created for this run, if any. The
+        # caller (MessageHandler) sends the final reply there instead of
+        # self.message.channel so it lands next to the sandbox's own output
+        # rather than outside the thread.
+        self.sandbox_thread = None
 
 
     @staticmethod
@@ -212,7 +223,6 @@ class TextLLMHandler:
         tools = [
             web_search,
             fetch_url,
-            fetch_weather,
             store_memory,
             remove_memory,
             clear_memories,
@@ -249,8 +259,14 @@ class TextLLMHandler:
         "guild_id": self.guild_id,
         "original_message": self.original_message,
         "attachment_refs": self.attachment_refs,
+        "discord_client": self.client,
         "redis_save_tool_calls": 0,
         "personality_tool_calls": 0,
+        # Set by run_code_sandbox (tool_functions.py) if/when it runs, to the
+        # thread it resolved/created — read back below regardless of how the
+        # run ends, since a tool call may have already mutated this dict
+        # before a later turn raises (e.g. MaxTurnsExceeded).
+        "sandbox_thread": None,
       }
       datetime = await get_current_datetime()
       self.system = f"Answer as if you are {self.system}."
@@ -273,8 +289,10 @@ class TextLLMHandler:
          print(response)
          final_output = response.final_output
          self._capture_reasoning(response.new_items, final_output)
+         self.sandbox_thread = user_info.get("sandbox_thread")
          return final_output
       except Exception as e:
+         self.sandbox_thread = user_info.get("sandbox_thread")
          print('Failed to get response from LLM: ' + str(e))
          # A run that died part-way (MaxTurnsExceeded after a few chained
          # tool calls is the common one) still reasoned before it broke, and

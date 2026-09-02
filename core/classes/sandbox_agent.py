@@ -4,9 +4,15 @@ Uses the OpenAI Agents SDK sandbox feature (beta, `agents.sandbox`): a nested
 SandboxAgent does the work inside a throwaway Docker container (shell +
 filesystem capabilities, python image) and returns its final answer.
 
-Lifecycle: every call creates a FRESH container (empty workspace), runs the
-nested agent loop, then the SDK stops and deletes the container. Nothing
-persists between calls.
+Lifecycle: every call creates a FRESH container, runs the nested agent loop,
+then the container is stopped and deleted. When the run happens in a Discord
+thread (see ensure_sandbox_thread/tool_functions.run_code_sandbox), the
+workspace is persisted to Redis as a snapshot keyed by that thread's id
+before teardown (session.stop(), see _persist_sandbox_snapshot) and restored
+into the next fresh container for a later run in the SAME thread
+(_create_sandbox_session) — so a thread's work can continue across calls even
+though every individual container is still fully disposable. A one-off call
+with no thread behaves exactly as before: nothing persists.
 
 Requirements (see docker-compose.yaml / charts/dis-ai-bot):
   - a reachable Docker daemon (docker.sock mounted into the core container;
@@ -17,10 +23,14 @@ The heavy imports (docker SDK, agents.sandbox) stay inside the builder
 functions so the pure helpers below are testable without them.
 """
 import asyncio
+import io
 import os
 import posixpath
+import time
 from dataclasses import dataclass, field
 
+import discord
+import httpx
 from agents import (
     AsyncOpenAI,
     MaxTurnsExceeded,
@@ -30,26 +40,47 @@ from agents import (
     OpenAIChatCompletionsModel,
     Runner,
     RunConfig,
+    RunContextWrapper,
+    function_tool,
 )
 from agents.sandbox.config import DEFAULT_PYTHON_SANDBOX_IMAGE
 
+from classes import sandbox_thread_inbox
+
 DEFAULT_MAX_TURNS = 10
 DEFAULT_TIMEOUT_SECONDS = 600
+DEFAULT_ASK_USER_TIMEOUT_SECONDS = 300
+DEFAULT_PERSIST_TIMEOUT_SECONDS = 180  # generous: covers Memory's 2 extra model calls on stop()
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 180  # per-HTTP-request bound on one sandbox model call
+DEFAULT_MAX_RETRIES = 2  # matches the OpenAI client's own default, but stated explicitly
+SANDBOX_CONNECT_TIMEOUT_SECONDS = 10.0  # separate, short: a dead host must not eat the whole budget
 SANDBOX_DELETE_TIMEOUT_SECONDS = 30  # bound on tearing down our own container
 SANDBOX_RECOVERY_TIMEOUT_SECONDS = 30  # bound on best-effort artifact recovery after a timeout
+# Dependency key the DockerSandboxClient's snapshot Dependencies are bound
+# under (see build_sandbox_client) — must match what RemoteSnapshot(id=...,
+# client_dependency_key=...) is constructed with in _create_sandbox_session.
+SANDBOX_SNAPSHOT_DEP_KEY = "dcb.sandbox_snapshot"
 
 # Directory (relative to the sandbox's own shell cwd) where the sandbox
 # agent must save anything it wants returned as a file. Everything else in
-# the workspace is discarded with the container.
+# the workspace is left undelivered — though no longer lost: in a thread it
+# is snapshotted to Redis on teardown and restored for the next run there
+# (see _persist_sandbox_snapshot), so `out/` is the delivery boundary, not
+# the survival one.
 #
-# This is intentionally relative, not the SDK's nominal "/workspace" root:
-# with the Shell-only capability we use (see build_sandbox_agent), that
-# root is never actually materialized in the container — only the
-# Filesystem capability sets it up, and we deliberately don't use it. The
-# model's exec_command calls run with whatever cwd the image itself
-# defaults to (verified empirically to be "/" for the default sandbox
-# image), so we resolve `out/` the same way: by asking the live session
-# for its own cwd (_sandbox_output_dir). We now do this resolution BEFORE
+# This is intentionally relative, never a hardcoded path: _create_sandbox_session
+# now explicitly calls session.start() (added for snapshot resume — see its
+# docstring), which DOES materialize the SDK's nominal "/workspace" root and
+# make it the session's tracked cwd — verified live against a real Docker
+# daemon — even with the Shell-only capability we use (see build_sandbox_agent;
+# Filesystem is still avoided for the apply_patch/ChatCompletions reason
+# below). Before that call existed, an un-started session's exec_command
+# calls ran with whatever cwd the image itself defaulted to instead (e.g. "/"
+# for the default sandbox image) — this comment described that older
+# behavior. Either way we never hardcode the path: we resolve `out/` by
+# asking the live session for its own cwd (_sandbox_output_dir), so this
+# stays correct regardless of what the actual root turns out to be. We do
+# this resolution BEFORE
 # Runner.run starts (not just post-hoc to collect artifacts afterward), so
 # we can mkdir -p it before the model's first turn — but we deliberately
 # never tell the model the resolved ABSOLUTE path (see SANDBOX_INSTRUCTIONS
@@ -68,62 +99,93 @@ MAX_ARTIFACT_FILES = 10
 # reject the upload.
 MAX_ARTIFACT_BYTES = 25_000_000
 
-# Instructions for the nested sandbox agent. The workspace is always empty,
-# so the task text is its only input — it must behave self-sufficiently.
-# It MUST explicitly name the shell tools: the SDK's default sandbox prompt
-# (suppressed — see build_sandbox_agent) tells the model to use an
+# Instructions for the nested sandbox agent. On a first run in a thread the
+# workspace is empty and the task text is its only input, so it must behave
+# self-sufficiently; on a resumed run RESUMED_TASK_PREAMBLE tells it
+# otherwise. It MUST rule out apply_patch by name: the SDK's default sandbox
+# prompt (suppressed — see build_sandbox_agent) tells the model to use an
 # apply_patch tool we do not expose, and a model that calls it aborts the
 # whole run with ModelBehaviorError.
 #
+# Every instruction here has ONE home. The prompt reached ~5000 characters by
+# accretion — each observed bug fixed by adding text and never removing any —
+# at which point `out/` was explained in five places and two bullets
+# contradicted each other outright. Duplicated guidance is worse than terse
+# guidance on a small local model: copies drift apart, and a model given two
+# versions of a rule follows neither reliably. If you need to say something
+# here that is already said elsewhere, edit the existing home instead.
+#
 # {output_bullet} is filled in by build_sandbox_agent(out_dir): both
-# variants explicitly rule out "/workspace" (left unguided, models default
-# to that nonexistent path) while only ever naming the RELATIVE `out/`
-# dirname — never the resolved absolute path (see SANDBOX_OUTPUT_DIRNAME
-# comment above for why: exec_command's `workdir` argument rejects
-# absolute paths outright).
-SANDBOX_INSTRUCTIONS = """You work inside a fresh, isolated Linux sandbox (a minimal
-Python container) with shell tools. You receive one self-contained task.
+# variants name only the RELATIVE `out/` dirname, never the resolved
+# absolute path, and both say WHY — exec_command's `workdir` rejects every
+# absolute path, `/workspace` included (see the SANDBOX_OUTPUT_DIRNAME
+# comment above). They used to claim instead that `/workspace` "does not
+# exist", which was true before _create_sandbox_session called
+# session.start() and is not now; the bullet ended up contradicting its own
+# closing clause ("even though the directory is real").
+SANDBOX_INSTRUCTIONS = """You work inside an isolated Linux sandbox (a minimal
+Python container) with shell tools. What you receive is a REQUEST, not a
+specification.
 
-- Your ONLY tools are the shell tools: `exec_command` (run a command) and
-  `write_stdin` (interact with a running process). There is NO file-editing,
-  patching or editor tool — create and modify files through the shell
-  (heredocs: `cat > file.py << 'EOF' ... EOF`, or python one-liners), then
-  run and verify them.
-- The workspace starts completely empty. Never assume files, packages or
-  context exist unless the task provides them; install what you need
-  (e.g. `pip install ...`).
+- You own every design and implementation decision the request does not
+  explicitly pin down: visual style, dimensions, colours, libraries,
+  algorithms, file structure, method. Decide, build it, look at the result.
+  You can actually run code and see the output, so your judgement beats the
+  caller's. Only details the USER stated are fixed.
+- The only way to touch files is the shell: `exec_command` runs a command,
+  `write_stdin` talks to a running process. There is no separate editing or
+  patching tool. Create and modify files with heredocs
+  (`cat > file.py << 'EOF' ... EOF`) or python one-liners, then run and
+  verify what you wrote.
+- The workspace starts empty unless the task says otherwise. Never assume
+  files, packages or context exist unless the task provides them; install
+  what you need (e.g. `pip install ...`).
 - Do the work: write files, run commands, read the output, iterate until the
   task is done. If a step fails, read the error, fix it and retry.
 - If the task includes code or data, create it exactly as given.
-- Do not ask questions: make reasonable assumptions and state them.
+- For most ambiguity, make a reasonable assumption and state it rather than
+  asking. Use `ask_user` only when genuinely blocked by something you cannot
+  reasonably decide yourself, and keep working while you wait if there is
+  anything useful left to do.
+- People can talk to you in the thread while you work. Their messages are
+  appended to your command output as `[thread message from <name>]: ...`;
+  `check_thread_messages` fetches any waiting ones on demand. Treat them as
+  the user steering you: adapt straight away rather than finishing what you
+  had planned, and use `say_in_thread` to say what you are changing.
+- `send_preview_to_thread` shows the user something worth seeing before you
+  are finished (a partial plot, a draft file), without ending the task.
 - {output_bullet}
 - {budget_bullet}
-- Once you've run a check and confirmed a result is correct, stop — do not
-  repeat the same or similar verification again on output you've already
-  confirmed is correct.
+- Once you have confirmed a result is correct, stop — do not re-verify what
+  you have already verified.
 - When done, end with a concise final report: what you did, the key results
-  (exact numbers/outputs where they matter), and any failures or assumptions.
-  The final report is all the caller sees, so make it self-contained."""
+  (exact numbers/outputs where they matter), the significant design choices
+  you made, and any failures or assumptions. It is all the caller sees, so
+  make it self-contained — and it is FINAL: there is no turn after it and
+  nothing you say later reaches anyone, so never describe work as still in
+  progress, being generated, or about to arrive. If a file was required and
+  you have not verified with `ls` that it exists, it does not exist — say so
+  plainly as a failure instead of implying it is on its way."""
 
 _OUTPUT_BULLET_RESOLVED = (
-    "Do NOT assume `/workspace` exists — it does not in this sandbox. To "
-    "return a FILE (a plot, a converted document, generated data, etc.), "
-    "save it under the relative path `out/` from wherever you already are — "
-    "that directory has already been created for you, no `cd` or `mkdir` "
-    "needed. Never pass an absolute path (e.g. as exec_command's `workdir` "
-    "argument) — only relative paths like `out/` are accepted; an absolute "
-    "one will be rejected even though the directory is real. Anything saved "
-    "under `out/` is sent back to the user automatically. Do not print file "
-    "contents to stdout — only files under `out/` are returned; nothing "
-    "else in the workspace persists."
+    "Use RELATIVE paths only: exec_command's `workdir` rejects every "
+    "absolute path — `/workspace` included — even when the directory really "
+    "exists. To return a FILE (a plot, a converted document, generated "
+    "data), save it under `out/` from wherever you already are; it has "
+    "already been created for you, no `cd` or `mkdir` needed. Everything "
+    "under `out/` is sent to the user and nothing else is, so don't print "
+    "file contents to stdout — but do leave your working files in place: "
+    "the rest of the workspace is saved and restored for the next run in "
+    "this thread."
 )
 _OUTPUT_BULLET_FALLBACK = (
-    "Do NOT assume `/workspace` exists — it does not in this sandbox. To "
-    "return a FILE (a plot, a converted document, generated data, etc.), "
-    "save it under the `out/` directory relative to your working directory "
-    "(create it first: `mkdir -p out`). Anything saved there is sent back to "
-    "the user automatically. Do not print file contents to stdout — only "
-    "files under `out/` are returned; nothing else in the workspace persists."
+    "Use RELATIVE paths only. exec_command's `workdir` rejects every "
+    "absolute path — `/workspace` included — even when the directory really "
+    "exists. To return a FILE (a plot, a converted document, generated "
+    "data), save it under the `out/` directory relative to your working "
+    "directory (create it first: `mkdir -p out`). Everything under `out/` is "
+    "sent to the user automatically and nothing else is, so don't print file "
+    "contents to stdout."
 )
 
 # {budget_bullet}: tells the model its hard turn/time budget so it can pace
@@ -136,25 +198,23 @@ _OUTPUT_BULLET_FALLBACK = (
 # live sandbox_max_turns()/sandbox_timeout() values so this always matches
 # what the caller actually enforces.
 #
-# The model has no built-in sense of elapsed wall-clock time (unlike turns,
-# which it can just count), so the bullet tells it to check a real clock
-# itself via `date +%s` rather than just saying "track the time" and
-# leaving it with no way to do so.
+# The model has no internal clock, so it is TOLD the elapsed time rather
+# than taught to measure it: _elapsed_note appends the running total to
+# every shell result. The bullet used to carry the measurement procedure
+# instead ("run `date +%s` as your very first command ... re-run it every
+# few turns and subtract"), which asked a small local model to carry an
+# epoch integer across turns and do arithmetic on it, spent a turn out of a
+# budget that can be as low as 10, and fought RESUMED_TASK_PREAMBLE over
+# which command gets to be "first".
 _BUDGET_BULLET = (
-    "You have a hard budget of {max_turns} turns (each response you give "
-    "counts as one turn, however many tool calls it includes) and "
-    "{timeout_seconds} seconds of wall-clock time for this entire task — "
+    "You have at most {max_turns} turns (one response = one turn) and "
+    "{timeout_seconds} seconds of wall-clock time for this whole task; "
     "whichever runs out first ends the run immediately, with no chance to "
-    "write a final report. Count your turns as you go. For time, you have "
-    "no internal clock, so check a real one: run `date +%s` as your very "
-    "first command and note the number, then re-run it every few turns and "
-    "subtract to see how many of the {timeout_seconds} seconds have passed. "
-    "If you are within a couple of turns of {max_turns}, or have used "
-    "roughly 80% of the {timeout_seconds}-second budget, and do not yet "
-    "have a finished result, STOP iterating: save your best current partial "
-    "output under `out/` right away and end with a final report describing "
-    "what is done, what is missing, and why — do not risk losing everything "
-    "to a forced cutoff."
+    "write a final report. Every command tells you how much of that time "
+    "you have used. Once roughly 80% is gone without a finished result, "
+    "STOP iterating: save your best current partial output under `out/` and "
+    "write the final report describing what is done and what is missing, "
+    "rather than losing everything to a forced cutoff."
 )
 
 
@@ -211,6 +271,14 @@ def _positive_int(raw: str | None, default: int) -> int:
         return default
 
 
+def _non_negative_int(raw: str | None, default: int) -> int:
+    try:
+        value = int(str(raw).strip())
+        return value if value >= 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
 def sandbox_max_turns() -> int:
     """Max model turns for one sandbox task (SANDBOX_MAX_TURNS, default 10)."""
     return _positive_int(os.environ.get("SANDBOX_MAX_TURNS"), DEFAULT_MAX_TURNS)
@@ -220,6 +288,54 @@ def sandbox_timeout() -> int:
     """Wall-clock seconds before a sandbox task is stopped (SANDBOX_TIMEOUT,
     default 600)."""
     return _positive_int(os.environ.get("SANDBOX_TIMEOUT"), DEFAULT_TIMEOUT_SECONDS)
+
+
+def sandbox_ask_user_timeout() -> int:
+    """Max seconds the ask_user tool waits for a reply before telling the
+    model to proceed on its own (SANDBOX_ASK_USER_TIMEOUT, default 300). Any
+    single call also never waits past the run's own remaining
+    sandbox_timeout() budget — see ask_user's `deadline` handling."""
+    return _positive_int(os.environ.get("SANDBOX_ASK_USER_TIMEOUT"), DEFAULT_ASK_USER_TIMEOUT_SECONDS)
+
+
+def sandbox_persist_timeout() -> int:
+    """Wall-clock seconds allowed to persist a thread's workspace snapshot on
+    session.stop() (SANDBOX_PERSIST_TIMEOUT_SECONDS, default 180). This runs
+    AFTER the sandbox_timeout() envelope has already returned, and — when the
+    Memory capability is active — is also where its phase-one/phase-two
+    memory extraction runs (two extra local-model calls), so it needs its own,
+    separate budget rather than none at all."""
+    return _positive_int(
+        os.environ.get("SANDBOX_PERSIST_TIMEOUT_SECONDS"), DEFAULT_PERSIST_TIMEOUT_SECONDS
+    )
+
+
+def sandbox_request_timeout() -> int:
+    """Seconds of silence on one HTTP request to the sandbox's LLM before the
+    client gives up on it (SANDBOX_REQUEST_TIMEOUT_SECONDS, default 180),
+    down from the OpenAI client's unstated 600s default.
+
+    This is httpx's per-read timeout, not a wall-clock bound on the call, so
+    be clear about what it does and does not catch. It bounds a connection
+    that hangs (see SANDBOX_CONNECT_TIMEOUT_SECONDS) and a server that
+    accepts the request then sends nothing. It does NOT bound a server that
+    dribbles keep-alive bytes while it works: OpenRouter pads non-streaming
+    responses with whitespace, and every pad byte resets this timer, so such
+    a request is bounded only by sandbox_timeout(). Bounding that needs a
+    wall-clock timeout around the model call itself.
+    """
+    return _positive_int(
+        os.environ.get("SANDBOX_REQUEST_TIMEOUT_SECONDS"), DEFAULT_REQUEST_TIMEOUT_SECONDS
+    )
+
+
+def sandbox_max_retries() -> int:
+    """How many times the sandbox's LLM client retries a failed request
+    (SANDBOX_MAX_RETRIES, default 2). 0 disables retries — which is why this
+    uses _non_negative_int rather than _positive_int: worst-case latency is
+    (1 + retries) x sandbox_request_timeout(), so being able to say "none"
+    is the point."""
+    return _non_negative_int(os.environ.get("SANDBOX_MAX_RETRIES"), DEFAULT_MAX_RETRIES)
 
 
 def _tolerant_tool_invoke(original_invoke):
@@ -266,17 +382,456 @@ def _tolerant_tool_invoke(original_invoke):
     return _invoke
 
 
-def _make_shell_tools_tolerant(toolset) -> None:
+def _elapsed_note(context: dict) -> str:
+    """The time-budget marker appended to every shell result, or "" when
+    this run has no deadline (the nested tools are also used in tests and
+    on paths that never set one).
+
+    This exists so _BUDGET_BULLET can state the budget instead of teaching
+    the model to measure it — see the comment above _BUDGET_BULLET for what
+    that cost. Rounded to whole seconds: the model is pacing itself against
+    an 80% threshold, not timing anything.
+    """
+    deadline = context.get("deadline")
+    total = context.get("timeout_seconds")
+    if deadline is None or not total:
+        return ""
+    used = int(total - max(0.0, deadline - time.monotonic()))
+    return f"[time used: {used}s of {total}s]"
+
+
+def _with_elapsed_note(original_invoke):
+    """Wraps a shell tool's on_invoke_tool so each command reports how much
+    of the run's time budget has been spent.
+
+    Same delivery argument as _with_thread_messages, which it composes with:
+    a small local model will not remember to check a clock, but it cannot
+    avoid reading the output of the command it just ran.
+
+    Exception-safe by design: a failure here degrades to "no marker", never
+    breaks a shell call the run depends on.
+    """
+    async def _invoke(ctx, raw_input):
+        result = await original_invoke(ctx, raw_input)
+        try:
+            context = ctx.context if isinstance(getattr(ctx, "context", None), dict) else {}
+            note = _elapsed_note(context)
+            return f"{result}\n\n{note}" if note else result
+        except Exception as e:
+            print(f"Sandbox: could not attach the time marker to a tool result: {e}")
+            return result
+
+    return _invoke
+
+
+def _with_thread_messages(original_invoke):
+    """Wraps a shell tool's on_invoke_tool so anything people posted in the
+    thread since the last command is appended to the command's output.
+
+    This is the primary way mid-run steering reaches the model. There is also
+    an explicit `check_thread_messages` tool, but a small local model reliably
+    forgets to poll, whereas it cannot avoid reading the result of the command
+    it just ran — so piggy-backing on every shell call is what actually makes
+    "make it blue instead" land within one turn.
+
+    Exception-safe by design: the inbox is an enhancement, and a failure here
+    must degrade to "no messages delivered", never break a shell call the run
+    depends on.
+    """
+    async def _invoke(ctx, raw_input):
+        result = await original_invoke(ctx, raw_input)
+        try:
+            context = ctx.context if isinstance(getattr(ctx, "context", None), dict) else {}
+            thread = context.get("thread")
+            if thread is None:
+                return result
+            pending = sandbox_thread_inbox.drain(thread.id)
+            if not pending:
+                return result
+            return f"{result}\n\n{pending}"
+        except Exception as e:
+            print(f"Sandbox inbox: could not attach thread messages to a tool result: {e}")
+            return result
+
+    return _invoke
+
+
+def _configure_shell_tools(toolset) -> None:
     """configure_tools callback (see agents.sandbox.capabilities.Shell):
-    makes both shell tools tolerant of malformed calls. See
-    _tolerant_tool_invoke for why this is needed."""
-    toolset.exec_command.on_invoke_tool = _tolerant_tool_invoke(
-        toolset.exec_command.on_invoke_tool
-    )
+    wraps both shell tools so malformed calls become model-visible errors
+    (see _tolerant_tool_invoke) and so live thread messages ride back on
+    every command's output (see _with_thread_messages).
+
+    Order matters: _with_thread_messages goes on the OUTSIDE, so it also
+    appends to the "Tool call rejected" string _tolerant_tool_invoke
+    substitutes for a malformed call. Nested the other way, the ValidationError
+    would unwind past the inbox drain and an interjection would be silently
+    dropped just because the model's tool call happened to be malformed.
+    _with_elapsed_note sits between them for the same reason, and so that a
+    steering message stays last in the result — the position the model is
+    most likely to act on.
+    """
+    def _wrap(invoke):
+        return _with_thread_messages(_with_elapsed_note(_tolerant_tool_invoke(invoke)))
+
+    toolset.exec_command.on_invoke_tool = _wrap(toolset.exec_command.on_invoke_tool)
     if toolset.write_stdin is not None:
-        toolset.write_stdin.on_invoke_tool = _tolerant_tool_invoke(
-            toolset.write_stdin.on_invoke_tool
+        toolset.write_stdin.on_invoke_tool = _wrap(toolset.write_stdin.on_invoke_tool)
+
+
+def _thread_name(task: str) -> str:
+    """A Discord thread name derived from the task (Discord caps thread
+    names at 100 chars)."""
+    prefix = "🐳 "
+    name = " ".join((task or "").split())
+    if not name:
+        return f"{prefix}Sandbox"
+    limit = 100 - len(prefix)
+    if len(name) > limit:
+        name = name[: limit - 1] + "…"
+    return f"{prefix}{name}"
+
+
+async def ensure_sandbox_thread(original_message, task: str):
+    """Resolves the Discord channel a sandbox run should post to.
+
+    Returns (channel, thread_created). If original_message is already inside
+    a thread, that thread is reused as-is (thread_created=False) — this
+    covers both a sandbox-created thread and any other thread the user is
+    @mentioning the bot in; either way it's safe, since sandbox_snapshot_id_for
+    simply starts fresh for a thread that never ran a sandbox task before.
+    A thread previously started off this very message is likewise reused.
+    Otherwise a new thread is created off original_message (thread_created=
+    True). If thread creation isn't possible (e.g. the channel type doesn't
+    support threads, or a permissions error), the failure is caught and the
+    original channel is returned unchanged (thread_created=False) so the tool
+    degrades to today's behavior instead of failing outright — see
+    sandbox_snapshot_id_for for why that fallback also means "no snapshot".
+    """
+    channel = original_message.channel
+    if isinstance(channel, discord.Thread):
+        return channel, False
+    # Reuse a thread already started off this message. Discord permits
+    # exactly one, so a second create_thread here fails with 160004 ("a
+    # thread has already been created for this message") and we would fall
+    # back to the parent channel — running outside the thread the earlier
+    # attempt lives in, and unsnapshotted, since a non-thread channel is
+    # never a snapshot key. That is observed behavior, not a hypothetical:
+    # it is what happened when the outer model retried a timed-out run.
+    existing = getattr(original_message, "thread", None)
+    if isinstance(existing, discord.Thread):
+        return existing, False
+    try:
+        thread = await original_message.create_thread(name=_thread_name(task))
+    except Exception as e:
+        print(f"Sandbox: could not create a thread, falling back to the channel: {e}")
+        return channel, False
+    return thread, True
+
+
+def sandbox_snapshot_id_for(channel) -> str | None:
+    """The Redis snapshot id for a sandbox run's target channel, or None
+    when there is no thread to key a snapshot on. A plain (non-thread)
+    channel id is deliberately never used as a fallback key — that would
+    wrongly link unrelated tasks posted in the same channel into one
+    workspace lineage; no thread means no snapshot, matching the fully
+    disposable behavior this tool had before threads existed."""
+    return str(channel.id) if isinstance(channel, discord.Thread) else None
+
+
+async def sandbox_snapshot_exists(snapshot_id: str | None) -> bool:
+    """Whether a saved workspace exists for this snapshot id — i.e. whether
+    session.start() will restore one rather than starting empty.
+
+    The SDK gives the caller no way to ask after the fact: session.start()
+    returns None, and state.snapshot_fingerprint is written on persist only,
+    never on restore (verified against the pinned openai-agents version). But
+    the restore condition is exactly `await snapshot.restorable(...)`, which
+    for our RemoteSnapshot is exactly this store's exists() — so asking it
+    ourselves, before the run starts, gives the same answer the SDK will act
+    on moments later.
+
+    Any error answers False: this only drives a status badge, and a wrong
+    badge must never break a run.
+    """
+    if snapshot_id is None:
+        return False
+    try:
+        from classes.sandbox_snapshot_store import SandboxSnapshotStore
+
+        return bool(await SandboxSnapshotStore().exists(snapshot_id))
+    except Exception as e:
+        print(f"Sandbox: could not check for a saved workspace snapshot: {e}")
+        return False
+
+
+def sandbox_workspace_note(resumed: bool) -> str:
+    """The one-line origin badge shown at the top of a run's embed, so the
+    thread says plainly whether this run built on the last one or started
+    over — otherwise the two are indistinguishable from the outside."""
+    if resumed:
+        return "♻️ **Resumed** — this thread's saved workspace and memory were restored."
+    return "🆕 **Fresh sandbox** — empty workspace, nothing carried over."
+
+
+async def sandbox_snapshot_remaining_seconds(snapshot_id: str | None) -> int | None:
+    """How much longer this thread's saved workspace can be resumed, or None
+    when there is nothing saved to resume.
+
+    Read from Redis rather than computed from sandbox_snapshot_ttl_seconds()
+    on purpose: persisting is best-effort and swallowed
+    (_persist_sandbox_snapshot), so the configured TTL would happily promise
+    a resume for a snapshot that was never written. Redis answers -2 for a
+    missing key, which becomes None here — as does any error, since this
+    only drives a closing note and must never break a run.
+    """
+    if snapshot_id is None:
+        return None
+    try:
+        from classes.sandbox_snapshot_store import SandboxSnapshotStore
+
+        remaining = await SandboxSnapshotStore().ttl(snapshot_id)
+    except Exception as e:
+        print(f"Sandbox: could not read the saved workspace's expiry: {e}")
+        return None
+    return remaining if remaining > 0 else None
+
+
+def format_resume_window(seconds: int) -> str:
+    """A rough, human-readable "for another ..." duration. Deliberately
+    coarse — this is a reassurance in a closing note, not a countdown, so
+    one unit is enough and rounding down never over-promises."""
+    if seconds >= 172_800:  # 2 days
+        return f"{seconds // 86_400} days"
+    if seconds >= 86_400:
+        return "1 day"
+    if seconds >= 7_200:
+        return f"{seconds // 3_600} hours"
+    if seconds >= 3_600:
+        return "1 hour"
+    minutes = max(1, seconds // 60)
+    return "1 minute" if minutes == 1 else f"{minutes} minutes"
+
+
+def sandbox_closing_note(
+    remaining_seconds: int | None, in_thread: bool, outcome: str = "",
+) -> str:
+    """The description of the embed posted when a sandbox run is over.
+
+    `outcome` is a one-line reason the run ended, shown first and passed only
+    when it did NOT finish normally (see tool_functions.finalize_notes). With
+    live progress off this embed is the only end-of-run signal in the thread,
+    so without it a run that timed out looks exactly like one that succeeded
+    and simply produced no file.
+
+    It marks the boundary between "messages here steer the running sandbox"
+    and "messages here are ordinary chat again" — without it the only signal
+    is the absence of a 📨 reaction, which is invisible until you try.
+
+    It also states where a resume is possible, because that is not
+    guessable: the snapshot is keyed on the thread's own id
+    (sandbox_snapshot_id_for) and ensure_sandbox_thread creates a NEW thread
+    for a request made anywhere else, so asking in the parent channel starts
+    a fresh sandbox rather than reopening this one. (The one exception is
+    invisible to the user: a retry within the same outer turn reuses the
+    thread that turn already opened, instead of being pushed out into the
+    parent channel.)
+
+    One imprecision, accepted: remaining_seconds says A workspace is
+    resumable, not that THIS run's workspace is. Persisting is best-effort
+    and swallowed (_persist_sandbox_snapshot), so on a second-or-later run
+    whose persist failed, the window shown belongs to the PREVIOUS run's
+    snapshot. The note stays true — you can still resume, just to that
+    earlier state — and the first run in a thread has no older key to fall
+    back on, so it correctly reports that nothing was saved.
+    """
+    head = f"{outcome}\n" if outcome else ""
+    if not in_thread:
+        return head + "🐳 Sandbox closed. It left nothing behind — the next request starts fresh."
+    if remaining_seconds is None:
+        return head + ("🐳 Sandbox closed. Its workspace could **not** be saved, so a "
+                       "follow-up here will start from scratch.")
+    return head + (
+        f"🐳 Sandbox closed — messages here are back to normal chat.\n"
+        f"Its workspace was saved for another **{format_resume_window(remaining_seconds)}**: "
+        f"@mention me *in this thread* to carry on from where it left off. "
+        f"Asking anywhere else always starts a brand-new sandbox."
+    )
+
+
+RESUMED_TASK_PREAMBLE = (
+    "This sandbox was restored from an earlier run in this same thread — the "
+    "workspace is NOT empty. Run `ls -R .` first and build on what is already "
+    "there instead of redoing it.\n\n"
+)
+
+
+def _ask_user_context(wrapper: RunContextWrapper[dict]) -> dict:
+    return wrapper.context if isinstance(wrapper.context, dict) else {}
+
+
+@function_tool
+async def ask_user(wrapper: RunContextWrapper[dict], question: str) -> str:
+    """Ask the user who requested this task a question and block until they
+    reply in the Discord thread. Costs you time from the run's budget.
+
+    Args:
+        question: A specific, self-contained question. Avoid vague or
+            open-ended questions; ask exactly what you need to know to
+            continue.
+    """
+    ctx = _ask_user_context(wrapper)
+    thread = ctx.get("thread")
+    client = ctx.get("client")
+    requesting_user_id = ctx.get("requesting_user_id")
+    if thread is None or client is None or requesting_user_id is None:
+        return "No interactive thread is available right now — proceed using your best judgement."
+
+    timeout = float(sandbox_ask_user_timeout())
+    deadline = ctx.get("deadline")
+    if deadline is not None:
+        remaining = deadline - time.monotonic()
+        # Never wait past this run's own remaining sandbox_timeout() budget —
+        # a question asked late in a run must not outlive the outer timeout
+        # that will cut the whole run off anyway.
+        timeout = max(1.0, min(timeout, remaining))
+
+    try:
+        await thread.send(
+            f"🤖 {question}\n-# Reply in this thread — no @mention needed."
         )
+    except Exception as e:
+        print(f"Sandbox ask_user: failed to send question: {e}")
+        return "Could not reach the user (failed to send the question) — proceed using your best judgement."
+
+    def _is_reply(message) -> bool:
+        return (
+            message.channel.id == thread.id
+            and message.author.id == requesting_user_id
+            and not message.author.bot
+        )
+
+    try:
+        reply = await client.wait_for("message", check=_is_reply, timeout=timeout)
+    except asyncio.TimeoutError:
+        return _with_pending(thread, (
+            f"No response within {int(timeout)}s — proceed using your best judgement "
+            "and note this assumption in your final report."
+        ))
+    except Exception as e:
+        print(f"Sandbox ask_user: wait_for failed: {e}")
+        return _with_pending(thread, "Could not get the user's reply — proceed using your best judgement.")
+    # discord.py dispatches a message to wait_for futures AND to on_message
+    # independently, so this same reply was also queued in the thread inbox.
+    # Drop it there or the model gets it twice: once as the answer to its
+    # question, once as an unrelated interjection.
+    try:
+        sandbox_thread_inbox.consume(thread.id, reply.id)
+    except Exception as e:
+        print(f"Sandbox ask_user: could not de-duplicate the reply: {e}")
+    return _with_pending(thread, reply.content or "(the user replied with no text)")
+
+
+def _with_pending(thread, text: str) -> str:
+    """Appends anything else waiting in the thread inbox to a tool result.
+
+    Anything people said while the model was blocked in ask_user is at least
+    as relevant as the answer itself, so it rides back on the same result
+    rather than waiting for the next shell command to pick it up.
+    """
+    try:
+        pending = sandbox_thread_inbox.drain(thread.id)
+    except Exception as e:
+        print(f"Sandbox inbox: could not read pending thread messages: {e}")
+        return text
+    return f"{text}\n\n{pending}" if pending else text
+
+
+@function_tool
+async def check_thread_messages(wrapper: RunContextWrapper[dict]) -> str:
+    """Check for thread messages you have not seen yet, without waiting.
+    Worth doing before you commit to something expensive or hard to undo;
+    routine polling is unnecessary.
+    """
+    ctx = _ask_user_context(wrapper)
+    thread = ctx.get("thread")
+    if thread is None:
+        return "No thread is attached to this run, so nobody can send you messages."
+    try:
+        pending = sandbox_thread_inbox.drain(thread.id)
+    except Exception as e:
+        print(f"Sandbox inbox: check_thread_messages failed: {e}")
+        return "Could not check for new messages."
+    return pending or "No new messages."
+
+
+@function_tool
+async def say_in_thread(wrapper: RunContextWrapper[dict], text: str) -> str:
+    """Post a short message to the Discord thread and carry on immediately;
+    unlike `ask_user` it does not wait for a reply, so it costs you nothing.
+    Use it when you change course after something the user said, or when an
+    approach fails and you are trying another — not to narrate every command.
+
+    Args:
+        text: The message to post. Plain text, a sentence or two.
+    """
+    ctx = _ask_user_context(wrapper)
+    thread = ctx.get("thread")
+    if thread is None:
+        return "No thread is attached to this run — nothing was sent."
+    text = (text or "").strip()
+    if not text:
+        return "Nothing to send (the message was empty)."
+    try:
+        await thread.send(f"🐳 {text[:1900]}")
+    except Exception as e:
+        print(f"Sandbox say_in_thread: failed to send: {e}")
+        return "Could not post that to the thread — carry on with the task."
+    return _with_pending(thread, "Posted to the thread.")
+
+
+@function_tool
+async def send_preview_to_thread(
+    wrapper: RunContextWrapper[dict], path: str, caption: str = ""
+) -> str:
+    """Send a file to the Discord thread right now, without ending the task
+    — for showing a partial or in-progress result (a draft plot, an
+    intermediate file).
+
+    Args:
+        path: Path to the file, relative to your current working directory
+            (never an absolute path).
+        caption: Optional short caption to send alongside the file.
+    """
+    ctx = _ask_user_context(wrapper)
+    thread = ctx.get("thread")
+    session = ctx.get("session")
+    if thread is None or session is None:
+        return "No thread is available to preview to right now."
+    if path.startswith("/"):
+        return "Use a path relative to your working directory, not an absolute one."
+
+    try:
+        result = await session.exec("cat", "--", path, shell=False)
+    except Exception as e:
+        print(f"Sandbox send_preview_to_thread: exec failed: {e}")
+        return f"Could not read {path!r} to preview it."
+    if not result.ok():
+        return f"Could not read {path!r} — check the path and try again."
+    data = result.stdout
+    if len(data) > MAX_ARTIFACT_BYTES:
+        return (
+            f"{path!r} is too large to preview ({len(data)} bytes, over the "
+            f"{MAX_ARTIFACT_BYTES}-byte limit)."
+        )
+
+    name = _relative_artifact_name(path, "")
+    try:
+        await thread.send(content=caption or None, file=discord.File(io.BytesIO(data), filename=name))
+    except Exception as e:
+        print(f"Sandbox send_preview_to_thread: send failed: {e}")
+        return f"Read {path!r} but could not send it to the thread."
+    return f"Sent {name!r} to the thread as a preview."
 
 
 def build_sandbox_agent(out_dir: str | None) -> "object":
@@ -313,29 +868,66 @@ def build_sandbox_agent(out_dir: str | None) -> "object":
     apply_patch call without an apply_patch tool"). Empty string suppresses
     the default entirely; our instructions + the Shell capability's own
     instructions are all the model needs.
+
+    Capabilities also include Memory (persistent, distilled memory of prior
+    runs — see the module docstring): configured with live_update=False so
+    its own capability requirement stays Shell-only (the default,
+    live_update=True, requires Filesystem — the same apply_patch problem
+    above), and with its phase-one/phase-two extraction models pointed at
+    THIS SAME local/self-hosted LLM rather than the SDK's hosted-OpenAI
+    defaults ("gpt-5.4-mini"/"gpt-5.5"), which this bot has no API key
+    configured for and must never silently send sandbox content to.
+
+    tools (ask_user, send_preview_to_thread) are in addition to the Shell
+    capability's own tools — SandboxAgent is a dataclass subclass of Agent
+    and accepts tools=[...] the same way. Both tools no-op gracefully (return
+    a string telling the model to proceed on its own) when no Discord thread
+    context was passed into this run — see run_sandbox_task's nested_context.
     """
-    from agents.sandbox import SandboxAgent
-    from agents.sandbox.capabilities import Shell
+    from agents.sandbox import MemoryGenerateConfig, MemoryReadConfig, SandboxAgent
+    from agents.sandbox.capabilities import Memory, Shell
 
     output_bullet = _OUTPUT_BULLET_RESOLVED if out_dir is not None else _OUTPUT_BULLET_FALLBACK
     budget_bullet = _BUDGET_BULLET.format(
         max_turns=sandbox_max_turns(), timeout_seconds=sandbox_timeout()
     )
+    sandbox_llm = OpenAIChatCompletionsModel(
+        model=sandbox_model(),
+        openai_client=AsyncOpenAI(
+            base_url=sandbox_llm_host() + "/v1",
+            api_key=sandbox_llm_api_key(),
+            # Both stated rather than left to the client's defaults (600s,
+            # 2 retries), which together let one silent request spend 30
+            # minutes before the run reports anything. Connect gets its own
+            # short budget so an unreachable host fails fast instead of
+            # waiting out the read. Note the read timeout does not bound a
+            # server that keeps sending keep-alive padding — see
+            # sandbox_request_timeout() for what this does and does not catch.
+            timeout=httpx.Timeout(
+                float(sandbox_request_timeout()), connect=SANDBOX_CONNECT_TIMEOUT_SECONDS
+            ),
+            max_retries=sandbox_max_retries(),
+        ),
+    )
 
     return SandboxAgent(
         name="Code Sandbox",
-        model=OpenAIChatCompletionsModel(
-            model=sandbox_model(),
-            openai_client=AsyncOpenAI(
-                base_url=sandbox_llm_host() + "/v1",
-                api_key=sandbox_llm_api_key(),
-            ),
-        ),
+        model=sandbox_llm,
         instructions=SANDBOX_INSTRUCTIONS.format(
             output_bullet=output_bullet, budget_bullet=budget_bullet
         ),
         base_instructions="",
-        capabilities=[Shell(configure_tools=_make_shell_tools_tolerant)],
+        capabilities=[
+            Shell(configure_tools=_configure_shell_tools),
+            Memory(
+                read=MemoryReadConfig(live_update=False),
+                generate=MemoryGenerateConfig(
+                    phase_one_model=sandbox_llm,
+                    phase_two_model=sandbox_llm,
+                ),
+            ),
+        ],
+        tools=[ask_user, send_preview_to_thread, check_thread_messages, say_in_thread],
         # Slightly cooler than the chat agent: code tasks want determinism.
         model_settings=ModelSettings(temperature=0.5),
     )
@@ -363,6 +955,13 @@ class SandboxResult:
     ...) still raises instead of returning ok=False — those mean the
     sandbox itself is unusable, not that the task ran out of budget.
 
+    resumed is the GROUND TRUTH of whether this run started from the
+    thread's saved workspace, which can differ from what the caller predicted
+    with sandbox_snapshot_exists(): a snapshot that existed but could not be
+    restored is dropped and the run retried empty (see
+    _create_sandbox_session), so the caller can correct a badge it already
+    posted rather than leaving a wrong one standing.
+
     skipped_artifacts holds a human-readable reason for each output file
     that was found under out/ but NOT fetched (over MAX_ARTIFACT_FILES /
     MAX_ARTIFACT_BYTES) — populated on both success and failure, empty when
@@ -373,18 +972,58 @@ class SandboxResult:
     ok: bool = True
     error: str | None = None
     skipped_artifacts: list[str] = field(default_factory=list)
+    resumed: bool = False
 
 
 def build_sandbox_client() -> "object":
-    """A fresh Docker sandbox client bound to the local daemon."""
+    """A fresh Docker sandbox client bound to the local daemon, wired to
+    persist/restore per-thread workspace snapshots through Redis
+    (classes.sandbox_snapshot_store.SandboxSnapshotStore) under
+    SANDBOX_SNAPSHOT_DEP_KEY — see _create_sandbox_session for how a
+    snapshot id ties a client.create() call to one Discord thread."""
     from docker import from_env as docker_from_env
     from agents.sandbox.sandboxes.docker import DockerSandboxClient
+    from agents.sandbox.session import Dependencies
 
-    return DockerSandboxClient(docker_from_env())
+    from classes.sandbox_snapshot_store import SandboxSnapshotStore
+
+    dependencies = Dependencies().bind_value(SANDBOX_SNAPSHOT_DEP_KEY, SandboxSnapshotStore())
+    return DockerSandboxClient(docker_from_env(), dependencies=dependencies)
 
 
-async def _create_sandbox_session(client) -> "object":
-    """Creates (and starts) one fresh, empty-workspace container.
+async def _create_sandbox_session(sandbox_client, snapshot_id: str | None,
+                                  resumed: bool = False):
+    """Creates AND STARTS one container for this run.
+
+    The explicit session.start() call (distinct from the raw Docker
+    container.start() that client.create() already does internally) matters
+    for two things, both verified live against a real Docker daemon and the
+    pinned SDK version (docker.from_env() + DockerSandboxClient, no mocks):
+    it is what actually materializes the manifest root (/workspace) and sets
+    it as the session's tracked working directory (a raw session.exec("pwd")
+    on an un-started session returns the image's own default, e.g. "/", and
+    /workspace never gets created at all) — and, when a snapshot is
+    restorable, it is where hydration into that materialized root actually
+    happens (create() alone does not hydrate anything; without start(), a
+    "resumed" session came back completely empty in that same live check,
+    even though the snapshot was uploaded correctly). Skipping this call
+    (the original state of this function) meant BOTH the model's own work
+    and any prior snapshot content lived somewhere session.stop()'s
+    persist step never looks at, silently making resume/Memory persistence
+    into no-ops despite the plumbing otherwise looking correct — caught by
+    that live check, not by any mocked unit test.
+
+    When snapshot_id is given (the run is happening in a Discord thread —
+    see ensure_sandbox_thread/sandbox_snapshot_id_for), the session is seeded
+    from that thread's saved workspace snapshot in Redis if one exists (a
+    prior run in the same thread), via a RemoteSnapshot bound to the SAME id
+    both here and in _persist_sandbox_snapshot — this is what lets "continue
+    this in the thread" pick back up instead of starting from scratch.
+    snapshot_id is None for a one-off run with no thread: passing
+    snapshot=None to client.create() resolves to a true no-op snapshot
+    (verified against the SDK: DockerSandboxClient.create's
+    resolve_snapshot(None, ...) builds a NoopSnapshot, never a hidden local
+    default) — today's fully disposable behavior, unchanged.
 
     We create the session ourselves — rather than letting RunConfig create
     one automatically — so we retain a live handle to it after Runner.run
@@ -392,8 +1031,47 @@ async def _create_sandbox_session(client) -> "object":
     build_sandbox_run_config for the other half of this.
     """
     from agents.sandbox.sandboxes.docker import DockerSandboxClientOptions
+    from agents.sandbox.snapshot import RemoteSnapshot
 
-    return await client.create(options=DockerSandboxClientOptions(image=sandbox_image()))
+    def _snapshot():
+        if snapshot_id is None:
+            return None
+        return RemoteSnapshot(id=snapshot_id, client_dependency_key=SANDBOX_SNAPSHOT_DEP_KEY)
+
+    async def _create():
+        return await sandbox_client.create(
+            options=DockerSandboxClientOptions(image=sandbox_image()),
+            snapshot=_snapshot(),
+        )
+
+    session = await _create()
+    try:
+        await session.start()
+    except Exception as e:
+        # Only start() is guarded, and only when a restore was actually
+        # expected: a Docker-daemon problem fails in create() above and is
+        # therefore outside this branch, so a failure here with a restorable
+        # snapshot is overwhelmingly the restore itself (a truncated or
+        # corrupt tar surfaces from hydrate_workspace's untar, NOT as
+        # SnapshotRestoreError — RemoteSnapshot only wraps download(), and
+        # our store's download() never raises — so this cannot be narrowed
+        # to a specific exception class).
+        if not (resumed and snapshot_id is not None):
+            raise
+        print(f"Sandbox: could not restore this thread's saved workspace, starting fresh: {e}")
+        await _delete_sandbox_session(sandbox_client, session)
+        # Delete the bad key BEFORE retrying, for two reasons: it is what
+        # makes the retry work at all (exists() is now False, so start()
+        # stops trying to restore it), and it un-bricks the thread — every
+        # later run would otherwise hit the same corrupt snapshot until its
+        # TTL expired. Retrying with snapshot=None instead would "work" once
+        # and then quietly disable persistence forever, since a NoopSnapshot
+        # makes the teardown session.stop() save nothing.
+        await _delete_sandbox_snapshot(snapshot_id)
+        session = await _create()
+        await session.start()
+        return session, False
+    return session, resumed
 
 
 def build_sandbox_run_config(client, session) -> RunConfig:
@@ -410,7 +1088,7 @@ def build_sandbox_run_config(client, session) -> RunConfig:
     return RunConfig(sandbox=SandboxRunConfig(client=client, session=session))
 
 
-async def _delete_sandbox_session(client, session) -> None:
+async def _delete_sandbox_session(sandbox_client, session) -> None:
     """Tears down a container we own, tolerating our own cancellation.
 
     Wrapped in asyncio.shield so that if the caller of run_sandbox_task is
@@ -420,11 +1098,50 @@ async def _delete_sandbox_session(client, session) -> None:
     """
     try:
         await asyncio.wait_for(
-            asyncio.shield(client.delete(session)),
+            asyncio.shield(sandbox_client.delete(session)),
             timeout=SANDBOX_DELETE_TIMEOUT_SECONDS,
         )
     except Exception as e:
         print(f"Sandbox: failed to delete session/container: {e}")
+
+
+async def _persist_sandbox_snapshot(session, snapshot_id: str | None) -> None:
+    """Persists the workspace back to Redis (via session.stop(), which
+    archives the workspace through whatever snapshot the session was created
+    with — see _create_sandbox_session) so a later run in the same thread can
+    resume from it. A no-op when snapshot_id is None (no thread, or thread
+    creation failed — see ensure_sandbox_thread/sandbox_snapshot_id_for):
+    today's fully disposable behavior is unchanged in that case.
+
+    Time-boxed and best-effort, same rationale as _delete_sandbox_session:
+    when the Memory capability is active, session.stop() is also where its
+    phase-one/phase-two extraction runs (two extra local-model calls) —
+    entirely outside the sandbox_timeout() envelope already spent on the run
+    itself — so a slow or failed persist must never block returning the
+    sandbox's result to the user.
+    """
+    if snapshot_id is None:
+        return
+    try:
+        await asyncio.wait_for(session.stop(), timeout=sandbox_persist_timeout())
+    except Exception as e:
+        print(f"Sandbox: failed to persist workspace snapshot {snapshot_id!r}: {e}")
+
+
+async def _delete_sandbox_snapshot(snapshot_id: str | None) -> None:
+    """Drops a thread's saved workspace from Redis. Used only by
+    _create_sandbox_session's recovery path, when the snapshot turned out not
+    to be restorable. Best-effort: if the delete itself fails the retry below
+    will fail too and propagate, which is the correct outcome — but a failure
+    here must not mask the original restore error in the logs."""
+    if snapshot_id is None:
+        return
+    try:
+        from classes.sandbox_snapshot_store import SandboxSnapshotStore
+
+        await SandboxSnapshotStore().delete(snapshot_id)
+    except Exception as e:
+        print(f"Sandbox: failed to drop unrestorable snapshot {snapshot_id!r}: {e}")
 
 
 def _parse_find_output(raw: str) -> list[tuple[str, int]]:
@@ -567,7 +1284,15 @@ async def _collect_artifacts(
     return artifacts, skip_notes
 
 
-async def run_sandbox_task(task: str, progress_hooks=None) -> SandboxResult:
+async def run_sandbox_task(
+    task: str,
+    progress_hooks=None,
+    *,
+    thread=None,
+    client=None,
+    requesting_user_id=None,
+    resumed: bool = False,
+) -> SandboxResult:
     """Run one self-contained task in a fresh Docker sandbox.
 
     Returns a SandboxResult: the agent's final report (text) plus any
@@ -577,10 +1302,38 @@ async def run_sandbox_task(task: str, progress_hooks=None) -> SandboxResult:
     run so every tool call (exec_command/write_stdin) and its output can be
     observed — e.g. to stream them to Discord.
 
+    thread/client/requesting_user_id are all optional (default None, which
+    reproduces the exact original single-argument behavior: no thread
+    context, no snapshot persistence, and the ask_user/send_preview_to_thread
+    tools degrade to telling the model to proceed on its own). When given —
+    thread is the Discord thread/channel resolved by
+    tool_functions.run_code_sandbox via ensure_sandbox_thread, client is the
+    discord.Client (needed for ask_user's client.wait_for), and
+    requesting_user_id is the id of the user whose replies ask_user accepts —
+    they are threaded into the NESTED Runner.run's own `context=`, which the
+    ask_user/send_preview_to_thread tools (see their definitions above) read
+    via wrapper.context. thread also determines whether this run's workspace
+    is persisted as a snapshot for a later run in the same thread — see
+    sandbox_snapshot_id_for/_create_sandbox_session/_persist_sandbox_snapshot.
+
+    resumed says whether the caller expects this thread's saved workspace to
+    be restored (it asked sandbox_snapshot_exists before announcing it). It
+    does two things: it prepends RESUMED_TASK_PREAMBLE so the nested model
+    actually LOOKS at the restored files — a small local model will not infer
+    "there is prior work here" from the Memory summary alone — and it enables
+    _create_sandbox_session's recovery path for a snapshot that turns out not
+    to be restorable. The value that comes back on SandboxResult.resumed is
+    the ground truth, which differs from this argument exactly when that
+    recovery fired.
+
     We create and own the container ourselves (rather than letting
     RunConfig(sandbox=...) manage it) so we can read artifacts out of it
     after the run finishes but before it is destroyed; the container is
-    always deleted in `finally`, including on timeout or any other error.
+    always deleted in `finally`, including on timeout or any other error —
+    and, when a snapshot id applies, its workspace is persisted just before
+    that (_persist_sandbox_snapshot), on every exit path (success, timeout,
+    max_turns, model_error, or an uncaught infra error) since even a partial
+    run's workspace may be worth resuming from.
 
     On timeout (the task outliving sandbox_timeout() seconds), we do NOT
     raise: the container is still alive at that point, and a task that ran
@@ -597,40 +1350,60 @@ async def run_sandbox_task(task: str, progress_hooks=None) -> SandboxResult:
     are infra/configuration failures the sandbox itself can't recover from,
     not a task that simply ran out of budget.
     """
-    client = build_sandbox_client()
-    session = await _create_sandbox_session(client)
+    snapshot_id = sandbox_snapshot_id_for(thread)
+    sandbox_client = build_sandbox_client()
+    session, resumed = await _create_sandbox_session(sandbox_client, snapshot_id, resumed)
+    if resumed:
+        task = RESUMED_TASK_PREAMBLE + task
     try:
         out_dir = await _sandbox_output_dir(session)
         if out_dir is not None:
             await session.exec("mkdir", "-p", out_dir, shell=False)
         agent = build_sandbox_agent(out_dir)
+        nested_context = {
+            "thread": thread,
+            "client": client,
+            "requesting_user_id": requesting_user_id,
+            "session": session,
+            "deadline": time.monotonic() + sandbox_timeout(),
+            # Paired with "deadline" so _elapsed_note can report time used
+            # as a fraction of the whole budget. Read from the context
+            # rather than re-read from the env at each command, so the
+            # figure the model sees always matches the deadline it is
+            # actually racing.
+            "timeout_seconds": sandbox_timeout(),
+        }
         try:
             run_result = await asyncio.wait_for(
                 Runner.run(
                     agent,
                     task,
                     max_turns=sandbox_max_turns(),
-                    run_config=build_sandbox_run_config(client, session),
+                    run_config=build_sandbox_run_config(sandbox_client, session),
                     hooks=progress_hooks,
+                    context=nested_context,
                 ),
                 timeout=sandbox_timeout(),
             )
         except asyncio.TimeoutError:
-            return await _failure_result(session, out_dir, "timeout")
+            return await _failure_result(session, out_dir, "timeout", resumed=resumed)
         except MaxTurnsExceeded:
-            return await _failure_result(session, out_dir, "max_turns")
+            return await _failure_result(session, out_dir, "max_turns", resumed=resumed)
         except (ModelBehaviorError, ModelRefusalError) as e:
-            return await _failure_result(session, out_dir, "model_error", str(e))
+            return await _failure_result(session, out_dir, "model_error", str(e), resumed=resumed)
         final_output = run_result.final_output
         text = final_output if isinstance(final_output, str) else str(final_output)
         artifacts, skip_notes = await _collect_artifacts(session, out_dir)
-        return SandboxResult(text=text, artifacts=artifacts, skipped_artifacts=skip_notes)
+        return SandboxResult(text=text, artifacts=artifacts, skipped_artifacts=skip_notes,
+                             resumed=resumed)
     finally:
-        await _delete_sandbox_session(client, session)
+        await _persist_sandbox_snapshot(session, snapshot_id)
+        await _delete_sandbox_session(sandbox_client, session)
 
 
 async def _failure_result(
-    session, out_dir: str | None, error: str, detail: str | None = None
+    session, out_dir: str | None, error: str, detail: str | None = None,
+    *, resumed: bool = False,
 ) -> SandboxResult:
     """Builds the SandboxResult for a run stopped before it produced a
     final report (timeout / max_turns / model_error — see SandboxResult).
@@ -655,5 +1428,6 @@ async def _failure_result(
     except Exception as e:
         print(f"Sandbox: artifact recovery after {error} failed: {e}")
     return SandboxResult(
-        text="", artifacts=artifacts, ok=False, error=error, skipped_artifacts=skip_notes
+        text="", artifacts=artifacts, ok=False, error=error, skipped_artifacts=skip_notes,
+        resumed=resumed,
     )

@@ -523,3 +523,23 @@ async def test_message_stays_under_discord_limits():
     assert all(len(f.value) <= FIELD_VALUE_CHARS for f in embed.fields)
     # the newest command is still visible after eviction
     assert any("line-29" in f.name for f in embed.fields)
+
+
+# ---------------------- workspace origin badge ----------------------
+
+def test_transcript_has_no_workspace_note_by_default():
+    # the no-thread fallback path passes nothing, and must look exactly as
+    # it did before the badge existed
+    _, spec = _render(SandboxTranscript("do a thing"))
+    assert spec.description == "Running in sandbox: do a thing"
+
+
+def test_transcript_puts_the_workspace_note_above_the_task():
+    _, spec = _render(SandboxTranscript("do a thing", workspace_note="♻️ **Resumed**"))
+    assert spec.description == "♻️ **Resumed**\nRunning in sandbox: do a thing"
+
+
+def test_hooks_pass_the_workspace_note_into_the_transcript():
+    hooks = SandboxProgressHooks(MagicMock(), "do a thing", workspace_note="🆕 **Fresh**")
+    _, spec = hooks.transcript.render_message()
+    assert spec.description.startswith("🆕 **Fresh**\n")
