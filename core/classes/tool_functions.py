@@ -480,6 +480,12 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
 
     if in_thread:
         sandbox_thread_inbox.begin_run(channel.id)
+    # What people said to the run while it happened. main.py routes those
+    # messages to the sandbox instead of enqueuing them, and the outer
+    # model's history was built before the run started, so without this it
+    # answers a request it never saw change — observed: a mid-run "make the
+    # milk red" produced a red image the outer model called a mistake.
+    steering = ""
     try:
         result = await run_sandbox_task(
             task,
@@ -503,8 +509,14 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
     finally:
         # Must be in a finally: leaving the thread registered would silently
         # swallow every later message posted there (main.py routes them to a
-        # run that no longer exists) instead of answering them.
+        # run that no longer exists) instead of answering them. history()
+        # first — end_run drops the transcript along with the queue.
+        #
+        # The `except` path above cannot see this: its return value is already
+        # built by the time a finally runs. Accepted — that path means the
+        # sandbox itself died, so there is no result for steering to explain.
         if in_thread:
+            steering = sandbox_thread_inbox.history(channel.id)
             sandbox_thread_inbox.end_run(channel.id)
 
     # Ground truth from the run itself. It only disagrees with the badge
@@ -573,16 +585,48 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
         note = "✅ Done." if result.ok else finalize_notes.get(result.error, "❌ Stopped.")
         await progress.finalize(note)
 
+    # The sandbox agent's own closing message, written FOR the user (see
+    # SANDBOX_INSTRUCTIONS' final bullet). It rides on the first file so the
+    # user gets one message — summary plus image — the way a preview already
+    # arrives, and because the agent is the only party that knows what it
+    # actually did: the outer model, which used to be the sole author of this
+    # message, cannot see the run. Clamped to Discord's per-message limit
+    # rather than chunked — this is a short note beside a file, and a report
+    # long enough to need chunking would bury the file it belongs to.
+    lead = result.text.strip()[:1900] if (result.ok and result.text) else ""
     sent_names = []
     for artifact in result.artifacts:
+        content = lead or (artifact.caption.strip()[:1900] or None)
         try:
             await channel.send(
-                file=discord.File(io.BytesIO(artifact.data), filename=artifact.name)
+                content=content,
+                file=discord.File(io.BytesIO(artifact.data), filename=artifact.name),
             )
             print(f"Sandbox artifact sent to channel: {artifact.name} ({len(artifact.data)} bytes)")
             sent_names.append(artifact.name)
+            # Only now: a failed send carried the message with it, so keeping
+            # `lead` set is what lets the fallback below still deliver it.
+            lead = ""
         except Exception as e:
             print(f"Sandbox artifact {artifact.name} generated but failed to send: {e}")
+    if lead:
+        # No files, or every send failed: the message still has to reach the
+        # user, or the run's own account of itself is lost and only the outer
+        # model's second-hand version survives.
+        try:
+            await channel.send(lead)
+        except Exception as e:
+            print(f"Sandbox: failed to post the agent's closing message: {e}")
+
+    steering_note = ""
+    if steering:
+        steering_note = (
+            "\n\nThe user changed the request while the sandbox worked, in the "
+            f"thread:\n{steering}\nThe sandbox received these and adapted, so the "
+            "result reflects them and not the original wording. Treat them as "
+            "part of what was asked: do not call the result a mistake, do not "
+            "say it went wrong, and do not offer to undo it."
+        )
 
     skip_note = ""
     if result.skipped_artifacts:
@@ -625,13 +669,14 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
                 f"{len(sent_names)} file(s), which were recovered and sent to the "
                 f"channel: {', '.join(sent_names)}. Tell the user the file(s) were "
                 "delivered despite the task not finishing, and do not claim they "
-                "are pending." + unfinished_note + skip_note + resume_correction
+                "are pending." + unfinished_note + skip_note + steering_note
+                + resume_correction
             )
         return no_artifact_messages.get(
             result.error,
             "The sandbox task was stopped before finishing. Tell the user the "
             "task failed.",
-        ) + unfinished_note + skip_note + resume_correction
+        ) + unfinished_note + skip_note + steering_note + resume_correction
 
     if not sent_names:
         # Only warn when nothing was produced at all — an artifact that WAS
@@ -639,17 +684,20 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
         # already correctly described by the exception log above; claiming
         # "no files were found" there would be false.
         no_file_note = (
-            "\n\n(No output files were found under out/ for this run. If "
-            "one was expected, it was not produced — tell the user that "
-            "plainly. Do not claim a file exists, was sent, or is still "
-            "being generated.)"
+            "\n\n(The sandbox attached no file for this run. If one was "
+            "expected, it was not produced — tell the user that plainly. Do "
+            "not claim a file exists, was sent, or is still being generated.)"
         ) if not result.artifacts else ""
-        return result.text + no_file_note + skip_note + resume_correction
+        return (result.text + no_file_note + skip_note + steering_note
+                + resume_correction)
     return (
         f"{result.text}\n\n"
-        f"{len(sent_names)} file(s) were generated and already sent to the "
-        f"channel: {', '.join(sent_names)}. Do not claim they are pending or "
-        "describe sending them yourself." + skip_note + resume_correction
+        f"The sandbox chose {len(sent_names)} file(s) to deliver and they are "
+        f"already in the thread: {', '.join(sent_names)}. The text above is its "
+        "own message to the user, posted there beside them — so the user has "
+        "already read it. Add at most one short sentence of your own: do not "
+        "repeat it, re-describe the files, or second-guess the result."
+        + skip_note + steering_note + resume_correction
     )
 
 

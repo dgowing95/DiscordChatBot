@@ -151,9 +151,9 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
    `MaxTurnsExceeded` or `ModelBehaviorError`/`ModelRefusalError` propagate:
    each becomes `SandboxResult(ok=False, error="timeout"|"max_turns"|
    "model_error")`, and the container is still read before teardown in all
-   three cases — any file already saved and verified under the output dir
-   is recovered and delivered instead of being discarded with the
-   container. `run_code_sandbox` (tool_functions.py) turns `error` into
+   three cases — whatever the run had already attached (or, failing that,
+   whatever the `out/` sweep finds) is recovered and delivered instead of
+   being discarded with the container. `run_code_sandbox` (tool_functions.py) turns `error` into
    reason-specific guidance for the calling agent instead of one
    generic "may be unavailable" message for every failure — that generic
    message is now reserved for errors that actually propagate (a dead
@@ -194,6 +194,30 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
    elapsed → thread messages, so a steering message stays last in the
    result, where the model is most likely to act on it.
 
+   **The sandbox agent chooses what is delivered.** `out/` used to mean
+   "everything in here is sent", so a model that iterated — saving v1, v2,
+   v3 — delivered three near-identical images for one request (observed
+   live). It now calls `attach_file(path, caption)` on the finished file;
+   only attached files are sent. The list lives in the nested run context
+   (`deliverables`), written DURING the run so it survives the paths where
+   `Runner.run` never returns (timeout, max_turns). `_deliver` prefers it and
+   falls back to the blind `out/` sweep (`_collect_artifacts`) only when
+   nothing was attached — a run cut off before it could attach, or a model
+   that finished without calling the tool. That sweep is also filtered with
+   `find -newer` against a run marker touched beside (never inside) `out/` at
+   the start of every run: a thread's snapshot carries `out/` with it and a
+   resumed run only `mkdir -p`s it, so without the filter run #2 re-sent
+   run #1's files. Attached files arrive under their basename
+   (`_attachment_name`), not the sweep's flattened `out_plot.png` form.
+
+   **The sandbox agent also writes the message the user reads.** Its final
+   output is no longer only handed to the outer model: `run_code_sandbox`
+   posts it into the thread as the `content` of the first attached file (one
+   message, summary plus image), or on its own when there are no files, and
+   `SANDBOX_INSTRUCTIONS`' closing bullet is aimed at the user rather than at
+   "the caller". The outer model is told, in the tool result, that the user
+   has already read it and to add at most one short sentence.
+
    The output dir is also resolved
    (via `pwd`) and mkdir -p'd before the run starts, but the sandbox agent
    is only ever told the RELATIVE `out/` dirname, never the resolved
@@ -222,7 +246,8 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
    `SANDBOX_TIMEOUT` budget is left — an unanswered question never hangs or
    fails the run, it just tells the model to proceed on its own judgement)
    `send_preview_to_thread` (push an in-progress file to the thread before
-   the task finishes, same size cap as final artifacts), `say_in_thread`
+   the task finishes, same size cap as final artifacts), `attach_file` (mark
+   a finished file for delivery — see above), `say_in_thread`
    (post a progress note without waiting for anything) and
    `check_thread_messages`. The Discord
    `client` needed for `ask_user`'s `wait_for` is threaded all the way down
@@ -283,8 +308,20 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
    acknowledging with a 📨 reaction. Messages reach the model three ways, in
    order of reliability: appended to every shell command's result
    (`_with_thread_messages`, wrapped OUTSIDE `_tolerant_tool_invoke` so a
-   rejected call still carries them), appended to `ask_user`/`say_in_thread`
-   returns, and on demand via `check_thread_messages`. `ask_user` calls
+   rejected call still carries them), appended to
+   `ask_user`/`say_in_thread`/`attach_file` returns, and on demand via
+   `check_thread_messages`.
+
+   They also reach the OUTER model, which otherwise cannot know the request
+   changed: its history was built before the run started, and `on_message`
+   routes these messages to the sandbox instead of enqueuing them. `deliver()`
+   records each accepted message in `_SEEN`, `history()` renders the lot
+   non-destructively (so it survives the `drain()`s the sandbox does mid-run,
+   and the `consume()` `ask_user` does), and `run_code_sandbox` reads it just
+   before `end_run` and appends it to the tool result with an instruction not
+   to call the result a mistake. Without it the outer model answered a
+   mid-run "make the milk red" by telling the user the sandbox "went a bit
+   rogue". `ask_user` calls
    `consume()` on the reply it received, because discord.py's `dispatch`
    fans a message out to `wait_for` futures and `on_message` independently
    and the model would otherwise see it twice.

@@ -18,8 +18,10 @@ def clean_registry():
     """The registry is module-level process state, so a test that leaves a
     thread registered would silently change the next test's behavior."""
     inbox._PENDING.clear()
+    inbox._SEEN.clear()
     yield
     inbox._PENDING.clear()
+    inbox._SEEN.clear()
 
 
 # ---------------------- run lifecycle ----------------------
@@ -170,3 +172,73 @@ def test_drain_empties_the_queue_but_keeps_the_run_active():
     # need to reach the sandbox
     assert inbox.is_run_active(1) is True
     assert inbox.deliver(1, 11, "ana", "again") is True
+
+
+# ---------------------- history (what the OUTER model is told) ----------------------
+
+def test_history_is_empty_for_a_thread_with_no_run():
+    assert inbox.history(1) == ""
+
+
+def test_history_records_every_accepted_message_in_order():
+    inbox.begin_run(1)
+    inbox.deliver(1, 10, "ana", "make it blue")
+    inbox.deliver(1, 11, "bo", "and smaller")
+    assert inbox.history(1) == (
+        "[thread message from ana]: make it blue\n"
+        "[thread message from bo]: and smaller"
+    )
+
+
+def test_history_survives_draining():
+    # The whole point: drain() empties the queue as the sandbox reads it,
+    # several times over a run. The outer model reads history once at the
+    # end and must still see everything that was said.
+    inbox.begin_run(1)
+    inbox.deliver(1, 10, "ana", "make it blue")
+    inbox.drain(1)
+    inbox.deliver(1, 11, "ana", "and fizzy")
+    inbox.drain(1)
+    assert inbox.history(1) == (
+        "[thread message from ana]: make it blue\n"
+        "[thread message from ana]: and fizzy"
+    )
+
+
+def test_history_survives_consume():
+    # consume() drops a message from the QUEUE because ask_user already
+    # received it — it steered the run just as much as any other, so the
+    # outer model still needs to know it was said.
+    inbox.begin_run(1)
+    inbox.deliver(1, 10, "ana", "use red")
+    inbox.consume(1, 10)
+    assert inbox.drain(1) == ""
+    assert "use red" in inbox.history(1)
+
+
+def test_history_excludes_rejected_messages():
+    # A message the queue refused never reaches the sandbox, so reporting it
+    # as a change to the request would be wrong in the other direction.
+    inbox.begin_run(1)
+    for i in range(inbox.MAX_PENDING_MESSAGES):
+        assert inbox.deliver(1, i, "ana", "ok") is True
+    assert inbox.deliver(1, 99, "ana", "dropped") is False
+    assert "dropped" not in inbox.history(1)
+
+
+def test_history_is_cleared_between_runs():
+    inbox.begin_run(1)
+    inbox.deliver(1, 10, "ana", "make it blue")
+    inbox.end_run(1)
+    assert inbox.history(1) == ""
+    inbox.begin_run(1)
+    assert inbox.history(1) == ""
+
+
+def test_begin_run_keeps_history_on_re_entry():
+    # begin_run is documented idempotent for _PENDING; the record must not
+    # be quietly wiped by a re-entry either.
+    inbox.begin_run(1)
+    inbox.deliver(1, 10, "ana", "make it blue")
+    inbox.begin_run(1)
+    assert "make it blue" in inbox.history(1)

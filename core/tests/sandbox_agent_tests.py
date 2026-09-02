@@ -220,11 +220,17 @@ def test_sandbox_instructions_explain_out_in_exactly_one_place():
     agent = sandbox_agent.build_sandbox_agent("/root/out")
     assert agent.instructions.count("out/") <= 4
     # This ceiling is a deliberate brake, not a comfortable bound: the prompt
-    # is ~3715 chars, so there is under 100 to spare. It is meant to fail the
+    # is ~3870 chars, so there is under 100 to spare. It is meant to fail the
     # next person who adds a paragraph instead of editing one — the exact
     # accretion that took this prompt to ~5000 chars with `out/` explained in
     # five places. Rewrite to fit; only raise it with a reason.
-    assert len(agent.instructions) < 3800
+    #
+    # Raised once, from 3800, when attach_file replaced "everything under
+    # out/ is sent" as the delivery rule: the output bullet had to teach the
+    # selection step, and the final-report bullet had to be re-aimed at the
+    # user (it is now posted in the thread, not just handed to the caller).
+    # Both were rewritten in place, not added to.
+    assert len(agent.instructions) < 3950
 
 
 def test_sandbox_instructions_tells_model_to_stop_after_verification():
@@ -238,7 +244,10 @@ def test_sandbox_instructions_tells_model_its_turn_and_time_budget(monkeypatch):
     agent = sandbox_agent.build_sandbox_agent(None)
     assert "7 turns" in agent.instructions
     assert "123 seconds" in agent.instructions
-    assert "save your best current partial output" in agent.instructions
+    # The escape hatch has to name the delivery step, not just the saving:
+    # once anything is attached the out/ fallback sweep no longer runs, so
+    # "save it under out/" alone would not reach the user.
+    assert "save and attach your best current partial output" in agent.instructions
 
 
 def test_sandbox_instructions_do_not_teach_the_model_to_measure_time():
@@ -365,6 +374,53 @@ def test_relative_artifact_name_falls_back_when_empty():
     assert sandbox_agent._relative_artifact_name("/out", "/out") == "artifact"
 
 
+def test_attachment_name_uses_the_basename():
+    # The agent named this file itself, so it should arrive under that name
+    # rather than the sweep's flattened form (_relative_artifact_name).
+    assert sandbox_agent._attachment_name("out/plot.png") == "plot.png"
+    assert sandbox_agent._attachment_name("out/sub/plot.png") == "plot.png"
+    assert sandbox_agent._attachment_name("plot.png") == "plot.png"
+
+
+def test_attachment_name_falls_back_when_there_is_no_basename():
+    assert sandbox_agent._attachment_name("out/") == "out"
+    assert sandbox_agent._attachment_name("/") == "artifact"
+
+
+def _entry(path, size, caption=""):
+    return {"path": path, "size": size, "caption": caption}
+
+
+def test_select_deliverables_keeps_attached_files_under_the_caps():
+    kept, skipped = sandbox_agent._select_deliverables(
+        [_entry("out/a.png", 10), _entry("out/b.png", 20)], max_files=10, max_bytes=1000)
+    assert [e["path"] for e in kept] == ["out/a.png", "out/b.png"]
+    assert skipped == []
+
+
+def test_select_deliverables_names_skips_for_the_user():
+    # Unlike _select_artifacts, whose caller re-maps container paths, these
+    # notes already read as the user will see the file named.
+    kept, skipped = sandbox_agent._select_deliverables(
+        [_entry("out/big.png", 5000)], max_files=10, max_bytes=1000)
+    assert kept == []
+    assert len(skipped) == 1 and skipped[0].startswith("big.png (skipped:")
+
+
+def test_select_deliverables_enforces_the_running_total():
+    kept, skipped = sandbox_agent._select_deliverables(
+        [_entry("out/a.png", 600), _entry("out/b.png", 600)], max_files=10, max_bytes=1000)
+    assert [e["path"] for e in kept] == ["out/a.png"]
+    assert "would exceed" in skipped[0]
+
+
+def test_select_deliverables_enforces_the_file_count_cap():
+    entries = [_entry(f"out/{i}.png", 1) for i in range(3)]
+    kept, skipped = sandbox_agent._select_deliverables(entries, max_files=2, max_bytes=1000)
+    assert len(kept) == 2
+    assert skipped == ["2.png (skipped: more than 2 attached files)"]
+
+
 def test_select_artifacts_accepts_files_under_the_caps():
     listed = [("/workspace/out/a.png", 100), ("/workspace/out/b.png", 200)]
     to_fetch, skipped = sandbox_agent._select_artifacts(listed, max_files=10, max_bytes=1000)
@@ -405,7 +461,11 @@ def _patch_session_lifecycle(client=None, session=None, delete=None, out_dir=Non
     client = client if client is not None else MagicMock(name="client")
     if session is None:
         session = MagicMock(name="session")
-        session.exec = AsyncMock()
+        # A real exec result, not a bare AsyncMock: an AsyncMock's own
+        # return_value is another AsyncMock, so `res.ok()` would hand
+        # production code a coroutine (truthy, never awaited) instead of a
+        # bool — which is not how a live session behaves.
+        session.exec = AsyncMock(return_value=_exec_result(b""))
     return (
         patch.object(prod_sandbox_agent, "build_sandbox_client", return_value=client),
         patch.object(prod_sandbox_agent, "_create_sandbox_session",
@@ -466,7 +526,12 @@ async def test_run_sandbox_task_resolves_output_dir_before_run(monkeypatch):
          p_client, p_session, p_delete, p_out_dir:
         await prod_sandbox_agent.run_sandbox_task("t")
 
-    session.exec.assert_awaited_once_with("mkdir", "-p", "/root/out", shell=False)
+    # mkdir first, then the run marker beside (never inside) out/ — see
+    # _mark_run_start.
+    assert [c.args for c in session.exec.await_args_list] == [
+        ("mkdir", "-p", "/root/out"),
+        ("touch", "--", "/root/.dcb_run_start"),
+    ]
     build_agent.assert_called_once_with("/root/out")
 
 
@@ -1150,7 +1215,7 @@ async def test_tool_warns_the_outer_model_when_ok_but_no_files_were_produced(mon
         )
 
     assert "On it! It'll pop up shortly." in result
-    assert "No output files were found under out/" in result
+    assert "The sandbox attached no file" in result
     assert "Do not claim a file exists" in result
 
 
@@ -1402,9 +1467,14 @@ async def test_tool_sends_artifacts_and_tells_llm_they_were_sent(monkeypatch):
     message.channel.send.assert_awaited_once()
     _, kwargs = message.channel.send.await_args
     assert kwargs["file"].filename == "plot.png"
+    # The sandbox's own closing message rides on the file, so the user reads
+    # what the agent that did the work actually said — not only the outer
+    # model's second-hand version of it.
+    assert kwargs["content"] == "done: 42"
     assert "done: 42" in result
     assert "plot.png" in result
-    assert "already sent" in result
+    assert "already in the thread" in result
+    assert "at most one short sentence" in result
 
 
 @pytest.mark.asyncio
@@ -1426,6 +1496,159 @@ async def test_tool_returns_plain_text_when_an_artifact_fails_to_send(monkeypatc
     # the send failed, so the text result is returned as-is (no false claim
     # that a file was sent)
     assert result == "done: 42"
+
+
+@pytest.mark.asyncio
+async def test_collect_artifacts_filters_by_the_run_marker():
+    # A thread's snapshot carries out/ with it, and a resumed run only
+    # mkdir -p's it — so without the filter run #2 re-delivers run #1's
+    # files. Restored files keep their archived mtimes, so they sort older
+    # than the marker touched at the start of this run.
+    session = MagicMock()
+    session.exec = AsyncMock(return_value=_exec_result(b""))
+    await prod_sandbox_agent._collect_artifacts(session, "/root/out", "/root/.dcb_run_start")
+    assert session.exec.await_args.args == (
+        "find", "/root/out", "-maxdepth", "3", "-type", "f",
+        "-newer", "/root/.dcb_run_start", "-printf", "%s %p\n",
+    )
+
+
+@pytest.mark.asyncio
+async def test_collect_artifacts_omits_the_filter_without_a_marker():
+    # The marker is best-effort (see _mark_run_start); losing it must fall
+    # back to the old unfiltered sweep, never to sweeping nothing.
+    session = MagicMock()
+    session.exec = AsyncMock(return_value=_exec_result(b""))
+    await prod_sandbox_agent._collect_artifacts(session, "/root/out", None)
+    assert "-newer" not in session.exec.await_args.args
+
+
+@pytest.mark.asyncio
+async def test_mark_run_start_touches_beside_the_output_dir():
+    # Never INSIDE out/, or the sweep would find the marker itself and
+    # deliver it to the user as an empty file.
+    session = MagicMock()
+    session.exec = AsyncMock(return_value=_exec_result(b""))
+    marker = await prod_sandbox_agent._mark_run_start(session, "/root/out")
+    assert marker == "/root/.dcb_run_start"
+    session.exec.assert_awaited_once_with("touch", "--", "/root/.dcb_run_start", shell=False)
+
+
+@pytest.mark.asyncio
+async def test_mark_run_start_is_best_effort():
+    session = MagicMock()
+    session.exec = AsyncMock(side_effect=Exception("no touch"))
+    assert await prod_sandbox_agent._mark_run_start(session, "/root/out") is None
+    assert await prod_sandbox_agent._mark_run_start(MagicMock(), None) is None
+
+
+@pytest.mark.asyncio
+async def test_collect_deliverables_reads_only_what_was_attached():
+    session = MagicMock()
+    session.exec = AsyncMock(return_value=_exec_result(b"PNGDATA"))
+    entries = [{"path": "out/final.png", "size": 7, "caption": "here you go"}]
+
+    artifacts, skipped = await prod_sandbox_agent._collect_deliverables(session, entries)
+
+    assert skipped == []
+    assert [(a.name, a.data, a.caption) for a in artifacts] == [
+        ("final.png", b"PNGDATA", "here you go")
+    ]
+    session.exec.assert_awaited_once_with("cat", "--", "out/final.png", shell=False)
+
+
+@pytest.mark.asyncio
+async def test_deliver_prefers_what_the_agent_attached():
+    # The whole point of the fix: out/ may hold v1/v2/v3, but only the
+    # attached file is delivered.
+    session = MagicMock()
+    session.exec = AsyncMock(return_value=_exec_result(b"PNGDATA"))
+    sweep = AsyncMock(return_value=([], []))
+
+    with patch.object(prod_sandbox_agent, "_collect_artifacts", sweep):
+        artifacts, _ = await prod_sandbox_agent._deliver(
+            session, [{"path": "out/v3.png", "size": 7, "caption": ""}], "/root/out", None)
+
+    assert [a.name for a in artifacts] == ["v3.png"]
+    sweep.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_deliver_falls_back_to_the_sweep_when_nothing_was_attached():
+    # The safety net for a run cut off before it could attach anything, and
+    # for a model that finished without ever calling attach_file.
+    recovered = [sandbox_agent.SandboxArtifact(name="plot.png", data=b"x")]
+    sweep = AsyncMock(return_value=(recovered, []))
+
+    with patch.object(prod_sandbox_agent, "_collect_artifacts", sweep):
+        artifacts, _ = await prod_sandbox_agent._deliver(
+            MagicMock(), [], "/root/out", "/root/.dcb_run_start")
+
+    assert artifacts == recovered
+    sweep.assert_awaited_once()
+    assert sweep.await_args.args[1:] == ("/root/out", "/root/.dcb_run_start")
+
+
+@pytest.mark.asyncio
+async def test_run_sandbox_task_delivers_what_the_agent_attached(monkeypatch):
+    # End to end through run_sandbox_task: the tool writes into the run
+    # context DURING the run, and delivery reads it back afterwards.
+    session = MagicMock(name="session")
+    session.exec = AsyncMock(return_value=_exec_result(b"PNGDATA"))
+
+    async def run(*args, **kwargs):
+        kwargs["context"]["deliverables"].append(
+            {"path": "out/final.png", "size": 7, "caption": ""})
+        out = MagicMock()
+        out.final_output = "done"
+        return out
+
+    runner = MagicMock()
+    runner.run = run
+    sweep = AsyncMock(return_value=([], []))
+    p_client, p_session, p_delete, p_out_dir = _patch_session_lifecycle(
+        session=session, out_dir="/root/out")
+
+    with patch.object(prod_sandbox_agent, "Runner", runner), \
+         patch.object(prod_sandbox_agent, "build_sandbox_agent"), \
+         patch.object(prod_sandbox_agent, "build_sandbox_run_config"), \
+         patch.object(prod_sandbox_agent, "_collect_artifacts", sweep), \
+         p_client, p_session, p_delete, p_out_dir:
+        result = await prod_sandbox_agent.run_sandbox_task("draw a glass of milk")
+
+    assert [a.name for a in result.artifacts] == ["final.png"]
+    sweep.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_sandbox_task_recovers_attachments_after_a_timeout(monkeypatch):
+    # A run killed by the clock still delivers whatever it had already
+    # attached, in preference to sweeping out/.
+    monkeypatch.setenv("SANDBOX_TIMEOUT", "1")
+    session = MagicMock(name="session")
+    session.exec = AsyncMock(return_value=_exec_result(b"PNGDATA"))
+
+    async def slow_run(*args, **kwargs):
+        kwargs["context"]["deliverables"].append(
+            {"path": "out/partial.png", "size": 7, "caption": ""})
+        await asyncio.sleep(5)
+
+    runner = MagicMock()
+    runner.run = slow_run
+    sweep = AsyncMock(return_value=([], []))
+    p_client, p_session, p_delete, p_out_dir = _patch_session_lifecycle(
+        session=session, out_dir="/root/out")
+
+    with patch.object(prod_sandbox_agent, "Runner", runner), \
+         patch.object(prod_sandbox_agent, "build_sandbox_agent"), \
+         patch.object(prod_sandbox_agent, "build_sandbox_run_config"), \
+         patch.object(prod_sandbox_agent, "_collect_artifacts", sweep), \
+         p_client, p_session, p_delete, p_out_dir:
+        result = await prod_sandbox_agent.run_sandbox_task("draw a glass of milk")
+
+    assert result.ok is False and result.error == "timeout"
+    assert [a.name for a in result.artifacts] == ["partial.png"]
+    sweep.assert_not_awaited()
 
 
 # ============================================================
@@ -1659,6 +1882,120 @@ def _preview_ctx(**overrides):
     )
 
 
+def _attach_ctx(**overrides):
+    from agents.tool_context import ToolContext
+    ctx = {"thread": _thread_mock(), "session": MagicMock(), "deliverables": []}
+    ctx.update(overrides)
+    return ToolContext(
+        context=ctx,
+        tool_name="attach_file",
+        tool_call_id="a1",
+        tool_arguments=json.dumps({"path": "out/plot.png"}),
+    )
+
+
+async def _attach(ctx, **args):
+    return await prod_sandbox_agent.attach_file.on_invoke_tool(ctx, json.dumps(args))
+
+
+@pytest.mark.asyncio
+async def test_attach_file_records_the_file_for_delivery():
+    # The fix for the core bug: a model that iterates leaves v1/v2/v3 under
+    # out/, and only what it attaches is sent.
+    session = MagicMock()
+    session.exec = AsyncMock(return_value=_exec_result(b"512\n"))
+    ctx = _attach_ctx(session=session)
+
+    result = await _attach(ctx, path="out/plot.png", caption="the final one")
+
+    assert ctx.context["deliverables"] == [
+        {"path": "out/plot.png", "size": 512, "caption": "the final one"}
+    ]
+    assert "plot.png" in result
+    session.exec.assert_awaited_once_with(
+        "stat", "-c", "%s", "--", "out/plot.png", shell=False)
+
+
+@pytest.mark.asyncio
+async def test_attach_file_replaces_an_earlier_version_of_the_same_path():
+    # "I fixed it, attach again" must not deliver both versions.
+    session = MagicMock()
+    session.exec = AsyncMock(return_value=_exec_result(b"20\n"))
+    ctx = _attach_ctx(session=session, deliverables=[
+        {"path": "out/plot.png", "size": 10, "caption": "draft"}])
+
+    result = await _attach(ctx, path="out/plot.png", caption="fixed")
+
+    assert ctx.context["deliverables"] == [
+        {"path": "out/plot.png", "size": 20, "caption": "fixed"}
+    ]
+    assert "Replaced" in result
+
+
+@pytest.mark.asyncio
+async def test_attach_file_rejects_a_missing_file():
+    # Attaching something that does not exist must be a model-visible error,
+    # not a silent promise of a file the user never receives.
+    session = MagicMock()
+    session.exec = AsyncMock(return_value=_exec_result(b"", ok=False))
+    ctx = _attach_ctx(session=session)
+
+    result = await _attach(ctx, path="out/nope.png")
+
+    assert ctx.context["deliverables"] == []
+    assert "does not exist" in result
+
+
+@pytest.mark.asyncio
+async def test_attach_file_rejects_an_absolute_path():
+    ctx = _attach_ctx()
+    result = await _attach(ctx, path="/etc/passwd")
+    assert ctx.context["deliverables"] == []
+    assert "relative" in result
+
+
+@pytest.mark.asyncio
+async def test_attach_file_rejects_an_oversized_file():
+    session = MagicMock()
+    size = str(sandbox_agent.MAX_ARTIFACT_BYTES + 1).encode()
+    session.exec = AsyncMock(return_value=_exec_result(size))
+    ctx = _attach_ctx(session=session)
+
+    result = await _attach(ctx, path="out/huge.bin")
+
+    assert ctx.context["deliverables"] == []
+    assert "too large" in result
+
+
+@pytest.mark.asyncio
+async def test_attach_file_refuses_past_the_file_cap():
+    session = MagicMock()
+    session.exec = AsyncMock(return_value=_exec_result(b"1\n"))
+    full = [{"path": f"out/{i}.png", "size": 1, "caption": ""}
+            for i in range(sandbox_agent.MAX_ARTIFACT_FILES)]
+    ctx = _attach_ctx(session=session, deliverables=full)
+
+    result = await _attach(ctx, path="out/extra.png")
+
+    assert len(ctx.context["deliverables"]) == sandbox_agent.MAX_ARTIFACT_FILES
+    assert "limit" in result
+
+
+@pytest.mark.asyncio
+async def test_attach_file_carries_back_waiting_thread_messages(clean_inbox):
+    # Same delivery argument as ask_user/say_in_thread: a steering message
+    # must not wait for the next shell command to be noticed.
+    thread = _thread_mock(thread_id=88)
+    session = MagicMock()
+    session.exec = AsyncMock(return_value=_exec_result(b"5\n"))
+    clean_inbox.begin_run(88)
+    clean_inbox.deliver(88, 1, "ana", "make it red")
+
+    result = await _attach(_attach_ctx(thread=thread, session=session), path="out/p.png")
+
+    assert "make it red" in result
+
+
 @pytest.mark.asyncio
 async def test_send_preview_to_thread_sends_the_file():
     thread = _thread_mock()
@@ -1673,7 +2010,9 @@ async def test_send_preview_to_thread_sends_the_file():
 
     thread.send.assert_awaited_once()
     _, kwargs = thread.send.await_args
-    assert kwargs["file"].filename == "out_plot.png"
+    # basename, not the flattened out_plot.png: the agent named this file
+    # itself, so it should arrive under the name it used (_attachment_name).
+    assert kwargs["file"].filename == "plot.png"
     assert kwargs["content"] == "in progress"
     assert "sent" in result.lower()
 
@@ -1980,7 +2319,7 @@ async def test_run_sandbox_task_persists_even_on_timeout(monkeypatch):
     monkeypatch.setenv("SANDBOX_TIMEOUT", "1")
     thread = _thread_mock(thread_id=7)
     session = MagicMock(name="session")
-    session.exec = AsyncMock()
+    session.exec = AsyncMock(return_value=_exec_result(b""))
     session.stop = AsyncMock()
 
     async def slow_run(*args, **kwargs):
@@ -2136,9 +2475,13 @@ def clean_inbox():
     import classes.sandbox_thread_inbox as prod_inbox
     core_inbox._PENDING.clear()
     prod_inbox._PENDING.clear()
+    core_inbox._SEEN.clear()
+    prod_inbox._SEEN.clear()
     yield prod_inbox
     core_inbox._PENDING.clear()
     prod_inbox._PENDING.clear()
+    core_inbox._SEEN.clear()
+    prod_inbox._SEEN.clear()
 
 
 @pytest.mark.asyncio
@@ -2643,6 +2986,147 @@ async def test_tool_does_not_guard_a_plain_channel(clean_inbox):
 # ---------------------- run_code_sandbox: resume-mismatch correction ----------------------
 
 @pytest.mark.asyncio
+async def test_tool_posts_the_sandbox_message_even_with_no_files(clean_inbox):
+    # The sandbox is the only party that knows what it did; if its message
+    # only reached the outer model, the user would read a second-hand
+    # version of it and nothing else.
+    message = MagicMock()
+    message.author.id = 1
+    thread, patches = _sandbox_tool_patches(_text_result("no file this time, here is why"))
+    thread.send = AsyncMock()
+
+    with patches[0], patches[1], patches[2], patches[3], \
+         patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()):
+        await prod_tool_functions.run_code_sandbox.on_invoke_tool(
+            _tool_context(message), json.dumps({"task": "print 42"}))
+
+    posted = [c.args[0] for c in thread.send.await_args_list if c.args]
+    assert "no file this time, here is why" in posted
+
+
+@pytest.mark.asyncio
+async def test_tool_does_not_post_a_message_for_a_stopped_run(clean_inbox):
+    # A stopped run has no report (Runner.run never returned one), so there
+    # is nothing to post — the closing embed states what happened instead.
+    message = MagicMock()
+    message.author.id = 1
+    thread, patches = _sandbox_tool_patches(_timeout_result())
+    thread.send = AsyncMock()
+
+    with patches[0], patches[1], patches[2], patches[3], \
+         patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()):
+        await prod_tool_functions.run_code_sandbox.on_invoke_tool(
+            _tool_context(message), json.dumps({"task": "print 42"}))
+
+    thread.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_tool_uses_the_attached_caption_for_later_files(clean_inbox):
+    # The report leads the first file; each further file carries whatever
+    # caption the agent gave it in attach_file.
+    message = MagicMock()
+    message.author.id = 1
+    artifacts = [
+        sandbox_agent.SandboxArtifact(name="a.png", data=b"a", caption="ignored"),
+        sandbox_agent.SandboxArtifact(name="b.png", data=b"b", caption="the second one"),
+    ]
+    thread, patches = _sandbox_tool_patches(_text_result("both charts", artifacts))
+    thread.send = AsyncMock()
+
+    with patches[0], patches[1], patches[2], patches[3], \
+         patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()):
+        await prod_tool_functions.run_code_sandbox.on_invoke_tool(
+            _tool_context(message), json.dumps({"task": "chart it"}))
+
+    contents = [c.kwargs.get("content") for c in thread.send.await_args_list
+                if "file" in c.kwargs]
+    assert contents == ["both charts", "the second one"]
+
+
+@pytest.mark.asyncio
+async def test_tool_still_delivers_the_message_when_the_file_send_fails(clean_inbox):
+    # The report must not go down with the attachment: losing both leaves
+    # the user with only the closing embed.
+    message = MagicMock()
+    message.author.id = 1
+    artifacts = [sandbox_agent.SandboxArtifact(name="a.png", data=b"a")]
+    thread, patches = _sandbox_tool_patches(_text_result("here is the chart", artifacts))
+    thread.send = AsyncMock(side_effect=[Exception("discord is down"), None])
+
+    with patches[0], patches[1], patches[2], patches[3], \
+         patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()):
+        await prod_tool_functions.run_code_sandbox.on_invoke_tool(
+            _tool_context(message), json.dumps({"task": "chart it"}))
+
+    assert thread.send.await_args.args[0] == "here is the chart"
+
+
+@pytest.mark.asyncio
+async def test_tool_tells_the_outer_model_what_the_user_said_mid_run(clean_inbox):
+    # Regression: mid-run steering reached only the sandbox, so the outer
+    # model answered a request it never saw change — a "make the milk red"
+    # produced a red image it then called a mistake.
+    message = MagicMock()
+    message.author.id = 1
+    thread, patches = _sandbox_tool_patches(_text_result("red fizzy milk"))
+    thread.send = AsyncMock()
+
+    async def run_with_steering(*args, **kwargs):
+        clean_inbox.deliver(thread.id, 1, "ana", "can you make the milk red?")
+        clean_inbox.deliver(thread.id, 2, "ana", "and also fizzy, add bubbles")
+        return _text_result("red fizzy milk")
+
+    with patches[0], patches[1], patches[2], \
+         patch.object(prod_sandbox_agent, "run_sandbox_task",
+                      AsyncMock(side_effect=run_with_steering)), \
+         patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()):
+        out = await prod_tool_functions.run_code_sandbox.on_invoke_tool(
+            _tool_context(message), json.dumps({"task": "draw a glass of milk"}))
+
+    assert "can you make the milk red?" in out
+    assert "and also fizzy, add bubbles" in out
+    assert "do not call the result a mistake" in out
+
+
+@pytest.mark.asyncio
+async def test_tool_says_nothing_about_steering_when_nobody_interrupted(clean_inbox):
+    message = MagicMock()
+    message.author.id = 1
+    thread, patches = _sandbox_tool_patches(_text_result("done"))
+    thread.send = AsyncMock()
+
+    with patches[0], patches[1], patches[2], patches[3], \
+         patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()):
+        out = await prod_tool_functions.run_code_sandbox.on_invoke_tool(
+            _tool_context(message), json.dumps({"task": "print 42"}))
+
+    assert "changed the request" not in out
+
+
+@pytest.mark.asyncio
+async def test_tool_reports_steering_on_a_stopped_run_too(clean_inbox):
+    # A run that timed out after being steered still has to explain itself:
+    # the outer model is about to tell the user what happened.
+    message = MagicMock()
+    message.author.id = 1
+    thread, patches = _sandbox_tool_patches(_timeout_result())
+
+    async def run_with_steering(*args, **kwargs):
+        clean_inbox.deliver(thread.id, 1, "ana", "make it red")
+        return _timeout_result()
+
+    with patches[0], patches[1], patches[2], \
+         patch.object(prod_sandbox_agent, "run_sandbox_task",
+                      AsyncMock(side_effect=run_with_steering)), \
+         patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()):
+        out = await prod_tool_functions.run_code_sandbox.on_invoke_tool(
+            _tool_context(message), json.dumps({"task": "draw a glass of milk"}))
+
+    assert "make it red" in out
+
+
+@pytest.mark.asyncio
 async def test_tool_corrects_the_badge_when_the_workspace_could_not_be_restored(clean_inbox):
     # The badge already went out saying "Resumed"; the run reports it
     # actually started empty, so the record has to be put straight.
@@ -2657,8 +3141,8 @@ async def test_tool_corrects_the_badge_when_the_workspace_could_not_be_restored(
         out = await prod_tool_functions.run_code_sandbox.on_invoke_tool(
             _tool_context(message), json.dumps({"task": "print 42"}))
 
-    thread.send.assert_awaited_once()
-    assert "couldn't be restored" in thread.send.await_args.args[0]
+    posted = [c.args[0] for c in thread.send.await_args_list if c.args]
+    assert any("couldn't be restored" in text for text in posted)
     assert "could not be restored" in out
 
 
@@ -2675,7 +3159,9 @@ async def test_tool_does_not_correct_the_badge_on_a_normal_resume(clean_inbox):
         out = await prod_tool_functions.run_code_sandbox.on_invoke_tool(
             _tool_context(message), json.dumps({"task": "print 42"}))
 
-    thread.send.assert_not_awaited()
+    # "done" (the sandbox's own message) is expected here; a correction is not.
+    posted = [c.args[0] for c in thread.send.await_args_list if c.args]
+    assert not any("couldn't be restored" in text for text in posted)
     assert "could not be restored" not in out
 
 
@@ -2691,7 +3177,8 @@ async def test_tool_does_not_correct_the_badge_on_a_fresh_run(clean_inbox):
         await prod_tool_functions.run_code_sandbox.on_invoke_tool(
             _tool_context(message), json.dumps({"task": "print 42"}))
 
-    thread.send.assert_not_awaited()
+    posted = [c.args[0] for c in thread.send.await_args_list if c.args]
+    assert not any("couldn't be restored" in text for text in posted)
 
 
 # ---------------------- closing note ----------------------

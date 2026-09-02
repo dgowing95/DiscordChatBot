@@ -62,11 +62,12 @@ SANDBOX_RECOVERY_TIMEOUT_SECONDS = 30  # bound on best-effort artifact recovery 
 SANDBOX_SNAPSHOT_DEP_KEY = "dcb.sandbox_snapshot"
 
 # Directory (relative to the sandbox's own shell cwd) where the sandbox
-# agent must save anything it wants returned as a file. Everything else in
-# the workspace is left undelivered — though no longer lost: in a thread it
-# is snapshotted to Redis on teardown and restored for the next run there
-# (see _persist_sandbox_snapshot), so `out/` is the delivery boundary, not
-# the survival one.
+# agent saves anything it means to return as a file. It is no longer the
+# delivery boundary — the agent picks what is delivered with attach_file,
+# and out/ is only where finished candidates live (plus the fallback swept
+# when it attached nothing; see _deliver). Nothing left elsewhere is lost
+# either: in a thread the whole workspace is snapshotted to Redis on
+# teardown and restored for the next run there (_persist_sandbox_snapshot).
 #
 # This is intentionally relative, never a hardcoded path: _create_sandbox_session
 # now explicitly calls session.start() (added for snapshot resume — see its
@@ -94,6 +95,10 @@ SANDBOX_SNAPSHOT_DEP_KEY = "dcb.sandbox_snapshot"
 # bypass that manifest check entirely (see _collect_artifacts).
 SANDBOX_OUTPUT_DIRNAME = "out"
 MAX_ARTIFACT_FILES = 10
+# Marker file touched at the start of every run, next to (never inside) the
+# output dir, so the fallback sweep can tell this run's files from ones a
+# resumed workspace snapshot restored — see _mark_run_start.
+RUN_MARKER_NAME = ".dcb_run_start"
 # Discord's own non-boosted upload cap is ~25MB; enforcing it here fails
 # fast instead of reading a huge file into memory only for Discord to
 # reject the upload.
@@ -158,34 +163,38 @@ specification.
 - {budget_bullet}
 - Once you have confirmed a result is correct, stop — do not re-verify what
   you have already verified.
-- When done, end with a concise final report: what you did, the key results
-  (exact numbers/outputs where they matter), the significant design choices
-  you made, and any failures or assumptions. It is all the caller sees, so
-  make it self-contained — and it is FINAL: there is no turn after it and
-  nothing you say later reaches anyone, so never describe work as still in
-  progress, being generated, or about to arrive. If a file was required and
-  you have not verified with `ls` that it exists, it does not exist — say so
-  plainly as a failure instead of implying it is on its way."""
+- When done, end with a short message TO THE USER: it is posted in the thread
+  beside the file(s) you attached, so write it to them. Say what you made, the
+  key results (exact numbers where they matter), the significant choices you
+  made, anything that failed or that you assumed, and anything you changed
+  because they asked mid-run. It is FINAL:
+  there is no turn after it and nothing you say later reaches anyone, so never
+  describe work as still in progress, being generated, or about to arrive. If
+  a file was required and you have not verified with `ls` that it exists, it
+  does not exist — say so plainly as a failure instead of implying it is on
+  its way."""
 
 _OUTPUT_BULLET_RESOLVED = (
     "Use RELATIVE paths only: exec_command's `workdir` rejects every "
     "absolute path — `/workspace` included — even when the directory really "
     "exists. To return a FILE (a plot, a converted document, generated "
     "data), save it under `out/` from wherever you already are; it has "
-    "already been created for you, no `cd` or `mkdir` needed. Everything "
-    "under `out/` is sent to the user and nothing else is, so don't print "
-    "file contents to stdout — but do leave your working files in place: "
-    "the rest of the workspace is saved and restored for the next run in "
-    "this thread."
+    "already been created for you, no `cd` or `mkdir` needed. Then call "
+    "`attach_file` on the finished file — ONE per thing the user asked for. "
+    "Only attached files are sent, so drafts left behind cost nothing. "
+    "Don't print file contents to stdout, and leave "
+    "your working files in place: the rest of the workspace is saved and "
+    "restored for the next run in this thread."
 )
 _OUTPUT_BULLET_FALLBACK = (
     "Use RELATIVE paths only. exec_command's `workdir` rejects every "
     "absolute path — `/workspace` included — even when the directory really "
     "exists. To return a FILE (a plot, a converted document, generated "
     "data), save it under the `out/` directory relative to your working "
-    "directory (create it first: `mkdir -p out`). Everything under `out/` is "
-    "sent to the user automatically and nothing else is, so don't print file "
-    "contents to stdout."
+    "directory (create it first: `mkdir -p out`), then call `attach_file` on "
+    "the finished file — ONE per thing the user asked for. Only attached "
+    "files are sent, so drafts cost nothing. Don't print file contents to "
+    "stdout."
 )
 
 # {budget_bullet}: tells the model its hard turn/time budget so it can pace
@@ -212,8 +221,8 @@ _BUDGET_BULLET = (
     "whichever runs out first ends the run immediately, with no chance to "
     "write a final report. Every command tells you how much of that time "
     "you have used. Once roughly 80% is gone without a finished result, "
-    "STOP iterating: save your best current partial output under `out/` and "
-    "write the final report describing what is done and what is missing, "
+    "STOP iterating: save and attach your best current partial output, then "
+    "write the final message describing what is done and what is missing, "
     "rather than losing everything to a forced cutoff."
 )
 
@@ -825,13 +834,85 @@ async def send_preview_to_thread(
             f"{MAX_ARTIFACT_BYTES}-byte limit)."
         )
 
-    name = _relative_artifact_name(path, "")
+    name = _attachment_name(path)
     try:
         await thread.send(content=caption or None, file=discord.File(io.BytesIO(data), filename=name))
     except Exception as e:
         print(f"Sandbox send_preview_to_thread: send failed: {e}")
         return f"Read {path!r} but could not send it to the thread."
     return f"Sent {name!r} to the thread as a preview."
+
+
+@function_tool
+async def attach_file(wrapper: RunContextWrapper[dict], path: str, caption: str = "") -> str:
+    """Mark a finished file to be delivered to the user when the task ends.
+    Only files you attach are sent. Attach the same path again to replace an
+    earlier version of it; don't attach your intermediate attempts.
+
+    Args:
+        path: Path to the file, relative to your current working directory
+            (never an absolute path).
+        caption: Optional short caption sent alongside this file.
+    """
+    ctx = _ask_user_context(wrapper)
+    session = ctx.get("session")
+    thread = ctx.get("thread")
+    if session is None:
+        return "No sandbox session is available, so nothing can be attached."
+    path = (path or "").strip()
+    if not path:
+        return "No path given — nothing was attached."
+    if path.startswith("/"):
+        return "Use a path relative to your working directory, not an absolute one."
+
+    # stat, not `test -f` then `wc -c`: one call answers both "does it exist"
+    # and "how big is it", and the size is what the caps below need. GNU
+    # coreutils is already a hard assumption here — _collect_artifacts uses
+    # `find -printf`, which is GNU findutils.
+    try:
+        result = await session.exec("stat", "-c", "%s", "--", path, shell=False)
+    except Exception as e:
+        print(f"Sandbox attach_file: stat failed for {path!r}: {e}")
+        return f"Could not check {path!r}. Verify it exists with `ls`, then attach it again."
+    if not result.ok():
+        return (
+            f"{path!r} does not exist, so it was NOT attached. Check the path "
+            "with `ls` — nothing is sent to the user unless it is attached."
+        )
+    try:
+        size = int(result.stdout.decode("utf-8", errors="replace").strip())
+    except ValueError:
+        return f"Could not read the size of {path!r}. Verify it with `ls -l` and try again."
+    if size > MAX_ARTIFACT_BYTES:
+        return (
+            f"{path!r} is too large to send ({size} bytes, over the "
+            f"{MAX_ARTIFACT_BYTES}-byte limit). Produce a smaller file and attach that."
+        )
+
+    deliverables = ctx.get("deliverables")
+    if deliverables is None:
+        return "This run cannot attach files."
+    name = _attachment_name(path)
+    caption = (caption or "").strip()
+    for entry in deliverables:
+        # Re-attaching a path is how the model says "I fixed it", so the new
+        # version replaces the old rather than the user receiving both.
+        if entry["path"] == path:
+            entry.update(size=size, caption=caption)
+            return _maybe_with_pending(thread, f"Replaced the attached {name!r}; it will be sent when you finish.")
+    if len(deliverables) >= MAX_ARTIFACT_FILES:
+        return (
+            f"You already have {MAX_ARTIFACT_FILES} files attached, which is the "
+            "limit. Attach only the finished results the user asked for."
+        )
+    deliverables.append({"path": path, "size": size, "caption": caption})
+    return _maybe_with_pending(thread, f"Attached {name!r}; it will be sent to the user when you finish.")
+
+
+def _maybe_with_pending(thread, text: str) -> str:
+    """_with_pending, but tolerating a run with no thread attached (tests and
+    the no-thread fallback path — see ensure_sandbox_thread)."""
+    return _with_pending(thread, text) if thread is not None else text
 
 
 def build_sandbox_agent(out_dir: str | None) -> "object":
@@ -927,7 +1008,8 @@ def build_sandbox_agent(out_dir: str | None) -> "object":
                 ),
             ),
         ],
-        tools=[ask_user, send_preview_to_thread, check_thread_messages, say_in_thread],
+        tools=[ask_user, attach_file, send_preview_to_thread, check_thread_messages,
+               say_in_thread],
         # Slightly cooler than the chat agent: code tasks want determinism.
         model_settings=ModelSettings(temperature=0.5),
     )
@@ -935,15 +1017,24 @@ def build_sandbox_agent(out_dir: str | None) -> "object":
 
 @dataclass
 class SandboxArtifact:
-    """One file the sandbox agent saved under SANDBOX_OUTPUT_DIR."""
+    """One file being delivered to the user: normally one the sandbox agent
+    chose with attach_file, otherwise one swept out of SANDBOX_OUTPUT_DIR by
+    the fallback path. caption is whatever the agent passed to attach_file
+    (empty for a swept file), sent as the message text beside it."""
     name: str
     data: bytes
+    caption: str = ""
 
 
 @dataclass
 class SandboxResult:
-    """What run_sandbox_task returns: the agent's text report plus any
-    files it saved under out/ (empty when it returned none).
+    """What run_sandbox_task returns: the agent's final message to the user
+    (text) plus the files it chose to deliver with attach_file — or, when it
+    chose none, whatever the out/ fallback sweep found (empty if nothing).
+
+    text is written FOR the user (see SANDBOX_INSTRUCTIONS' final bullet):
+    the caller posts it in the thread beside the files as well as handing it
+    to the outer model.
 
     ok is False when the run was stopped before producing a final report:
     error identifies why, as one of "timeout" (wall-clock budget exceeded),
@@ -962,8 +1053,8 @@ class SandboxResult:
     _create_sandbox_session), so the caller can correct a badge it already
     posted rather than leaving a wrong one standing.
 
-    skipped_artifacts holds a human-readable reason for each output file
-    that was found under out/ but NOT fetched (over MAX_ARTIFACT_FILES /
+    skipped_artifacts holds a human-readable reason for each file that was
+    attached (or found under out/) but NOT fetched (over MAX_ARTIFACT_FILES /
     MAX_ARTIFACT_BYTES) — populated on both success and failure, empty when
     nothing was skipped, so the caller can tell the model what was dropped
     and why instead of it going unexplained."""
@@ -1174,6 +1265,53 @@ def _relative_artifact_name(container_path: str, out_dir: str) -> str:
     return rel or "artifact"
 
 
+def _attachment_name(container_path: str) -> str:
+    """The Discord-safe filename for a file the agent named itself: its
+    basename, since a Discord attachment name is a single path segment. Pure.
+
+    Distinct from _relative_artifact_name, which flattens a path relative to
+    out/ so two files with the same basename in different subdirectories stay
+    distinguishable in a blind sweep. Here the agent picked the file by name,
+    so `out/milk.png` should arrive as `milk.png`, not `out_milk.png`.
+    """
+    name = posixpath.basename(container_path.rstrip("/"))
+    return name or "artifact"
+
+
+def _select_deliverables(
+    entries: list[dict],
+    *,
+    max_files: int = MAX_ARTIFACT_FILES,
+    max_bytes: int = MAX_ARTIFACT_BYTES,
+) -> tuple[list[dict], list[str]]:
+    """Applies the file-count/size caps to what the agent attached.
+
+    The same caps _select_artifacts applies to a blind sweep, re-applied here
+    because attach_file's own checks are per-call: it can reject one oversized
+    file, but only this sees the running total. Returns (kept, skip_notes)
+    with skip notes already named for the user (_attachment_name), unlike
+    _select_artifacts, whose caller re-maps container paths. Pure.
+    """
+    kept: list[dict] = []
+    skipped: list[str] = []
+    total = 0
+    for entry in entries:
+        name = _attachment_name(entry["path"])
+        size = int(entry.get("size") or 0)
+        if len(kept) >= max_files:
+            skipped.append(f"{name} (skipped: more than {max_files} attached files)")
+            continue
+        if size > max_bytes:
+            skipped.append(f"{name} (skipped: {size} bytes over the {max_bytes}-byte limit)")
+            continue
+        if total + size > max_bytes:
+            skipped.append(f"{name} (skipped: would exceed the {max_bytes}-byte total limit)")
+            continue
+        kept.append(entry)
+        total += size
+    return kept, skipped
+
+
 def _select_artifacts(
     listed: list[tuple[str, int]],
     *,
@@ -1220,9 +1358,21 @@ async def _sandbox_output_dir(session) -> str | None:
 
 
 async def _collect_artifacts(
-    session, out_dir: str | None
+    session, out_dir: str | None, newer_than: str | None = None,
 ) -> tuple[list[SandboxArtifact], list[str]]:
     """Reads back whatever the sandbox agent saved under out_dir.
+
+    This is the FALLBACK delivery path, used when the agent attached nothing
+    with attach_file (or was cut off before it could). It is a blind sweep, so
+    a model that iterated saves v1/v2/v3 here and the user receives all three
+    — which is exactly why selection, not this, is the normal path now.
+
+    newer_than is the run marker written by _mark_run_start: when given, only
+    files modified since this run began are swept. A thread's workspace
+    snapshot includes out/ and a resumed run only mkdir -p's it, so without
+    the filter run #2 re-delivers run #1's files alongside its own. None (no
+    marker, or the touch failed) keeps the unfiltered behavior — this is a
+    fallback path and must never fail a run over its own filter.
 
     Returns (artifacts, skip_notes): skip_notes is one human-readable
     reason per output file that was found but not fetched (over
@@ -1252,10 +1402,10 @@ async def _collect_artifacts(
     """
     if out_dir is None:
         return [], []
-    res = await session.exec(
-        "find", out_dir, "-maxdepth", "3", "-type", "f", "-printf", "%s %p\n",
-        shell=False,
-    )
+    args = ["find", out_dir, "-maxdepth", "3", "-type", "f"]
+    if newer_than:
+        args += ["-newer", newer_than]
+    res = await session.exec(*args, "-printf", "%s %p\n", shell=False)
     if not res.ok():
         return [], []  # a missing/empty out/ dir is not an error
     listed = _parse_find_output(res.stdout.decode("utf-8", errors="replace"))
@@ -1284,6 +1434,79 @@ async def _collect_artifacts(
     return artifacts, skip_notes
 
 
+async def _collect_deliverables(
+    session, entries: list[dict]
+) -> tuple[list[SandboxArtifact], list[str]]:
+    """Reads back the files the agent chose with attach_file, in the order it
+    attached them.
+
+    Same `exec("cat", ...)` primitive and the same reasons as
+    _collect_artifacts (session.read() enforces a manifest root we don't use;
+    exec_command truncates to a token budget) — it just reads a list the agent
+    curated instead of everything it happened to leave lying around. Sizes
+    were recorded at attach time, so the caps are applied without re-statting.
+    """
+    kept, skip_notes = _select_deliverables(entries)
+    for note in skip_notes:
+        print(f"Sandbox: {note}")
+
+    artifacts: list[SandboxArtifact] = []
+    for entry in kept:
+        path = entry["path"]
+        try:
+            read_result = await session.exec("cat", "--", path, shell=False)
+        except Exception as e:
+            print(f"Sandbox: failed to read attached file {path}: {e}")
+            continue
+        if not read_result.ok():
+            print(f"Sandbox: failed to read attached file {path}: exit {read_result.exit_code}")
+            continue
+        artifacts.append(SandboxArtifact(
+            name=_attachment_name(path),
+            data=read_result.stdout,
+            caption=entry.get("caption") or "",
+        ))
+    return artifacts, skip_notes
+
+
+async def _mark_run_start(session, out_dir: str | None) -> str | None:
+    """Touches this run's marker file and returns its path, or None when that
+    wasn't possible.
+
+    Placed BESIDE out_dir, never inside it, or the sweep would find the marker
+    itself and deliver it to the user as an empty file. Touched after
+    session.start() has already hydrated any restored snapshot, so everything
+    that came out of that snapshot is older than it — tar preserves mtimes, so
+    restored files keep the times they were archived with.
+    """
+    if out_dir is None:
+        return None
+    marker = posixpath.join(posixpath.dirname(out_dir), RUN_MARKER_NAME)
+    try:
+        res = await session.exec("touch", "--", marker, shell=False)
+    except Exception as e:
+        print(f"Sandbox: could not write the run marker: {e}")
+        return None
+    return marker if res.ok() else None
+
+
+async def _deliver(
+    session, deliverables: list[dict], out_dir: str | None, marker: str | None,
+) -> tuple[list[SandboxArtifact], list[str]]:
+    """What the user actually receives: the files the agent attached, or —
+    only when it attached none — a swept fallback from out/.
+
+    The fallback is what makes a cut-off run still worth something (a timeout
+    that already produced a good file), and it is also the safety net for a
+    model that finished without ever calling attach_file. It is not the normal
+    path: sweeping delivers every iteration the model happened to leave in
+    out/, which is the bug this selection exists to fix.
+    """
+    if deliverables:
+        return await _collect_deliverables(session, deliverables)
+    return await _collect_artifacts(session, out_dir, marker)
+
+
 async def run_sandbox_task(
     task: str,
     progress_hooks=None,
@@ -1295,8 +1518,8 @@ async def run_sandbox_task(
 ) -> SandboxResult:
     """Run one self-contained task in a fresh Docker sandbox.
 
-    Returns a SandboxResult: the agent's final report (text) plus any
-    files it saved under the output dir (artifacts, possibly empty).
+    Returns a SandboxResult: the agent's final message to the user (text)
+    plus the files it attached (artifacts, possibly empty).
     progress_hooks is an optional agents.RunHooks instance (e.g.
     classes.sandbox_progress.SandboxProgressHooks) attached to the nested
     run so every tool call (exec_command/write_stdin) and its output can be
@@ -1359,12 +1582,21 @@ async def run_sandbox_task(
         out_dir = await _sandbox_output_dir(session)
         if out_dir is not None:
             await session.exec("mkdir", "-p", out_dir, shell=False)
+        # After the mkdir, so the marker is never older than out/ itself, and
+        # after any snapshot restore (session.start(), above) so every
+        # restored file is older than it. See _mark_run_start.
+        marker = await _mark_run_start(session, out_dir)
         agent = build_sandbox_agent(out_dir)
         nested_context = {
             "thread": thread,
             "client": client,
             "requesting_user_id": requesting_user_id,
             "session": session,
+            # Appended to by the attach_file tool; read back below to decide
+            # what is delivered. A list rather than a return value because the
+            # agent chooses files DURING the run, including on the paths where
+            # Runner.run never returns one (timeout, max_turns).
+            "deliverables": [],
             "deadline": time.monotonic() + sandbox_timeout(),
             # Paired with "deadline" so _elapsed_note can report time used
             # as a fraction of the whole budget. Read from the context
@@ -1386,14 +1618,18 @@ async def run_sandbox_task(
                 timeout=sandbox_timeout(),
             )
         except asyncio.TimeoutError:
-            return await _failure_result(session, out_dir, "timeout", resumed=resumed)
+            return await _failure_result(session, nested_context, out_dir, marker,
+                                         "timeout", resumed=resumed)
         except MaxTurnsExceeded:
-            return await _failure_result(session, out_dir, "max_turns", resumed=resumed)
+            return await _failure_result(session, nested_context, out_dir, marker,
+                                         "max_turns", resumed=resumed)
         except (ModelBehaviorError, ModelRefusalError) as e:
-            return await _failure_result(session, out_dir, "model_error", str(e), resumed=resumed)
+            return await _failure_result(session, nested_context, out_dir, marker,
+                                         "model_error", str(e), resumed=resumed)
         final_output = run_result.final_output
         text = final_output if isinstance(final_output, str) else str(final_output)
-        artifacts, skip_notes = await _collect_artifacts(session, out_dir)
+        artifacts, skip_notes = await _deliver(
+            session, nested_context["deliverables"], out_dir, marker)
         return SandboxResult(text=text, artifacts=artifacts, skipped_artifacts=skip_notes,
                              resumed=resumed)
     finally:
@@ -1402,17 +1638,19 @@ async def run_sandbox_task(
 
 
 async def _failure_result(
-    session, out_dir: str | None, error: str, detail: str | None = None,
+    session, nested_context: dict, out_dir: str | None, marker: str | None,
+    error: str, detail: str | None = None,
     *, resumed: bool = False,
 ) -> SandboxResult:
     """Builds the SandboxResult for a run stopped before it produced a
     final report (timeout / max_turns / model_error — see SandboxResult).
 
     The container is still alive at this point, so we make a bounded,
-    best-effort attempt to recover whatever was already saved under out_dir
-    before the caller tears it down; recovery failures are swallowed, since
-    it's strictly better-than-nothing on top of returning no artifacts at
-    all. `detail` (e.g. the ModelBehaviorError message) is logged only —
+    best-effort attempt to recover whatever the run had already produced
+    before the caller tears it down: the files it had attached, or a swept
+    fallback from out_dir if it was cut off before attaching any (see
+    _deliver). Recovery failures are swallowed, since it's strictly
+    better-than-nothing on top of returning no artifacts at all. `detail` (e.g. the ModelBehaviorError message) is logged only —
     never put in SandboxResult.text or shown to the outer model, which
     should be told to retry with a clearer task, not fed the raw error.
     """
@@ -1422,7 +1660,7 @@ async def _failure_result(
     skip_notes: list[str] = []
     try:
         artifacts, skip_notes = await asyncio.wait_for(
-            _collect_artifacts(session, out_dir),
+            _deliver(session, nested_context.get("deliverables") or [], out_dir, marker),
             timeout=SANDBOX_RECOVERY_TIMEOUT_SECONDS,
         )
     except Exception as e:

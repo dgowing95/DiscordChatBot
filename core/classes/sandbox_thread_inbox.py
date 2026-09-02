@@ -41,19 +41,39 @@ MAX_MESSAGE_CHARS = 1000  # per-message cap, applied before the total
 # drain() must never delete it.
 _PENDING: dict[int, list[tuple[int, str, str]]] = {}
 
+# thread id -> every message accepted for this run, in order, kept until the
+# run ends. _PENDING is a queue that empties as the sandbox reads it; this is
+# the record of what was said, which outlives the reading.
+#
+# It exists for the OUTER model, which otherwise cannot know the request
+# changed: main.py's on_message routes a message in an active thread here
+# instead of enqueuing it, and the outer agent's history was snapshotted
+# before the run started. Without this it answered a red-fizzy-milk image
+# with "looks like the sandbox went a bit rogue", having only ever seen
+# "a glass of milk".
+#
+# Recorded in deliver() rather than drain() for two reasons: one call site
+# instead of drain()'s four, and consume() removes a message from _PENDING
+# because ask_user already received it — it steered the run just as much as
+# any other, so it must survive here.
+_SEEN: dict[int, list[tuple[str, str]]] = {}
+
 
 def begin_run(thread_id: int) -> None:
     """Marks a sandbox run as in flight in this thread, so messages posted
     here are routed to it. Idempotent: a re-entry keeps anything already
     pending rather than dropping it."""
     _PENDING.setdefault(int(thread_id), [])
+    _SEEN.setdefault(int(thread_id), [])
 
 
 def end_run(thread_id: int) -> None:
     """Marks the run finished. Anything still undrained is discarded — the
     run it was addressed to is over, and holding it would leak it into an
-    unrelated later run in the same thread."""
+    unrelated later run in the same thread. The same goes for the seen
+    record, so read it with history() BEFORE calling this."""
     _PENDING.pop(int(thread_id), None)
+    _SEEN.pop(int(thread_id), None)
 
 
 def is_run_active(thread_id: int) -> bool:
@@ -81,7 +101,12 @@ def deliver(thread_id: int, message_id: int, author: str, text: str) -> bool:
         text = text[: MAX_MESSAGE_CHARS - 1] + "…"
     if sum(len(t) for _, _, t in pending) + len(text) > MAX_PENDING_CHARS:
         return False
-    pending.append((int(message_id), str(author or "someone"), text))
+    author = str(author or "someone")
+    pending.append((int(message_id), author, text))
+    # Only messages that were actually ACCEPTED are recorded: a rejected one
+    # never reaches the sandbox, so telling the outer model the request
+    # changed because of it would be a lie in the opposite direction.
+    _SEEN.setdefault(int(thread_id), []).append((author, text))
     return True
 
 
@@ -114,3 +139,18 @@ def drain(thread_id: int) -> str:
     lines = [f"[thread message from {author}]: {text}" for _, author, text in pending]
     pending.clear()
     return "\n".join(lines)
+
+
+def history(thread_id: int) -> str:
+    """Everything said to the run in flight in this thread so far, rendered
+    for the OUTER model, or "" when nothing was said (or no run is active).
+
+    Same rendering as drain() on purpose — both are quoting the same people
+    to a model — but this one is non-destructive and cumulative, so it can be
+    read once at the end of a run after drain() has already emptied the queue
+    several times over.
+    """
+    seen = _SEEN.get(int(thread_id))
+    if not seen:
+        return ""
+    return "\n".join(f"[thread message from {author}]: {text}" for author, text in seen)
