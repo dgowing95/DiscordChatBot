@@ -531,6 +531,14 @@ async def ensure_sandbox_thread(original_message, task: str):
     # attempt lives in, and unsnapshotted, since a non-thread channel is
     # never a snapshot key. That is observed behavior, not a hypothetical:
     # it is what happened when the outer model retried a timed-out run.
+    #
+    # Residual gap, not closed by this or by run_code_sandbox's own
+    # context["sandbox_thread"] check: the SDK runs one turn's tool calls
+    # concurrently, so if the outer model emits TWO run_code_sandbox calls in a
+    # single response both read no recorded thread and race. The loser gets
+    # 160004 with `.thread` not yet in the guild cache (THREAD_CREATE has not
+    # landed), so it still falls back to the parent channel — where in_thread
+    # is False and the is_run_active guard cannot see it either.
     existing = getattr(original_message, "thread", None)
     if isinstance(existing, discord.Thread):
         return existing, False

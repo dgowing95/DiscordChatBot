@@ -22,7 +22,12 @@ core/                  # the main bot (the app that runs in production)
                            #   + in-flight task registry (prompt hint for still-running slow tools)
     text_llm_handler.py    # builds an `agents` Agent against the LLM server's (llama.cpp) OpenAI-compat API
     response_filter.py     # PURE (stdlib-only) response cleaning / thinking-block stripping
-    content_guard.py       # OpenAI Moderations-based safety guard for web_search/fetch_url
+    content_guard.py       # OpenAI Moderations-based safety guard for web_search / fetch_url /
+                           #   run_code_sandbox
+    llm_config.py          # PURE (stdlib-only) MODEL / LLM_HOST / LLM_PASS defaults and the
+                           #   temperature parser, shared by the main and sandbox agents
+    redis_client.py        # the two shared, lazily-built Redis clients (str + binary); the
+                           #   stores below hold no client of their own
     metrics.py             # PURE (stdlib + prometheus_client) Prometheus metrics:
                            #   all metric definitions + /metrics HTTP server (METRICS_PORT)
     user_memory.py         # JSON lists in Redis per (guild, user)
@@ -30,6 +35,8 @@ core/                  # the main bot (the app that runs in production)
     tool_functions.py      # agent function tools: web_search, fetch_url, memory tools, generate_image, run_code_sandbox
     image_generation.py    # client for the diffusion service + IMAGE_GEN_ENABLED flag
     sandbox_agent.py       # nested SandboxAgent + run_sandbox_task (throwaway Docker sandbox)
+                           #   + the pure builders for what the outer model is told
+                           #   (sandbox_tool_result and friends)
     sandbox_progress.py    # streams sandbox commands/output to one edited Discord message
                            #   (single embed: one field per command, state-coloured)
     sandbox_snapshot_store.py  # Redis-backed workspace snapshots, keyed by thread id
@@ -37,11 +44,14 @@ core/                  # the main bot (the app that runs in production)
     common.py              # shared helpers (Discord tool embeds)
   tests/               # pytest suite (see Testing below)
   Dockerfile           # python:3.13-slim image, runs main.py
-  requirements.txt
+  requirements.txt     # runtime only
+  requirements-dev.txt # the above plus pytest et al (what CI installs)
 diffusionservice/      # standalone image service (text->image; FastAPI + diffusers,
                        #   queued single-worker, sd-turbo by default,
                        #   CPU-offloaded for low VRAM)
-charts/dis-ai-bot/     # Helm chart
+charts/dis-ai-bot/     # Helm chart (credentials render into templates/secret.yaml,
+                       #   everything else into templates/configmap.yaml)
+pyproject.toml         # pytest configuration - why bare `pytest` works from the repo root
 docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusion (GPU) + core (mounts ./core)
 .env / .env.example    # environment configuration (never commit .env)
 ```
@@ -111,277 +121,51 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
    no image-editing path. Generation settings (`IMAGE_MODEL`, `IMAGE_STEPS`,
    `IMAGE_WIDTH`/`HEIGHT`, `IMAGE_OFFLOAD`, `IMAGE_QUEUE_SIZE`) live in the same
    configmap/env the diffusion pod reads.
-7. Code sandbox: when enabled (`SANDBOX_ENABLED`, set from the chart's
-   `sandbox.enabled`), the agent gets a `run_code_sandbox(task)` tool
-   (no slash command). It runs a nested `SandboxAgent` (same LLM as the main
-   agent by default — `SANDBOX_MODEL`/`SANDBOX_LLM_HOST`/`SANDBOX_LLM_API_KEY`
-   can point it at a different OpenAI-compatible API, e.g. OpenRouter;
-   Shell capability only — the Filesystem capability's `apply_patch` is a
-   grammar tool the ChatCompletions API does not support, and exec_command
-   already gives full filesystem access, empty workspace; the SDK's default
-   sandbox base prompt is suppressed with `base_instructions=""` because it
-   tells the model to call apply_patch, which aborts the run with
-   ModelBehaviorError when the tool is absent) inside a THROWAWAY
-   Docker container via `agents.sandbox.DockerSandboxClient` and returns the
-   sandbox agent's final report. A fresh container is created and deleted for
-   every call, so no CONTAINER outlives a run — but in a thread its WORKSPACE
-   does, snapshotted to Redis and restored on the next call there (see the
-   snapshot/resume paragraphs below). A task must be self-contained unless it
-   is resuming a thread it already ran in. Live
-   progress is a per-guild opt-in: the `/sandbox_progress_updates true|false`
-   slash command stores the setting in Redis (default OFF — then only the one
-   static "Running in sandbox" embed is sent). When on, a `RunHooks` attached
-   to the nested run observes each `exec_command`/`write_stdin` call and its
-   output and mirrors them into ONE Discord message edited in place: a
-   single embed styled like the static "Tool Usage" embed (title "🐳
-   Sandbox", description "Running in sandbox: {task}"), with ONE FIELD PER
-   COMMAND — one-liners as the bold field name (`$ cmd`), heredocs under
-   `⌨ Command` with their text and the fenced output in the value — and the
-   accent colour reflecting state (yellow running / red failure / cyan
-   idle); events are queued and the whole queue is batched into every
-   throttled edit (15s to stay under Discord's 5-edits/minute limit; oldest
-   fields evicted as a unit under the 25-field/6000-char embed budget —
-   see `sandbox_progress.py`). The run's final state (done/timeout/turns
-   exhausted/model error/failed) is flushed via `finalize()` before the
-   tool returns. `run_sandbox_task` never lets `asyncio.TimeoutError`,
-   `MaxTurnsExceeded` or `ModelBehaviorError`/`ModelRefusalError` propagate:
-   each becomes `SandboxResult(ok=False, error="timeout"|"max_turns"|
-   "model_error")`, and the container is still read before teardown in all
-   three cases — whatever the run had already attached (or, failing that,
-   whatever the `out/` sweep finds) is recovered and delivered instead of
-   being discarded with the container. `run_code_sandbox` (tool_functions.py) turns `error` into
-   reason-specific guidance for the calling agent instead of one
-   generic "may be unavailable" message for every failure — that generic
-   message is now reserved for errors that actually propagate (a dead
-   container/Docker daemon, `UserError`, ...), which mean the sandbox
-   itself is unusable rather than a task that ran out of budget. Output
-   files skipped by the artifact caps (`MAX_ARTIFACT_FILES`/
-   `MAX_ARTIFACT_BYTES`) are reported back the same way, on both success
-   and failure, instead of only being logged.
+7. Code sandbox: when enabled (`SANDBOX_ENABLED`, from the chart's
+   `sandbox.enabled`), the agent gets a `run_code_sandbox(task)` tool (no slash
+   command). It runs a nested `SandboxAgent` in a THROWAWAY Docker container via
+   `agents.sandbox.DockerSandboxClient` and returns that agent's own report.
+   The core container needs the Docker daemon socket mounted (compose: a bind
+   mount; chart: a hostPath gated on `sandbox.enabled`) plus the `docker` and
+   `websocket-client` packages. Tasks go through the content guard first, and
+   `SANDBOX_MAX_TURNS`/`SANDBOX_TIMEOUT` bound each run.
 
-   **No stopped run tells the outer model to retry.** A retry starts the task
-   over in a fresh container, throwing away the partial workspace teardown
-   just persisted — and in practice the outer model answers "retry, more
-   focused" by writing exactly the implementation spec `run_code_sandbox`'s
-   docstring exists to suppress (observed: a timed-out cow GIF retried with
-   an invented canvas size, frame count and library choice). So the three
-   failure strings state what happened and stop there; the "what now" clause
-   is chosen from the closing embed's own answer — when the workspace really
-   was saved (`_send_sandbox_closing_note` hands its live TTL back to the
-   caller) the model is told to offer the user a follow-up **in the thread**,
-   which resumes from where the run stopped, and otherwise just to ask. The
-   two can therefore never disagree about whether a resume is available. The sandbox agent's own
-   instructions state its exact turn/time budget
-   (`SANDBOX_MAX_TURNS`/`SANDBOX_TIMEOUT`) and tell it to save partial
-   output under `out/` before a forced cutoff rather than risk losing
-   everything.
+   How the pieces fit:
 
-   **Elapsed time is injected, not measured by the model.** Every shell
-   result carries `[time used: 312s of 1800s]`, appended by
-   `_with_elapsed_note` from the `deadline`/`timeout_seconds` pair in the
-   run context — the same carrier `_with_thread_messages` uses, for the same
-   reason: a small local model will not remember to check a clock, but it
-   cannot avoid reading the output of the command it just ran. The budget
-   bullet used to teach the measurement instead ("run `date +%s` as your
-   very first command … re-run it every few turns and subtract"), which
-   asked a 27B Q4 model to carry an epoch integer across turns, spent one of
-   a budget as low as 10 turns, and fought `RESUMED_TASK_PREAMBLE` over
-   which command gets to be "first". Composition order is tolerant →
-   elapsed → thread messages, so a steering message stays last in the
-   result, where the model is most likely to act on it.
+   | Concern | Where it lives |
+   |---|---|
+   | Orchestration: thread, guard, progress, artifacts, inbox lifecycle | `tool_functions.run_code_sandbox` |
+   | What the outer model is told about a finished run | `sandbox_agent.sandbox_tool_result` (pure) |
+   | Nested agent, its prompt, session/container lifecycle, artifact selection | `sandbox_agent.py` |
+   | Live progress streamed into one edited message | `sandbox_progress.py` |
+   | Workspace snapshots in Redis, keyed by thread id | `sandbox_snapshot_store.py` |
+   | Mid-run steering from thread messages | `sandbox_thread_inbox.py` |
 
-   **The sandbox agent chooses what is delivered.** `out/` used to mean
-   "everything in here is sent", so a model that iterated — saving v1, v2,
-   v3 — delivered three near-identical images for one request (observed
-   live). It now calls `attach_file(path, caption)` on the finished file;
-   only attached files are sent. The list lives in the nested run context
-   (`deliverables`), written DURING the run so it survives the paths where
-   `Runner.run` never returns (timeout, max_turns). `_deliver` prefers it and
-   falls back to the blind `out/` sweep (`_collect_artifacts`) only when
-   nothing was attached — a run cut off before it could attach, or a model
-   that finished without calling the tool. That sweep is also filtered with
-   `find -newer` against a run marker touched beside (never inside) `out/` at
-   the start of every run: a thread's snapshot carries `out/` with it and a
-   resumed run only `mkdir -p`s it, so without the filter run #2 re-sent
-   run #1's files. Attached files arrive under their basename
-   (`_attachment_name`), not the sweep's flattened `out_plot.png` form.
+   The behaviour worth knowing before you change anything:
 
-   **The sandbox agent also writes the message the user reads.** Its final
-   output is no longer only handed to the outer model: `run_code_sandbox`
-   posts it into the thread as the `content` of the first attached file (one
-   message, summary plus image), or on its own when there are no files, and
-   `SANDBOX_INSTRUCTIONS`' closing bullet is aimed at the user rather than at
-   "the caller". The outer model is told, in the tool result, that the user
-   has already read it and to add at most one short sentence.
+   - **Every call runs in a Discord thread.** `ensure_sandbox_thread` creates one
+     off the triggering message (or reuses the thread you are already in), and
+     everything — embeds, files, previews, questions — goes there.
+   - **The container is disposable; the workspace is not.** In a thread, the
+     workspace is persisted to Redis before teardown and restored on the next
+     call in that SAME thread. Resume is thread-local by construction: the
+     snapshot id IS the thread id, so asking anywhere else starts fresh.
+   - **A run can be steered while it happens.** Messages posted in an active
+     thread are routed to the sandbox instead of the outer LLM (📨 acknowledges
+     receipt), and reach the model on the back of its next shell result.
+   - **The sandbox agent chooses what is delivered** (`attach_file`) and writes
+     the closing message the user reads. The outer model adds at most a
+     sentence.
+   - **A stopped run is never told to retry.** Timeout, max-turns and
+     model-error each become `SandboxResult(ok=False, error=...)`, artifacts are
+     recovered from the still-live container, and the model is pointed at a
+     follow-up in the thread instead — which resumes rather than starting over.
 
-   The output dir is also resolved
-   (via `pwd`) and mkdir -p'd before the run starts, but the sandbox agent
-   is only ever told the RELATIVE `out/` dirname, never the resolved
-   absolute path: exec_command's own `workdir` argument is validated by
-   the SDK's manifest system, which rejects any absolute path outright
-   (confirmed in production — a model told the absolute path reused it as
-   `workdir` and the call failed). That rejection — not the older claim that
-   `/workspace` does not exist — is what the instructions now state.
-   `session.start()` does materialize `/workspace`, so the old wording had
-   drifted into contradicting the very same bullet's closing clause ("even
-   though the directory is real"). The core
-   container needs the Docker daemon socket mounted (compose: socket bind
-   mount; chart: hostPath volume gated on `sandbox.enabled`) plus the
-   `docker`/`websocket-client` Python packages. Tasks go through the content
-   guard first; `SANDBOX_MAX_TURNS`/`SANDBOX_TIMEOUT` bound each run.
-
-   Every call runs in its own Discord **thread**
-   (`sandbox_agent.ensure_sandbox_thread`): the first call off a normal
-   message creates one (a note is posted in the original channel pointing to
-   it) and everything else — the static/live-progress embed, output files,
-   previews, HITL questions — goes to the thread instead; a call made from
-   inside an existing thread just reuses it. The nested `SandboxAgent` also
-   gets two extra tools alongside its shell capability: `ask_user` (post a
-   question to the thread and `client.wait_for` a reply from the requesting
-   user, bounded by `SANDBOX_ASK_USER_TIMEOUT` AND whatever of the run's own
-   `SANDBOX_TIMEOUT` budget is left — an unanswered question never hangs or
-   fails the run, it just tells the model to proceed on its own judgement)
-   `send_preview_to_thread` (push an in-progress file to the thread before
-   the task finishes, same size cap as final artifacts), `attach_file` (mark
-   a finished file for delivery — see above), `say_in_thread`
-   (post a progress note without waiting for anything) and
-   `check_thread_messages`. The Discord
-   `client` needed for `ask_user`'s `wait_for` is threaded all the way down
-   from `main.py` through `MessageHandler` → `TextLLMHandler` (constructor
-   param `client`, exposed to tool context as `"discord_client"`) → the
-   nested `Runner.run`'s own `context=`.
-
-   The container is still fully disposable — a fresh one is created and
-   deleted every call — but when the call is happening in a thread, its
-   workspace is persisted as a snapshot in **Redis** just before teardown
-   (`session.stop()`, time-boxed by `SANDBOX_PERSIST_TIMEOUT_SECONDS` since
-   that's also where the `Memory` capability's own extraction runs — two
-   extra local-model calls, outside `SANDBOX_TIMEOUT`'s envelope) and
-   restored into the next fresh container for a later call in the SAME
-   thread, via a `classes.sandbox_snapshot_store.SandboxSnapshotStore`
-   (binary Redis client, `SANDBOX_SNAPSHOT_MAX_BYTES` cap,
-   `SANDBOX_SNAPSHOT_TTL_SECONDS` expiry) bound to the SDK's
-   `RemoteSnapshot`/`Dependencies` mechanism and keyed by the thread's id —
-   this is what lets "continue this in the thread" pick back up with the
-   prior workspace instead of starting from scratch. A call with no thread
-   (thread creation failed, or isn't possible on that channel type) skips
-   snapshotting entirely rather than keying it on the plain channel id. The
-   `Memory` capability rides on the same snapshot (its files live under the
-   workspace root, which is exactly what gets persisted/restored) —
-   configured `live_update=False` to stay Shell-only (matching the
-   Filesystem/`apply_patch` avoidance above) and pointed at the sandbox's
-   own local model for its phase-one/phase-two extraction instead of the
-   SDK's hosted-OpenAI defaults, which this self-hosted bot has no key for.
-
-   Which of the two happened is stated up front: `run_code_sandbox` asks
-   `sandbox_snapshot_exists()` before the run and puts a one-line badge at
-   the top of the embed — 🆕 fresh vs ♻️ resumed (`sandbox_workspace_note`,
-   passed to `SandboxProgressHooks(workspace_note=...)` on the live path). The
-   SDK offers no way to ask after the fact — `session.start()` returns `None`
-   and `snapshot_fingerprint` is only written on persist — but its restore
-   condition IS this store's `exists()`, so asking first gives the same
-   answer. A resumed run also gets `RESUMED_TASK_PREAMBLE` prepended to its
-   task, because the nested model won't otherwise think to `ls` the restored
-   workspace. If a snapshot exists but can't actually be restored (corrupt
-   tar), `_create_sandbox_session` deletes the key and retries once against
-   the SAME id — never `snapshot=None`, which would silently disable
-   persistence for that thread — and `SandboxResult.resumed` carries the
-   ground truth back so the badge can be corrected.
-
-   **Design ownership sits with the sandbox agent, not the outer LLM.** The
-   outer model's job is to forward the user's request in their own words plus
-   context the sandbox can't see; `SANDBOX_INSTRUCTIONS` tells the nested
-   agent it receives "a REQUEST, not a specification" and owns every choice
-   the user didn't pin down. This is enforced only by `run_code_sandbox`'s
-   docstring, since the outer system prompt is per-guild Redis
-   (`Answer as if you are {system}`) and not a code lever.
-
-   **People can steer a run while it happens.** `classes/sandbox_thread_inbox.py`
-   is a pure, module-level registry: `run_code_sandbox` calls `begin_run` /
-   `end_run` around the run (threads only — registering a plain channel would
-   swallow every message in it), and `main.py`'s `on_message` routes any
-   human message in an active thread there instead of to the outer LLM,
-   acknowledging with a 📨 reaction. Messages reach the model three ways, in
-   order of reliability: appended to every shell command's result
-   (`_with_thread_messages`, wrapped OUTSIDE `_tolerant_tool_invoke` so a
-   rejected call still carries them), appended to
-   `ask_user`/`say_in_thread`/`attach_file` returns, and on demand via
-   `check_thread_messages`.
-
-   They also reach the OUTER model, which otherwise cannot know the request
-   changed: its history was built before the run started, and `on_message`
-   routes these messages to the sandbox instead of enqueuing them. `deliver()`
-   records each accepted message in `_SEEN`, `history()` renders the lot
-   non-destructively (so it survives the `drain()`s the sandbox does mid-run,
-   and the `consume()` `ask_user` does), and `run_code_sandbox` reads it just
-   before `end_run` and appends it to the tool result with an instruction not
-   to call the result a mistake. Without it the outer model answered a
-   mid-run "make the milk red" by telling the user the sandbox "went a bit
-   rogue". `ask_user` calls
-   `consume()` on the reply it received, because discord.py's `dispatch`
-   fans a message out to `wait_for` futures and `on_message` independently
-   and the model would otherwise see it twice.
-
-   That early return is also the concurrency guard: two runs in one thread
-   would both persist to `dcb:sandbox_snapshot:{thread_id}` on teardown and
-   the last to finish would clobber the other. `run_code_sandbox` repeats the
-   guard itself (returning early and forwarding the task into the running
-   sandbox), since queue lag or two tool calls in one turn can get past the
-   `on_message` check.
-
-   When the run ends, a muted grey **"Sandbox closed"** embed marks the
-   boundary — after it, messages in the thread are ordinary chat again. When
-   the run did not finish normally its first line is the reason (the same
-   wording `finalize()` uses): with live progress off this embed is the
-   thread's only end-of-run signal, so without it a timeout looked exactly
-   like a success that happened to produce no file. In a
-   thread it also states how much longer the workspace can be resumed, read
-   as the LIVE Redis `TTL` (`SandboxSnapshotStore.ttl` →
-   `sandbox_snapshot_remaining_seconds`) rather than echoing the configured
-   `SANDBOX_SNAPSHOT_TTL_SECONDS`, because persisting is best-effort and
-   swallowed — the configured value would happily promise a resume for a
-   snapshot that was never written (Redis answers `-2`, which becomes "could
-   not be saved"). One accepted imprecision: it reports that *a* workspace is
-   resumable, not that *this run's* is — if a second-or-later run's persist
-   fails, the window shown belongs to the previous run's snapshot, which is
-   still resumable, just to an earlier state. It is posted after the artifacts on every path where a
-   "Running in sandbox" embed already went out, including the
-   sandbox-unavailable one, and never on the early returns (content guard,
-   forwarded-to-a-running-run) where nothing was opened.
-
-   **Resume is thread-local by construction, not by policy.** The snapshot id
-   is the thread's own Discord id, and `ensure_sandbox_thread` creates a NEW
-   thread for any request that doesn't already come from inside one — so a
-   request in the parent channel gets a new id and starts fresh. There is no
-   code path that resumes a thread's workspace from outside that thread.
-
-   **A second call in the same outer turn reuses that turn's thread.** Discord
-   allows exactly one thread per message, so asking `create_thread` for a
-   second one fails with 160004 and the old code fell back to the parent
-   channel — which is how a retried run ended up running in the main channel,
-   away from the thread holding its work and with no snapshot id, silently
-   abandoning the partial workspace the stopped run had just saved. Two
-   defences: `run_code_sandbox` prefers a `discord.Thread` already recorded in
-   `wrapper.context["sandbox_thread"]` (one context object per outer
-   `Runner.run`, so the first call's write is what the retry reads), and
-   `ensure_sandbox_thread` falls back to `message.thread` for a retry in a
-   later turn. Both are `isinstance`-guarded: the context is seeded with
-   `None`, the no-thread fallback path writes a plain channel there, and
-   `MagicMock` messages in the tests have a truthy `.thread`. Residual gap,
-   pre-existing and not closed by either defence: the SDK runs one turn's
-   tool calls concurrently, so if the outer model emits TWO
-   `run_code_sandbox` calls in a single response, both read
-   `sandbox_thread=None` and race — the loser gets 160004 with `.thread` not
-   yet in the guild cache (THREAD_CREATE hasn't landed) and still falls back
-   to the parent channel, where `in_thread` is False and so the
-   `is_run_active` guard cannot see it either.
-
-   Known failure mode: the registry is plain process memory, deregistered in
-   a `finally`. A process restart clears it (fine), but a worker torn down in
-   a way that skips that `finally` would leave the thread registered — every
-   later message in it then gets a 📨 and goes nowhere until the bot
-   restarts. If a thread ever "goes deaf" with 📨 reactions and no replies,
-   that is what happened.
+   Every one of these carries its full rationale — the production incident that
+   produced it, and what breaks if it is undone — in the docstring of the
+   function that implements it. Read those before editing; they are the primary
+   source, and this list is only a map. Start with `sandbox_agent.py`'s module
+   docstring, then `run_sandbox_task`, `_deliver` and `sandbox_tool_result`.
 
 ### Prompt surface
 
@@ -396,19 +180,16 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
 
    **One home per concept.** Both prompts grew by accretion — every observed
    bug fixed by adding text, none ever removed — until `SANDBOX_INSTRUCTIONS`
-   was ~5000 characters with `out/` explained in five bullets, and
-   `run_code_sandbox`'s description alone was 37% of the entire outer tool
-   payload. Two bullets had drifted into outright contradiction (an "your
-   ONLY tools are the shell tools" claim four bullets above four other
-   tools; a `/workspace` warning that contradicted its own closing clause).
-   Duplicated guidance is worse than terse guidance on a 27B Q4 model:
-   copies drift, and a model handed two versions of a rule follows neither
-   reliably. So when adding guidance, edit the existing home rather than
-   restating it nearby. Current sizes, worth re-measuring before adding:
-   `SANDBOX_INSTRUCTIONS` ~3700 chars (pinned by a test), `run_code_sandbox`
-   ~1750 including its JSON schema.
+   was ~5000 characters with `out/` explained in five bullets and two of them
+   flatly contradicting each other. Duplicated guidance is worse than terse
+   guidance on a small local model: copies drift, and a model handed two
+   versions of a rule follows neither reliably. So when adding guidance, edit
+   the existing home rather than restating it nearby — the comment block above
+   `SANDBOX_INSTRUCTIONS` records which bullets were merged and why.
+   Sizes worth re-measuring before adding: `SANDBOX_INSTRUCTIONS` ~3700 chars
+   (pinned by a test), `run_code_sandbox` ~1750 including its JSON schema.
 
-   Prefer a positive example over a list of prohibitions. The design-
+   **Prefer a positive example over a list of prohibitions.** The design-
    ownership rule once carried a 350-character negative list ("no dimensions,
    colours or RGB values, no frame counts, no library choices…"); the model
    then retried a failed run with an invented canvas size, frame count and
