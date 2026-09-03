@@ -1673,3 +1673,161 @@ async def _failure_result(
         text="", artifacts=artifacts, ok=False, error=error, skipped_artifacts=skip_notes,
         resumed=resumed,
     )
+
+
+# ---------------------------------------------------------------------------
+# What the OUTER model is told about a finished run
+# ---------------------------------------------------------------------------
+#
+# Pure string-building, kept here rather than inline in
+# tool_functions.run_code_sandbox: it is the part that changes most often (every
+# observed misbehaviour of the outer model gets fixed by rewording it) and the
+# part hardest to review buried in 370 lines of orchestration. Keeping it pure
+# also means it is testable without a Discord channel or a Docker daemon.
+
+# One line naming how a run ended, shown to the USER: on the live-progress
+# message's final state and as the first line of the closing embed. Only used
+# when the run did NOT finish normally.
+SANDBOX_OUTCOME_NOTES = {
+    "timeout": "⏱ Stopped: the task timed out.",
+    "max_turns": "🔁 Stopped: the task ran out of turns.",
+    "model_error": "⚠️ Stopped: the sandbox's model misbehaved.",
+}
+
+# The same three reasons as a clause, for the sentence written to the MODEL.
+_FAILURE_REASON = {
+    "timeout": "it timed out",
+    "max_turns": "it ran out of turns",
+    "model_error": "the sandbox's model misbehaved",
+}
+
+
+def sandbox_outcome_note(error: str | None) -> str:
+    """The user-facing one-liner for a run that did not finish normally."""
+    return SANDBOX_OUTCOME_NOTES.get(error, "❌ Stopped.")
+
+
+def _no_artifact_message(error: str | None) -> str:
+    """What to tell the model when a stopped run produced nothing at all.
+
+    Deliberately none of these says "retry". A retry starts the whole task
+    again in a fresh container, throwing away the partial workspace teardown
+    just persisted - and in practice the outer model answers "retry, more
+    focused" by writing exactly the implementation spec run_code_sandbox's
+    docstring exists to suppress (observed: a timed-out cow GIF retried with an
+    invented canvas size, frame count and library choice). The resumable
+    follow-up offered below is strictly better and costs nothing but asking.
+    """
+    return {
+        "timeout": (
+            f"The sandbox task ran out of time and was stopped at the "
+            f"{sandbox_timeout()}s limit before it finished. Tell the user "
+            "it timed out."
+        ),
+        "max_turns": (
+            f"The sandbox task ran out of turns ({sandbox_max_turns()} max) "
+            "before finishing. Tell the user it did not finish in the number "
+            "of steps it had."
+        ),
+        "model_error": (
+            "The sandbox's own model produced an invalid action mid-task "
+            "and the run was stopped before finishing. Tell the user the "
+            "sandbox could not complete this task."
+        ),
+    }.get(error,
+          "The sandbox task was stopped before finishing. Tell the user the "
+          "task failed.")
+
+
+def sandbox_skip_note(skipped: list) -> str:
+    """Files that were produced but not delivered (over the artifact caps)."""
+    if not skipped:
+        return ""
+    return (
+        f"\n\n{len(skipped)} output file(s) were NOT sent "
+        f"(over the {MAX_ARTIFACT_FILES}-file / {MAX_ARTIFACT_BYTES}-byte "
+        f"limit): {', '.join(skipped)}. Tell the user "
+        "which file(s) could not be delivered and why; if it matters, "
+        "retry producing a smaller or fewer files."
+    )
+
+
+def sandbox_steering_note(steering: str) -> str:
+    """What people said to the run while it happened.
+
+    The outer model's history was built before the run started and on_message
+    routes these to the sandbox instead of enqueuing them, so without this it
+    cannot know the request changed. Observed without it: a mid-run "make the
+    milk red" produced a red image the outer model called a mistake.
+    """
+    if not steering:
+        return ""
+    return (
+        "\n\nThe user changed the request while the sandbox worked, in the "
+        f"thread:\n{steering}\nThe sandbox received these and adapted, so the "
+        "result reflects them and not the original wording. Treat them as "
+        "part of what was asked: do not call the result a mistake, do not "
+        "say it went wrong, and do not offer to undo it."
+    )
+
+
+def sandbox_tool_result(
+    result, *, sent_names: list, in_thread: bool, resumable: bool,
+    steering: str = "", resume_correction: str = "",
+) -> str:
+    """The string run_code_sandbox hands back to the outer model.
+
+    `resumable` must come from the closing embed's own answer (the live Redis
+    TTL), not from the configured one, so what the model is told about picking
+    the work back up can never disagree with what the user was just shown.
+    """
+    skip_note = sandbox_skip_note(result.skipped_artifacts)
+    steering_note = sandbox_steering_note(steering)
+    tail = skip_note + steering_note + resume_correction
+
+    if not result.ok:
+        if in_thread and resumable:
+            unfinished = (
+                " Its workspace WAS saved, so do NOT retry: a retry starts the "
+                "whole task again from scratch in an empty sandbox, while the "
+                "user simply asking again in THIS thread carries on from where "
+                "it stopped. Offer them that, and do not add build instructions "
+                "of your own when you do."
+            )
+        else:
+            unfinished = (
+                " Do not retry the same task unchanged; ask the user how they "
+                "want to proceed."
+            )
+        if sent_names:
+            return (
+                f"The sandbox task did not finish "
+                f"({_FAILURE_REASON.get(result.error, 'it failed')}), "
+                f"but before it was stopped it had already produced and verified "
+                f"{len(sent_names)} file(s), which were recovered and sent to the "
+                f"channel: {', '.join(sent_names)}. Tell the user the file(s) were "
+                "delivered despite the task not finishing, and do not claim they "
+                "are pending." + unfinished + tail
+            )
+        return _no_artifact_message(result.error) + unfinished + tail
+
+    if not sent_names:
+        # Only warn when nothing was produced AT ALL. An artifact that was found
+        # but failed to send is a different case, already logged, and claiming
+        # "no files were found" for it would be false.
+        no_file_note = (
+            "\n\n(The sandbox attached no file for this run. If one was "
+            "expected, it was not produced — tell the user that plainly. Do "
+            "not claim a file exists, was sent, or is still being generated.)"
+        ) if not result.artifacts else ""
+        return result.text + no_file_note + tail
+
+    return (
+        f"{result.text}\n\n"
+        f"The sandbox chose {len(sent_names)} file(s) to deliver and they are "
+        f"already in the thread: {', '.join(sent_names)}. The text above is its "
+        "own message to the user, posted there beside them — so the user has "
+        "already read it. Add at most one short sentence of your own: do not "
+        "repeat it, re-describe the files, or second-guess the result."
+        + tail
+    )

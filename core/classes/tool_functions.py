@@ -313,7 +313,9 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
         sandbox_snapshot_exists,
         sandbox_snapshot_id_for,
         sandbox_snapshot_remaining_seconds,
+        sandbox_outcome_note,
         sandbox_timeout,
+        sandbox_tool_result,
         sandbox_workspace_note,
         MAX_ARTIFACT_BYTES,
         MAX_ARTIFACT_FILES,
@@ -476,49 +478,10 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
         except Exception as e:
             logger.warning(f"Sandbox: failed to post the resume correction: {e}")
 
-    # Per-failure-reason wording so the caller (the outer LLM) knows what,
-    # if anything, to change before retrying — a bare "it failed" gives it
-    # nothing to act on. See SandboxResult.error for the reason codes.
-    finalize_notes = {
-        "timeout": "⏱ Stopped: the task timed out.",
-        "max_turns": "🔁 Stopped: the task ran out of turns.",
-        "model_error": "⚠️ Stopped: the sandbox's model misbehaved.",
-    }
-    # Deliberately none of these tells the model to retry. A retry starts the
-    # whole task over in a new container, so on a run stopped part way it
-    # throws away the partial workspace teardown just saved — and in practice
-    # the outer model answers "retry, more focused" by writing the
-    # implementation spec this tool's docstring exists to prevent (observed:
-    # a timed-out cow GIF retried with an invented canvas size, frame count
-    # and library choice). The resumable follow-up below is strictly better
-    # and costs nothing but asking.
-    no_artifact_messages = {
-        "timeout": (
-            f"The sandbox task ran out of time and was stopped at the "
-            f"{sandbox_timeout()}s limit before it finished. Tell the user "
-            "it timed out."
-        ),
-        "max_turns": (
-            f"The sandbox task ran out of turns ({sandbox_max_turns()} max) "
-            "before finishing. Tell the user it did not finish in the number "
-            "of steps it had."
-        ),
-        "model_error": (
-            "The sandbox's own model produced an invalid action mid-task "
-            "and the run was stopped before finishing. Tell the user the "
-            "sandbox could not complete this task."
-        ),
-    }
-    failure_reason = {
-        "timeout": "it timed out",
-        "max_turns": "it ran out of turns",
-        "model_error": "the sandbox's model misbehaved",
-    }
-
     if progress is not None:
         # give the live message its final state (it would otherwise sit on
         # the last "still running" / thinking snapshot)
-        note = "✅ Done." if result.ok else finalize_notes.get(result.error, "❌ Stopped.")
+        note = "✅ Done." if result.ok else sandbox_outcome_note(result.error)
         await progress.finalize(note)
 
     # The sandbox agent's own closing message, written FOR the user (see
@@ -554,86 +517,27 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
         except Exception as e:
             logger.warning(f"Sandbox: failed to post the agent's closing message: {e}")
 
-    steering_note = ""
-    if steering:
-        steering_note = (
-            "\n\nThe user changed the request while the sandbox worked, in the "
-            f"thread:\n{steering}\nThe sandbox received these and adapted, so the "
-            "result reflects them and not the original wording. Treat them as "
-            "part of what was asked: do not call the result a mistake, do not "
-            "say it went wrong, and do not offer to undo it."
-        )
-
-    skip_note = ""
-    if result.skipped_artifacts:
-        skip_note = (
-            f"\n\n{len(result.skipped_artifacts)} output file(s) were NOT sent "
-            f"(over the {MAX_ARTIFACT_FILES}-file / {MAX_ARTIFACT_BYTES}-byte "
-            f"limit): {', '.join(result.skipped_artifacts)}. Tell the user "
-            "which file(s) could not be delivered and why; if it matters, "
-            "retry producing a smaller or fewer files."
-        )
-
-    # After the artifacts, before every return below: the thread's "here is
-    # how the run ended, and how long you can pick it back up" marker. The
-    # outcome line only goes out when the run did NOT finish normally.
-    outcome = "" if result.ok else finalize_notes.get(result.error, "❌ Stopped.")
+    # After the artifacts, before the return: the thread's "here is how the run
+    # ended, and how long you can pick it back up" marker. The outcome line only
+    # goes out when the run did NOT finish normally. Posted on every path where
+    # a "Running in sandbox" embed already went out, and never on the early
+    # returns (content guard, forwarded-to-a-running-run) where nothing opened.
+    outcome = "" if result.ok else sandbox_outcome_note(result.error)
     remaining = await _send_sandbox_closing_note(
         channel, snapshot_id, in_thread, outcome)
 
-    if not result.ok:
-        # What the model should do about it, kept in step with the closing
-        # embed: only offer a resume when there is genuinely a saved workspace
-        # to resume (persisting is best-effort — _persist_sandbox_snapshot).
-        if in_thread and remaining is not None:
-            unfinished_note = (
-                " Its workspace WAS saved, so do NOT retry: a retry starts the "
-                "whole task again from scratch in an empty sandbox, while the "
-                "user simply asking again in THIS thread carries on from where "
-                "it stopped. Offer them that, and do not add build instructions "
-                "of your own when you do."
-            )
-        else:
-            unfinished_note = (
-                " Do not retry the same task unchanged; ask the user how they "
-                "want to proceed."
-            )
-        if sent_names:
-            return (
-                f"The sandbox task did not finish ({failure_reason.get(result.error, 'it failed')}), "
-                f"but before it was stopped it had already produced and verified "
-                f"{len(sent_names)} file(s), which were recovered and sent to the "
-                f"channel: {', '.join(sent_names)}. Tell the user the file(s) were "
-                "delivered despite the task not finishing, and do not claim they "
-                "are pending." + unfinished_note + skip_note + steering_note
-                + resume_correction
-            )
-        return no_artifact_messages.get(
-            result.error,
-            "The sandbox task was stopped before finishing. Tell the user the "
-            "task failed.",
-        ) + unfinished_note + skip_note + steering_note + resume_correction
-
-    if not sent_names:
-        # Only warn when nothing was produced at all — an artifact that WAS
-        # found but failed to send (Discord error) is a different case and
-        # already correctly described by the exception log above; claiming
-        # "no files were found" there would be false.
-        no_file_note = (
-            "\n\n(The sandbox attached no file for this run. If one was "
-            "expected, it was not produced — tell the user that plainly. Do "
-            "not claim a file exists, was sent, or is still being generated.)"
-        ) if not result.artifacts else ""
-        return (result.text + no_file_note + skip_note + steering_note
-                + resume_correction)
-    return (
-        f"{result.text}\n\n"
-        f"The sandbox chose {len(sent_names)} file(s) to deliver and they are "
-        f"already in the thread: {', '.join(sent_names)}. The text above is its "
-        "own message to the user, posted there beside them — so the user has "
-        "already read it. Add at most one short sentence of your own: do not "
-        "repeat it, re-describe the files, or second-guess the result."
-        + skip_note + steering_note + resume_correction
+    # Everything the outer model is told is built by sandbox_tool_result
+    # (sandbox_agent.py) — pure, and unit-tested without a Discord channel.
+    # `resumable` comes from the closing embed's own live-TTL answer, so the
+    # model and the user can never disagree about whether a follow-up in this
+    # thread picks the work back up.
+    return sandbox_tool_result(
+        result,
+        sent_names=sent_names,
+        in_thread=in_thread,
+        resumable=remaining is not None,
+        steering=steering,
+        resume_correction=resume_correction,
     )
 
 
