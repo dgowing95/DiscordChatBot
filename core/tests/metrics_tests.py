@@ -53,13 +53,13 @@ def test_metric_names():
 
 
 def test_message_counters_and_generation_histogram():
-    before = _counter_value(m.messages_received_total, guild_id=GUILD, user_id=USER)
-    m.inc_messages_received(GUILD, USER)
-    assert _counter_value(m.messages_received_total, guild_id=GUILD, user_id=USER) == before + 1
+    before = _counter_value(m.messages_received_total, guild_id=GUILD)
+    m.inc_messages_received(GUILD)
+    assert _counter_value(m.messages_received_total, guild_id=GUILD) == before + 1
 
-    before = _counter_value(m.messages_processed_total, guild_id=GUILD, user_id=USER)
-    m.inc_messages_processed(GUILD, USER)
-    assert _counter_value(m.messages_processed_total, guild_id=GUILD, user_id=USER) == before + 1
+    before = _counter_value(m.messages_processed_total, guild_id=GUILD)
+    m.inc_messages_processed(GUILD)
+    assert _counter_value(m.messages_processed_total, guild_id=GUILD) == before + 1
 
     before = m.response_generation_seconds.labels(guild_id=GUILD)._sum.get()
     m.observe_response_generation(GUILD, 3.5)

@@ -35,7 +35,17 @@ from classes.message_queue import (
 
 from classes.sandbox_agent import sandbox_enabled
 
-from classes.tool_functions import *
+from classes.tool_functions import (
+    change_personality,
+    clear_memories,
+    fetch_url,
+    generate_image,
+    get_current_datetime,
+    remove_memory,
+    run_code_sandbox,
+    store_memory,
+    web_search,
+)
 
 
 # The LLM host/model/key never change at runtime, so the AsyncOpenAI client

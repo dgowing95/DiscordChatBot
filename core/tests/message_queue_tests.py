@@ -125,7 +125,7 @@ async def test_on_message_enqueues_when_queue_has_room():
     bot = MagicMock()
     queue = asyncio.Queue(maxsize=2)
     received_before = _counter(metrics.messages_received_total,
-                               guild_id="42", user_id="777")
+                               guild_id="42")
     drops_before = _counter(metrics.queue_drops_total, guild_id="42")
 
     with patch.object(main_mod, "client", bot), \
@@ -137,7 +137,7 @@ async def test_on_message_enqueues_when_queue_has_room():
     assert queue.get_nowait() is msg
     msg.reply.assert_not_awaited()
     assert _counter(metrics.messages_received_total,
-                    guild_id="42", user_id="777") == received_before + 1
+                    guild_id="42") == received_before + 1
     assert _counter(metrics.queue_drops_total, guild_id="42") == drops_before
 
 
@@ -148,7 +148,7 @@ async def test_on_message_drops_mention_with_busy_reply_when_full():
     queue = asyncio.Queue(maxsize=1)
     queue.put_nowait(object())  # already full
     received_before = _counter(metrics.messages_received_total,
-                               guild_id="42", user_id="777")
+                               guild_id="42")
     drops_before = _counter(metrics.queue_drops_total, guild_id="42")
 
     with patch.object(main_mod, "client", bot), \
@@ -160,7 +160,7 @@ async def test_on_message_drops_mention_with_busy_reply_when_full():
     assert queue.qsize() == 1
     assert _counter(metrics.queue_drops_total, guild_id="42") == drops_before + 1
     assert _counter(metrics.messages_received_total,
-                    guild_id="42", user_id="777") == received_before
+                    guild_id="42") == received_before
     # a mention is not silently ignored: short busy reply
     msg.reply.assert_awaited_once()
     assert "working through my queue" in msg.reply.await_args.args[0]

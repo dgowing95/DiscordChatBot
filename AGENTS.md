@@ -425,10 +425,13 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
 | `LLM_PASS` | placeholder key — llama.cpp does not authenticate, but the OpenAI client requires a non-empty key |
 | `MODEL` | the model, single source of truth: the bot requests this name AND the compose `llamacpp` service serves it (as `LLAMA_ARG_HF_REPO`); in the Helm chart the one `model` value feeds both. In-code default `qwen3:4b` |
 | `OPENAI_API_KEY` | API key for the free OpenAI Moderations endpoint (web-tool guard); fail-open if unset |
+| `OPENAI_BASE_URL` | moderation API base (default `https://api.openai.com/v1`); any OpenAI-compatible `/v1/moderations` endpoint works. Chart: `openaiBaseUrl` |
+| `MODERATION_MODEL` | moderation model name, e.g. `text-moderation-latest`; unset omits the parameter and uses the server default. Chart: `moderationModel` |
 | `CONTENT_GUARD_ENABLED` | `0`/`false` disables the content guard on web tools (default: on) |
 | `CONTENT_GUARD_DEBUG` | `0`/`false` silences content-guard debug logging (default: on) |
 | `METRICS_PORT` | port to serve the Prometheus `/metrics` endpoint on (default 9464); empty/`0` disables. Chart: `metrics.enabled`/`metrics.port` also add a ClusterIP Service, the pod port, and a kube-prometheus-stack ServiceMonitor (labelled `release: kube-prometheus-stack` — the operator only imports ServiceMonitors with that label) |
-| `MSG_HISTORY_LIMIT` | how many prior channel messages to include, default 5 |
+| `MSG_HISTORY_LIMIT` | how many prior channel messages to include, default 5. Chart: `message_history` |
+| `REASONING_EFFORT` | sent to the LLM as the OpenAI-compat `reasoning_effort` field (low/medium/high, default medium). Chart: `reasoningEffort` |
 | `LLM_MAX_TURNS` | max model turns for ONE reply from the main agent (helm: `llmMaxTurns`), default 20. A turn is one model response, however many tool calls it carries. Passed explicitly to `Runner.run` because the SDK's own default of 10 is easily overrun by a reply that chains several sandbox/image calls — and overrunning raises `MaxTurnsExceeded`, which costs the whole answer |
 | `SHOW_THINKING` | `1`/`true` sends the model's reasoning as spoiler-hidden follow-up message(s); default (off) drops it entirely. Chart: `showThinking` |
 | `WORKER_COUNT` | queue worker tasks (default 2, min 1); each handles one message at a time, a per-channel lock keeps same-channel order. Chart: `worker_count` |
@@ -441,6 +444,9 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
 | `IMAGE_OFFLOAD` | `model` (default: one pipeline component on GPU at a time, text encoder in CPU RAM) / `sequential` (lowest VRAM, slowest) / `none` (all on GPU) |
 | `IMAGE_QUEUE_SIZE` | max queued image requests in the diffusion service (default 16); over that it returns 503 |
 | `IMAGE_GEN_TIMEOUT` | seconds core waits on the diffusion service (default 300) |
+| `SANDBOX_ENABLED` | `0`/`false` removes the `run_code_sandbox` tool from the LLM (default: on). Chart: `sandbox.enabled` also removes the Docker-socket hostPath mount |
+| `SANDBOX_IMAGE` | container image for the sandbox workspace, pulled once onto the daemon (default `python:3.14-slim`). Chart: `sandbox.image` |
+| `SANDBOX_MAX_TURNS` | max model turns for one sandbox task (default 10). Chart: `sandbox.maxTurns` |
 | `SANDBOX_MODEL` | model id for the nested sandbox agent; empty (default) = the main bot's `MODEL`. Chart: `sandbox.model` |
 | `SANDBOX_LLM_HOST` | base URL of the sandbox agent's LLM (core appends `/v1`); empty (default) = the main `LLM_HOST`. E.g. `https://openrouter.ai/api` for OpenRouter. Chart: `sandbox.llmHost` |
 | `SANDBOX_LLM_API_KEY` | API key for the sandbox agent's LLM; empty (default) = the main `LLM_PASS` placeholder. Chart: `sandbox.apiKey` |
@@ -453,21 +459,33 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
 
 ## Testing
 
-- **Framework:** `pytest` (in `core/requirements.txt`). No conftest/pytest.ini; plain
-  test files in `core/tests/`.
-- **Prereq:** a Python 3.13+ venv with `pip install -r core/requirements.txt`
-  (tests that import `config_manager`/`user_memory` need `redis`; `response_filter`
-  tests are pure-stdlib).
-- **How to run** (from the repo root — the `PYTHONPATH` is required because
-  modules use both `core.classes...` and `classes...` import styles):
+- **Framework:** `pytest`, configured in `pyproject.toml` at the repo root
+  (`python_files = *_tests.py` — the suite predates the default `test_*.py`
+  convention — plus `testpaths` and `pythonpath`).
+- **Prereq:** a Python 3.13+ venv with `pip install -r core/requirements-dev.txt`
+  (that pulls in `core/requirements.txt` and adds the test-only packages;
+  `response_filter` tests are pure-stdlib).
+- **How to run** — from the repo root, no arguments and no `PYTHONPATH`:
 
   ```bash
-  # same file list as the CI workflow (.github/workflows/tests.yaml)
-  PYTHONPATH=$(pwd) pytest core/tests/user_memory_tests.py core/tests/response_filter_tests.py core/tests/content_guard_tests.py core/tests/message_handler_tests.py core/tests/image_generation_tests.py core/tests/sandbox_agent_tests.py core/tests/sandbox_progress_tests.py core/tests/sandbox_snapshot_store_tests.py core/tests/sandbox_thread_inbox_tests.py core/tests/metrics_tests.py core/tests/message_queue_tests.py core/tests/task_registry_tests.py core/tests/common_tests.py
+  pytest
   ```
 
-  (On Windows PowerShell use `$env:PYTHONPATH=$(Get-Location)` — or
-  `PYTHONPATH=$PWD pytest ...` in bash.)
+  This is exactly what CI runs, so a new test file is picked up automatically;
+  there is no list to keep in step. ~460 tests, roughly 15 seconds.
+
+- Tests import production modules as `classes.X`, the same name the app uses
+  (it runs with cwd `/app`), and `pyproject.toml` puts `core/` on the path to
+  make that resolve. Do NOT import them as `core.classes.X`: that resolves as a
+  separate namespace package, giving a SECOND module object with its own
+  globals, so a patch applied to one copy leaves the other untouched and any
+  import-time state (metric registration, the channel-lock and in-flight
+  registries) exists twice. `grep -rn "core\.classes" core/` should stay empty.
+- Nothing in the suite may write to `os.environ` directly — use `monkeypatch`.
+  A bare `os.environ.setdefault("REDIS_HOST", "localhost")` in a test helper
+  leaked process-wide and made every later test that touched `configManager`
+  block on a real Redis connect timeout, which is what made the full suite
+  appear to hang.
 
 ### Manual/live testing via a Discord webhook
 
@@ -503,18 +521,22 @@ curl -sS -X POST "$TEST_WEBHOOK_URL" \
 - Keeping a module **pure and importable without the discord/agents SDKs** (like
   `response_filter.py`) is the intended pattern for anything you want to unit test —
   `MessageHandler` itself drags in `discord`, `agents`, Redis, etc.
-- **CI:** `.github/workflows/tests.yaml` runs on every push to non-main branches,
-  installs `core/requirements.txt` on Python 3.13, and calls the same pytest command
-  as above. **When you add a new test file, add it to that command.**
+- **CI:** `.github/workflows/tests.yaml` runs `pytest` on every push, and
+  `release.yaml` runs it again as a gate the image/chart jobs depend on
+  (releases are cut straight off a push to `main`, so this is the only place
+  the shipped commit is tested). New test files need no CI change.
 - Conventions seen in existing tests: `pytest` fixtures + `unittest.mock` to stub
   Redis; docstring-style comments at the top of test files documenting how to run them.
 
 ## Conventions & gotchas
 
-- Import style is inconsistent, and it works-leave it as-is: within `core/` modules import
-  siblings as `from classes.X import ...` (works because the app runs with cwd `/app`
-  in the container), while tests import as `from core.classes.X import ...`. Both
-  resolve as namespace packages; preserve the existing style when editing.
+- There is ONE import name: `from classes.X import ...`, in production code and in
+  tests alike (the app runs with cwd `/app`; `pyproject.toml` puts `core/` on the
+  test path). It used to be inconsistent — tests used `core.classes.X` — and because
+  the two resolve to separate module objects with separate globals, `metrics.py` and
+  `message_queue.py` each needed a `sys.modules` aliasing hack to keep their
+  import-time state from being created twice, and the sandbox tests had to know which
+  copy to patch. Don't reintroduce the second name.
 - A reasoning model delivers its thinking in one of two shapes: out of band in
   `reasoning_content` (llama.cpp's default — becomes a `reasoning_item` on the run
   result), or inline as open/close think-tags with an optional tab after the
@@ -528,8 +550,9 @@ curl -sS -X POST "$TEST_WEBHOOK_URL" \
   in_flight_hint) live in `core/classes/message_queue.py` — keep it pure
   (stdlib only). Cover changes to the concurrency model in
   `core/tests/message_queue_tests.py` (which also tests the `on_message` /
-  `process_messages` wiring in `main.py` via the `_import_main()` pattern
-  from `image_generation_tests.py`), the registry itself in
+  `process_messages` wiring in `main.py`, imported directly — `main.py` guards
+  `client.run()` behind `if __name__ == "__main__"` and builds its Redis client
+  lazily, so importing it starts nothing and needs no environment), the registry itself in
   `core/tests/task_registry_tests.py`, the scoped-lock behaviour of
   `MessageHandler.handle_message` (concurrent generations, serialized sends,
   prompt hint) in `core/tests/message_handler_tests.py`, and the slow-tool

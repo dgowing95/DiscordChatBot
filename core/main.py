@@ -161,7 +161,6 @@ async def on_message(message):
     if not await should_handle_message(message):
         return
     guild_id = message.guild.id if message.guild else 0
-    user_id = message.author.id
 
     # Backpressure: the queue is bounded (QUEUE_MAX_SIZE). When it's full the
     # bot is behind (e.g. a 10-minute sandbox run) — dropping beats answering
@@ -178,7 +177,7 @@ async def on_message(message):
                 print(f"Could not send busy reply to {message.id}: {e}")
         return
 
-    inc_messages_received(guild_id, user_id)
+    inc_messages_received(guild_id)
     await message_queue.put(message)
     set_message_queue_size(message_queue.qsize())
 
@@ -219,7 +218,6 @@ async def process_messages():
         # Every queued message already passed should_handle_message() in
         # on_message, so handle it directly.
         guild_id = message.guild.id if message.guild else 0
-        user_id = message.author.id
         print("Picking up message from queue")
         try:
             # The per-channel lock is SCOPED inside handle_message to the two
@@ -230,7 +228,7 @@ async def process_messages():
             # during the (unlocked) LLM/tool phase.
             async with message.channel.typing():
                 await handler.handle_message()
-            inc_messages_processed(guild_id, user_id)
+            inc_messages_processed(guild_id)
             message_queue.task_done()
             print("Done with message from queue")
         except Exception as e:

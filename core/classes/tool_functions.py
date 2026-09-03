@@ -103,12 +103,14 @@ async def store_memory(wrapper: RunContextWrapper[dict], data: str) -> str:
         data: The fact to store, e.g. "prefers metric units".
     """
 
-    # Sometimes OpenAI repeats a tool call.
+    # The model sometimes repeats a tool call within one reply; only the first
+    # is performed. Say so honestly rather than reporting a success that did not
+    # happen - the model reads this back when it writes the reply.
     times_called = wrapper.context.get("redis_save_tool_calls")
     if times_called > 0:
-        err = f"Tool call limit reached: {times_called}. Not storing data."
-        print(err)
-        return "Data stored successfully."
+        print(f"store_memory already called {times_called} time(s) this run; skipping.")
+        return ("A memory was already stored for this request, so this duplicate "
+                "call was skipped. Nothing further is needed.")
     wrapper.context["redis_save_tool_calls"] += 1
     
 
@@ -404,7 +406,7 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
         )
         await Common.send_tool_discord_embed(
             channel,
-            f"📨 Messages you send here will be recived by the sandbox AI while the sandbox is running. The AI may or may not respond.",
+            f"📨 Messages you send here will be received by the sandbox AI while the sandbox is running. The AI may or may not respond.",
             0xB0F400,
             "Thread Linked to Sandbox"
         )
@@ -640,11 +642,10 @@ async def change_personality(wrapper: RunContextWrapper[dict], personality: str)
         personality: The new personality to set.
     """
 
-    # Sometimes OpenAI repeats a tool call.
+    # As in store_memory: the model sometimes repeats a call within one reply.
     times_called = wrapper.context.get("personality_tool_calls")
     if times_called > 0:
-        err = f"Tool call limit reached: {times_called}. Not storing data."
-        print(err)
+        print(f"change_personality already called {times_called} time(s) this run; skipping.")
         return True
     wrapper.context["personality_tool_calls"] += 1
 
