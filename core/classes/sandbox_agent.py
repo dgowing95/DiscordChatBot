@@ -22,6 +22,7 @@ Requirements (see docker-compose.yaml / charts/dis-ai-bot):
 The heavy imports (docker SDK, agents.sandbox) stay inside the builder
 functions so the pure helpers below are testable without them.
 """
+import logging
 import asyncio
 import io
 import os
@@ -47,6 +48,8 @@ from agents.sandbox.config import DEFAULT_PYTHON_SANDBOX_IMAGE
 
 from classes import sandbox_thread_inbox
 from classes.llm_config import DEFAULT_LLM_API_KEY, DEFAULT_LLM_HOST, DEFAULT_MODEL
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_TURNS = 10
 DEFAULT_TIMEOUT_SECONDS = 600
@@ -428,7 +431,7 @@ def _with_elapsed_note(original_invoke):
             note = _elapsed_note(context)
             return f"{result}\n\n{note}" if note else result
         except Exception as e:
-            print(f"Sandbox: could not attach the time marker to a tool result: {e}")
+            logger.warning(f"Sandbox: could not attach the time marker to a tool result: {e}")
             return result
 
     return _invoke
@@ -460,7 +463,7 @@ def _with_thread_messages(original_invoke):
                 return result
             return f"{result}\n\n{pending}"
         except Exception as e:
-            print(f"Sandbox inbox: could not attach thread messages to a tool result: {e}")
+            logger.warning(f"Sandbox inbox: could not attach thread messages to a tool result: {e}")
             return result
 
     return _invoke
@@ -534,7 +537,7 @@ async def ensure_sandbox_thread(original_message, task: str):
     try:
         thread = await original_message.create_thread(name=_thread_name(task))
     except Exception as e:
-        print(f"Sandbox: could not create a thread, falling back to the channel: {e}")
+        logger.warning(f"Sandbox: could not create a thread, falling back to the channel: {e}")
         return channel, False
     return thread, True
 
@@ -571,7 +574,7 @@ async def sandbox_snapshot_exists(snapshot_id: str | None) -> bool:
 
         return bool(await SandboxSnapshotStore().exists(snapshot_id))
     except Exception as e:
-        print(f"Sandbox: could not check for a saved workspace snapshot: {e}")
+        logger.warning(f"Sandbox: could not check for a saved workspace snapshot: {e}")
         return False
 
 
@@ -602,7 +605,7 @@ async def sandbox_snapshot_remaining_seconds(snapshot_id: str | None) -> int | N
 
         remaining = await SandboxSnapshotStore().ttl(snapshot_id)
     except Exception as e:
-        print(f"Sandbox: could not read the saved workspace's expiry: {e}")
+        logger.warning(f"Sandbox: could not read the saved workspace's expiry: {e}")
         return None
     return remaining if remaining > 0 else None
 
@@ -711,7 +714,7 @@ async def ask_user(wrapper: RunContextWrapper[dict], question: str) -> str:
             f"🤖 {question}\n-# Reply in this thread — no @mention needed."
         )
     except Exception as e:
-        print(f"Sandbox ask_user: failed to send question: {e}")
+        logger.warning(f"Sandbox ask_user: failed to send question: {e}")
         return "Could not reach the user (failed to send the question) — proceed using your best judgement."
 
     def _is_reply(message) -> bool:
@@ -729,7 +732,7 @@ async def ask_user(wrapper: RunContextWrapper[dict], question: str) -> str:
             "and note this assumption in your final report."
         ))
     except Exception as e:
-        print(f"Sandbox ask_user: wait_for failed: {e}")
+        logger.warning(f"Sandbox ask_user: wait_for failed: {e}")
         return _with_pending(thread, "Could not get the user's reply — proceed using your best judgement.")
     # discord.py dispatches a message to wait_for futures AND to on_message
     # independently, so this same reply was also queued in the thread inbox.
@@ -738,7 +741,7 @@ async def ask_user(wrapper: RunContextWrapper[dict], question: str) -> str:
     try:
         sandbox_thread_inbox.consume(thread.id, reply.id)
     except Exception as e:
-        print(f"Sandbox ask_user: could not de-duplicate the reply: {e}")
+        logger.warning(f"Sandbox ask_user: could not de-duplicate the reply: {e}")
     return _with_pending(thread, reply.content or "(the user replied with no text)")
 
 
@@ -752,7 +755,7 @@ def _with_pending(thread, text: str) -> str:
     try:
         pending = sandbox_thread_inbox.drain(thread.id)
     except Exception as e:
-        print(f"Sandbox inbox: could not read pending thread messages: {e}")
+        logger.warning(f"Sandbox inbox: could not read pending thread messages: {e}")
         return text
     return f"{text}\n\n{pending}" if pending else text
 
@@ -770,7 +773,7 @@ async def check_thread_messages(wrapper: RunContextWrapper[dict]) -> str:
     try:
         pending = sandbox_thread_inbox.drain(thread.id)
     except Exception as e:
-        print(f"Sandbox inbox: check_thread_messages failed: {e}")
+        logger.warning(f"Sandbox inbox: check_thread_messages failed: {e}")
         return "Could not check for new messages."
     return pending or "No new messages."
 
@@ -795,7 +798,7 @@ async def say_in_thread(wrapper: RunContextWrapper[dict], text: str) -> str:
     try:
         await thread.send(f"🐳 {text[:1900]}")
     except Exception as e:
-        print(f"Sandbox say_in_thread: failed to send: {e}")
+        logger.warning(f"Sandbox say_in_thread: failed to send: {e}")
         return "Could not post that to the thread — carry on with the task."
     return _with_pending(thread, "Posted to the thread.")
 
@@ -824,7 +827,7 @@ async def send_preview_to_thread(
     try:
         result = await session.exec("cat", "--", path, shell=False)
     except Exception as e:
-        print(f"Sandbox send_preview_to_thread: exec failed: {e}")
+        logger.warning(f"Sandbox send_preview_to_thread: exec failed: {e}")
         return f"Could not read {path!r} to preview it."
     if not result.ok():
         return f"Could not read {path!r} — check the path and try again."
@@ -839,7 +842,7 @@ async def send_preview_to_thread(
     try:
         await thread.send(content=caption or None, file=discord.File(io.BytesIO(data), filename=name))
     except Exception as e:
-        print(f"Sandbox send_preview_to_thread: send failed: {e}")
+        logger.warning(f"Sandbox send_preview_to_thread: send failed: {e}")
         return f"Read {path!r} but could not send it to the thread."
     return f"Sent {name!r} to the thread as a preview."
 
@@ -873,7 +876,7 @@ async def attach_file(wrapper: RunContextWrapper[dict], path: str, caption: str 
     try:
         result = await session.exec("stat", "-c", "%s", "--", path, shell=False)
     except Exception as e:
-        print(f"Sandbox attach_file: stat failed for {path!r}: {e}")
+        logger.warning(f"Sandbox attach_file: stat failed for {path!r}: {e}")
         return f"Could not check {path!r}. Verify it exists with `ls`, then attach it again."
     if not result.ok():
         return (
@@ -1150,7 +1153,7 @@ async def _create_sandbox_session(sandbox_client, snapshot_id: str | None,
         # to a specific exception class).
         if not (resumed and snapshot_id is not None):
             raise
-        print(f"Sandbox: could not restore this thread's saved workspace, starting fresh: {e}")
+        logger.warning(f"Sandbox: could not restore this thread's saved workspace, starting fresh: {e}")
         await _delete_sandbox_session(sandbox_client, session)
         # Delete the bad key BEFORE retrying, for two reasons: it is what
         # makes the retry work at all (exists() is now False, so start()
@@ -1194,7 +1197,7 @@ async def _delete_sandbox_session(sandbox_client, session) -> None:
             timeout=SANDBOX_DELETE_TIMEOUT_SECONDS,
         )
     except Exception as e:
-        print(f"Sandbox: failed to delete session/container: {e}")
+        logger.warning(f"Sandbox: failed to delete session/container: {e}")
 
 
 async def _persist_sandbox_snapshot(session, snapshot_id: str | None) -> None:
@@ -1217,7 +1220,7 @@ async def _persist_sandbox_snapshot(session, snapshot_id: str | None) -> None:
     try:
         await asyncio.wait_for(session.stop(), timeout=sandbox_persist_timeout())
     except Exception as e:
-        print(f"Sandbox: failed to persist workspace snapshot {snapshot_id!r}: {e}")
+        logger.warning(f"Sandbox: failed to persist workspace snapshot {snapshot_id!r}: {e}")
 
 
 async def _delete_sandbox_snapshot(snapshot_id: str | None) -> None:
@@ -1233,7 +1236,7 @@ async def _delete_sandbox_snapshot(snapshot_id: str | None) -> None:
 
         await SandboxSnapshotStore().delete(snapshot_id)
     except Exception as e:
-        print(f"Sandbox: failed to drop unrestorable snapshot {snapshot_id!r}: {e}")
+        logger.warning(f"Sandbox: failed to drop unrestorable snapshot {snapshot_id!r}: {e}")
 
 
 def _parse_find_output(raw: str) -> list[tuple[str, int]]:
@@ -1413,7 +1416,7 @@ async def _collect_artifacts(
     to_fetch, skipped = _select_artifacts(listed)
     skip_notes: list[str] = []
     for note in skipped:
-        print(f"Sandbox: {note}")
+        logger.info(f"Sandbox: {note}")
         # split on the " (skipped: " marker, not plain whitespace — a path
         # under out/ can itself contain spaces (e.g. "my plot.png")
         path, _, reason = note.partition(" (skipped: ")
@@ -1424,10 +1427,10 @@ async def _collect_artifacts(
         try:
             read_result = await session.exec("cat", "--", path, shell=False)
         except Exception as e:
-            print(f"Sandbox: failed to read output file {path}: {e}")
+            logger.warning(f"Sandbox: failed to read output file {path}: {e}")
             continue
         if not read_result.ok():
-            print(f"Sandbox: failed to read output file {path}: exit {read_result.exit_code}")
+            logger.warning(f"Sandbox: failed to read output file {path}: exit {read_result.exit_code}")
             continue
         artifacts.append(
             SandboxArtifact(name=_relative_artifact_name(path, out_dir), data=read_result.stdout)
@@ -1449,7 +1452,7 @@ async def _collect_deliverables(
     """
     kept, skip_notes = _select_deliverables(entries)
     for note in skip_notes:
-        print(f"Sandbox: {note}")
+        logger.info(f"Sandbox: {note}")
 
     artifacts: list[SandboxArtifact] = []
     for entry in kept:
@@ -1457,10 +1460,10 @@ async def _collect_deliverables(
         try:
             read_result = await session.exec("cat", "--", path, shell=False)
         except Exception as e:
-            print(f"Sandbox: failed to read attached file {path}: {e}")
+            logger.warning(f"Sandbox: failed to read attached file {path}: {e}")
             continue
         if not read_result.ok():
-            print(f"Sandbox: failed to read attached file {path}: exit {read_result.exit_code}")
+            logger.warning(f"Sandbox: failed to read attached file {path}: exit {read_result.exit_code}")
             continue
         artifacts.append(SandboxArtifact(
             name=_attachment_name(path),
@@ -1486,7 +1489,7 @@ async def _mark_run_start(session, out_dir: str | None) -> str | None:
     try:
         res = await session.exec("touch", "--", marker, shell=False)
     except Exception as e:
-        print(f"Sandbox: could not write the run marker: {e}")
+        logger.warning(f"Sandbox: could not write the run marker: {e}")
         return None
     return marker if res.ok() else None
 
@@ -1655,7 +1658,7 @@ async def _failure_result(
     never put in SandboxResult.text or shown to the outer model, which
     should be told to retry with a clearer task, not fed the raw error.
     """
-    print(f"Sandbox: run stopped ({error}), attempting best-effort artifact recovery"
+    logger.warning(f"Sandbox: run stopped ({error}), attempting best-effort artifact recovery"
           + (f": {detail}" if detail else ""))
     artifacts: list[SandboxArtifact] = []
     skip_notes: list[str] = []
@@ -1665,7 +1668,7 @@ async def _failure_result(
             timeout=SANDBOX_RECOVERY_TIMEOUT_SECONDS,
         )
     except Exception as e:
-        print(f"Sandbox: artifact recovery after {error} failed: {e}")
+        logger.warning(f"Sandbox: artifact recovery after {error} failed: {e}")
     return SandboxResult(
         text="", artifacts=artifacts, ok=False, error=error, skipped_artifacts=skip_notes,
         resumed=resumed,

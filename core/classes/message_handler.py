@@ -1,3 +1,4 @@
+import logging
 import asyncio, re, json, time, os, io, base64
 import aiohttp
 import pillow_heif
@@ -14,6 +15,8 @@ from classes.response_filter import (
 )
 from classes.metrics import observe_response_generation
 from classes.message_queue import get_channel_lock, in_flight_hint
+
+logger = logging.getLogger(__name__)
 
 # Max image attachments forwarded to the LLM per message (keeps prompts a sane size).
 MAX_IMAGES_PER_MESSAGE = 3
@@ -136,11 +139,11 @@ class MessageHandler:
             try:
                 async with sess.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                     if resp.status != 200:
-                        print(f"Failed to download image {url}: HTTP {resp.status}")
+                        logger.warning(f"Failed to download image {url}: HTTP {resp.status}")
                         return None
                     return await resp.read()
             except Exception as e:
-                print(f"Failed to download image {url}: {e}")
+                logger.warning(f"Failed to download image {url}: {e}")
                 return None
 
         if session is not None:
@@ -155,7 +158,7 @@ class MessageHandler:
                 continue
             encoded = await asyncio.to_thread(encode_image_for_llm, data)
             if encoded is None:
-                print(f"Skipping image {url}: not a decodable image (format={content_type!r})")
+                logger.warning(f"Skipping image {url}: not a decodable image (format={content_type!r})")
                 continue
             image_data, ctype = encoded
             parts.append({
@@ -208,7 +211,7 @@ class MessageHandler:
 
 
     async def handle_message(self):
-        print(f'Handling message: {self.message.content}')
+        logger.info(f'Handling message: {self.message.content}')
         # Histogram covers the whole handling: prompt build + LLM run + send.
         # Observed on both outcomes (the ❌ path is still a timed attempt;
         # its failures are separately counted in llm_errors).

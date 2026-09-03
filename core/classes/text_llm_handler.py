@@ -1,3 +1,4 @@
+import logging
 import os,aiohttp, discord, io, time
 from classes.user_memory import UserMemory
 from classes.metrics import inc_llm_error, inc_tool_call, inc_tool_error, observe_tool_duration
@@ -46,6 +47,8 @@ from classes.tool_functions import (
     store_memory,
     web_search,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # The LLM host/model/key never change at runtime, so the AsyncOpenAI client
@@ -130,7 +133,7 @@ class ToolMetricsHooks(RunHooks):
         try:
             self._starts[self._key(context, tool)] = (time.monotonic(), name)
         except Exception as e:
-            print(f"Metrics tool_start hook failed: {e}")
+            logger.warning(f"Metrics tool_start hook failed: {e}")
         if name in SLOW_TOOL_NAMES:
             try:
                 register_task_run(
@@ -140,7 +143,7 @@ class ToolMetricsHooks(RunHooks):
                     run_key=self._key(context, tool),
                 )
             except Exception as e:
-                print(f"In-flight registry tool_start failed: {e}")
+                logger.warning(f"In-flight registry tool_start failed: {e}")
 
     async def on_tool_end(self, context, agent, tool, result) -> None:
         name = self._tool_name(context, tool)
@@ -152,7 +155,7 @@ class ToolMetricsHooks(RunHooks):
             if isinstance(result, str) and result.startswith(self._SDK_FAILURE_PREFIX):
                 inc_tool_error(name, self.guild_id)
         except Exception as e:
-            print(f"Metrics tool_end hook failed: {e}")
+            logger.warning(f"Metrics tool_end hook failed: {e}")
         if name in SLOW_TOOL_NAMES:
             try:
                 failed = isinstance(result, str) and result.startswith(self._SDK_FAILURE_PREFIX)
@@ -164,7 +167,7 @@ class ToolMetricsHooks(RunHooks):
                     finish=not failed,
                 )
             except Exception as e:
-                print(f"In-flight registry tool_end failed: {e}")
+                logger.warning(f"In-flight registry tool_end failed: {e}")
 
 class TextLLMHandler:
 
@@ -201,21 +204,21 @@ class TextLLMHandler:
         # on boot (LLAMA_ARG_HF_REPO into the LLAMA_CACHE volume). We only check that
         # the configured model is loaded (fail-soft: it may still be downloading).
         url = llm_host() + "/v1/models"
-        print(f"Checking model {model} on LLM host ({url})")
+        logger.info(f"Checking model {model} on LLM host ({url})")
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url) as response:
                     if response.status != 200:
-                        print(f"LLM server not ready yet ({response.status}); model may still be downloading")
+                        logger.warning(f"LLM server not ready yet ({response.status}); model may still be downloading")
                         return
                     data = await response.json()
                     available = [m.get("name") or m.get("id") for m in data.get("models", [])]
                     if model in available:
-                        print(f"Model {model} is available")
+                        logger.info(f"Model {model} is available")
                     else:
-                        print(f"Model {model} not loaded yet (server has: {available})")
+                        logger.warning(f"Model {model} not loaded yet (server has: {available})")
         except Exception as e:
-            print(f"Could not reach LLM server at {url}: {e}")
+            logger.warning(f"Could not reach LLM server at {url}: {e}")
       
     async def get_settings(self):
         self.system = await self.config.get_setting("system", self.guild_id) or "An AI Story Teller"
@@ -294,15 +297,15 @@ class TextLLMHandler:
          response = await Runner.run(self.agent, messages_for_run, context=user_info,
                                      max_turns=llm_max_turns(),
                                      hooks=ToolMetricsHooks(self.guild_id))
-         print(f'Response generated')
-         print(response)
+         logger.info('Response generated')
+         logger.debug(response)
          final_output = response.final_output
          self._capture_reasoning(response.new_items, final_output)
          self.sandbox_thread = user_info.get("sandbox_thread")
          return final_output
       except Exception as e:
          self.sandbox_thread = user_info.get("sandbox_thread")
-         print('Failed to get response from LLM: ' + str(e))
+         logger.warning('Failed to get response from LLM: ' + str(e))
          # A run that died part-way (MaxTurnsExceeded after a few chained
          # tool calls is the common one) still reasoned before it broke, and
          # its tools have already posted their embeds/files to the channel.
@@ -332,8 +335,8 @@ class TextLLMHandler:
             if not self.reasoning and isinstance(final_output, str):
                 self.reasoning = extract_thinking(final_output)
         except Exception as e:
-            print('Could not extract reasoning from the response: ' + str(e))
+            logger.warning('Could not extract reasoning from the response: ' + str(e))
             self.reasoning = ""
-        print(f'Reasoning captured: {len(self.reasoning)} chars')
+        logger.info(f'Reasoning captured: {len(self.reasoning)} chars')
       
   

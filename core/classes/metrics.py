@@ -42,11 +42,14 @@ Environment:
                 exported).
 """
 
+import logging
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from prometheus_client import Counter, Gauge, Histogram, generate_latest
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Metric definitions
@@ -212,8 +215,8 @@ def start_metrics_server_from_env() -> ThreadingHTTPServer | None:
     """Start the server on METRICS_PORT (default 9464); empty/0 disables."""
     raw = os.environ.get("METRICS_PORT", "9464").strip()
     if raw in ("", "0"):
-        print("Metrics server disabled (METRICS_PORT is empty/0)")
+        logger.info("Metrics server disabled (METRICS_PORT is empty/0)")
         return None
     server = start_metrics_server(int(raw))
-    print(f"Metrics server listening on :{server.server_address[1]}/metrics")
+    logger.info(f"Metrics server listening on :{server.server_address[1]}/metrics")
     return server

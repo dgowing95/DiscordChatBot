@@ -1,3 +1,4 @@
+import logging
 import discord
 import os
 import random
@@ -19,6 +20,20 @@ from classes.metrics import (
     start_metrics_server_from_env,
 )
 
+logger = logging.getLogger(__name__)
+
+# The only logging setup in the app; every module just uses
+# logging.getLogger(__name__). LOG_LEVEL tunes it without a code change - these
+# were all bare print() calls before, so there was no level to tune.
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+)
+# CONTENT_GUARD_DEBUG=1 (the default) means the guard's per-request detail is
+# wanted, which is DEBUG on its own logger rather than on the root.
+if os.environ.get("CONTENT_GUARD_DEBUG", "1").strip().lower() not in ("0", "false", "no", "off"):
+    logging.getLogger("classes.content_guard").setLevel(logging.DEBUG)
+
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -33,7 +48,7 @@ message_queue = make_message_queue()
 
 
 async def register_commands():
-    print("Registering commands")
+    logger.info("Registering commands")
     command_tree = discord.app_commands.CommandTree(client=client, fallback_to_global=True)
 
     @command_tree.command(name="system", description="Change the behaviour/personality of the bot")
@@ -87,11 +102,11 @@ async def register_commands():
             # and ctx.edit_original_response() to answer it later — NOT
             # ctx.response.edit_message(), which raises InteractionResponded.
             await ctx.response.defer()
-            print(f"Slash command: generating image for prompt: {prompt}")
+            logger.info(f"Slash command: generating image for prompt: {prompt}")
             try:
                 image_bytes = await generate_image_from_api(prompt)
             except Exception as e:
-                print(f"Image generation failed: {e}")
+                logger.warning(f"Image generation failed: {e}")
                 await ctx.edit_original_response(
                     content="❌ Image generation failed — the image service may be down or busy. Try again later."
                 )
@@ -103,18 +118,18 @@ async def register_commands():
 
     synced_commands = await command_tree.sync()
     for synced_command in synced_commands:
-        print(f"Command '{synced_command.name}' synced")
+        logger.info(f"Command '{synced_command.name}' synced")
 
 @client.event
 async def on_ready():
-    print(f'Logged in as {client.user}')
+    logger.info(f'Logged in as {client.user}')
     # Prometheus /metrics endpoint (METRICS_PORT; empty/0 disables).
     start_metrics_server_from_env()
     # Start the worker pool immediately so the bot still consumes messages
     # even if the model check or command sync fails (e.g. server not up yet
     # after a power cycle).
     count = worker_count()
-    print(f"Starting {count} queue worker(s)")
+    logger.info(f"Starting {count} queue worker(s)")
     for _ in range(count):
         client.loop.create_task(process_messages())
     try:
@@ -123,7 +138,7 @@ async def on_ready():
         model = llm_model()
         await TextLLMHandler.check_model_ready(model)
     except Exception as e:
-        print(f"Failed to check model: {e}")
+        logger.warning(f"Failed to check model: {e}")
         return
     await register_commands()
     
@@ -151,7 +166,7 @@ async def on_message(message):
         try:
             await message.add_reaction("📨" if delivered else "🚫")
         except Exception as e:
-            print(f"Sandbox inbox: could not acknowledge {message.id}: {e}")
+            logger.warning(f"Sandbox inbox: could not acknowledge {message.id}: {e}")
         return
 
     # The reply filter runs at receive time so only messages the bot will
@@ -168,13 +183,13 @@ async def on_message(message):
     # busy reply so they aren't silently ignored; random-chance messages
     # drop quietly.
     if message_queue.full():
-        print(f"Message queue full ({message_queue.maxsize}); dropping message {message.id}")
+        logger.warning(f"Message queue full ({message_queue.maxsize}); dropping message {message.id}")
         inc_queue_drop(guild_id)
         if client.user in message.mentions:
             try:
                 await message.reply("⏳ I'm still working through my queue — try me again in a moment.")
             except Exception as e:
-                print(f"Could not send busy reply to {message.id}: {e}")
+                logger.warning(f"Could not send busy reply to {message.id}: {e}")
         return
 
     inc_messages_received(guild_id)
@@ -218,7 +233,7 @@ async def process_messages():
         # Every queued message already passed should_handle_message() in
         # on_message, so handle it directly.
         guild_id = message.guild.id if message.guild else 0
-        print("Picking up message from queue")
+        logger.info("Picking up message from queue")
         try:
             # The per-channel lock is SCOPED inside handle_message to the two
             # fast phases (build + send) — see classes/message_queue.py — so
@@ -230,11 +245,11 @@ async def process_messages():
                 await handler.handle_message()
             inc_messages_processed(guild_id)
             message_queue.task_done()
-            print("Done with message from queue")
+            logger.info("Done with message from queue")
         except Exception as e:
-            print("Error handling message: " + str(e))
+            logger.warning("Error handling message: " + str(e))
             message_queue.task_done()
-            print("Done with message from queue")
+            logger.info("Done with message from queue")
 
 
 if __name__ == "__main__":
