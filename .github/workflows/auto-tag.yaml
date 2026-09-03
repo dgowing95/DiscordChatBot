@@ -1,0 +1,52 @@
+name: Auto Tag
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: auto-tag
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute and push next tag
+        run: |
+          set -euo pipefail
+
+          if git tag --points-at HEAD | grep '^v' > /dev/null; then
+            echo "HEAD is already tagged ($(git tag --points-at HEAD | tr '\n' ' ')) - skipping."
+            exit 0
+          fi
+
+          latest=$(git tag -l 'v*' --sort=-v:refname | sed -n '1p')
+          if [ -z "$latest" ]; then
+            latest="v2.0"
+          fi
+          echo "Latest tag: $latest"
+
+          major=${latest#v}
+          minor=${major##*.}
+          major=${major%.*}
+          next="v${major}.$((minor + 1))"
+          echo "Next tag: $next"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "$next"
+          git push origin "$next"
+
+          # A tag pushed with GITHUB_TOKEN does not fire `on: push: tags`, so
+          # dispatch the release workflow against the new tag instead.
+          gh workflow run release.yaml --ref "$next"
