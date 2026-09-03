@@ -15,10 +15,9 @@ Run from the repo root:
 import os
 import sys
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import classes.message_queue as prod_mq  # production-style import path
-from core.classes import message_queue as mq
+from classes import message_queue as mq
 
 BASE = 1_000_000.0  # fake "now" anchor for deterministic elapsed times
 

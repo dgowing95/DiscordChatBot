@@ -6,7 +6,8 @@ Overview of this repository and how to work with it (for humans and AI coding ag
 
 A Python Discord bot that answers messages using a local LLM (llama.cpp server serving a GGUF model, e.g. `ggml-org/Qwen3.8-27B-GGUF:Q4_K_M`).
 It is primarily deployed on **Kubernetes** via the Helm chart in `charts/dis-ai-bot`
-(releases are produced by semantic-release; a prebuilt chart is downloadable from GitHub releases).
+(releases are cut by `.github/workflows/auto-tag.yaml`, which bumps a `vMAJOR.MINOR` tag on every
+push to `main` and dispatches `release.yaml`; a prebuilt chart is downloadable from GitHub releases).
 Redis is used as the settings store and user-memory store.
 
 ## Repository layout
@@ -123,7 +124,10 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
    ModelBehaviorError when the tool is absent) inside a THROWAWAY
    Docker container via `agents.sandbox.DockerSandboxClient` and returns the
    sandbox agent's final report. A fresh container is created and deleted for
-   every call (nothing persists); the task must be self-contained. Live
+   every call, so no CONTAINER outlives a run — but in a thread its WORKSPACE
+   does, snapshotted to Redis and restored on the next call there (see the
+   snapshot/resume paragraphs below). A task must be self-contained unless it
+   is resuming a thread it already ran in. Live
    progress is a per-guild opt-in: the `/sandbox_progress_updates true|false`
    slash command stores the setting in Redis (default OFF — then only the one
    static "Running in sandbox" embed is sent). When on, a `RunHooks` attached
@@ -534,8 +538,11 @@ curl -sS -X POST "$TEST_WEBHOOK_URL" \
   `content_guard.py` retries 429/5xx with backoff, caches verdicts per input, and
   fails open when it cannot get an answer. Tunables are documented at the top of
   that module and in `.env.example`.
-- `wrap(..., break_long_words=False)` silently drops whitespace-less runs longer than
-  the chunk size (2000 chars) in `handle_message_send`; be aware when changing chunking.
+- `wrap(..., break_long_words=False)` does not drop a whitespace-less run longer than
+  the chunk size - it returns it as one OVERSIZED chunk, which Discord then rejects
+  with `HTTPException`, unwinding past `handle_message()` and costing the whole reply.
+  Both send paths therefore go through `response_filter.chunk_for_discord`, which
+  hard-splits anything still over the limit. Use it rather than calling `wrap` directly.
 - llama.cpp has no pull API: the `llamacpp` container downloads the model itself on boot
   (`LLAMA_ARG_HF_REPO` into the `LLAMA_CACHE` volume). Changing the model therefore requires
   restarting the server (`docker compose up -d` after editing `MODEL` in `.env`; `helm upgrade`

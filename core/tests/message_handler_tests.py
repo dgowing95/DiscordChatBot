@@ -4,7 +4,6 @@ import sys
 
 # message_handler pulls in sibling modules via the production "classes.*" import
 # style (the app runs with cwd=core/), so make core/ importable for tests too.
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import asyncio
 import base64
@@ -14,12 +13,12 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from PIL import Image
 
-from core.classes.message_handler import (
+from classes.message_handler import (
     MAX_IMAGES_PER_MESSAGE,
     MessageHandler,
     encode_image_for_llm,
 )
-from core.classes import message_queue as mq
+from classes import message_queue as mq
 
 # To run this pytest file from the command line, use:
 # PYTHONPATH=$(pwd) pytest core/tests/message_handler_tests.py
@@ -122,7 +121,7 @@ def test_invalid_bytes_return_none():
 async def test_image_attachment_becomes_decodable_data_url():
     payload = _make_image("JPEG")
     handler = _handler()
-    with patch("core.classes.message_handler.aiohttp.ClientSession",
+    with patch("classes.message_handler.aiohttp.ClientSession",
                return_value=_mock_client_session(payload=payload)):
         parts = await handler.download_image_parts([_attachment()])
 
@@ -136,7 +135,7 @@ async def test_image_attachment_becomes_decodable_data_url():
 async def test_webp_attachment_arrives_as_png_for_the_llm():
     payload = _make_image("WEBP")
     handler = _handler()
-    with patch("core.classes.message_handler.aiohttp.ClientSession",
+    with patch("classes.message_handler.aiohttp.ClientSession",
                return_value=_mock_client_session(payload=payload)):
         parts = await handler.download_image_parts([_attachment()])
 
@@ -150,7 +149,7 @@ async def test_webp_attachment_arrives_as_png_for_the_llm():
 async def test_heic_attachment_arrives_as_png_for_the_llm():
     payload = _make_image("HEIF")
     handler = _handler()
-    with patch("core.classes.message_handler.aiohttp.ClientSession",
+    with patch("classes.message_handler.aiohttp.ClientSession",
                return_value=_mock_client_session(payload=payload)):
         parts = await handler.download_image_parts([_attachment(content_type="image/heic")])
 
@@ -163,7 +162,7 @@ async def test_heic_attachment_arrives_as_png_for_the_llm():
 @pytest.mark.asyncio
 async def test_undecodable_download_is_skipped():
     handler = _handler()
-    with patch("core.classes.message_handler.aiohttp.ClientSession",
+    with patch("classes.message_handler.aiohttp.ClientSession",
                return_value=_mock_client_session(payload=b"not an image")):
         parts = await handler.download_image_parts([_attachment()])
     assert parts == []
@@ -172,7 +171,7 @@ async def test_undecodable_download_is_skipped():
 @pytest.mark.asyncio
 async def test_non_image_attachments_are_skipped():
     handler = _handler()
-    with patch("core.classes.message_handler.aiohttp.ClientSession",
+    with patch("classes.message_handler.aiohttp.ClientSession",
                return_value=_mock_client_session()):
         parts = await handler.download_image_parts([
             _attachment(url="http://cdn.example/v.mp4", content_type="video/mp4"),
@@ -186,7 +185,7 @@ async def test_non_image_attachments_are_skipped():
 @pytest.mark.asyncio
 async def test_download_failure_is_skipped():
     handler = _handler()
-    with patch("core.classes.message_handler.aiohttp.ClientSession",
+    with patch("classes.message_handler.aiohttp.ClientSession",
                return_value=_mock_client_session(raise_exc=ConnectionError("down"))):
         parts = await handler.download_image_parts([_attachment()])
     assert parts == []
@@ -195,7 +194,7 @@ async def test_download_failure_is_skipped():
 @pytest.mark.asyncio
 async def test_non_200_response_is_skipped():
     handler = _handler()
-    with patch("core.classes.message_handler.aiohttp.ClientSession",
+    with patch("classes.message_handler.aiohttp.ClientSession",
                return_value=_mock_client_session(status=404)):
         parts = await handler.download_image_parts([_attachment()])
     assert parts == []
@@ -207,7 +206,7 @@ async def test_max_images_per_message_cap():
     payload = _make_image("JPEG")
     attachments = [_attachment(url=f"http://cdn.example/{i}.png")
                    for i in range(MAX_IMAGES_PER_MESSAGE + 3)]
-    with patch("core.classes.message_handler.aiohttp.ClientSession",
+    with patch("classes.message_handler.aiohttp.ClientSession",
                return_value=_mock_client_session(payload=payload)):
         parts = await handler.download_image_parts(attachments)
     assert len(parts) == MAX_IMAGES_PER_MESSAGE
@@ -216,7 +215,7 @@ async def test_max_images_per_message_cap():
 @pytest.mark.asyncio
 async def test_mixed_good_and_bad_attachments_only_sends_valid_images():
     handler = _handler()
-    with patch("core.classes.message_handler.aiohttp.ClientSession",
+    with patch("classes.message_handler.aiohttp.ClientSession",
                side_effect=lambda: _mock_client_session(payload=_make_image("JPEG"))):
         parts = await handler.download_image_parts([
             _attachment(url="http://cdn.example/a.jpg", content_type="image/jpeg"),
@@ -310,7 +309,7 @@ async def test_handle_message_scoped_lock_generates_concurrently_sends_serially(
         msg.channel.send = AsyncMock(side_effect=_send)
         handlers.append(_handled(handler, msg, lambda h: setattr(h, "messages", [])))
 
-    with patch("core.classes.message_handler.TextLLMHandler", _FakeLLM):
+    with patch("classes.message_handler.TextLLMHandler", _FakeLLM):
         await asyncio.gather(handlers[0].handle_message(), handlers[1].handle_message())
 
     # 1) generations overlapped: msg 2's LLM run started before msg 1's ended
@@ -353,7 +352,7 @@ async def test_handle_message_appends_in_flight_hint_to_prompt():
 
     assert mq.register_task_run(channel_id, "🐳 code sandbox", "compute pi", run_key="t1")
     try:
-        with patch("core.classes.message_handler.TextLLMHandler", _FakeLLM):
+        with patch("classes.message_handler.TextLLMHandler", _FakeLLM):
             await handler.handle_message()
     finally:
         mq.unregister_task_run(channel_id, run_key="t1")
@@ -384,7 +383,7 @@ async def test_handle_message_no_hint_when_channel_idle():
         lambda h: setattr(h, "messages", [{"role": "user", "content": "hello"}]),
     )
 
-    with patch("core.classes.message_handler.TextLLMHandler", _FakeLLM):
+    with patch("classes.message_handler.TextLLMHandler", _FakeLLM):
         await handler.handle_message()
 
     assert len(captured["prompt"]) == 1  # nothing appended
@@ -411,7 +410,7 @@ async def test_handle_message_passes_client_to_text_llm_handler():
         lambda h: setattr(h, "messages", [{"role": "user", "content": "hi"}]),
     )
 
-    with patch("core.classes.message_handler.TextLLMHandler", _FakeLLM):
+    with patch("classes.message_handler.TextLLMHandler", _FakeLLM):
         await handler.handle_message()
 
     assert captured["client"] is handler.client
@@ -441,7 +440,7 @@ async def test_handle_message_sends_final_reply_to_sandbox_thread_when_set():
     )
     handler.message.channel.send = AsyncMock()
 
-    with patch("core.classes.message_handler.TextLLMHandler", _FakeLLM):
+    with patch("classes.message_handler.TextLLMHandler", _FakeLLM):
         await handler.handle_message()
 
     thread.send.assert_awaited_once_with("here's your result")
@@ -468,8 +467,8 @@ async def test_handle_message_sends_reasoning_to_sandbox_thread_when_set():
     )
     handler.message.channel.send = AsyncMock()
 
-    with patch("core.classes.message_handler.SHOW_THINKING", True), \
-         patch("core.classes.message_handler.TextLLMHandler", _FakeLLM):
+    with patch("classes.message_handler.SHOW_THINKING", True), \
+         patch("classes.message_handler.TextLLMHandler", _FakeLLM):
         await handler.handle_message()
 
     sent_texts = [call.args[0] for call in thread.send.await_args_list]
@@ -494,7 +493,7 @@ async def test_handle_message_falls_back_to_original_channel_without_sandbox_thr
     )
     handler.message.channel.send = AsyncMock()
 
-    with patch("core.classes.message_handler.TextLLMHandler", _FakeLLM):
+    with patch("classes.message_handler.TextLLMHandler", _FakeLLM):
         await handler.handle_message()
 
     handler.message.channel.send.assert_awaited_once_with("the answer")
@@ -527,7 +526,7 @@ async def _run_with_llm(fake_llm, channel_id, sends):
     handler.client.user.id = 1234
     handler.message.channel.send = AsyncMock(side_effect=lambda text, *a, **k: sends.append(text))
     handler.message.add_reaction = AsyncMock()
-    with patch("core.classes.message_handler.TextLLMHandler", fake_llm):
+    with patch("classes.message_handler.TextLLMHandler", fake_llm):
         await handler.handle_message()
     return handler
 
@@ -538,7 +537,7 @@ async def test_handle_message_sends_out_of_band_reasoning_as_spoiler():
     text. Reading it off the response string instead (as extract_thinking
     did) silently sent nothing at all."""
     sends = []
-    with patch("core.classes.message_handler.SHOW_THINKING", True):
+    with patch("classes.message_handler.SHOW_THINKING", True):
         await _run_with_llm(_reasoning_llm("i reasoned about it"), 300, sends)
 
     assert sends[0] == "the answer"
@@ -550,7 +549,7 @@ async def test_handle_message_sends_out_of_band_reasoning_as_spoiler():
 @pytest.mark.asyncio
 async def test_handle_message_sends_no_reasoning_when_show_thinking_off():
     sends = []
-    with patch("core.classes.message_handler.SHOW_THINKING", False):
+    with patch("classes.message_handler.SHOW_THINKING", False):
         await _run_with_llm(_reasoning_llm("i reasoned about it"), 301, sends)
 
     assert sends == ["the answer"]
@@ -559,7 +558,7 @@ async def test_handle_message_sends_no_reasoning_when_show_thinking_off():
 @pytest.mark.asyncio
 async def test_handle_message_sends_no_reasoning_when_model_did_not_think():
     sends = []
-    with patch("core.classes.message_handler.SHOW_THINKING", True):
+    with patch("classes.message_handler.SHOW_THINKING", True):
         await _run_with_llm(_reasoning_llm(""), 302, sends)
 
     assert sends == ["the answer"]
@@ -571,7 +570,7 @@ async def test_handle_message_sends_no_reasoning_when_model_did_not_think():
 # run result, because it is NOT in the answer string it returns.
 
 def _generate_handler(run_result):
-    from core.classes.text_llm_handler import TextLLMHandler
+    from classes.text_llm_handler import TextLLMHandler
 
     handler = TextLLMHandler.__new__(TextLLMHandler)  # __init__ needs Redis
     handler.messages = [{"role": "user", "content": "hi"}]
@@ -597,8 +596,8 @@ def _run_result(final_output, items=()):
 
 async def _generate(run_result):
     handler = _generate_handler(run_result)
-    with patch("core.classes.text_llm_handler.Runner") as runner, \
-         patch("core.classes.text_llm_handler.get_current_datetime", AsyncMock(return_value="now")):
+    with patch("classes.text_llm_handler.Runner") as runner, \
+         patch("classes.text_llm_handler.get_current_datetime", AsyncMock(return_value="now")):
         runner.run = AsyncMock(return_value=run_result)
         answer = await handler.generate()
     return answer, handler.reasoning
@@ -650,8 +649,8 @@ async def test_generate_captures_sandbox_thread_set_by_a_tool_call():
         context["sandbox_thread"] = thread
         return result
 
-    with patch("core.classes.text_llm_handler.Runner") as runner, \
-         patch("core.classes.text_llm_handler.get_current_datetime", AsyncMock(return_value="now")):
+    with patch("classes.text_llm_handler.Runner") as runner, \
+         patch("classes.text_llm_handler.get_current_datetime", AsyncMock(return_value="now")):
         runner.run = AsyncMock(side_effect=_fake_run)
         await handler.generate()
 
@@ -661,8 +660,8 @@ async def test_generate_captures_sandbox_thread_set_by_a_tool_call():
 @pytest.mark.asyncio
 async def test_generate_has_no_sandbox_thread_when_no_tool_ran():
     handler = _generate_handler(None)
-    with patch("core.classes.text_llm_handler.Runner") as runner, \
-         patch("core.classes.text_llm_handler.get_current_datetime", AsyncMock(return_value="now")):
+    with patch("classes.text_llm_handler.Runner") as runner, \
+         patch("classes.text_llm_handler.get_current_datetime", AsyncMock(return_value="now")):
         runner.run = AsyncMock(return_value=_run_result("just an answer"))
         await handler.generate()
     assert handler.sandbox_thread is None
@@ -685,9 +684,9 @@ async def test_generate_recovers_reasoning_from_a_failed_run():
     exc.run_data = MagicMock()
     exc.run_data.new_items = [_reasoning_item(summary=["i kept calling the sandbox"])]
 
-    with patch("core.classes.text_llm_handler.Runner") as runner, \
-         patch("core.classes.text_llm_handler.get_current_datetime", AsyncMock(return_value="now")), \
-         patch("core.classes.text_llm_handler.inc_llm_error", MagicMock()):
+    with patch("classes.text_llm_handler.Runner") as runner, \
+         patch("classes.text_llm_handler.get_current_datetime", AsyncMock(return_value="now")), \
+         patch("classes.text_llm_handler.inc_llm_error", MagicMock()):
         runner.run = AsyncMock(side_effect=exc)
         answer = await handler.generate()
 
@@ -713,9 +712,9 @@ async def test_generate_captures_sandbox_thread_even_when_run_failed():
         context["sandbox_thread"] = thread
         raise exc
 
-    with patch("core.classes.text_llm_handler.Runner") as runner, \
-         patch("core.classes.text_llm_handler.get_current_datetime", AsyncMock(return_value="now")), \
-         patch("core.classes.text_llm_handler.inc_llm_error", MagicMock()):
+    with patch("classes.text_llm_handler.Runner") as runner, \
+         patch("classes.text_llm_handler.get_current_datetime", AsyncMock(return_value="now")), \
+         patch("classes.text_llm_handler.inc_llm_error", MagicMock()):
         runner.run = AsyncMock(side_effect=_fake_run)
         answer = await handler.generate()
 
@@ -728,9 +727,9 @@ async def test_generate_survives_a_failure_carrying_no_run_data():
     from agents import MaxTurnsExceeded
 
     handler = _generate_handler(None)
-    with patch("core.classes.text_llm_handler.Runner") as runner, \
-         patch("core.classes.text_llm_handler.get_current_datetime", AsyncMock(return_value="now")), \
-         patch("core.classes.text_llm_handler.inc_llm_error", MagicMock()):
+    with patch("classes.text_llm_handler.Runner") as runner, \
+         patch("classes.text_llm_handler.get_current_datetime", AsyncMock(return_value="now")), \
+         patch("classes.text_llm_handler.inc_llm_error", MagicMock()):
         runner.run = AsyncMock(side_effect=MaxTurnsExceeded("boom"))
         answer = await handler.generate()
 
@@ -741,11 +740,11 @@ async def test_generate_survives_a_failure_carrying_no_run_data():
 @pytest.mark.asyncio
 async def test_generate_passes_an_explicit_max_turns():
     """The SDK's own default is 10, which a chained tool run overruns."""
-    from core.classes.text_llm_handler import llm_max_turns
+    from classes.text_llm_handler import llm_max_turns
 
     handler = _generate_handler(None)
-    with patch("core.classes.text_llm_handler.Runner") as runner, \
-         patch("core.classes.text_llm_handler.get_current_datetime", AsyncMock(return_value="now")):
+    with patch("classes.text_llm_handler.Runner") as runner, \
+         patch("classes.text_llm_handler.get_current_datetime", AsyncMock(return_value="now")):
         runner.run = AsyncMock(return_value=_run_result("ok"))
         await handler.generate()
 
@@ -765,7 +764,7 @@ async def test_handle_message_sends_reasoning_even_when_the_run_failed():
             self.reasoning = "i was thinking when it broke"
             return "Error"
 
-    with patch("core.classes.message_handler.SHOW_THINKING", True):
+    with patch("classes.message_handler.SHOW_THINKING", True):
         handler = await _run_with_llm(_FailingLLM, 310, sends)
 
     handler.message.add_reaction.assert_awaited_with('❌')
@@ -784,7 +783,7 @@ async def test_handle_message_failed_run_with_no_reasoning_just_reacts():
         async def generate(self):
             return "Error"
 
-    with patch("core.classes.message_handler.SHOW_THINKING", True):
+    with patch("classes.message_handler.SHOW_THINKING", True):
         handler = await _run_with_llm(_FailingLLM, 311, sends)
 
     handler.message.add_reaction.assert_awaited_with('❌')

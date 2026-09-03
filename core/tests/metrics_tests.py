@@ -16,11 +16,10 @@ import urllib.request
 from unittest.mock import MagicMock
 
 # Same dual-import setup as image_generation_tests.py: the app imports
-# classes.* (cwd = core/) while most tests import core.classes.*.
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+# classes.* (cwd = core/) while most tests import classes.*.
 
 import classes.metrics as prod_metrics  # production-style import path
-from core.classes import metrics as m
+from classes import metrics as m
 
 
 def test_no_double_registration_under_both_import_paths():
@@ -147,7 +146,7 @@ def test_start_from_env_disabled(monkeypatch):
 # The slow tools (SLOW_TOOL_NAMES) register themselves in the per-channel
 # in-flight registry (core/classes/message_queue.py) through the hooks, so a
 # newer same-channel message's prompt gets the hint. These tests drive the
-# REAL hooks (core.classes.text_llm_handler) against the REAL registry.
+# REAL hooks (classes.text_llm_handler) against the REAL registry.
 
 
 def _hook_context(channel_id, tool_name, tool_input, call_id):
@@ -173,8 +172,8 @@ def _hook_tool(name):
 
 def test_tool_hooks_register_slow_tool_in_flight():
     import asyncio
-    from core.classes import message_queue as mq
-    from core.classes import text_llm_handler as tlh
+    from classes import message_queue as mq
+    from classes import text_llm_handler as tlh
 
     hooks = tlh.ToolMetricsHooks(GUILD)
     ctx = _hook_context(300, "run_code_sandbox", {"task": "compute pi"}, "call_1")
@@ -194,8 +193,8 @@ def test_tool_hooks_register_slow_tool_in_flight():
 
 def test_tool_hooks_failed_run_leaves_no_recently_done_note():
     import asyncio
-    from core.classes import message_queue as mq
-    from core.classes import text_llm_handler as tlh
+    from classes import message_queue as mq
+    from classes import text_llm_handler as tlh
 
     hooks = tlh.ToolMetricsHooks(GUILD)
     ctx = _hook_context(301, "generate_image", {"prompt": "a red fox"}, "call_2")
@@ -212,8 +211,8 @@ def test_tool_hooks_failed_run_leaves_no_recently_done_note():
 
 def test_tool_hooks_ignore_fast_tools():
     import asyncio
-    from core.classes import message_queue as mq
-    from core.classes import text_llm_handler as tlh
+    from classes import message_queue as mq
+    from classes import text_llm_handler as tlh
 
     hooks = tlh.ToolMetricsHooks(GUILD)
     ctx = _hook_context(302, "web_search", {"search_request": "python asyncio"}, "call_3")

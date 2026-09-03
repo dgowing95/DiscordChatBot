@@ -2,14 +2,15 @@ import io
 import os
 import sys
 
-# sandbox_snapshot_store is imported as core.classes.* here and classes.* in
+# sandbox_snapshot_store is imported as classes.* here and classes.* in
 # production (the app runs with cwd=core/); both resolve as namespace packages.
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from core.classes.sandbox_snapshot_store import (
+from classes import redis_client
+
+from classes.sandbox_snapshot_store import (
     SandboxSnapshotStore,
     SnapshotTooLargeError,
     sandbox_snapshot_max_bytes,
@@ -28,7 +29,12 @@ def mock_redis(monkeypatch):
     mock_redis_instance.exists = AsyncMock()
     monkeypatch.setenv('REDIS_HOST', 'localhost')
     monkeypatch.setattr('redis.asyncio.Redis', MagicMock(return_value=mock_redis_instance))
-    return mock_redis_instance
+    # The clients are shared and cached (classes/redis_client.py), so the
+    # cache must be dropped either side of the patch or the first test's
+    # mock would be handed to every later one.
+    redis_client.reset_clients()
+    yield mock_redis_instance
+    redis_client.reset_clients()
 
 
 # ---------------------- env accessors ----------------------
@@ -87,7 +93,7 @@ async def test_upload_reads_the_stream_via_a_thread(mock_redis):
     data = MagicMock()
     data.read = MagicMock(return_value=b"tarbytes")
 
-    with patch("core.classes.sandbox_snapshot_store.asyncio.to_thread",
+    with patch("classes.sandbox_snapshot_store.asyncio.to_thread",
                AsyncMock(return_value=b"tarbytes")) as to_thread:
         store = SandboxSnapshotStore()
         await store.upload("thread-1", data)

@@ -1,0 +1,21 @@
+# Pytest configuration. Before this existed, the suite could only be run by
+# naming all 13 files explicitly (bare `pytest` matched none of them, because
+# they are *_tests.py rather than the default test_*.py), which meant the CI
+# workflow carried a hand-maintained file list and AGENTS.md had to tell
+# contributors to update it.
+[tool.pytest.ini_options]
+python_files = ["*_tests.py"]
+testpaths = ["core/tests"]
+# `core` ONLY, deliberately not `.` as well. The app runs with cwd=core/ and
+# imports its siblings as `classes.X`. The suite used to import the same
+# modules as `core.classes.X`, and the two resolve to SEPARATE module objects
+# with separate globals -- so a patch applied to one copy left the other
+# unpatched, and metrics.py/message_queue.py each needed a sys.modules
+# aliasing hack to stop their import-time state being registered twice.
+# Everything now uses the `classes.X` name only.
+#
+# Note this does not make the other name unreachable: pytest still puts the
+# rootdir on sys.path, so `import core.classes.X` would resolve as a namespace
+# package. The invariant is that nothing does it, which is worth keeping --
+# `grep -rn "core\.classes" core/` should stay empty.
+pythonpath = ["core"]

@@ -43,21 +43,10 @@ Environment:
 """
 
 import os
-import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from prometheus_client import Counter, Gauge, Histogram, generate_latest
-
-# The repo is importable as both `classes.*` and `core.classes.*` (see
-# AGENTS.md). This module has import-time side effects (metric registration
-# in the global REGISTRY), so it must not execute under both names — alias
-# whichever name isn't ours yet to this module object; the import system
-# then reuses it instead of re-running the registration.
-if __name__ == "classes.metrics":
-    sys.modules.setdefault("core.classes.metrics", sys.modules[__name__])
-elif __name__ == "core.classes.metrics":
-    sys.modules.setdefault("classes.metrics", sys.modules[__name__])
 
 # ---------------------------------------------------------------------------
 # Metric definitions

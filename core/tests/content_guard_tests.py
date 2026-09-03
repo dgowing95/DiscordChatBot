@@ -9,8 +9,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-import core.classes.content_guard as guard
-from core.classes.content_guard import (
+import classes.content_guard as guard
+from classes.content_guard import (
     _is_unsafe,
     check_web_request,
     moderate_with_openai,
@@ -29,7 +29,7 @@ def _fast_retries(monkeypatch):
 @pytest.mark.asyncio
 async def test_blocks_when_moderation_flags_unsafe(monkeypatch):
     monkeypatch.setattr(guard, "_verdict_cache", {})
-    with patch("core.classes.content_guard.moderate_with_openai",
+    with patch("classes.content_guard.moderate_with_openai",
                new=AsyncMock(return_value=False)):
         allowed, reason = await check_web_request("totally benign sounding query")
     assert not allowed and "safety filter" in reason
@@ -37,7 +37,7 @@ async def test_blocks_when_moderation_flags_unsafe(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_allows_when_moderation_is_clean():
-    with patch("core.classes.content_guard.moderate_with_openai",
+    with patch("classes.content_guard.moderate_with_openai",
                new=AsyncMock(return_value=True)) as mock_moderation:
         allowed, reason = await check_web_request("python asyncio tutorial")
     assert allowed and reason == ""
@@ -47,7 +47,7 @@ async def test_allows_when_moderation_is_clean():
 @pytest.mark.asyncio
 async def test_guard_can_be_disabled_via_env(monkeypatch):
     monkeypatch.setenv("CONTENT_GUARD_ENABLED", "0")
-    with patch("core.classes.content_guard.moderate_with_openai",
+    with patch("classes.content_guard.moderate_with_openai",
                new=AsyncMock(return_value=False)) as mock_moderation:
         allowed, reason = await check_web_request("anything at all")
     assert allowed and reason == ""

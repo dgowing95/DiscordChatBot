@@ -46,6 +46,7 @@ from agents import (
 from agents.sandbox.config import DEFAULT_PYTHON_SANDBOX_IMAGE
 
 from classes import sandbox_thread_inbox
+from classes.llm_config import DEFAULT_LLM_API_KEY, DEFAULT_LLM_HOST, DEFAULT_MODEL
 
 DEFAULT_MAX_TURNS = 10
 DEFAULT_TIMEOUT_SECONDS = 600
@@ -256,20 +257,20 @@ def sandbox_model() -> str:
     main bot's MODEL — i.e. the local llama.cpp model unless SANDBOX_MODEL
     points the sandbox at a different OpenAI-compatible API, e.g.
     OpenRouter)."""
-    return _env_or("SANDBOX_MODEL", "MODEL", "qwen3:4b")
+    return _env_or("SANDBOX_MODEL", "MODEL", DEFAULT_MODEL)
 
 
 def sandbox_llm_host() -> str:
     """Base URL of the LLM the sandbox agent talks to (SANDBOX_LLM_HOST;
     default: the main bot's LLM_HOST). The core appends /v1 itself, so this
     must not include it (OpenRouter: https://openrouter.ai/api)."""
-    return _env_or("SANDBOX_LLM_HOST", "LLM_HOST", "http://llamacpp:8080")
+    return _env_or("SANDBOX_LLM_HOST", "LLM_HOST", DEFAULT_LLM_HOST)
 
 
 def sandbox_llm_api_key() -> str:
     """API key for the sandbox agent's LLM (SANDBOX_LLM_API_KEY; default:
     the main bot's LLM_PASS placeholder)."""
-    return _env_or("SANDBOX_LLM_API_KEY", "LLM_PASS", "llamacpp")
+    return _env_or("SANDBOX_LLM_API_KEY", "LLM_PASS", DEFAULT_LLM_API_KEY)
 
 
 def _positive_int(raw: str | None, default: int) -> int:

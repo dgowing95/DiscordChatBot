@@ -3,7 +3,7 @@ from textwrap import wrap
 
 import pytest
 
-from core.classes.response_filter import (
+from classes.response_filter import (
     strip_thinking,
     filter_response,
     extract_thinking,

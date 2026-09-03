@@ -4,6 +4,7 @@ from classes.metrics import inc_llm_error, inc_tool_call, inc_tool_error, observ
 from agents import Agent, Runner, OpenAIChatCompletionsModel, AsyncOpenAI, FunctionTool, function_tool, RunContextWrapper, ModelSettings, RunHooks
 from classes.config_manager import configManager
 from classes.response_filter import extract_reasoning_items, extract_thinking
+from classes.llm_config import llm_api_key, llm_host, llm_model, parse_temperature
 
 # Max turns for ONE reply from the main agent (a turn = one model response,
 # however many tool calls it carries). The SDK's own default is 10, which a
@@ -49,10 +50,10 @@ def _get_main_model_client() -> OpenAIChatCompletionsModel:
     global _main_model_client
     if _main_model_client is None:
         _main_model_client = OpenAIChatCompletionsModel(
-            model=os.environ.get("MODEL", "qwen3:4b"),
+            model=llm_model(),
             openai_client=AsyncOpenAI(
-                base_url=os.environ.get("LLM_HOST", "http://llamacpp:8080") + "/v1",
-                api_key=os.environ.get("LLM_PASS", "ollama"),
+                base_url=llm_host() + "/v1",
+                api_key=llm_api_key(),
             ),
         )
     return _main_model_client
@@ -189,7 +190,7 @@ class TextLLMHandler:
         # llama.cpp has no pull endpoint: the llamacpp container downloads the model
         # on boot (LLAMA_ARG_HF_REPO into the LLAMA_CACHE volume). We only check that
         # the configured model is loaded (fail-soft: it may still be downloading).
-        url = os.environ.get("LLM_HOST", "http://llamacpp:8080") + "/v1/models"
+        url = llm_host() + "/v1/models"
         print(f"Checking model {model} on LLM host ({url})")
         try:
             async with aiohttp.ClientSession() as session:
@@ -208,9 +209,13 @@ class TextLLMHandler:
       
     async def get_settings(self):
         self.system = await self.config.get_setting("system", self.guild_id) or "An AI Story Teller"
-        self.model = os.environ.get("MODEL", "qwen3:4b")
+        self.model = llm_model()
+        # parse_temperature, not `float(...) or 1.0`: 0.0 is falsy, so the
+        # original turned a deliberate /temperature 0 back into 1.0.
         self.options = {
-         "temperature": float(await self.config.get_setting("temperature", self.guild_id)) or 1.0
+            "temperature": parse_temperature(
+                await self.config.get_setting("temperature", self.guild_id)
+            )
         }
 
     async def get_client(self):

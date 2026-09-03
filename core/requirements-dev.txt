@@ -1,0 +1,9 @@
+# Test-only dependencies. Kept out of requirements.txt so they are not baked
+# into the production image (core/Dockerfile installs requirements.txt only).
+-r requirements.txt
+
+iniconfig==2.3.0
+pluggy==1.6.0
+pytest==9.1.1
+pytest-asyncio==1.4.0
+types-requests==2.33.0.20260712

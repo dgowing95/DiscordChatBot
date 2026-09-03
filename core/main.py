@@ -5,6 +5,7 @@ import aiohttp
 import io
 from classes.message_handler import MessageHandler
 from classes.text_llm_handler import TextLLMHandler
+from classes.llm_config import llm_model
 from classes.config_manager import configManager
 from classes.image_generation import generate_image_from_api, image_generation_enabled
 from classes.sandbox_agent import sandbox_enabled
@@ -117,7 +118,9 @@ async def on_ready():
     for _ in range(count):
         client.loop.create_task(process_messages())
     try:
-        model = os.environ.get("MODEL", "gemma3:4b")
+        # Same accessor the bot itself uses, so an unset MODEL cannot make
+        # the readiness check verify a different model than the one requested.
+        model = llm_model()
         await TextLLMHandler.check_model_ready(model)
     except Exception as e:
         print(f"Failed to check model: {e}")
@@ -236,5 +239,7 @@ async def process_messages():
             print("Done with message from queue")
 
 
-token = os.environ['DISCORD_TOKEN']
-client.run(token)
+if __name__ == "__main__":
+    # Guarded so the module can be imported (by the tests, and by anything
+    # that just wants to inspect it) without connecting to Discord.
+    client.run(os.environ['DISCORD_TOKEN'])

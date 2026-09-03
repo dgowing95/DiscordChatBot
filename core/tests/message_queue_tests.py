@@ -5,7 +5,7 @@ Unit tests for the message queue concurrency model:
     registry (no discord/agents imports needed).
   - the queue wiring in core/main.py — the bounded drop policy in
     on_message() and the worker-pool + per-channel-lock semantics of
-    process_messages() (imports core.main via the _import_main() helper).
+    process_messages() (imports main via the _import_main() helper).
 
 Run from the repo root:
     PYTHONPATH=$(pwd) pytest core/tests/message_queue_tests.py
@@ -19,12 +19,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 # Same dual-import setup as the other test files: the app imports classes.*
-# (cwd = core/) while the tests import core.classes.*.
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+# (cwd = core/) while the tests import classes.*.
 
 import classes.message_queue as prod_mq  # production-style import path
-from core.classes import message_queue as mq
-from core.classes import metrics
+from classes import message_queue as mq
+from classes import metrics
 
 
 # ---------------------------------------------------------------------------
@@ -79,19 +78,16 @@ def test_channel_lock_identity():
 # ---------------------------------------------------------------------------
 
 def _import_main():
-    """Import core.main exactly once, without starting the bot.
+    """Import main exactly once, without starting the bot.
 
     Same pattern as image_generation_tests.py: main.py has a module-level
-    client.run(token), so set the required env vars and neutralize
-    Client.run before importing.
+    client.run() is guarded behind `if __name__ == "__main__"` and the Redis
+    client is built lazily, so a plain import neither starts the bot nor
+    requires any environment.
     """
-    if "core.main" in sys.modules:
-        return sys.modules["core.main"]
-    os.environ.setdefault("DISCORD_TOKEN", "test-token")
-    os.environ.setdefault("REDIS_HOST", "localhost")
-    import discord
-    with patch.object(discord.Client, "run", lambda self, *a, **k: None):
-        import core.main as m
+    if "main" in sys.modules:
+        return sys.modules["main"]
+    import main as m
     return m
 
 

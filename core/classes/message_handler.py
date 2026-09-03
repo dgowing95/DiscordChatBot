@@ -8,6 +8,7 @@ from PIL import Image
 pillow_heif.register_heif_opener()
 from classes.text_llm_handler import TextLLMHandler
 from classes.response_filter import (
+    chunk_for_discord,
     filter_response as clean_response,
     format_thinking_for_discord,
 )
@@ -176,13 +177,13 @@ class MessageHandler:
 
 
     async def handle_message_send(self, message_content, channel=None):
-        from textwrap import wrap
         channel = channel or self.message.channel
-        chunks = wrap(message_content, 2000, break_long_words=False, replace_whitespace=False)
+        # chunk_for_discord, not textwrap.wrap directly: wrap alone can emit a
+        # chunk over Discord's 2000-char limit when the text contains a long
+        # whitespace-free run, and the rejected send costs the whole reply.
+        chunks = chunk_for_discord(message_content)
         last = len(chunks) - 1
         for i, chunk in enumerate(chunks):
-            if len(chunk) == 0:
-                continue
             await channel.send(chunk)
             if i < last:
                 await asyncio.sleep(1)
