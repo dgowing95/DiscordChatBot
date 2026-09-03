@@ -2460,9 +2460,11 @@ async def test_tool_does_not_notify_when_reusing_an_existing_thread():
             _tool_context(message), json.dumps({"task": "print 42"}),
         )
 
-    # the static "Running in sandbox" embed, the "Thread Linked to Sandbox"
-    # notice and the closing note — but no "started a thread" note
-    assert embed.await_count == 3
+    # ensure_sandbox_thread returned a plain channel, not a discord.Thread, so
+    # in_thread is False: the static "Running in sandbox" embed and the closing
+    # note only. No "started a thread" note, and no "Thread Linked to Sandbox"
+    # notice either — nothing would route messages from here to the run.
+    assert embed.await_count == 2
     assert not [d for d in _embed_descriptions(embed) if "sandbox thread" in d]
 
 

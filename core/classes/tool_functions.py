@@ -409,12 +409,19 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
             channel,
             f"{workspace_note}\nRunning in sandbox: {shown}",
         )
-        await Common.send_tool_discord_embed(
-            channel,
-            f"📨 Messages you send here will be received by the sandbox AI while the sandbox is running. The AI may or may not respond.",
-            0xB0F400,
-            "Thread Linked to Sandbox"
-        )
+        # Only in a real thread: begin_run() below is gated the same way, and
+        # main.py only routes messages to a run it can see as active. Sent
+        # unconditionally, this told a user in the parent channel (the
+        # thread-creation-failed fallback) that their messages would reach the
+        # sandbox, when nothing would have picked them up.
+        if in_thread:
+            await Common.send_tool_discord_embed(
+                channel,
+                "📨 Messages you send here will be received by the sandbox AI"
+                " while the sandbox is running. The AI may or may not respond.",
+                0xB0F400,
+                "Thread Linked to Sandbox",
+            )
 
     if in_thread:
         sandbox_thread_inbox.begin_run(channel.id)
