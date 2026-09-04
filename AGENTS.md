@@ -262,7 +262,15 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
   separate namespace package, giving a SECOND module object with its own
   globals, so a patch applied to one copy leaves the other untouched and any
   import-time state (metric registration, the channel-lock and in-flight
-  registries) exists twice. `grep -rn "core\.classes" core/` should stay empty.
+  registries) exists twice.
+  `grep -rn "core\.classes\|core\.tests" core/` should stay empty.
+- One test module may borrow a helper from another (message_handler_tests
+  reuses response_filter_tests' reasoning-item builders), but import it by its
+  BARE name -- `from response_filter_tests import _reasoning_item`. pytest puts
+  core/tests on sys.path; the repo root only lands there when something else
+  puts the cwd there, so a `core.tests.X` import resolves under `python -m
+  pytest` and IDE runners but raises ModuleNotFoundError under bare `pytest`,
+  locally and in CI alike.
 - Nothing in the suite may write to `os.environ` directly — use `monkeypatch`.
   A bare `os.environ.setdefault("REDIS_HOST", "localhost")` in a test helper
   leaked process-wide and made every later test that touched `configManager`

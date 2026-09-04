@@ -14,8 +14,12 @@ testpaths = ["core/tests"]
 # aliasing hack to stop their import-time state being registered twice.
 # Everything now uses the `classes.X` name only.
 #
-# Note this does not make the other name unreachable: pytest still puts the
-# rootdir on sys.path, so `import core.classes.X` would resolve as a namespace
-# package. The invariant is that nothing does it, which is worth keeping --
-# `grep -rn "core\.classes" core/` should stay empty.
+# What pytest puts on sys.path itself is the BASEDIR of each collected file
+# (core/tests, since it has no __init__.py) -- not the rootdir. So `core.X`
+# resolves only when the repo root reaches sys.path some other way, e.g. via
+# the cwd that `python -m pytest` prepends; under CI's bare `pytest` it is an
+# ImportError. Nothing may use that name anyway (a namespace-package `core.X`
+# is a SECOND module object with its own globals), and sibling test helpers
+# are imported by bare module name -- `from response_filter_tests import ...`.
+# `grep -rn "core\.classes\|core\.tests" core/` should stay empty.
 pythonpath = ["core"]

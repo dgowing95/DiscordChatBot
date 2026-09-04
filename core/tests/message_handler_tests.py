@@ -607,7 +607,13 @@ async def _generate(run_result):
 async def test_generate_captures_reasoning_from_run_items():
     """The llama.cpp shape: reasoning_content becomes its own run item and
     the answer text is clean, so the run items are the only source."""
-    from core.tests.response_filter_tests import _reasoning_item
+    # Sibling test modules are imported by their BARE name: pytest puts
+    # core/tests (the basedir of the file being collected) on sys.path, so
+    # this is the same module object pytest itself registered. A dotted
+    # repo-root-relative name only resolves when the root happens to be on
+    # the path -- true under `python -m pytest`, false under CI's bare
+    # `pytest` (see the Testing section of AGENTS.md).
+    from response_filter_tests import _reasoning_item
 
     answer, reasoning = await _generate(
         _run_result("the clean answer", [_reasoning_item(summary=["thought hard"])])
@@ -620,7 +626,7 @@ async def test_generate_captures_reasoning_from_run_items():
 async def test_generate_falls_back_to_inline_think_tags():
     """A server on --reasoning-format none leaves the reasoning inline and
     emits no reasoning item; the tag path still has to work."""
-    from core.tests.response_filter_tests import _think_open, _think_close
+    from response_filter_tests import _think_open, _think_close
 
     text = _think_open(tab=False) + "inline thought" + _think_close(tab=False) + "the answer"
     answer, reasoning = await _generate(_run_result(text))
@@ -676,7 +682,7 @@ async def test_generate_has_no_sandbox_thread_when_no_tool_ran():
 
 @pytest.mark.asyncio
 async def test_generate_recovers_reasoning_from_a_failed_run():
-    from core.tests.response_filter_tests import _reasoning_item
+    from response_filter_tests import _reasoning_item
     from agents import MaxTurnsExceeded
 
     handler = _generate_handler(None)
