@@ -222,10 +222,15 @@ showThinking: false
 worker_count: 2
 queue_max_size: 10
 
-# Prometheus metrics: core serves /metrics on metrics.port and a
-# ServiceMonitor (kube-prometheus-stack) scrapes it.
-# enabled: false removes the pod port + ServiceMonitor and sets METRICS_PORT
-# empty in the configmap (metrics disabled in the app).
+# Prometheus metrics. One switch covers both scrape targets:
+#   - core serves the discord_bot_* series on metrics.port
+#   - llama.cpp serves its own llamacpp:* series on its API port
+#     (LLAMA_ARG_ENDPOINT_METRICS, off upstream by default) — including
+#     llamacpp:n_tokens_max, the high watermark of context actually used
+# with a ServiceMonitor (kube-prometheus-stack) per target.
+# enabled: false removes the pod port + both ServiceMonitors, drops the
+# llama.cpp flag, and sets METRICS_PORT empty in the configmap (metrics
+# disabled in the app).
 metrics:
   enabled: true
   port: 9464

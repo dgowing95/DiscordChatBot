@@ -17,6 +17,7 @@ from classes.metrics import (
     inc_messages_processed,
     inc_messages_received,
     inc_queue_drop,
+    set_context_window_from_env,
     set_message_queue_size,
     start_metrics_server_from_env,
 )
@@ -130,6 +131,10 @@ async def on_ready():
     logger.info(f'Logged in as {client.user}')
     # Prometheus /metrics endpoint (METRICS_PORT; empty/0 disables).
     start_metrics_server_from_env()
+    # The context window the LLM server was started with (LLM_CONTEXT_LENGTH),
+    # published as a gauge so a dashboard can express prompt sizes as a
+    # fraction of it without hard-coding the number.
+    set_context_window_from_env()
     # Start the worker pool immediately so the bot still consumes messages
     # even if the model check or command sync fails (e.g. server not up yet
     # after a power cycle).

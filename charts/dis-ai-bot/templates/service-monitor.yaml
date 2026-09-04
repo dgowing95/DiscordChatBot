@@ -28,4 +28,32 @@ spec:
     - port: metrics
       path: /metrics
       interval: {{ .Values.metrics.scrapeInterval }}
+---
+# llama.cpp's OWN metrics (llamacpp:* series), enabled by
+# LLAMA_ARG_ENDPOINT_METRICS in llamacpp.yaml under this same switch. It answers
+# what the discord_bot_* series cannot: llamacpp:n_tokens_max, the server's own
+# high watermark of context size observed, plus requests_processing /
+# requests_deferred and prompt/predict throughput.
+#
+# Scraped on the API port (8080, named "http") — llama.cpp has no separate
+# metrics port. Same operator constraints as above: the release label is
+# required, and there is no serviceName field on this CRD.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ .Release.Name }}-llamacpp
+  namespace: {{ .Release.Namespace }}
+  labels:
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-llamacpp
+  namespaceSelector:
+    matchNames:
+    - {{ .Release.Namespace }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.metrics.scrapeInterval }}
 {{- end }}

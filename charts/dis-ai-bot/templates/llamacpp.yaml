@@ -82,6 +82,17 @@ spec:
           value: {{ .Values.llamacpp.parallel | quote }}
         - name: LLAMA_ARG_LOG_VERBOSITY
           value: {{ .Values.llamacpp.verbosity | quote }}
+        {{- if .Values.metrics.enabled }}
+        # --metrics: serves llama.cpp's own Prometheus metrics on GET /metrics,
+        # on the SAME port as the API (there is no separate metrics port). Off
+        # by default upstream — without it the endpoint returns 501. The one
+        # that answers "how much of LLAMA_ARG_CTX_SIZE do we actually use" is
+        # llamacpp:n_tokens_max, the high watermark of context size observed;
+        # it resets to 0 when this pod restarts, so query it with
+        # max_over_time() and never rate(). See service-monitor.yaml.
+        - name: LLAMA_ARG_ENDPOINT_METRICS
+          value: "1"
+        {{- end }}
         {{- range $name, $value := .Values.llamacpp.extraEnv }}
         # llamacpp.extraEnv — rendered last so a repeated name wins (the
         # kubelet takes the final occurrence).
@@ -105,6 +116,11 @@ kind: Service
 metadata:
   name: {{ .Release.Name }}-llamacpp-service
   namespace: {{ .Release.Namespace }}
+  labels:
+    # Not decorative: the ServiceMonitor's selector matches SERVICE labels (not
+    # pod labels), so without this it selects nothing and Prometheus silently
+    # shows no llamacpp target. Same pairing as core-service.yaml.
+    app: {{ .Release.Name }}-llamacpp
 spec:
   type: NodePort
   selector:

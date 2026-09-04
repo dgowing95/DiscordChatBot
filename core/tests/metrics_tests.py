@@ -50,6 +50,8 @@ def test_metric_names():
     assert m.image_generation_seconds._name == "discord_bot_image_generation_seconds"
     assert m.message_queue_size._name == "discord_bot_message_queue_size"
     assert m.queue_drops_total._name == "discord_bot_message_queue_drops"
+    assert m.llm_prompt_tokens._name == "discord_bot_llm_prompt_tokens"
+    assert m.llm_context_window_tokens._name == "discord_bot_llm_context_window_tokens"
 
 
 def test_message_counters_and_generation_histogram():
@@ -101,6 +103,45 @@ def test_queue_gauge_and_drops():
     assert _counter_value(m.queue_drops_total, guild_id=GUILD) == before + 1
 
 
+def test_prompt_tokens_histogram():
+    label = m.llm_prompt_tokens.labels(guild_id=GUILD)
+    # prometheus_client stores per-bucket counts and accumulates them only at
+    # exposition time, so the observation count is their sum, not the last one.
+    def _count():
+        return sum(bucket.get() for bucket in label._buckets)
+
+    # A realistic prompt (the size prod's /slots reported) lands in the 4000
+    # bucket, well inside the 80000 window. Deltas, not absolutes: the metrics
+    # live in the global REGISTRY, so other tests in this file observe into the
+    # same bucket.
+    bucket = m.PROMPT_TOKEN_BUCKETS.index(4000)
+    before_sum, before_count = label._sum.get(), _count()
+    before_bucket = label._buckets[bucket].get()
+
+    m.observe_llm_prompt_tokens(GUILD, 2360)
+    assert label._sum.get() == before_sum + 2360
+    assert _count() == before_count + 1
+    assert label._buckets[bucket].get() == before_bucket + 1
+
+
+def test_context_window_gauge_from_env(monkeypatch):
+    monkeypatch.setenv("LLM_CONTEXT_LENGTH", "80000")
+    m.set_context_window_from_env()
+    assert m.llm_context_window_tokens._value.get() == 80000
+
+    # Unset/garbage must not raise out of startup — the gauge just keeps its
+    # last value (0 on a fresh process).
+    monkeypatch.setenv("LLM_CONTEXT_LENGTH", "")
+    m.set_context_window_from_env()
+    assert m.llm_context_window_tokens._value.get() == 80000
+    monkeypatch.setenv("LLM_CONTEXT_LENGTH", "not-a-number")
+    m.set_context_window_from_env()
+    assert m.llm_context_window_tokens._value.get() == 80000
+    monkeypatch.delenv("LLM_CONTEXT_LENGTH")
+    m.set_context_window_from_env()
+    assert m.llm_context_window_tokens._value.get() == 80000
+
+
 def test_guild_label_defaults():
     # Falsy guild ids become the "unknown" label instead of "0".
     m.inc_llm_error(0)
@@ -108,6 +149,10 @@ def test_guild_label_defaults():
 
 
 def test_metrics_http_server():
+    # Labelled series only appear in the exposition once a label set exists,
+    # so make this test independent of the ones above rather than relying on
+    # file order for the _bucket assertion below.
+    m.observe_llm_prompt_tokens(GUILD, 1)
     server = m.start_metrics_server(0)  # ephemeral port
     try:
         port = server.server_address[1]
@@ -120,6 +165,8 @@ def test_metrics_http_server():
             "discord_bot_tool_calls_total",
             "discord_bot_image_generation_seconds",
             "discord_bot_message_queue_size",
+            "discord_bot_llm_prompt_tokens_bucket",
+            "discord_bot_llm_context_window_tokens",
         ):
             assert name in body, f"{name} missing from /metrics output"
         # Prometheus process collectors are registered by default.
@@ -221,3 +268,52 @@ def test_tool_hooks_ignore_fast_tools():
     asyncio.run(hooks.on_tool_start(ctx, None, tool))
     asyncio.run(hooks.on_tool_end(ctx, None, tool, "results"))
     assert mq.in_flight_hint(302) == ""
+
+# ---------------------- TextLLMHandler._record_prompt_tokens ----------------------
+#
+# One reply is several model calls, and every one of them sends the whole
+# conversation so far — so each is its own sample of how much of the context
+# window was needed. These drive the REAL method against ModelResponse-shaped
+# stubs, including the error-path shape (RunErrorDetails.raw_responses, which
+# is None when a run died before its first response).
+
+
+def _model_response(input_tokens):
+    """A ModelResponse-shaped stub: only .usage.input_tokens is read."""
+    response = MagicMock()
+    response.usage.input_tokens = input_tokens
+    return response
+
+
+def _record(raw_responses, guild_id=GUILD):
+    """Call the real method with a stub self (it only reads .guild_id)."""
+    from classes import text_llm_handler as tlh
+
+    handler = MagicMock()
+    handler.guild_id = guild_id
+    tlh.TextLLMHandler._record_prompt_tokens(handler, raw_responses)
+
+
+def test_record_prompt_tokens_observes_every_model_call():
+    label = m.llm_prompt_tokens.labels(guild_id=GUILD)
+    before = label._sum.get()
+
+    # A tool-using reply: the prompt grows turn by turn, and all three sizes
+    # matter — recording only the last would hide the ramp.
+    _record([_model_response(1200), _model_response(3400), _model_response(9100)])
+    assert label._sum.get() == before + 1200 + 3400 + 9100
+
+
+def test_record_prompt_tokens_survives_missing_usage():
+    label = m.llm_prompt_tokens.labels(guild_id=GUILD)
+    before = label._sum.get()
+
+    # None is the error-path shape when the run died before any response;
+    # a response with no usage (or a zero count) is simply skipped. None of
+    # these may raise — that would cost the caller a good answer.
+    _record(None)
+    _record([])
+    no_usage = MagicMock()
+    no_usage.usage = None
+    _record([no_usage, _model_response(0), _model_response(None)])
+    assert label._sum.get() == before

@@ -1,7 +1,13 @@
 import logging
 import os,aiohttp, discord, io, time
 from classes.user_memory import UserMemory
-from classes.metrics import inc_llm_error, inc_tool_call, inc_tool_error, observe_tool_duration
+from classes.metrics import (
+    inc_llm_error,
+    inc_tool_call,
+    inc_tool_error,
+    observe_llm_prompt_tokens,
+    observe_tool_duration,
+)
 from agents import Agent, Runner, OpenAIChatCompletionsModel, AsyncOpenAI, FunctionTool, function_tool, RunContextWrapper, ModelSettings, RunHooks
 from classes.config_manager import configManager
 from classes.response_filter import extract_reasoning_items, extract_thinking
@@ -301,6 +307,7 @@ class TextLLMHandler:
          logger.debug(response)
          final_output = response.final_output
          self._capture_reasoning(response.new_items, final_output)
+         self._record_prompt_tokens(response.raw_responses)
          self.sandbox_thread = user_info.get("sandbox_thread")
          return final_output
       except Exception as e:
@@ -314,8 +321,32 @@ class TextLLMHandler:
          # leaving the user with a bare ❌ and no idea what happened.
          run_data = getattr(e, "run_data", None)
          self._capture_reasoning(getattr(run_data, "new_items", None), None)
+         self._record_prompt_tokens(getattr(run_data, "raw_responses", None))
          inc_llm_error(self.guild_id)
          return "Error"
+
+    def _record_prompt_tokens(self, raw_responses):
+        """Record the prompt size of every model call in this run (never raises).
+
+        One reply is several model calls - one per turn - and each sends the
+        whole conversation so far, so each is its own sample of "how much of
+        the context window did we need". Recording only the last (or only the
+        aggregate on the run) would miss that a tool-heavy reply grows the
+        prompt turn by turn.
+
+        Called on the error path too, from RunErrorDetails.raw_responses: a run
+        that died on MaxTurnsExceeded is exactly the one whose prompts got big.
+
+        Fully guarded, same rule as _capture_reasoning: a surprise in the
+        run-item shape must not turn a good answer into the "Error" sentinel.
+        """
+        try:
+            for model_response in raw_responses or []:
+                tokens = getattr(getattr(model_response, "usage", None), "input_tokens", None)
+                if tokens:
+                    observe_llm_prompt_tokens(self.guild_id, tokens)
+        except Exception as e:
+            logger.warning('Could not record prompt token usage: ' + str(e))
 
     def _capture_reasoning(self, items, final_output):
         """Store this run's reasoning on self.reasoning (never raises).

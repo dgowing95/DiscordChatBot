@@ -76,3 +76,9 @@ data:
   # Prometheus metrics: core serves /metrics on METRICS_PORT; empty disables
   # the metrics server (helm: metrics.enabled)
   METRICS_PORT: {{ if .Values.metrics.enabled }}{{ .Values.metrics.port | toString | quote }}{{ else }}""{{ end }}
+  # The llama.cpp context window, which only the llamacpp pod knew about
+  # (LLAMA_ARG_CTX_SIZE). core exports it as a gauge so a dashboard can show
+  # prompt sizes as a fraction of it. llama.cpp rounds this up to a block
+  # boundary (80000 -> 80128), so the fraction reads ~0.2% high — not worth
+  # modelling.
+  LLM_CONTEXT_LENGTH: {{ .Values.llamacppContextLength | toString | quote }}

@@ -35,11 +35,32 @@ Metrics (scraped by Prometheus from the /metrics HTTP endpoint):
   Counter  discord_bot_message_queue_drops_total{guild_id}
            Messages dropped because the processing queue was full (bounded
            queue, QUEUE_MAX_SIZE in main.py).
+  Histogram discord_bot_llm_prompt_tokens{guild_id}
+           Prompt (input) tokens of ONE model call - a single reply makes
+           several of these (one per turn), and each is a separate
+           observation, because each is a prompt that had to fit in the
+           context window. This is the answer to "how much of the configured
+           context are we actually using"; divide by the gauge below.
+  Gauge    discord_bot_llm_context_window_tokens
+           The configured context window (LLM_CONTEXT_LENGTH), exported so a
+           dashboard has the denominator without hard-coding it.
+
+Context-window note: this is the PROMPT side, which is what has to fit before
+generation starts. The server-side counterpart is llama.cpp's own
+`llamacpp:n_tokens_max` - "high watermark of the context size observed", which
+the chart enables alongside these (metrics.enabled ->
+LLAMA_ARG_ENDPOINT_METRICS). Upstream does not document whether that watermark
+is taken before or after generation, so treat it as >= this histogram, not as
+a known prompt+completion total.
 
 Environment:
   METRICS_PORT  port to serve /metrics on (default 9464). Empty or 0
                 disables the server (metrics are still defined, just not
                 exported).
+  LLM_CONTEXT_LENGTH
+                the llama.cpp --ctx-size the server was started with (helm:
+                llamacppContextLength), exported as the gauge above. Unset or
+                unparseable leaves the gauge at 0.
 """
 
 import logging
@@ -60,6 +81,11 @@ logger = logging.getLogger(__name__)
 RESPONSE_GEN_BUCKETS = (0.5, 1, 2.5, 5, 10, 30, 60, 120, 300)
 TOOL_BUCKETS = (0.1, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600)
 IMAGE_GEN_BUCKETS = (1, 5, 10, 30, 60, 120, 300)
+# Prompt sizes span the chart default context (40000) and prod's (80000), with
+# headroom above so an over-budget prompt is still visible rather than lost in
+# +Inf.
+PROMPT_TOKEN_BUCKETS = (500, 1000, 2000, 4000, 8000, 16000, 24000, 32000,
+                        48000, 64000, 96000, 128000)
 
 # Labelled by guild only. user_id was a label here too, which is unbounded
 # cardinality: every distinct Discord user who ever triggered the bot became a
@@ -128,6 +154,18 @@ queue_drops_total = Counter(
     ["guild_id"],
 )
 
+llm_prompt_tokens = Histogram(
+    "discord_bot_llm_prompt_tokens",
+    "Prompt (input) tokens sent to the LLM on one model call",
+    ["guild_id"],
+    buckets=PROMPT_TOKEN_BUCKETS,
+)
+
+llm_context_window_tokens = Gauge(
+    "discord_bot_llm_context_window_tokens",
+    "Configured LLM context window in tokens (LLM_CONTEXT_LENGTH)",
+)
+
 # ---------------------------------------------------------------------------
 # Convenience helpers (labels are always strings; IDs come in as ints)
 # ---------------------------------------------------------------------------
@@ -175,6 +213,26 @@ def set_message_queue_size(n: int) -> None:
 
 def inc_queue_drop(guild_id) -> None:
     queue_drops_total.labels(guild_id=_guild_label(guild_id)).inc()
+
+
+def observe_llm_prompt_tokens(guild_id, tokens: int) -> None:
+    llm_prompt_tokens.labels(guild_id=_guild_label(guild_id)).observe(tokens)
+
+
+def set_context_window_from_env() -> None:
+    """Publish LLM_CONTEXT_LENGTH as the context-window gauge.
+
+    Fail-soft like start_metrics_server_from_env(): an unset or unparseable
+    value leaves the gauge at 0 rather than raising out of startup - a
+    dashboard dividing by it then reads +Inf, which is at least obviously
+    wrong rather than quietly plausible. Only reachable outside the chart
+    (docker-compose dev), which sets it unconditionally.
+    """
+    raw = os.environ.get("LLM_CONTEXT_LENGTH", "").strip()
+    try:
+        llm_context_window_tokens.set(int(raw))
+    except (TypeError, ValueError):
+        logger.info(f"LLM_CONTEXT_LENGTH not set or unparseable ({raw!r}); context-window gauge left at 0")
 
 
 # ---------------------------------------------------------------------------
