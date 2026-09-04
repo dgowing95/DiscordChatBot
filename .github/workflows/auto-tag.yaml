@@ -12,14 +12,19 @@ jobs:
   tag:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      actions: write
-    env:
-      GH_TOKEN: ${{ github.token }}
+      contents: read
     steps:
+      # Tags are pushed with TAG_PUSH_TOKEN, not GITHUB_TOKEN, for two reasons:
+      # the "Restrict Tagging" ruleset blocks ref creation for everyone but
+      # repo admins (GITHUB_TOKEN acts as the GitHub Actions app, which is not
+      # one), and a ref pushed with GITHUB_TOKEN does not fire `on: push`, so
+      # release.yaml would never start. It is a fine-grained PAT with
+      # Contents: read and write on this repo -- see the Releasing section of
+      # AGENTS.md for how to mint a replacement when it expires.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.TAG_PUSH_TOKEN }}
 
       - name: Compute and push next tag
         run: |
@@ -45,8 +50,9 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag "$next"
-          git push origin "$next"
 
-          # A tag pushed with GITHUB_TOKEN does not fire `on: push: tags`, so
-          # dispatch the release workflow against the new tag instead.
-          gh workflow run release.yaml --ref "$next"
+          # The push is what starts release.yaml, via its `on: push: tags`.
+          # Do NOT also dispatch it: a PAT push fires the tag event, so a
+          # dispatch on top would run the release twice against one tag and
+          # the loser would die on `gh release create ... already exists`.
+          git push origin "$next"

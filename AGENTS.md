@@ -7,7 +7,8 @@ Overview of this repository and how to work with it (for humans and AI coding ag
 A Python Discord bot that answers messages using a local LLM (llama.cpp server serving a GGUF model, e.g. `ggml-org/Qwen3.8-27B-GGUF:Q4_K_M`).
 It is primarily deployed on **Kubernetes** via the Helm chart in `charts/dis-ai-bot`
 (releases are cut by `.github/workflows/auto-tag.yaml`, which bumps a `vMAJOR.MINOR` tag on every
-push to `main` and dispatches `release.yaml`; a prebuilt chart is downloadable from GitHub releases).
+push to `main`, and the tag push starts `release.yaml`; a prebuilt chart is downloadable from GitHub
+releases -- see Releasing below).
 Redis is used as the settings store and user-memory store.
 
 ## Repository layout
@@ -238,6 +239,31 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
 | `SANDBOX_MAX_RETRIES` | how many times that client retries a failed request (default 2; 0 disables). Worst-case latency for one model call is (1 + this) x `SANDBOX_REQUEST_TIMEOUT_SECONDS`. Chart: `sandbox.maxRetries` |
 | `SANDBOX_SNAPSHOT_MAX_BYTES` | max size of one thread's stored workspace snapshot in Redis (default 50MB). Chart: `sandbox.snapshotMaxBytes` |
 | `SANDBOX_SNAPSHOT_TTL_SECONDS` | how long an unused thread's workspace snapshot survives in Redis (default 604800 = 7 days). Chart: `sandbox.snapshotTtlSeconds` |
+
+## Releasing
+
+- Every push to `main` runs `auto-tag.yaml`, which bumps the highest `vMAJOR.MINOR`
+  tag by one minor and pushes it. That tag push is what starts `release.yaml`
+  (tests -> two images -> chart -> GitHub release). Nothing dispatches
+  `release.yaml`; its `workflow_dispatch` trigger is a manual escape hatch for
+  re-running a release against an existing tag.
+- **`TAG_PUSH_TOKEN` (repo secret) is what pushes the tag**, and it expires.
+  `GITHUB_TOKEN` cannot do the job for two independent reasons: the "Restrict
+  Tagging" ruleset allows ref creation only for repo admins, and it acts as the
+  GitHub Actions app rather than a user; and a ref pushed with it deliberately
+  fires no `push` event, so `release.yaml` would never start.
+- To mint a replacement: your **account** settings (not the repo's) → Developer
+  settings → Personal access tokens → Fine-grained tokens → Generate new token,
+  scoped to `dgowing95/DiscordChatBot` only, with **Repository permissions →
+  Contents: Read and write** (nothing else; `workflow` is not needed, the job
+  pushes a tag and never touches `.github/workflows`). Then store it in the
+  **repo's** settings → Secrets and variables → Actions, as `TAG_PUSH_TOKEN`.
+- How the Auto Tag job fails tells you which half is wrong. Secret unset: the
+  checkout step itself fails, because `token:` is a required input and an unset
+  secret makes it empty rather than falling back to `GITHUB_TOKEN`. PAT expired
+  or revoked: an authentication failure fetching the repo. `remote: error:
+  GH013 ... Cannot create ref due to creations being restricted` on the push:
+  the token is valid but its owner is not a bypass actor on the ruleset.
 
 ## Testing
 
