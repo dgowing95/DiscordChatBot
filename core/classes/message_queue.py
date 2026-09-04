@@ -32,7 +32,6 @@ MessageHandler.handle_message() in message_handler.py):
 
 import asyncio
 import os
-import sys
 import time
 
 DEFAULT_WORKER_COUNT = 2
@@ -62,15 +61,6 @@ RECENT_DONE_SECONDS = 300.0
 
 # Cap on the recently-done list per channel (oldest dropped).
 MAX_RECENT_DONE = 5
-
-# The repo is importable as both `classes.*` and `core.classes.*` (see
-# AGENTS.md). If both names ended up in sys.modules the per-channel lock
-# registry and the task registry would exist twice, so alias whichever name
-# isn't ours yet to this module object (same trick as metrics.py).
-if __name__ == "classes.message_queue":
-    sys.modules.setdefault("core.classes.message_queue", sys.modules[__name__])
-elif __name__ == "core.classes.message_queue":
-    sys.modules.setdefault("classes.message_queue", sys.modules[__name__])
 
 
 def _env_positive_int(name: str, default: int) -> int:

@@ -33,6 +33,7 @@ Configuration (all env vars optional):
   HF_HOME          model cache dir (set to /models in k8s/compose; the model
                    is downloaded once and survives redeploys on the volume)
 """
+import logging
 import asyncio
 import io
 import os
@@ -48,6 +49,13 @@ from diffusers import (
     DPMSolverMultistepScheduler,
     StableDiffusionPipeline,
     StableDiffusionXLPipeline,
+)
+
+logger = logging.getLogger(__name__)
+
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
 )
 
 
@@ -124,7 +132,7 @@ def _hf_single_file_path(repo_id: str):
     try:
         info = HfApi().model_info(repo_id, files_metadata=True)
     except Exception as e:
-        print(f"could not list files for {repo_id!r}: {e}")
+        logger.warning(f"could not list files for {repo_id!r}: {e}")
         return None
     candidates = [
         (s.size or 0, s.rfilename)
@@ -136,7 +144,7 @@ def _hf_single_file_path(repo_id: str):
         return None
     candidates.sort(reverse=True)  # largest first = the real checkpoint
     size, name = candidates[0]
-    print(f"downloading single-file checkpoint {name} "
+    logger.info(f"downloading single-file checkpoint {name} "
           f"({size / 1073741824:.1f} GB) from {repo_id!r}")
     return hf_hub_download(repo_id=repo_id, filename=name)
 
@@ -146,9 +154,9 @@ def load_pipeline():
     global pipe, ready
     has_cuda = torch.cuda.is_available()
     if not has_cuda:
-        print("No CUDA device found; running on CPU (slow, dev only)")
+        logger.info("No CUDA device found; running on CPU (slow, dev only)")
     dtype = torch.float16 if has_cuda else torch.float32
-    print(f"Loading diffusion pipeline {MODEL!r} "
+    logger.info(f"Loading diffusion pipeline {MODEL!r} "
           f"(steps={STEPS}, {WIDTH}x{HEIGHT}, offload={OFFLOAD}, seed={SEED})")
     # DiffusionPipeline picks the right class (SD1.5/SDXL/...) from the repo's
     # model_index.json, so IMAGE_MODEL can be swapped without code changes.
@@ -170,7 +178,7 @@ def load_pipeline():
         single = _hf_single_file_path(MODEL)
         if single is None:
             raise
-        print(f"from_pretrained failed ({e!r}); "
+        logger.warning(f"from_pretrained failed ({e!r}); "
               f"using single-file checkpoint {single!r}")
         # from_single_file lives on the concrete pipeline classes and each
         # one validates that the checkpoint matches its family, so detect
@@ -188,7 +196,7 @@ def load_pipeline():
         p.scheduler = DPMSolverMultistepScheduler.from_config(
             p.scheduler.config, use_karras_scheduling=True
         )
-        print("scheduler upgraded to DPM++ 2M Karras (SDXL)")
+        logger.info("scheduler upgraded to DPM++ 2M Karras (SDXL)")
     # Slice attention and VAE activations: saves a few hundred MB of VRAM
     # at SDXL resolutions for a small speed cost, keeping 1024x1024 viable
     # on 8GB cards under CPU offload.
@@ -205,7 +213,7 @@ def load_pipeline():
         p = p.to("cuda" if has_cuda else "cpu")
     pipe = p
     ready = True
-    print("Diffusion pipeline ready")
+    logger.info("Diffusion pipeline ready")
 
 
 def generate_bytes(prompt: str) -> bytes:
@@ -271,11 +279,11 @@ async def generate(request: GenerateRequest):
         queue.put_nowait((prompt, future))
     except asyncio.QueueFull:
         raise HTTPException(status_code=503, detail="image queue is full, try again later")
-    print(f"Queued image generation (queue depth {queue.qsize()}): {prompt[:80]!r}")
+    logger.info(f"Queued image generation (queue depth {queue.qsize()}): {prompt[:80]!r}")
     try:
         data = await future
     except Exception as e:
-        print(f"Image generation failed: {e}")
+        logger.warning(f"Image generation failed: {e}")
         raise HTTPException(status_code=500, detail=f"image generation failed: {e}")
-    print(f"Generated image ({len(data)} bytes) for: {prompt[:80]!r}")
+    logger.info(f"Generated image ({len(data)} bytes) for: {prompt[:80]!r}")
     return Response(content=data, media_type="image/png")

@@ -8,12 +8,12 @@ metrics: memory, CPU seconds, GC, thread count).
 
 Metrics (scraped by Prometheus from the /metrics HTTP endpoint):
 
-  Counter  discord_bot_messages_received_total{guild_id,user_id}
+  Counter  discord_bot_messages_received_total{guild_id}
            Messages that passed the reply filter (bot mentioned, or the
            random reply chance rolled successfully) and were enqueued for
            handling (messages dropped for a full queue are not counted here;
            see discord_bot_message_queue_drops_total).
-  Counter  discord_bot_messages_processed_total{guild_id,user_id}
+  Counter  discord_bot_messages_processed_total{guild_id}
            Messages whose handler completed without raising.
   Counter  discord_bot_llm_errors_total{guild_id}
            Times the LLM run failed and the bot reacted ❌.
@@ -42,22 +42,14 @@ Environment:
                 exported).
 """
 
+import logging
 import os
-import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from prometheus_client import Counter, Gauge, Histogram, generate_latest
 
-# The repo is importable as both `classes.*` and `core.classes.*` (see
-# AGENTS.md). This module has import-time side effects (metric registration
-# in the global REGISTRY), so it must not execute under both names — alias
-# whichever name isn't ours yet to this module object; the import system
-# then reuses it instead of re-running the registration.
-if __name__ == "classes.metrics":
-    sys.modules.setdefault("core.classes.metrics", sys.modules[__name__])
-elif __name__ == "core.classes.metrics":
-    sys.modules.setdefault("classes.metrics", sys.modules[__name__])
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Metric definitions
@@ -69,16 +61,21 @@ RESPONSE_GEN_BUCKETS = (0.5, 1, 2.5, 5, 10, 30, 60, 120, 300)
 TOOL_BUCKETS = (0.1, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600)
 IMAGE_GEN_BUCKETS = (1, 5, 10, 30, 60, 120, 300)
 
+# Labelled by guild only. user_id was a label here too, which is unbounded
+# cardinality: every distinct Discord user who ever triggered the bot became a
+# permanent extra time series in the scrape output and in Prometheus' index.
+# Guild count is bounded and is what the dashboards actually group by; per-user
+# detail belongs in logs, not in a metric label.
 messages_received_total = Counter(
     "discord_bot_messages_received_total",
     "Messages that passed the reply filter (mentioned or random-chance hit) and entered handling",
-    ["guild_id", "user_id"],
+    ["guild_id"],
 )
 
 messages_processed_total = Counter(
     "discord_bot_messages_processed_total",
     "Messages whose handler completed without error",
-    ["guild_id", "user_id"],
+    ["guild_id"],
 )
 
 llm_errors_total = Counter(
@@ -140,12 +137,12 @@ def _guild_label(guild_id) -> str:
     return str(guild_id) if guild_id else "unknown"
 
 
-def inc_messages_received(guild_id, user_id) -> None:
-    messages_received_total.labels(guild_id=_guild_label(guild_id), user_id=str(user_id)).inc()
+def inc_messages_received(guild_id) -> None:
+    messages_received_total.labels(guild_id=_guild_label(guild_id)).inc()
 
 
-def inc_messages_processed(guild_id, user_id) -> None:
-    messages_processed_total.labels(guild_id=_guild_label(guild_id), user_id=str(user_id)).inc()
+def inc_messages_processed(guild_id) -> None:
+    messages_processed_total.labels(guild_id=_guild_label(guild_id)).inc()
 
 
 def inc_llm_error(guild_id) -> None:
@@ -218,8 +215,8 @@ def start_metrics_server_from_env() -> ThreadingHTTPServer | None:
     """Start the server on METRICS_PORT (default 9464); empty/0 disables."""
     raw = os.environ.get("METRICS_PORT", "9464").strip()
     if raw in ("", "0"):
-        print("Metrics server disabled (METRICS_PORT is empty/0)")
+        logger.info("Metrics server disabled (METRICS_PORT is empty/0)")
         return None
     server = start_metrics_server(int(raw))
-    print(f"Metrics server listening on :{server.server_address[1]}/metrics")
+    logger.info(f"Metrics server listening on :{server.server_address[1]}/metrics")
     return server

@@ -1,13 +1,12 @@
 import os
 import sys
 
-# sandbox_thread_inbox is imported as core.classes.* here and classes.* in
+# sandbox_thread_inbox is imported as classes.* here and classes.* in
 # production (the app runs with cwd=core/); both resolve as namespace packages.
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import pytest
 
-from core.classes import sandbox_thread_inbox as inbox
+from classes import sandbox_thread_inbox as inbox
 
 # To run this pytest file from the command line, use:
 # PYTHONPATH=$(pwd) pytest core/tests/sandbox_thread_inbox_tests.py

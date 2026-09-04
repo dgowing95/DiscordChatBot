@@ -1,14 +1,13 @@
 import os
 import sys
 
-# image_generation is imported as core.classes.* here and classes.* in
-# production (the app runs with cwd=core/); both resolve as namespace packages.
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+# Imported as `classes.X`, the same name the app uses (it runs with cwd=core/,
+# and pyproject.toml puts core/ on the test path).
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from core.classes import image_generation
+from classes import image_generation
 
 # To run this pytest file from the command line, use:
 # PYTHONPATH=$(pwd) pytest core/tests/image_generation_tests.py
@@ -101,14 +100,18 @@ async def test_generate_connection_error_raises(monkeypatch):
 # ---------------------- /generate_image slash command (core/main.py) ----------------------
 
 def _import_main():
-    """Import core.main exactly once, without starting the bot."""
-    if "core.main" in sys.modules:
-        return sys.modules["core.main"]
-    os.environ.setdefault("DISCORD_TOKEN", "test-token")
-    os.environ.setdefault("REDIS_HOST", "localhost")
-    import discord
-    with patch.object(discord.Client, "run", lambda self, *a, **k: None):
-        import core.main as m
+    """Import main exactly once.
+
+    main.py guards client.run() behind `if __name__ == "__main__"` and builds
+    its Redis client lazily, so importing it neither connects to Discord nor
+    needs any environment. This used to os.environ.setdefault REDIS_HOST to
+    "localhost", which leaked process-wide (unlike monkeypatch.setenv) and
+    made every later test that touched configManager pay a real TCP connect
+    timeout to a Redis that was not running.
+    """
+    if "main" in sys.modules:
+        return sys.modules["main"]
+    import main as m
     return m
 
 
@@ -199,7 +202,7 @@ async def _agent_tool_names(monkeypatch, enabled_value):
     # TextLLMHandler.__init__ needs Redis; skip it and set what get_client()
     # reads directly.
     monkeypatch.setenv("IMAGE_GEN_ENABLED", enabled_value)
-    from core.classes.text_llm_handler import TextLLMHandler
+    from classes.text_llm_handler import TextLLMHandler
 
     handler = TextLLMHandler.__new__(TextLLMHandler)
     handler.messages = []

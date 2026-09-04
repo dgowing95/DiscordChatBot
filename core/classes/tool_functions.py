@@ -1,3 +1,4 @@
+import logging
 import asyncio
 import io
 
@@ -8,12 +9,14 @@ import discord, aiohttp
 from ddgs import DDGS
 from bs4 import BeautifulSoup
 
+logger = logging.getLogger(__name__)
+
 async def add_emoji_to_message(message: discord.Message, emoji: str) -> None:
     try:
         await message.add_reaction(emoji)
-        print(f"Added emoji {emoji} to message {message.id}")
+        logger.info(f"Added emoji {emoji} to message {message.id}")
     except Exception as e:
-        print(f"Failed to add emoji {emoji} to message {message.id}: {e}")
+        logger.warning(f"Failed to add emoji {emoji} to message {message.id}: {e}")
     
 @function_tool
 async def web_search(wrapper: RunContextWrapper[dict], search_request: str) -> str:
@@ -22,11 +25,11 @@ async def web_search(wrapper: RunContextWrapper[dict], search_request: str) -> s
     Args:
         search_request: The query to search for.
     """
-    print(f"Searching the web for: {search_request}")
+    logger.info(f"Searching the web for: {search_request}")
 
     allowed, reason = await check_web_request(search_request)
     if not allowed:
-        print(f"Web search blocked by content guard: {reason}")
+        logger.warning(f"Web search blocked by content guard: {reason}")
         return ("I can't perform that search — it was blocked by the safety "
                 "guard. Please rephrase with a safe, non-harmful query.")
 
@@ -37,7 +40,7 @@ async def web_search(wrapper: RunContextWrapper[dict], search_request: str) -> s
     try:
         results = await asyncio.to_thread(DDGS().text, search_request, max_results=5)
     except Exception as e:
-        print(f"An error occurred while searching: {e}")
+        logger.warning(f"An error occurred while searching: {e}")
         return "Error fetching search results."
     return results
     
@@ -48,11 +51,11 @@ async def fetch_url(wrapper: RunContextWrapper[dict], url: str) -> str:
     Args:
         url: The URL to fetch.
     """
-    print(f"Fetching content from URL: {url}")
+    logger.info(f"Fetching content from URL: {url}")
 
     allowed, reason = await check_web_request(url)
     if not allowed:
-        print(f"URL fetch blocked by content guard: {reason}")
+        logger.warning(f"URL fetch blocked by content guard: {reason}")
         return ("I can't fetch that URL — it was blocked by the safety "
                 "guard.")
 
@@ -65,11 +68,11 @@ async def fetch_url(wrapper: RunContextWrapper[dict], url: str) -> str:
             async with session.get(url, headers={"User-Agent": "dis-ai-bot"}) as response:
                 html = await response.text()
     except Exception as e:
-        print(f"An error occurred while fetching the URL: {e}")
+        logger.warning(f"An error occurred while fetching the URL: {e}")
         return "Error fetching URL content."
 
     text = await asyncio.to_thread(_extract_page_text, html)
-    print(f"Fetched content from {url} successfully.")
+    logger.info(f"Fetched content from {url} successfully.")
     return text
 
 
@@ -90,7 +93,7 @@ async def get_current_datetime() -> str:
     from zoneinfo import ZoneInfo
     now = datetime.now(ZoneInfo("Europe/London"))
     now_formatted = now.strftime("%Y-%m-%d %H:%M:%S")
-    print(f"Current date and time: {now_formatted}")
+    logger.info(f"Current date and time: {now_formatted}")
     return now_formatted
 
 @function_tool
@@ -103,12 +106,14 @@ async def store_memory(wrapper: RunContextWrapper[dict], data: str) -> str:
         data: The fact to store, e.g. "prefers metric units".
     """
 
-    # Sometimes OpenAI repeats a tool call.
+    # The model sometimes repeats a tool call within one reply; only the first
+    # is performed. Say so honestly rather than reporting a success that did not
+    # happen - the model reads this back when it writes the reply.
     times_called = wrapper.context.get("redis_save_tool_calls")
     if times_called > 0:
-        err = f"Tool call limit reached: {times_called}. Not storing data."
-        print(err)
-        return "Data stored successfully."
+        logger.warning(f"store_memory already called {times_called} time(s) this run; skipping.")
+        return ("A memory was already stored for this request, so this duplicate "
+                "call was skipped. Nothing further is needed.")
     wrapper.context["redis_save_tool_calls"] += 1
     
 
@@ -118,7 +123,7 @@ async def store_memory(wrapper: RunContextWrapper[dict], data: str) -> str:
 
     response_message = ""
     try:
-        print(f"Storing data for user {user_id} in guild {guild_id}: {data}")
+        logger.info(f"Storing data for user {user_id} in guild {guild_id}: {data}")
         user_memory = UserMemory(user_id, guild_id)
         await user_memory.append(data)
         await add_emoji_to_message(wrapper.context.get("original_message"), "💾")
@@ -130,7 +135,7 @@ async def store_memory(wrapper: RunContextWrapper[dict], data: str) -> str:
         response_message = "Data stored successfully."
     except Exception as e:
         response_message = f"An error occurred while storing user data: {e}"
-        print(response_message)
+        logger.info(response_message)
 
     return response_message
 
@@ -154,7 +159,7 @@ async def remove_memory(wrapper: RunContextWrapper[dict], data: str) -> str:
         else:
             return "Memory not found."
     except Exception as e:
-        print(f"An error occurred while removing user memory: {e}")
+        logger.warning(f"An error occurred while removing user memory: {e}")
         return "Error removing user memory."
 
 @function_tool
@@ -171,7 +176,7 @@ async def clear_memories(wrapper: RunContextWrapper[dict]) -> str:
         await add_emoji_to_message(wrapper.context.get("original_message"), "🧹")
         return "All memories cleared."
     except Exception as e:
-        print(f"An error occurred while clearing user memories: {e}")
+        logger.warning(f"An error occurred while clearing user memories: {e}")
         return "Error clearing user memories."
 
 
@@ -197,7 +202,7 @@ async def generate_image(wrapper: RunContextWrapper[dict], prompt: str) -> str:
     from classes.image_generation import generate_image_from_api
 
     message = wrapper.context.get("original_message")
-    print(f"Generating image for prompt: {prompt}")
+    logger.info(f"Generating image for prompt: {prompt}")
     await add_emoji_to_message(message, "🎨")
     await Common.send_tool_discord_embed(
         message.channel,
@@ -206,7 +211,7 @@ async def generate_image(wrapper: RunContextWrapper[dict], prompt: str) -> str:
     try:
         image_bytes = await generate_image_from_api(prompt)
     except Exception as e:
-        print(f"Image generation failed: {e}")
+        logger.warning(f"Image generation failed: {e}")
         return ("Image generation failed. Tell the user the image service is "
                 "unavailable right now and do not retry.")
     try:
@@ -214,7 +219,7 @@ async def generate_image(wrapper: RunContextWrapper[dict], prompt: str) -> str:
             file=discord.File(io.BytesIO(image_bytes), filename="generated-image.png")
         )
     except Exception as e:
-        print(f"Image generated but failed to send to Discord: {e}")
+        logger.warning(f"Image generated but failed to send to Discord: {e}")
         return "The image was generated but could not be sent to the channel."
     return ("Image generated and sent to the channel. The user can already see "
             "it; do not send the image again or describe it as if pending.")
@@ -255,7 +260,7 @@ async def _send_sandbox_closing_note(
             title="Sandbox closed",
         )
     except Exception as e:
-        print(f"Sandbox: failed to post the closing note: {e}")
+        logger.warning(f"Sandbox: failed to post the closing note: {e}")
     return remaining
 
 
@@ -291,11 +296,11 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
             conversation the sandbox cannot see. Short, and with no
             implementation details of your own.
     """
-    print(f"Running sandbox task: {task}")
+    logger.info(f"Running sandbox task: {task}")
 
     allowed, reason = await check_web_request(task)
     if not allowed:
-        print(f"Sandbox task blocked by content guard: {reason}")
+        logger.warning(f"Sandbox task blocked by content guard: {reason}")
         return ("I can't run that in the sandbox — it was blocked by the safety "
                 "guard. Please rephrase with a safe, non-harmful task.")
 
@@ -308,7 +313,9 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
         sandbox_snapshot_exists,
         sandbox_snapshot_id_for,
         sandbox_snapshot_remaining_seconds,
+        sandbox_outcome_note,
         sandbox_timeout,
+        sandbox_tool_result,
         sandbox_workspace_note,
         MAX_ARTIFACT_BYTES,
         MAX_ARTIFACT_FILES,
@@ -368,7 +375,7 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
                 f"🧵 Started a sandbox thread: {channel.mention}",
             )
         except Exception as e:
-            print(f"Sandbox: failed to notify the original channel of the new thread: {e}")
+            logger.warning(f"Sandbox: failed to notify the original channel of the new thread: {e}")
     # Whether this run will resume the thread's saved workspace or start
     # empty. Asked before the run so the embed below can say which — the SDK
     # exposes no way to find out afterwards (see sandbox_snapshot_exists).
@@ -384,7 +391,7 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
         raw = await configManager().get_setting(
             "sandbox_progress_updates", wrapper.context.get("guild_id"))
     except Exception as e:
-        print(f"Could not read sandbox_progress_updates setting: {e}")
+        logger.warning(f"Could not read sandbox_progress_updates setting: {e}")
         raw = False
     if sandbox_progress_updates_enabled(raw):
         # Live progress: one Discord message, edited in place, showing each
@@ -402,12 +409,19 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
             channel,
             f"{workspace_note}\nRunning in sandbox: {shown}",
         )
-        await Common.send_tool_discord_embed(
-            channel,
-            f"📨 Messages you send here will be recived by the sandbox AI while the sandbox is running. The AI may or may not respond.",
-            0xB0F400,
-            "Thread Linked to Sandbox"
-        )
+        # Only in a real thread: begin_run() below is gated the same way, and
+        # main.py only routes messages to a run it can see as active. Sent
+        # unconditionally, this told a user in the parent channel (the
+        # thread-creation-failed fallback) that their messages would reach the
+        # sandbox, when nothing would have picked them up.
+        if in_thread:
+            await Common.send_tool_discord_embed(
+                channel,
+                "📨 Messages you send here will be received by the sandbox AI"
+                " while the sandbox is running. The AI may or may not respond.",
+                0xB0F400,
+                "Thread Linked to Sandbox",
+            )
 
     if in_thread:
         sandbox_thread_inbox.begin_run(channel.id)
@@ -427,7 +441,7 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
             resumed=resumed,
         )
     except Exception as e:
-        print(f"Sandbox task failed: {e}")
+        logger.warning(f"Sandbox task failed: {e}")
         if progress is not None:
             await progress.finalize("❌ Stopped: the sandbox itself failed.")
         # The "Running in sandbox" embed already went out, so this path needs
@@ -469,51 +483,12 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
                 "thread will pick up from this one."
             )
         except Exception as e:
-            print(f"Sandbox: failed to post the resume correction: {e}")
-
-    # Per-failure-reason wording so the caller (the outer LLM) knows what,
-    # if anything, to change before retrying — a bare "it failed" gives it
-    # nothing to act on. See SandboxResult.error for the reason codes.
-    finalize_notes = {
-        "timeout": "⏱ Stopped: the task timed out.",
-        "max_turns": "🔁 Stopped: the task ran out of turns.",
-        "model_error": "⚠️ Stopped: the sandbox's model misbehaved.",
-    }
-    # Deliberately none of these tells the model to retry. A retry starts the
-    # whole task over in a new container, so on a run stopped part way it
-    # throws away the partial workspace teardown just saved — and in practice
-    # the outer model answers "retry, more focused" by writing the
-    # implementation spec this tool's docstring exists to prevent (observed:
-    # a timed-out cow GIF retried with an invented canvas size, frame count
-    # and library choice). The resumable follow-up below is strictly better
-    # and costs nothing but asking.
-    no_artifact_messages = {
-        "timeout": (
-            f"The sandbox task ran out of time and was stopped at the "
-            f"{sandbox_timeout()}s limit before it finished. Tell the user "
-            "it timed out."
-        ),
-        "max_turns": (
-            f"The sandbox task ran out of turns ({sandbox_max_turns()} max) "
-            "before finishing. Tell the user it did not finish in the number "
-            "of steps it had."
-        ),
-        "model_error": (
-            "The sandbox's own model produced an invalid action mid-task "
-            "and the run was stopped before finishing. Tell the user the "
-            "sandbox could not complete this task."
-        ),
-    }
-    failure_reason = {
-        "timeout": "it timed out",
-        "max_turns": "it ran out of turns",
-        "model_error": "the sandbox's model misbehaved",
-    }
+            logger.warning(f"Sandbox: failed to post the resume correction: {e}")
 
     if progress is not None:
         # give the live message its final state (it would otherwise sit on
         # the last "still running" / thinking snapshot)
-        note = "✅ Done." if result.ok else finalize_notes.get(result.error, "❌ Stopped.")
+        note = "✅ Done." if result.ok else sandbox_outcome_note(result.error)
         await progress.finalize(note)
 
     # The sandbox agent's own closing message, written FOR the user (see
@@ -533,13 +508,13 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
                 content=content,
                 file=discord.File(io.BytesIO(artifact.data), filename=artifact.name),
             )
-            print(f"Sandbox artifact sent to channel: {artifact.name} ({len(artifact.data)} bytes)")
+            logger.info(f"Sandbox artifact sent to channel: {artifact.name} ({len(artifact.data)} bytes)")
             sent_names.append(artifact.name)
             # Only now: a failed send carried the message with it, so keeping
             # `lead` set is what lets the fallback below still deliver it.
             lead = ""
         except Exception as e:
-            print(f"Sandbox artifact {artifact.name} generated but failed to send: {e}")
+            logger.warning(f"Sandbox artifact {artifact.name} generated but failed to send: {e}")
     if lead:
         # No files, or every send failed: the message still has to reach the
         # user, or the run's own account of itself is lost and only the outer
@@ -547,88 +522,29 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
         try:
             await channel.send(lead)
         except Exception as e:
-            print(f"Sandbox: failed to post the agent's closing message: {e}")
+            logger.warning(f"Sandbox: failed to post the agent's closing message: {e}")
 
-    steering_note = ""
-    if steering:
-        steering_note = (
-            "\n\nThe user changed the request while the sandbox worked, in the "
-            f"thread:\n{steering}\nThe sandbox received these and adapted, so the "
-            "result reflects them and not the original wording. Treat them as "
-            "part of what was asked: do not call the result a mistake, do not "
-            "say it went wrong, and do not offer to undo it."
-        )
-
-    skip_note = ""
-    if result.skipped_artifacts:
-        skip_note = (
-            f"\n\n{len(result.skipped_artifacts)} output file(s) were NOT sent "
-            f"(over the {MAX_ARTIFACT_FILES}-file / {MAX_ARTIFACT_BYTES}-byte "
-            f"limit): {', '.join(result.skipped_artifacts)}. Tell the user "
-            "which file(s) could not be delivered and why; if it matters, "
-            "retry producing a smaller or fewer files."
-        )
-
-    # After the artifacts, before every return below: the thread's "here is
-    # how the run ended, and how long you can pick it back up" marker. The
-    # outcome line only goes out when the run did NOT finish normally.
-    outcome = "" if result.ok else finalize_notes.get(result.error, "❌ Stopped.")
+    # After the artifacts, before the return: the thread's "here is how the run
+    # ended, and how long you can pick it back up" marker. The outcome line only
+    # goes out when the run did NOT finish normally. Posted on every path where
+    # a "Running in sandbox" embed already went out, and never on the early
+    # returns (content guard, forwarded-to-a-running-run) where nothing opened.
+    outcome = "" if result.ok else sandbox_outcome_note(result.error)
     remaining = await _send_sandbox_closing_note(
         channel, snapshot_id, in_thread, outcome)
 
-    if not result.ok:
-        # What the model should do about it, kept in step with the closing
-        # embed: only offer a resume when there is genuinely a saved workspace
-        # to resume (persisting is best-effort — _persist_sandbox_snapshot).
-        if in_thread and remaining is not None:
-            unfinished_note = (
-                " Its workspace WAS saved, so do NOT retry: a retry starts the "
-                "whole task again from scratch in an empty sandbox, while the "
-                "user simply asking again in THIS thread carries on from where "
-                "it stopped. Offer them that, and do not add build instructions "
-                "of your own when you do."
-            )
-        else:
-            unfinished_note = (
-                " Do not retry the same task unchanged; ask the user how they "
-                "want to proceed."
-            )
-        if sent_names:
-            return (
-                f"The sandbox task did not finish ({failure_reason.get(result.error, 'it failed')}), "
-                f"but before it was stopped it had already produced and verified "
-                f"{len(sent_names)} file(s), which were recovered and sent to the "
-                f"channel: {', '.join(sent_names)}. Tell the user the file(s) were "
-                "delivered despite the task not finishing, and do not claim they "
-                "are pending." + unfinished_note + skip_note + steering_note
-                + resume_correction
-            )
-        return no_artifact_messages.get(
-            result.error,
-            "The sandbox task was stopped before finishing. Tell the user the "
-            "task failed.",
-        ) + unfinished_note + skip_note + steering_note + resume_correction
-
-    if not sent_names:
-        # Only warn when nothing was produced at all — an artifact that WAS
-        # found but failed to send (Discord error) is a different case and
-        # already correctly described by the exception log above; claiming
-        # "no files were found" there would be false.
-        no_file_note = (
-            "\n\n(The sandbox attached no file for this run. If one was "
-            "expected, it was not produced — tell the user that plainly. Do "
-            "not claim a file exists, was sent, or is still being generated.)"
-        ) if not result.artifacts else ""
-        return (result.text + no_file_note + skip_note + steering_note
-                + resume_correction)
-    return (
-        f"{result.text}\n\n"
-        f"The sandbox chose {len(sent_names)} file(s) to deliver and they are "
-        f"already in the thread: {', '.join(sent_names)}. The text above is its "
-        "own message to the user, posted there beside them — so the user has "
-        "already read it. Add at most one short sentence of your own: do not "
-        "repeat it, re-describe the files, or second-guess the result."
-        + skip_note + steering_note + resume_correction
+    # Everything the outer model is told is built by sandbox_tool_result
+    # (sandbox_agent.py) — pure, and unit-tested without a Discord channel.
+    # `resumable` comes from the closing embed's own live-TTL answer, so the
+    # model and the user can never disagree about whether a follow-up in this
+    # thread picks the work back up.
+    return sandbox_tool_result(
+        result,
+        sent_names=sent_names,
+        in_thread=in_thread,
+        resumable=remaining is not None,
+        steering=steering,
+        resume_correction=resume_correction,
     )
 
 
@@ -640,25 +556,24 @@ async def change_personality(wrapper: RunContextWrapper[dict], personality: str)
         personality: The new personality to set.
     """
 
-    # Sometimes OpenAI repeats a tool call.
+    # As in store_memory: the model sometimes repeats a call within one reply.
     times_called = wrapper.context.get("personality_tool_calls")
     if times_called > 0:
-        err = f"Tool call limit reached: {times_called}. Not storing data."
-        print(err)
+        logger.warning(f"change_personality already called {times_called} time(s) this run; skipping.")
         return True
     wrapper.context["personality_tool_calls"] += 1
 
     from classes.config_manager import configManager
-    print(f"Changing personality to: {personality}")
+    logger.info(f"Changing personality to: {personality}")
     try:
         configmanager = configManager()
         await configmanager.update_setting("system", personality, wrapper.context.get("guild_id"))
-        print(f"Changed personality to: {personality}")
+        logger.info(f"Changed personality to: {personality}")
 
         embed = discord.Embed(title="Personality Updated",
                       description=personality)
         await wrapper.context.get("original_message").channel.send(embed=embed)
         return True
     except Exception as e:
-        print(f"An error occurred while changing personality: {e}")
+        logger.warning(f"An error occurred while changing personality: {e}")
         return False

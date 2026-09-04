@@ -15,7 +15,7 @@ import asyncio
 import io
 import os
 
-import redis.asyncio as redis
+from classes.redis_client import binary_client
 
 DEFAULT_SNAPSHOT_MAX_BYTES = 50_000_000  # Redis here shares a PVC with settings/user-memory
 DEFAULT_SNAPSHOT_TTL_SECONDS = 7 * 24 * 60 * 60  # abandoned threads don't grow Redis forever
@@ -56,11 +56,13 @@ class SandboxSnapshotStore:
 
     NAMESPACE = "dcb"
 
-    def __init__(self):
-        # decode_responses is deliberately NOT set (defaults to False): this
-        # store holds binary tar bytes, unlike configManager/UserMemory,
-        # which decode every value to str.
-        self.redis = redis.Redis(host=os.environ['REDIS_HOST'], port=6379, db=0)
+    @property
+    def redis(self):
+        # The BINARY shared client (classes/redis_client.py): this store holds
+        # tar bytes, unlike configManager/UserMemory, which decode to str.
+        # sandbox_agent.py constructs a SandboxSnapshotStore at four separate
+        # points in one run, so sharing the pool matters here too.
+        return binary_client()
 
     def _key(self, snapshot_id: str) -> str:
         return f"{self.NAMESPACE}:sandbox_snapshot:{snapshot_id}"

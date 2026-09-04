@@ -1,12 +1,19 @@
 import json
-import os
-import redis.asyncio as redis
+
+from classes.redis_client import text_client
+
+
 class UserMemory:
     def __init__(self, user_id, guild_id):
         self.user_id = user_id
         self.guild_id = guild_id
-        self.redis = redis.Redis(host=os.environ['REDIS_HOST'], port=6379, db=0, encoding="utf-8", decode_responses=True)
         self.key = f"guild:{self.guild_id}:user:{self.user_id}"
+
+    @property
+    def redis(self):
+        # Shared, lazily-built client — see classes/redis_client.py. A
+        # UserMemory is built per message and again inside each memory tool.
+        return text_client()
 
     async def append(self, new_data):
         existing_data = await self.get() or []

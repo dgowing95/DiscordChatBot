@@ -1,4 +1,4 @@
-"""Safety guard for the web_search / fetch_url tools.
+"""Safety guard for the web_search, fetch_url and run_code_sandbox tools.
 
 Blocks requests that are classified as unsafe *before* the bot touches the
 internet. Uses the free OpenAI Moderations endpoint
@@ -39,19 +39,31 @@ Environment variables:
                                (default: on)
 """
 
+import logging
 import asyncio
 import os
 import time
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_BASE_URL = "https://api.openai.com/v1"
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 
 def _debug_log(*args):
-    """Guard debug logging, gated on CONTENT_GUARD_DEBUG (default: on)."""
-    value = os.environ.get("CONTENT_GUARD_DEBUG", "1").strip().lower()
-    if value not in ("0", "false", "no", "off"):
-        print('[content-guard] ' + ' '.join(str(a) for a in args))
+    """Guard debug logging, gated on CONTENT_GUARD_DEBUG (default: on).
+
+    The env var is a documented part of the interface (AGENTS.md, .env.example),
+    so it is kept and mapped onto this module's logger level rather than
+    removed: on -> DEBUG is emitted, off -> it is not.
+    """
+    if _debug_enabled():
+        logger.debug(' '.join(str(a) for a in args))
+
+
+def _debug_enabled() -> bool:
+    return os.environ.get("CONTENT_GUARD_DEBUG", "1").strip().lower() not in (
+        "0", "false", "no", "off")
 
 
 def _env_float(name: str, default: float) -> float:
@@ -159,7 +171,7 @@ async def moderate_with_openai(text: str) -> bool:
     api_key = os.environ.get("OPENAI_API_KEY", "")
 
     if not api_key:
-        print("Content guard: OPENAI_API_KEY is not set; failing open.")
+        logger.warning("Content guard: OPENAI_API_KEY is not set; failing open.")
         return True
 
     model = os.environ.get("MODERATION_MODEL", "").strip()
@@ -178,7 +190,7 @@ async def moderate_with_openai(text: str) -> bool:
         outcome = await _post_moderation(base_url, api_key, payload)
 
         if outcome is None:
-            print("Content guard: moderation call failed (network error); "
+            logger.warning("Content guard: moderation call failed (network error); "
                   "failing open.")
             return True
 
@@ -189,17 +201,17 @@ async def moderate_with_openai(text: str) -> bool:
                 result = data["results"][0]
             except Exception:
                 _debug_log(f"unexpected moderation response: {data!r}")
-                print(f"Content guard: unexpected moderation response "
+                logger.warning(f"Content guard: unexpected moderation response "
                       f"({data}); failing open.")
                 return True
 
             if _is_unsafe(result):
                 _debug_log(f"detected categories: {_flagged_categories(result)}")
-                print(f"Content guard: flagged UNSAFE: {text[:200]!r}")
+                logger.info(f"Content guard: flagged UNSAFE: {text[:200]!r}")
                 _cache_store(text, False)
                 return False
 
-            print(f"Content guard: flagged SAFE: {text[:200]!r}")
+            logger.info(f"Content guard: flagged SAFE: {text[:200]!r}")
             _cache_store(text, True)
             return True
 
@@ -212,7 +224,7 @@ async def moderate_with_openai(text: str) -> bool:
             attempt += 1
             continue
 
-        print(f"Content guard: moderation endpoint returned HTTP {status}: "
+        logger.warning(f"Content guard: moderation endpoint returned HTTP {status}: "
               f"{data!r}; failing open.")
         return True
 

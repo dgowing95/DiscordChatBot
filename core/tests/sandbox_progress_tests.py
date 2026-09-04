@@ -2,14 +2,13 @@ import json
 import os
 import sys
 
-# sandbox_progress is imported as core.classes.* here and classes.* in
+# sandbox_progress is imported as classes.* here and classes.* in
 # production (the app runs with cwd=core/); both resolve as namespace packages.
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from core.classes.sandbox_progress import (
+from classes.sandbox_progress import (
     COLOR_FAIL,
     COLOR_RUNNING,
     COLOR_TOOL,

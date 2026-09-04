@@ -2,7 +2,9 @@ import os
 import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from core.classes.user_memory import UserMemory
+
+from classes import redis_client
+from classes.user_memory import UserMemory
 
 @pytest.fixture
 def mock_redis(monkeypatch):
@@ -10,7 +12,12 @@ def mock_redis(monkeypatch):
     mock_redis_instance.get = AsyncMock()
     monkeypatch.setenv('REDIS_HOST', 'localhost')
     monkeypatch.setattr('redis.asyncio.Redis', MagicMock(return_value=mock_redis_instance))
-    return mock_redis_instance
+    # The clients are shared and cached (classes/redis_client.py), so the
+    # cache must be dropped either side of the patch or the first test's
+    # mock would be handed to every later one.
+    redis_client.reset_clients()
+    yield mock_redis_instance
+    redis_client.reset_clients()
 
 @pytest.mark.asyncio
 async def test_get_returns_deduped_set(mock_redis):

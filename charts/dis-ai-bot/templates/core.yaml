@@ -21,6 +21,9 @@ spec:
         envFrom:
         - configMapRef:
             name: {{ .Release.Name }}-configmap
+        # Credentials (DISCORD_TOKEN, OPENAI_API_KEY, SANDBOX_LLM_API_KEY)
+        - secretRef:
+            name: {{ .Release.Name }}-secret
         {{- if .Values.metrics.enabled }}
         ports:
         - name: metrics

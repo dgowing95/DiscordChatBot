@@ -24,6 +24,13 @@ the bot is one process running one asyncio event loop, and both the producer
 (on_message) and the consumer (the nested tools) live in it. Nothing here is
 persisted — a pending message is only meaningful to the run it was aimed at,
 and that run dies with the process.
+
+Known failure mode: because the registry is plain process memory, deregistered
+in run_code_sandbox's `finally`, a worker torn down in a way that skips that
+finally leaves the thread registered. Every later message posted there then
+gets a 📨 reaction and goes nowhere, because main.py routes it to a run that no
+longer exists. A process restart clears it. If a thread ever "goes deaf" —
+reactions but no replies — that is what happened.
 """
 
 # Caps on one thread's pending queue. A sandbox run can last minutes, and

@@ -130,6 +130,31 @@ MAX_THINKING_CHUNKS = 4
 _TRUNCATION_NOTE = "[... earlier reasoning truncated ...]\n"
 
 
+def chunk_for_discord(text: str, limit: int = DISCORD_CHUNK_SIZE) -> list:
+    """Split text into Discord-sendable pieces of at most `limit` characters.
+
+    textwrap.wrap alone is not enough. We pass break_long_words=False so URLs,
+    code and identifiers are not sliced mid-token, but that also means a
+    whitespace-free run LONGER than `limit` comes back as a single oversized
+    chunk: wrap("x" * 2600, 2000, break_long_words=False) returns one 2600-char
+    string. channel.send() then rejects it with HTTPException, which unwinds
+    past handle_message() into the worker's catch-all - so a reply containing
+    one long URL or base64 blob cost the user the ENTIRE answer rather than
+    just its formatting.
+
+    Anything still over the limit after wrapping is therefore hard-split at the
+    limit, and empty pieces are dropped so callers can send every element.
+    """
+    chunks: list = []
+    for piece in wrap(text, limit, break_long_words=False, replace_whitespace=False):
+        while len(piece) > limit:
+            chunks.append(piece[:limit])
+            piece = piece[limit:]
+        if piece:
+            chunks.append(piece)
+    return chunks
+
+
 def format_thinking_for_discord(thinking: str) -> list:
     """Wrap reasoning text into ready-to-send Discord message bodies.
 
@@ -143,7 +168,7 @@ def format_thinking_for_discord(thinking: str) -> list:
         return []
     safe = thinking.replace("```", _TRIPLE_BACKTICK_ESCAPE)
     max_len = DISCORD_CHUNK_SIZE - _SPOILER_CODE_OVERHEAD
-    chunks = [c for c in wrap(safe, max_len, break_long_words=False, replace_whitespace=False) if c]
+    chunks = chunk_for_discord(safe, max_len)
     if len(chunks) > MAX_THINKING_CHUNKS:
         chunks = chunks[-MAX_THINKING_CHUNKS:]
         chunks[0] = _TRUNCATION_NOTE + chunks[0][: max_len - len(_TRUNCATION_NOTE)]

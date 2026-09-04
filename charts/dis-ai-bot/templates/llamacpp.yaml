@@ -61,7 +61,10 @@ spec:
         {{- if .Values.llamacpp.hfToken }}
         - name: HF_TOKEN
           # read token for gated HF repos (llama.cpp reads HF_TOKEN when downloading)
-          value: {{ .Values.llamacpp.hfToken | quote }}
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-llamacpp-secret
+              key: HF_TOKEN
         {{- end }}
         - name: LLAMA_ARG_N_GPU_LAYERS
           value: {{ .Values.llamacpp.gpuLayers | quote }}

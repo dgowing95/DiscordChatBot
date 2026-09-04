@@ -4,17 +4,17 @@ import os
 import sys
 import time
 
-# sandbox_agent is imported as core.classes.* here and classes.* in
-# production (the app runs with cwd=core/); both resolve as namespace packages.
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+# Imported as `classes.X` — the same name the app uses (it runs with cwd=core/,
+# and pyproject.toml puts core/ on the test path). `sandbox_agent` and
+# `prod_sandbox_agent` are therefore the SAME module object, so it no longer
+# matters which one a patch targets; both aliases are kept only because the
+# tests below already name them.
 
 import discord
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from core.classes import sandbox_agent
-# The production-style import names: the modules the tools themselves use at
-# call time (a different module object than core.classes.* — patch THESE).
+from classes import sandbox_agent
 import classes.sandbox_agent as prod_sandbox_agent
 import classes.tool_functions as prod_tool_functions
 
@@ -973,7 +973,7 @@ async def _agent_tool_names(monkeypatch, enabled_value):
     # TextLLMHandler.__init__ needs Redis; skip it and set what get_client()
     # reads directly.
     monkeypatch.setenv("SANDBOX_ENABLED", enabled_value)
-    from core.classes.text_llm_handler import TextLLMHandler
+    from classes.text_llm_handler import TextLLMHandler
 
     handler = TextLLMHandler.__new__(TextLLMHandler)
     handler.messages = []
@@ -2432,10 +2432,11 @@ async def test_tool_notifies_original_channel_when_a_new_thread_is_created():
             _tool_context(message), json.dumps({"task": "print 42"}),
         )
 
-    # the "started a thread" note (to the ORIGINAL channel), the static
-    # "Running in sandbox" embed and the closing note (both to the thread,
-    # since these tests don't enable progress updates)
-    assert embed.await_count == 3
+    # the "started a thread" note (to the ORIGINAL channel), then three to the
+    # thread (these tests do not enable progress updates): the static "Running
+    # in sandbox" embed, the "Thread Linked to Sandbox" notice telling people
+    # they can steer the run from here, and the closing note.
+    assert embed.await_count == 4
     first_call = embed.await_args_list[0]
     assert first_call.args[0] is message.channel
     assert "sandbox thread" in first_call.args[1]
@@ -2459,8 +2460,10 @@ async def test_tool_does_not_notify_when_reusing_an_existing_thread():
             _tool_context(message), json.dumps({"task": "print 42"}),
         )
 
-    # the static "Running in sandbox" embed and the closing note — but no
-    # "started a thread" note
+    # ensure_sandbox_thread returned a plain channel, not a discord.Thread, so
+    # in_thread is False: the static "Running in sandbox" embed and the closing
+    # note only. No "started a thread" note, and no "Thread Linked to Sandbox"
+    # notice either — nothing would route messages from here to the run.
     assert embed.await_count == 2
     assert not [d for d in _embed_descriptions(embed) if "sandbox thread" in d]
 
@@ -2471,7 +2474,7 @@ async def test_tool_does_not_notify_when_reusing_an_existing_thread():
 def clean_inbox():
     """The thread inbox is module-level process state; a test that leaves a
     thread registered would change the next test's routing."""
-    from core.classes import sandbox_thread_inbox as core_inbox
+    from classes import sandbox_thread_inbox as core_inbox
     import classes.sandbox_thread_inbox as prod_inbox
     core_inbox._PENDING.clear()
     prod_inbox._PENDING.clear()

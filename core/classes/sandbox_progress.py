@@ -50,6 +50,7 @@ The pure parts (SandboxTranscript, parse_exec_result,
 sandbox_progress_updates_enabled) are unit-tested in
 core/tests/sandbox_progress_tests.py.
 """
+import logging
 import json
 import re
 import time
@@ -57,6 +58,8 @@ from dataclasses import dataclass, field
 
 import discord
 from agents import RunHooks
+
+logger = logging.getLogger(__name__)
 
 EDIT_INTERVAL_SECONDS = 15.0  # Discord allows 5 edits/minute per channel
 BACKOFF_SECONDS = 25.0        # wait before retrying after a failed update
@@ -423,7 +426,7 @@ class SandboxProgressHooks(RunHooks):
             fn(*args, **kwargs)
             self._dirty = True
         except Exception as e:  # a progress error must never kill the run
-            print(f"Sandbox progress: ignoring transcript error: {e}")
+            logger.warning(f"Sandbox progress: ignoring transcript error: {e}")
 
     async def _maybe_flush(self, force: bool = False) -> None:
         if self._finalized or not self._dirty:
@@ -446,7 +449,7 @@ class SandboxProgressHooks(RunHooks):
         try:
             content, spec = self.transcript.render_message()
         except Exception as e:
-            print(f"Sandbox progress: render failed: {e}")
+            logger.warning(f"Sandbox progress: render failed: {e}")
             return
         embed = self._build_embed(spec)
         try:
@@ -457,12 +460,12 @@ class SandboxProgressHooks(RunHooks):
         except discord.NotFound:
             # The message was deleted; fall back to a fresh send.
             self._message = None
-            print("Sandbox progress: message deleted, will resend")
+            logger.info("Sandbox progress: message deleted, will resend")
             return
         except Exception as e:
             # Usually a Discord rate limit (edits: 5/minute per channel) or
             # a network error — back off and keep the sandbox run going.
-            print(f"Sandbox progress: update failed, backing off: {e}")
+            logger.warning(f"Sandbox progress: update failed, backing off: {e}")
             self._backoff_until = time.monotonic() + BACKOFF_SECONDS
             return
         self._last_flush = time.monotonic()
