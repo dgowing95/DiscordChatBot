@@ -70,6 +70,15 @@ services:
       - IMAGE_STEPS=${IMAGE_STEPS:-4}
       - IMAGE_WIDTH=${IMAGE_WIDTH:-512}
       - IMAGE_HEIGHT=${IMAGE_HEIGHT:-512}
+      # CFG scale; empty = the pipeline's default, and forced to 0.0 on
+      # distilled models like the sd-turbo default (see generation_params.py)
+      - IMAGE_GUIDANCE=${IMAGE_GUIDANCE:-}
+      # Baseline negative prompt, merged behind the per-request one. Same
+      # default as the chart; dropped automatically on distilled models, which
+      # includes the sd-turbo default above.
+      - IMAGE_NEGATIVE_PROMPT=${IMAGE_NEGATIVE_PROMPT:-blurry, lowres, jpeg artifacts, deformed, disfigured, bad anatomy, extra limbs, extra fingers, watermark, signature, cropped, out of frame}
+      # 1/0: encode prompts past CLIP's 77-token window rather than truncate
+      - IMAGE_LONG_PROMPT=${IMAGE_LONG_PROMPT:-1}
       # model | sequential | none — see diffusionservice/main.py
       - IMAGE_OFFLOAD=${IMAGE_OFFLOAD:-model}
       - IMAGE_QUEUE_SIZE=${IMAGE_QUEUE_SIZE:-16}

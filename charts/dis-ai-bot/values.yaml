@@ -49,6 +49,37 @@ diffusion:
   queueSize: 16
   # Optional: fixed seed for reproducible images (empty = random)
   seed: ""
+  # CFG scale. Empty = the pipeline's own default (7.5 for SD1.5, 5.0 for
+  # SDXL). Higher follows the prompt more closely and costs contrast;
+  # Juggernaut XL suggests 3-7. Forced to 0.0 for distilled models
+  # (sd-turbo, Lightning, LCM, Hyper), which are trained without guidance.
+  guidance: ""
+  # Baseline "what must not appear", merged BEHIND the per-request negative
+  # prompt that the rewriter produces. That split is on purpose: the rewriter
+  # writes what would spoil THIS image, this writes what the checkpoint always
+  # gets wrong. It is also the floor when the rewriter is off or falls soft --
+  # then it is the only negative prompt an image gets.
+  #
+  # Safe to leave set whatever the model is: it is dropped automatically on
+  # distilled ones (sd-turbo, Lightning, LCM, Hyper), where diffusers skips the
+  # unconditional branch and a negative prompt has no effect at all.
+  #
+  # Keep text/words/letters OUT of it — users do ask for text in images.
+  negativePrompt: "blurry, lowres, jpeg artifacts, deformed, disfigured, bad anatomy, extra limbs, extra fingers, watermark, signature, cropped, out of frame"
+  # Encode prompts past CLIP's 77-token (~55 word) window instead of silently
+  # truncating them. false falls back to the truncating path.
+  longPrompt: true
+  # An LLM call in CORE (not the diffusion pod) that rewrites a request into an
+  # SDXL-shaped prompt + negative prompt before it is sent. Covers both the
+  # generate_image tool and the /generate_image slash command.
+  promptRewrite:
+    enabled: true
+    timeout: 60
+    # Empty = reuse the bot's own model/host/key. Set them to run the rewrite
+    # somewhere else, exactly as sandbox.model/llmHost/apiKey can.
+    model: ""
+    llmHost: ""
+    apiKey: ""
   # Optional: pin this pod to specific physical GPUs by CDI device name,
   # e.g. "nvidia.com/gpu=GPU-<uuid>" (comma-separated for several; `nvidia-smi
   # --query-gpu=uuid,name --format=csv` on the node lists them).

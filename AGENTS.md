@@ -35,6 +35,7 @@ core/                  # the main bot (the app that runs in production)
     config_manager.py      # per-guild settings in Redis (system prompt, temperature, ...)
     tool_functions.py      # agent function tools: web_search, fetch_url, memory tools, generate_image, run_code_sandbox
     image_generation.py    # client for the diffusion service + IMAGE_GEN_ENABLED flag
+    image_prompt.py        # LLM rewrite of an image request -> SDXL prompt + negative prompt
     sandbox_agent.py       # nested SandboxAgent + run_sandbox_task (throwaway Docker sandbox)
                            #   + the pure builders for what the outer model is told
                            #   (sandbox_tool_result and friends)
@@ -50,6 +51,8 @@ core/                  # the main bot (the app that runs in production)
 diffusionservice/      # standalone image service (text->image; FastAPI + diffusers,
                        #   queued single-worker, sd-turbo by default,
                        #   CPU-offloaded for low VRAM)
+                       #   generation_params.py is the stdlib-only half (guidance /
+                       #   negative-prompt policy), so it is unit-testable without torch
 charts/dis-ai-bot/     # Helm chart (credentials render into templates/secret.yaml,
                        #   everything else into templates/configmap.yaml)
 pyproject.toml         # pytest configuration - why bare `pytest` works from the repo root
@@ -120,8 +123,17 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
    its own pod/container, queues requests (one image at a time) and replies with
    a PNG that is sent to the Discord channel. It is text-to-image only; there is
    no image-editing path. Generation settings (`IMAGE_MODEL`, `IMAGE_STEPS`,
-   `IMAGE_WIDTH`/`HEIGHT`, `IMAGE_OFFLOAD`, `IMAGE_QUEUE_SIZE`) live in the same
-   configmap/env the diffusion pod reads.
+   `IMAGE_WIDTH`/`HEIGHT`, `IMAGE_GUIDANCE`, `IMAGE_NEGATIVE_PROMPT`,
+   `IMAGE_LONG_PROMPT`, `IMAGE_OFFLOAD`, `IMAGE_QUEUE_SIZE`) live in the same
+   configmap/env the diffusion pod reads. Both paths first send the request
+   through `image_prompt.build_image_prompt` — one LLM call that rewrites it
+   into an SDXL-shaped prompt plus a negative prompt, and falls back to the
+   request verbatim on any failure. That is why the SDXL prompt rules are NOT
+   in the `generate_image` docstring: the slash command never reads it.
+   In the service, prompts longer than CLIP's 77-token window are encoded in
+   chunks by compel rather than truncated, and distilled models (sd-turbo and
+   friends) are pinned to `guidance_scale=0.0` with the negative prompt
+   dropped, since diffusers skips the unconditional branch below CFG 1.
 7. Code sandbox: when enabled (`SANDBOX_ENABLED`, from the chart's
    `sandbox.enabled`), the agent gets a `run_code_sandbox(task)` tool (no slash
    command). It runs a nested `SandboxAgent` in a THROWAWAY Docker container via
@@ -224,9 +236,14 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
 | `DIFFUSION_URL` | base URL of the diffusion service (core appends `/generate`); compose `diffusion` service on :8000 in dev, in-cluster `*-diffusion-service` in the chart; in-code fallback `http://diffusion:8000` |
 | `IMAGE_MODEL` | HF repo id for the diffusion service (default `stabilityai/sd-turbo` — smallest practical model); the service downloads it into its `HF_HOME` volume on first boot |
 | `IMAGE_STEPS` / `IMAGE_WIDTH` / `IMAGE_HEIGHT` | generation settings for the diffusion service (defaults: 4 steps, 512x512) |
+| `IMAGE_GUIDANCE` | CFG scale; unset leaves the pipeline's own (7.5 SD1.5 / 5.0 SDXL). Forced to 0.0 on distilled models. Chart: `diffusion.guidance` |
+| `IMAGE_NEGATIVE_PROMPT` | baseline negative prompt, merged BEHIND the per-request one the rewriter produces, and the only one left when that rewrite is off or falls soft. Compose and the chart ship the same non-empty default; dropped automatically on distilled models. Chart: `diffusion.negativePrompt` |
+| `IMAGE_LONG_PROMPT` | `0`/`false` reverts to truncating prompts at 77 CLIP tokens instead of chunk-encoding them (default: on). Chart: `diffusion.longPrompt` |
 | `IMAGE_OFFLOAD` | `model` (default: one pipeline component on GPU at a time, text encoder in CPU RAM) / `sequential` (lowest VRAM, slowest) / `none` (all on GPU) |
 | `IMAGE_QUEUE_SIZE` | max queued image requests in the diffusion service (default 16); over that it returns 503 |
 | `IMAGE_GEN_TIMEOUT` | seconds core waits on the diffusion service (default 300) |
+| `IMAGE_PROMPT_REWRITE_ENABLED` | `0`/`false` sends image requests to the service verbatim instead of rewriting them first (default: on). Chart: `diffusion.promptRewrite.enabled` |
+| `IMAGE_PROMPT_MODEL` / `IMAGE_PROMPT_LLM_HOST` / `IMAGE_PROMPT_LLM_API_KEY` / `IMAGE_PROMPT_TIMEOUT` | the prompt rewrite's own LLM connection; each falls back to the bot's `MODEL` / `LLM_HOST` / `LLM_PASS` (timeout default 60s), exactly like the `SANDBOX_*` equivalents. Chart: `diffusion.promptRewrite.*` (the key via secret.yaml) |
 | `SANDBOX_ENABLED` | `0`/`false` removes the `run_code_sandbox` tool from the LLM (default: on). Chart: `sandbox.enabled` also removes the Docker-socket hostPath mount |
 | `SANDBOX_IMAGE` | container image for the sandbox workspace, pulled once onto the daemon (default `python:3.14-slim`). Chart: `sandbox.image` |
 | `SANDBOX_MAX_TURNS` | max model turns for one sandbox task (default 10). Chart: `sandbox.maxTurns` |

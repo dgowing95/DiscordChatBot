@@ -9,6 +9,7 @@ from classes.text_llm_handler import TextLLMHandler
 from classes.llm_config import llm_model
 from classes.config_manager import configManager
 from classes.image_generation import generate_image_from_api, image_generation_enabled
+from classes.image_prompt import build_image_prompt
 from classes.sandbox_agent import sandbox_enabled
 from classes import sandbox_thread_inbox
 from classes.message_queue import make_message_queue, worker_count
@@ -103,8 +104,12 @@ async def register_commands():
             # ctx.response.edit_message(), which raises InteractionResponded.
             await ctx.response.defer()
             logger.info(f"Slash command: generating image for prompt: {prompt}")
+            # Raw user text, never seen by the agent: this path is the reason
+            # the SDXL prompt rules live in image_prompt.py rather than in the
+            # generate_image tool's docstring, which only the agent reads.
+            image_prompt, negative_prompt = await build_image_prompt(prompt)
             try:
-                image_bytes = await generate_image_from_api(prompt)
+                image_bytes = await generate_image_from_api(image_prompt, negative_prompt)
             except Exception as e:
                 logger.warning(f"Image generation failed: {e}")
                 await ctx.edit_original_response(

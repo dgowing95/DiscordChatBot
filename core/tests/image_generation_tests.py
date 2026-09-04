@@ -75,7 +75,19 @@ async def test_generate_returns_image_bytes(monkeypatch):
     assert data == b"PNGDATA"
     args, kwargs = session.post.call_args
     assert args[0] == "http://diffusion:8000/generate"
-    assert kwargs["json"] == {"prompt": "a red fox"}
+    assert kwargs["json"] == {"prompt": "a red fox", "negative_prompt": ""}
+
+
+@pytest.mark.asyncio
+async def test_generate_sends_negative_prompt(monkeypatch):
+    """The service merges this in front of its own IMAGE_NEGATIVE_PROMPT."""
+    monkeypatch.setenv("DIFFUSION_URL", "http://diffusion:8000")
+    session, response = _mock_session(status=200, payload=b"PNGDATA")
+    with patch("aiohttp.ClientSession", return_value=session):
+        await image_generation.generate_image_from_api("a red fox", "cartoon, blurry")
+
+    _, kwargs = session.post.call_args
+    assert kwargs["json"] == {"prompt": "a red fox", "negative_prompt": "cartoon, blurry"}
 
 
 @pytest.mark.asyncio
@@ -136,6 +148,10 @@ class _FakeCommandTree:
 async def _register_and_collect(monkeypatch, enabled_value):
     main_mod = _import_main()
     monkeypatch.setenv("IMAGE_GEN_ENABLED", enabled_value)
+    # The command rewrites the prompt through an LLM before generating. Off
+    # here, so these tests do not open a real connection to LLM_HOST and sit
+    # through its timeout before the rewrite falls soft.
+    monkeypatch.setenv("IMAGE_PROMPT_REWRITE_ENABLED", "0")
     _FakeCommandTree.instances.clear()
     with patch.object(main_mod.discord.app_commands, "CommandTree", _FakeCommandTree):
         await main_mod.register_commands()
@@ -176,6 +192,24 @@ async def test_generate_image_command_defers_and_sends_image(monkeypatch):
     assert kwargs["content"] == "🎨"
     assert kwargs["attachments"][0].filename == "generated-image.png"
     assert kwargs["attachments"][0].fp.read() == b"PNGDATA"
+
+
+@pytest.mark.asyncio
+async def test_generate_image_command_uses_the_rewritten_prompt(monkeypatch):
+    """The slash command is raw user input the agent never sees, so the SDXL
+    rewrite has to happen here rather than in the tool docstring."""
+    main_mod, commands = await _register_and_collect(monkeypatch, "1")
+    fn = commands["generate_image"]
+
+    ctx = MagicMock()
+    ctx.response.defer = AsyncMock()
+    ctx.edit_original_response = AsyncMock()
+    api = AsyncMock(return_value=b"PNGDATA")
+    with patch.object(main_mod, "generate_image_from_api", new=api),          patch.object(main_mod, "build_image_prompt",
+                      new=AsyncMock(return_value=("a red fox, sharp fur", "cartoon"))):
+        await fn(ctx, "a red fox")
+
+    api.assert_awaited_once_with("a red fox, sharp fur", "cartoon")
 
 
 @pytest.mark.asyncio

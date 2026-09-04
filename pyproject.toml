@@ -5,7 +5,17 @@
 # contributors to update it.
 [tool.pytest.ini_options]
 python_files = ["*_tests.py"]
-testpaths = ["core/tests"]
+testpaths = ["core/tests", "diffusionservice/tests"]
+# diffusionservice/tests holds generation_params_tests.py alone. The service's
+# main.py needs torch + diffusers, which core/requirements-dev.txt does not
+# install and CI therefore never has -- generation_params.py is stdlib-only
+# precisely so the guidance/negative-prompt rules are testable anyway.
+#
+# The tests live in a tests/ SUBDIRECTORY rather than beside the module for the
+# same reason `pythonpath` below is not simply `.`: pytest prepends the basedir
+# of every collected file to sys.path, and diffusionservice/ contains a
+# `main.py` that would then shadow core's. diffusionservice/tests/conftest.py
+# appends the service dir instead; see the comment there.
 # `core` ONLY, deliberately not `.` as well. The app runs with cwd=core/ and
 # imports its siblings as `classes.X`. The suite used to import the same
 # modules as `core.classes.X`, and the two resolve to SEPARATE module objects

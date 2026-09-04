@@ -2,7 +2,9 @@
 
 The service runs in its own pod/container (see diffusionservice/); this module
 only knows whether the generate_image tool is enabled and how to ask the
-service for an image.
+service for an image. Turning a user's request INTO a prompt is image_prompt.py,
+called by each entry point (the generate_image tool and the /generate_image
+slash command) so both can show the caller what was actually sent.
 """
 import os
 import time
@@ -30,12 +32,16 @@ def diffusion_base_url() -> str:
     return os.environ.get("DIFFUSION_URL", "http://diffusion:8000").rstrip("/")
 
 
-async def generate_image_from_api(prompt: str) -> bytes:
+async def generate_image_from_api(prompt: str, negative_prompt: str = "") -> bytes:
     """Ask the diffusion service for a PNG (text-to-image).
+
+    `negative_prompt` lists what must NOT appear. The service merges it in
+    front of its own IMAGE_NEGATIVE_PROMPT baseline and ignores it entirely on
+    distilled models, where it would have no effect.
 
     Raises on HTTP errors or connection failures; the caller (the
     generate_image tool) turns that into a friendly message for the LLM."""
-    payload = {"prompt": prompt}
+    payload = {"prompt": prompt, "negative_prompt": negative_prompt or ""}
     # Timed from the caller's perspective: queue wait + generation. Observed
     # in finally so timeouts/HTTP errors are measured too; the tool layer
     # turns those into friendly LLM-facing strings.

@@ -26,8 +26,24 @@ data:
   IMAGE_HEIGHT: {{ .Values.diffusion.height | toString | quote }}
   IMAGE_OFFLOAD: {{ .Values.diffusion.offload }}
   IMAGE_QUEUE_SIZE: {{ .Values.diffusion.queueSize | toString | quote }}
+  IMAGE_LONG_PROMPT: {{ .Values.diffusion.longPrompt | quote }}
+  IMAGE_NEGATIVE_PROMPT: {{ .Values.diffusion.negativePrompt | quote }}
+  {{- if .Values.diffusion.guidance }}
+  IMAGE_GUIDANCE: {{ .Values.diffusion.guidance | toString | quote }}
+  {{- end }}
   {{- if .Values.diffusion.seed }}
   IMAGE_SEED: {{ .Values.diffusion.seed | toString | quote }}
+  {{- end }}
+  # Prompt rewriter: a CORE-side LLM call (not the diffusion pod) that turns a
+  # request into an SDXL prompt + negative prompt. Unset model/host fall back
+  # to the bot's own MODEL/LLM_HOST; the key lives in secret.yaml.
+  IMAGE_PROMPT_REWRITE_ENABLED: {{ .Values.diffusion.promptRewrite.enabled | quote }}
+  IMAGE_PROMPT_TIMEOUT: {{ .Values.diffusion.promptRewrite.timeout | toString | quote }}
+  {{- if .Values.diffusion.promptRewrite.model }}
+  IMAGE_PROMPT_MODEL: {{ .Values.diffusion.promptRewrite.model }}
+  {{- end }}
+  {{- if .Values.diffusion.promptRewrite.llmHost }}
+  IMAGE_PROMPT_LLM_HOST: {{ .Values.diffusion.promptRewrite.llmHost }}
   {{- end }}
   # Code sandbox: core registers the run_code_sandbox tool when SANDBOX_ENABLED
   # is true; tasks run in throwaway containers on the node via the Docker

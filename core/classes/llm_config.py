@@ -21,6 +21,21 @@ DEFAULT_LLM_API_KEY = "llamacpp"
 DEFAULT_TEMPERATURE = 1.0
 
 
+def env_or(primary: str, fallback: str, default: str) -> str:
+    """First non-empty of: env var `primary`, env var `fallback`, `default`.
+
+    How every secondary LLM caller overrides the main bot's connection one
+    variable at a time — the sandbox agent (SANDBOX_MODEL / SANDBOX_LLM_HOST /
+    SANDBOX_LLM_API_KEY) and the image prompt rewriter (IMAGE_PROMPT_*) both
+    fall back to MODEL / LLM_HOST / LLM_PASS when their own var is unset.
+    """
+    for name in (primary, fallback):
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return default
+
+
 def llm_model() -> str:
     """The model name the bot requests (MODEL)."""
     return os.environ.get("MODEL") or DEFAULT_MODEL

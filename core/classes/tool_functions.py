@@ -186,30 +186,34 @@ async def generate_image(wrapper: RunContextWrapper[dict], prompt: str) -> str:
     Use it when the user asks for art, illustrations, pictures or drawings.
     The image is sent automatically; never try to send it yourself.
     Args:
-        prompt: The text description of the image to generate. The image
-            model (Juggernaut XI) responds best to precise, specific
-            prompts: put the main subject in the first sentence, then add
-            the setting, the subject's action, secondary objects, colors,
-            lighting, style/medium, mood and camera angle; name textures
-            and materials explicitly (e.g. "coarse fur", "polished
-            steel"); for people, describe their clothing and emphasize
-            the emotion they should show; keep it tight - a couple of
-            short sentences with no filler, since long prompts reduce
-            adherence; append "high resolution"; for any text that must
-            appear in the image, use a short phrase in quotes near the
-            start (long text is often misspelled).
+        prompt: A plain-language description of the picture you want, in
+            ordinary sentences. Include everything that matters: the main
+            subject and what it is doing, where it is, how it is positioned,
+            what else is in shot, the lighting, the mood, and the style or
+            medium. Say what the user implied but did not spell out. A
+            separate step rewrites this into the image model's own prompt
+            format, so do NOT write comma-separated tag lists, quality
+            boilerplate like "high resolution", or weighting syntax - and do
+            not leave detail out to keep it short. Anything that must NOT
+            appear can simply be written as a normal sentence ("no people in
+            the shot"); it is moved to a negative prompt for you.
     """
     from classes.image_generation import generate_image_from_api
+    from classes.image_prompt import build_image_prompt
 
     message = wrapper.context.get("original_message")
     logger.info(f"Generating image for prompt: {prompt}")
     await add_emoji_to_message(message, "🎨")
+    # The rewritten prompt, not the requested one, is what the embed shows:
+    # what the image model was actually given is the thing worth seeing when
+    # the result does not match what was asked for.
+    image_prompt, negative_prompt = await build_image_prompt(prompt)
     await Common.send_tool_discord_embed(
         message.channel,
-        f"Generating image: {prompt}",
+        f"Generating image: {image_prompt}",
     )
     try:
-        image_bytes = await generate_image_from_api(prompt)
+        image_bytes = await generate_image_from_api(image_prompt, negative_prompt)
     except Exception as e:
         logger.warning(f"Image generation failed: {e}")
         return ("Image generation failed. Tell the user the image service is "
