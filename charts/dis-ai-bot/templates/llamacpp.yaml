@@ -58,12 +58,13 @@ spec:
           # == .Values.model: the one model value shared with core's MODEL
           value: "{{ .Values.model }}"
         {{- end }}
-        {{- if .Values.llamacpp.hfToken }}
+        {{- if or .Values.llamacpp.hfToken .Values.llamacpp.existingSecret }}
         - name: HF_TOKEN
-          # read token for gated HF repos (llama.cpp reads HF_TOKEN when downloading)
+          # read token for gated HF repos (llama.cpp reads HF_TOKEN when downloading);
+          # from the chart's Secret, or llamacpp.existingSecret (key HF_TOKEN)
           valueFrom:
             secretKeyRef:
-              name: {{ .Release.Name }}-llamacpp-secret
+              name: {{ .Values.llamacpp.existingSecret | default (printf "%s-llamacpp-secret" .Release.Name) }}
               key: HF_TOKEN
         {{- end }}
         - name: LLAMA_ARG_N_GPU_LAYERS

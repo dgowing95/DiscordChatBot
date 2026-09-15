@@ -213,7 +213,7 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
 
 | Var | Purpose |
 |---|---|
-| `DISCORD_TOKEN` | required; bot token |
+| `DISCORD_TOKEN` | required; bot token. Chart: `discordToken`, or bring your own Secret via `existingSecret` (keys = these env var names: `DISCORD_TOKEN`, `OPENAI_API_KEY`, `SANDBOX_LLM_API_KEY`, `IMAGE_PROMPT_LLM_API_KEY`); `llamacpp.existingSecret` does the same for the llamacpp pod's `HF_TOKEN` |
 | `REDIS_HOST` | required; Redis host |
 | `LLM_HOST` | llama.cpp server base URL (OpenAI-compat; core appends `/v1`). Points at the `llamacpp` service on :8081 in docker-compose (dev) and :8080 in the helm chart; the in-code fallback is `http://llamacpp:8080` |
 | `LLM_PASS` | placeholder key — llama.cpp does not authenticate, but the OpenAI client requires a non-empty key |
@@ -265,6 +265,13 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
   (tests -> two images -> chart -> GitHub release). Nothing dispatches
   `release.yaml`; its `workflow_dispatch` trigger is a manual escape hatch for
   re-running a release against an existing tag.
+- The packaged chart is published twice from that one `.tgz`: as a GitHub
+  release asset (`dchatbot-vX.Y.tgz`) and as an OCI artifact at
+  `oci://ghcr.io/dgowing95/charts/dchatbot` (tag = the git tag, e.g. `v2.29`).
+  The OCI copy is what lets a Helm-repo-aware consumer (ArgoCD, `helm install
+  oci://...`) resolve versions and semver ranges without a chart index; both
+  carry `appVersion` = the tag, which is where the `core-<tag>` /
+  `diffusion-<tag>` image tags in the templates come from.
 - **`TAG_PUSH_TOKEN` (repo secret) is what pushes the tag**, and it expires.
   `GITHUB_TOKEN` cannot do the job for two independent reasons: the "Restrict
   Tagging" ruleset allows ref creation only for repo admins, and it acts as the

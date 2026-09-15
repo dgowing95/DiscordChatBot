@@ -17,6 +17,13 @@ image:
 imagePullSecrets: []
 
 discordToken: ""
+# Name of a Secret you manage yourself (e.g. via External Secrets Operator or
+# sealed-secrets) holding the core credentials, instead of the one this chart
+# renders from discordToken / openaiApiKey / sandbox.apiKey /
+# diffusion.promptRewrite.apiKey (all ignored when this is set). Keys are the
+# env var names: DISCORD_TOKEN (required), OPENAI_API_KEY, SANDBOX_LLM_API_KEY,
+# IMAGE_PROMPT_LLM_API_KEY (each optional - omit rather than leave empty).
+existingSecret: ""
 redisHost: "dchatbot-redis-service.dchatbot.svc.cluster.local"
 # Base URL of the llama.cpp server (OpenAI-compat). core appends /v1 itself, so do not include it here
 llm_host: "http://dchatbot-llamacpp-service.dchatbot.svc.cluster.local:8080"
@@ -155,6 +162,9 @@ llamacpp:
   # Hugging Face read token (hf_...) for gated model repos; empty = none.
   # Accept the repo's terms on HF first, then paste a read token here.
   hfToken: ""
+  # Name of a Secret you manage yourself with key HF_TOKEN, instead of the one
+  # this chart renders from hfToken (ignored when this is set). Empty = none.
+  existingSecret: ""
   # Serve a GGUF file already on the volume instead of downloading from HF.
   # Path INSIDE the container: the llama.cpp PVC (hostPath .../ollama) is
   # mounted at /models, so a file copied to <pvc.hostPath>/ollama/foo.gguf is

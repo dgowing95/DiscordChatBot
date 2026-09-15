@@ -21,9 +21,10 @@ spec:
         envFrom:
         - configMapRef:
             name: {{ .Release.Name }}-configmap
-        # Credentials (DISCORD_TOKEN, OPENAI_API_KEY, SANDBOX_LLM_API_KEY)
+        # Credentials (DISCORD_TOKEN, OPENAI_API_KEY, SANDBOX_LLM_API_KEY);
+        # the chart's own Secret unless existingSecret names one
         - secretRef:
-            name: {{ .Release.Name }}-secret
+            name: {{ .Values.existingSecret | default (printf "%s-secret" .Release.Name) }}
         {{- if .Values.metrics.enabled }}
         ports:
         - name: metrics

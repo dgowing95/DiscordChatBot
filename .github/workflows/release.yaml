@@ -85,6 +85,10 @@ jobs:
       - build_images
       - build_diffusion_image
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # helm push to GHCR below
+      packages: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -93,6 +97,14 @@ jobs:
       - name: Package Helm Chart
         run: |
           helm package charts/dis-ai-bot --version ${{ github.ref_name }} --app-version ${{ github.ref_name }}
+      # The same .tgz is also published as an OCI artifact, so tools that speak
+      # Helm repos (ArgoCD, `helm install oci://...`) can resolve versions and
+      # semver ranges without a chart index: ghcr.io/dgowing95/charts/dchatbot:<tag>.
+      # The GitHub release asset (create_release) stays for direct downloads.
+      - name: Push Helm Chart to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+          helm push dchatbot-${{ github.ref_name }}.tgz oci://ghcr.io/dgowing95/charts
       - uses: actions/upload-artifact@v4
         with:
           name: helm-dis-ai-bot-${{ github.ref_name }}
