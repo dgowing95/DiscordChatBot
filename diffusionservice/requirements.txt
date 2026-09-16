@@ -4,7 +4,7 @@
 fastapi==0.115.12
 uvicorn[standard]==0.34.2
 diffusers==0.38.0
-transformers==5.10.4
+transformers==5.16.1
 # Encodes prompts past CLIP's 77-token window (see _build_compel in main.py).
 # Compel 2.4 supports Transformers 5 and preserves chunked long prompts. It
 # brings the Jupyter/notebook stack transitively; that trade-off is deliberate.
