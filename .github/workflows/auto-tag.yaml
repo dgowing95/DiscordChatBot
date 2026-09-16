@@ -22,7 +22,7 @@ jobs:
       # release.yaml would never start. The environment-scoped secret is a
       # fine-grained PAT with Contents: read and write on this repo. See the
       # Releasing section of AGENTS.md for replacement instructions.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
