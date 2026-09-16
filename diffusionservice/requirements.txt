@@ -13,5 +13,5 @@ compel==2.1.1
 accelerate==1.7.0
 huggingface-hub==0.32.3
 safetensors==0.5.3
-Pillow==11.2.1
+Pillow==12.3.0
 numpy==2.2.6
