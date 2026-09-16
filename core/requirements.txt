@@ -37,7 +37,7 @@ mcp==2.0.0
 mcp-types==2.0.0
 multidict==6.7.1
 openai==2.54.0
-openai-agents==0.20.0
+openai-agents==0.22.0
 opentelemetry-api==1.44.0
 Pillow==12.3.0
 pillow-heif==1.5.0
