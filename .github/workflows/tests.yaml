@@ -1,13 +1,22 @@
 name: Run Tests
 on:
+  pull_request:
+    branches:
+      - main
   push:
     branches:
-      - '*'
+      - main
+
+permissions:
+  contents: read
+
 jobs:
   run_pytest:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
    
       - name: Set up Python 3.13
         uses: actions/setup-python@v5

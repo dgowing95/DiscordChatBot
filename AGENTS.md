@@ -272,7 +272,7 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
   oci://...`) resolve versions and semver ranges without a chart index; both
   carry `appVersion` = the tag, which is where the `core-<tag>` /
   `diffusion-<tag>` image tags in the templates come from.
-- **`TAG_PUSH_TOKEN` (repo secret) is what pushes the tag**, and it expires.
+- **`TAG_PUSH_TOKEN` (the `release-tag` environment secret) creates the tag**, and it expires.
   `GITHUB_TOKEN` cannot do the job for two independent reasons: the "Restrict
   Tagging" ruleset allows ref creation only for repo admins, and it acts as the
   GitHub Actions app rather than a user; and a ref pushed with it deliberately
@@ -282,13 +282,12 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
   scoped to `dgowing95/DiscordChatBot` only, with **Repository permissions →
   Contents: Read and write** (nothing else; `workflow` is not needed, the job
   pushes a tag and never touches `.github/workflows`). Then store it in the
-  **repo's** settings → Secrets and variables → Actions, as `TAG_PUSH_TOKEN`.
+  **repo's** settings → Environments → `release-tag` → Environment secrets, as
+  `TAG_PUSH_TOKEN`. The environment is restricted to the protected `main` branch.
 - How the Auto Tag job fails tells you which half is wrong. Secret unset: the
-  checkout step itself fails, because `token:` is a required input and an unset
-  secret makes it empty rather than falling back to `GITHUB_TOKEN`. PAT expired
-  or revoked: an authentication failure fetching the repo. `remote: error:
-  GH013 ... Cannot create ref due to creations being restricted` on the push:
-  the token is valid but its owner is not a bypass actor on the ruleset.
+  `gh api` step fails authentication. PAT expired or revoked: the same step gets
+  a 401. A ruleset rejection while creating `refs/tags/<version>` means the token
+  is valid but its owner is not a bypass actor on the tag ruleset.
 
 ## Testing
 

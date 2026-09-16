@@ -5,15 +5,44 @@ on:
       - 'v*'
   workflow_dispatch:
 
+permissions: {}
+
+env:
+  VERSION: ${{ github.ref_name }}
+
 jobs:
-  run_tests:
+  validate_release:
     runs-on: ubuntu-latest
-    # Releases are cut by auto-tag.yaml straight off a push to main, so this is
-    # the only place the shipped commit is actually tested before it becomes an
-    # image and a chart.
     if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate release tag and commit
+        run: |
+          set -euo pipefail
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tag must match vMAJOR.MINOR; got: $VERSION" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "Release commit $GITHUB_SHA is not reachable from main." >&2
+            exit 1
+          fi
+
+  run_tests:
+    needs: validate_release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Set up Python 3.13
         uses: actions/setup-python@v5
         with:
@@ -29,26 +58,26 @@ jobs:
   build_images:
     needs: run_tests
     runs-on: ubuntu-latest
-    # auto-tag.yaml's tag push is what normally starts this; workflow_dispatch
-    # is a manual escape hatch, so guard against someone dispatching it on a
-    # branch, which would tag/release "main".
-    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
-
+        with:
+          persist-credentials: false
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}      
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Build and push Core docker image
         uses: docker/build-push-action@v6
         with:
           push: true
-          tags: ghcr.io/dgowing95/discordchatbot:core-${{github.ref_name}},ghcr.io/dgowing95/discordchatbot:core-latest
+          tags: ghcr.io/dgowing95/discordchatbot:core-${{ env.VERSION }},ghcr.io/dgowing95/discordchatbot:core-latest
           context: ./core
           cache-from: type=registry,ref=ghcr.io/dgowing95/discordchatbot:core-buildcache
           cache-to: type=registry,ref=ghcr.io/dgowing95/discordchatbot:core-buildcache,mode=max
@@ -56,13 +85,13 @@ jobs:
   build_diffusion_image:
     needs: run_tests
     runs-on: ubuntu-latest
-    # auto-tag.yaml's tag push is what normally starts this; workflow_dispatch
-    # is a manual escape hatch, so guard against someone dispatching it on a
-    # branch, which would tag/release "main".
-    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
-
+        with:
+          persist-credentials: false
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -75,7 +104,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           push: true
-          tags: ghcr.io/dgowing95/discordchatbot:diffusion-${{github.ref_name}},ghcr.io/dgowing95/discordchatbot:diffusion-latest
+          tags: ghcr.io/dgowing95/discordchatbot:diffusion-${{ env.VERSION }},ghcr.io/dgowing95/discordchatbot:diffusion-latest
           context: ./diffusionservice
           cache-from: type=registry,ref=ghcr.io/dgowing95/discordchatbot:diffusion-buildcache
           cache-to: type=registry,ref=ghcr.io/dgowing95/discordchatbot:diffusion-buildcache,mode=max
@@ -87,47 +116,44 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # helm push to GHCR below
       packages: write
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: azure/setup-helm@v4.3.0
       - name: Package Helm Chart
-        run: |
-          helm package charts/dis-ai-bot --version ${{ github.ref_name }} --app-version ${{ github.ref_name }}
-      # The same .tgz is also published as an OCI artifact, so tools that speak
-      # Helm repos (ArgoCD, `helm install oci://...`) can resolve versions and
-      # semver ranges without a chart index: ghcr.io/dgowing95/charts/dchatbot:<tag>.
-      # The GitHub release asset (create_release) stays for direct downloads.
+        run: helm package charts/dis-ai-bot --version "$VERSION" --app-version "$VERSION"
       - name: Push Helm Chart to GHCR
+        env:
+          HELM_TOKEN: ${{ github.token }}
         run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
-          helm push dchatbot-${{ github.ref_name }}.tgz oci://ghcr.io/dgowing95/charts
+          printf '%s' "$HELM_TOKEN" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          helm push "dchatbot-$VERSION.tgz" oci://ghcr.io/dgowing95/charts
       - uses: actions/upload-artifact@v4
         with:
-          name: helm-dis-ai-bot-${{ github.ref_name }}
-          path: dchatbot-${{ github.ref_name }}.tgz      
+          name: helm-dis-ai-bot-${{ env.VERSION }}
+          path: dchatbot-${{ env.VERSION }}.tgz
 
   create_release:
     needs: build_chart
     runs-on: ubuntu-latest
     permissions:
-      contents: write    
+      contents: write
     env:
-      GH_TOKEN: ${{ github.token }}      
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
-          name: helm-dis-ai-bot-${{ github.ref_name }}
+          name: helm-dis-ai-bot-${{ env.VERSION }}
       - name: Create Release
         run: |
-          gh release create ${{ github.ref_name }} \
-            --title "Release ${{ github.ref_name }}" \
+          gh release create "$VERSION" \
+            --title "Release $VERSION" \
             --generate-notes
-
-          gh release upload ${{ github.ref_name }} dchatbot-${{ github.ref_name }}.tgz
+          gh release upload "$VERSION" "dchatbot-$VERSION.tgz"

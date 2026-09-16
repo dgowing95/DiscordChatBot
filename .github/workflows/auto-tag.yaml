@@ -11,22 +11,25 @@ concurrency:
 jobs:
   tag:
     runs-on: ubuntu-latest
+    environment: release-tag
     permissions:
       contents: read
     steps:
-      # Tags are pushed with TAG_PUSH_TOKEN, not GITHUB_TOKEN, for two reasons:
+      # Tags are created with TAG_PUSH_TOKEN, not GITHUB_TOKEN, for two reasons:
       # the "Restrict Tagging" ruleset blocks ref creation for everyone but
       # repo admins (GITHUB_TOKEN acts as the GitHub Actions app, which is not
       # one), and a ref pushed with GITHUB_TOKEN does not fire `on: push`, so
-      # release.yaml would never start. It is a fine-grained PAT with
-      # Contents: read and write on this repo -- see the Releasing section of
-      # AGENTS.md for how to mint a replacement when it expires.
+      # release.yaml would never start. The environment-scoped secret is a
+      # fine-grained PAT with Contents: read and write on this repo. See the
+      # Releasing section of AGENTS.md for replacement instructions.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.TAG_PUSH_TOKEN }}
+          persist-credentials: false
 
-      - name: Compute and push next tag
+      - name: Compute and create next tag
+        env:
+          GH_TOKEN: ${{ secrets.TAG_PUSH_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -39,20 +42,24 @@ jobs:
           if [ -z "$latest" ]; then
             latest="v2.0"
           fi
+          if [[ ! "$latest" =~ ^v[0-9]+\.[0-9]+$ ]]; then
+            echo "Refusing to increment malformed latest tag: $latest" >&2
+            exit 1
+          fi
           echo "Latest tag: $latest"
 
           major=${latest#v}
           minor=${major##*.}
           major=${major%.*}
           next="v${major}.$((minor + 1))"
+          if [[ ! "$next" =~ ^v[0-9]+\.[0-9]+$ ]]; then
+            echo "Refusing to create malformed tag: $next" >&2
+            exit 1
+          fi
           echo "Next tag: $next"
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag "$next"
-
-          # The push is what starts release.yaml, via its `on: push: tags`.
-          # Do NOT also dispatch it: a PAT push fires the tag event, so a
-          # dispatch on top would run the release twice against one tag and
-          # the loser would die on `gh release create ... already exists`.
-          git push origin "$next"
+          # Creating the ref with the PAT fires the tag push event that starts
+          # release.yaml. The PAT never enters git's credential store.
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f ref="refs/tags/$next" \
+            -f sha="$GITHUB_SHA"
