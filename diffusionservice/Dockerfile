@@ -3,7 +3,7 @@ FROM python:3.12-slim
 COPY requirements.txt .
 # CUDA torch wheels (they bundle the nvidia-* runtime libs); cu128 works with
 # CUDA >= 12.8 node drivers.
-RUN pip --no-cache-dir install torch --index-url https://download.pytorch.org/whl/cu128
+RUN pip --no-cache-dir install torch==2.11.0+cu128 --index-url https://download.pytorch.org/whl/cu128
 RUN pip --no-cache-dir install -r requirements.txt
 
 WORKDIR /app

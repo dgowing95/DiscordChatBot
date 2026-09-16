@@ -67,8 +67,18 @@ pytest
 No arguments and no `PYTHONPATH` — configuration lives in `pyproject.toml`, and this is
 exactly what CI runs.
 
+## Contributing and security
+
+Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a
+pull request and follow the [Code of Conduct](CODE_OF_CONDUCT.md). Report suspected
+vulnerabilities privately according to [SECURITY.md](SECURITY.md), not in a public issue.
+
 ## More
 
 [`AGENTS.md`](AGENTS.md) covers the runtime architecture, the full environment-variable
 reference, the prompt surface, and the conventions and gotchas worth knowing before
 changing anything. It is written for both humans and AI coding agents.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
