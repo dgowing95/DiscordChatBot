@@ -61,7 +61,7 @@ socksio==1.0.0
 soupsieve==2.9.2
 sse-starlette==3.4.8
 starlette==1.6.0
-tqdm==4.70.0
+tqdm==4.70.1
 truststore==0.10.4
 typing-inspection==0.4.4
 typing_extensions==4.16.0
