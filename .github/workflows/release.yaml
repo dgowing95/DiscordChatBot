@@ -131,7 +131,7 @@ jobs:
         run: |
           printf '%s' "$HELM_TOKEN" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           helm push "dchatbot-$VERSION.tgz" oci://ghcr.io/dgowing95/charts
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: helm-dis-ai-bot-${{ env.VERSION }}
           path: dchatbot-${{ env.VERSION }}.tgz
