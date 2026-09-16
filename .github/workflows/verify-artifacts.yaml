@@ -70,7 +70,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: azure/setup-helm@v4.3.0
+      - uses: azure/setup-helm@v5.0.1
       - name: Lint Helm Chart
         run: |
           helm lint charts/dis-ai-bot

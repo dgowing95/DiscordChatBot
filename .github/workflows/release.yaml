@@ -122,7 +122,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: azure/setup-helm@v4.3.0
+      - uses: azure/setup-helm@v5.0.1
       - name: Package Helm Chart
         run: helm package charts/dis-ai-bot --version "$VERSION" --app-version "$VERSION"
       - name: Push Helm Chart to GHCR
