@@ -1,7 +1,7 @@
 # Top-level deps only (pip resolves the rest). torch is installed separately in
 # the Dockerfile from PyTorch's CUDA index (cu128 wheels bundle the nvidia-*
 # runtime libraries), so it is intentionally not pinned here.
-fastapi==0.115.12
+fastapi==0.141.1
 uvicorn[standard]==0.34.2
 diffusers==0.33.1
 # transformers must stay < 5: v5 flattened CLIPTextModel (no `.text_model`),
