@@ -148,7 +148,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: helm-dis-ai-bot-${{ env.VERSION }}
       - name: Create Release
