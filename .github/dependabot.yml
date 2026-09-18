@@ -21,6 +21,13 @@ updates:
     cooldown:
       default-days: 14
     open-pull-requests-limit: 5
+    # See diffusionservice/requirements.txt: transformers 5 breaks diffusers'
+    # single-file CLIP loading, and compel >= 2.2 requires transformers 5.
+    ignore:
+      - dependency-name: transformers
+        update-types: ["version-update:semver-major"]
+      - dependency-name: compel
+        versions: [">=2.2.0"]
 
   - package-ecosystem: github-actions
     directory: /
