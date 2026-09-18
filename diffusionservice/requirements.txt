@@ -20,4 +20,4 @@ accelerate==1.7.0
 huggingface-hub==0.32.3
 safetensors==0.5.3
 Pillow==11.2.1
-numpy==2.2.6
+numpy==2.5.2
