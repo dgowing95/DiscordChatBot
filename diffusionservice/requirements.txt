@@ -3,7 +3,7 @@
 # runtime libraries), so it is intentionally not pinned here.
 fastapi==0.115.12
 uvicorn[standard]==0.34.2
-diffusers==0.33.1
+diffusers==0.40.0
 # transformers must stay < 5: v5 flattened CLIPTextModel (no `.text_model`),
 # and diffusers' from_single_file CLIP loader still dereferences it. Single-file
 # checkpoints (the Juggernaut-XL model in prod) then fail at startup with
