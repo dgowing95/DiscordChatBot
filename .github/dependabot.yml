@@ -10,6 +10,22 @@ updates:
     cooldown:
       default-days: 14
     open-pull-requests-limit: 5
+    # First matching group wins. openai-agents pins a narrow openai range, so
+    # the two can only be bumped together (each alone failed resolution on
+    # #85/#89, 2026-09-18); this group has no update-types filter so a major
+    # of either still travels with the other. Everything else lands as one
+    # minor/patch batch; other majors stay as individual PRs for review.
+    groups:
+      openai:
+        patterns:
+          - openai
+          - openai-agents
+      core-minor:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
 
   - package-ecosystem: pip
     directory: /diffusionservice
