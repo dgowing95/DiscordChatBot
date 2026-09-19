@@ -259,7 +259,7 @@ def load_pipeline():
     # at SDXL resolutions for a small speed cost, keeping 1024x1024 viable
     # on 8GB cards under CPU offload.
     p.enable_attention_slicing()
-    p.enable_vae_slicing()
+    p.vae.enable_slicing()
     if has_cuda and OFFLOAD != "none":
         if OFFLOAD == "sequential":
             p.enable_sequential_cpu_offload()

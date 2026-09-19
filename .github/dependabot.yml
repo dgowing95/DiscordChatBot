@@ -21,13 +21,18 @@ updates:
     cooldown:
       default-days: 14
     open-pull-requests-limit: 5
-    # See diffusionservice/requirements.txt: transformers 5 breaks diffusers'
-    # single-file CLIP loading, and compel >= 2.2 requires transformers 5.
-    ignore:
-      - dependency-name: transformers
-        update-types: ["version-update:semver-major"]
-      - dependency-name: compel
-        versions: [">=2.2.0"]
+    # The HF stack must move together: diffusers 0.38 + transformers 5 skewed
+    # apart and crashed the single-file (Juggernaut-XL) pipeline in prod
+    # (v2.31-v2.37, 2026-09-16). One grouped PR keeps them in lockstep.
+    groups:
+      huggingface:
+        patterns:
+          - diffusers
+          - transformers
+          - compel
+          - accelerate
+          - huggingface-hub
+          - safetensors
 
   - package-ecosystem: github-actions
     directory: /

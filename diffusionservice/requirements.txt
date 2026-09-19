@@ -1,23 +1,21 @@
 # Top-level deps only (pip resolves the rest). torch is installed separately in
 # the Dockerfile from PyTorch's CUDA index (cu128 wheels bundle the nvidia-*
 # runtime libraries), so it is intentionally not pinned here.
-fastapi==0.115.12
-uvicorn[standard]==0.34.2
-diffusers==0.33.1
-# transformers must stay < 5: v5 flattened CLIPTextModel (no `.text_model`),
-# and diffusers' from_single_file CLIP loader still dereferences it. Single-file
-# checkpoints (the Juggernaut-XL model in prod) then fail at startup with
-# "'CLIPTextModel' object has no attribute 'text_model'". Broke prod on
-# v2.31-v2.37 (2026-09-16); CI cannot catch it because the image is only built,
-# never run.
-transformers==4.52.4
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+# diffusers and transformers move together: transformers >= 5.6 flattened
+# CLIPTextModel (no `.text_model`), and only diffusers >= 0.40 knows that in
+# its single-file CLIP loader. diffusers 0.38 + transformers 5 crashed the
+# Juggernaut-XL (single-file) pipeline at startup on v2.31-v2.37 (2026-09-16).
+# CI cannot catch this because the image is only built, never run.
+diffusers==0.40.0
+transformers==5.16.1
 # Encodes prompts past CLIP's 77-token window (see _build_compel in main.py).
-# Pinned to 2.1.1 on purpose: 2.4.0 requires transformers>=5 (see above), and
-# every release from 2.2.0 on also pulls in `notebook` (the whole Jupyter server
-# stack) for a library this service imports two names from.
-compel==2.1.1
-accelerate==1.7.0
-huggingface-hub==0.32.3
-safetensors==0.5.3
-Pillow==11.2.1
-numpy==2.2.6
+# Compel 2.4 supports Transformers 5 and preserves chunked long prompts. It
+# brings the Jupyter/notebook stack transitively; that trade-off is deliberate.
+compel==2.4.0
+accelerate==1.15.0
+huggingface-hub==1.31.0
+safetensors==0.8.0
+Pillow==12.3.0
+numpy==2.5.2
