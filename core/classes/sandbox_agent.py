@@ -31,7 +31,10 @@ import time
 from dataclasses import dataclass, field
 
 import discord
-import httpx
+# httpx2, not httpx: openai>=3 speaks HTTPX2 and does not translate a legacy
+# httpx.Timeout (it lands inside the httpx2 client as an opaque object, not
+# per-phase floats). Nothing else in core needs legacy httpx any more.
+import httpx2
 from agents import (
     AsyncOpenAI,
     MaxTurnsExceeded,
@@ -319,18 +322,36 @@ def sandbox_request_timeout() -> int:
     client gives up on it (SANDBOX_REQUEST_TIMEOUT_SECONDS, default 180),
     down from the OpenAI client's unstated 600s default.
 
-    This is httpx's per-read timeout, not a wall-clock bound on the call, so
-    be clear about what it does and does not catch. It bounds a connection
-    that hangs (see SANDBOX_CONNECT_TIMEOUT_SECONDS) and a server that
-    accepts the request then sends nothing. It does NOT bound a server that
-    dribbles keep-alive bytes while it works: OpenRouter pads non-streaming
-    responses with whitespace, and every pad byte resets this timer, so such
-    a request is bounded only by sandbox_timeout(). Bounding that needs a
-    wall-clock timeout around the model call itself.
+    This is the HTTP client's per-read timeout, not a wall-clock bound on the
+    call: it catches a connection that hangs (see
+    SANDBOX_CONNECT_TIMEOUT_SECONDS) and a server that accepts the request
+    then sends nothing, but NOT a server that dribbles keep-alive bytes while
+    it works — OpenRouter pads non-streaming responses with whitespace, and
+    every pad byte resets this timer. That case is caught by the separate
+    wall-clock bound on the whole model call, sandbox_model_call_timeout(),
+    which is derived from this value rather than configured on its own.
     """
     return _positive_int(
         os.environ.get("SANDBOX_REQUEST_TIMEOUT_SECONDS"), DEFAULT_REQUEST_TIMEOUT_SECONDS
     )
+
+
+def sandbox_model_call_timeout() -> float:
+    """Wall-clock seconds one model call may take in total, all HTTP retries
+    included: (1 + SANDBOX_MAX_RETRIES) x SANDBOX_REQUEST_TIMEOUT_SECONDS.
+
+    Applied as ModelSettings.timeout, which the SDK's runner enforces by
+    cancelling the whole call (it wraps the OpenAI client's own retry loop,
+    so it does not add to the worst case). It is deliberately the same
+    figure that was already the documented worst case for a silent server,
+    so the only behaviour change is that a server which keeps the read
+    timeout alive with padding is now bounded by it too, instead of only by
+    sandbox_timeout(). Exceeding it raises agents.ModelTimeoutError, which
+    run_sandbox_task lets propagate exactly like the client's own
+    APITimeoutError already did: run_code_sandbox reports both as "the
+    sandbox itself failed".
+    """
+    return float((1 + sandbox_max_retries()) * sandbox_request_timeout())
 
 
 def sandbox_max_retries() -> int:
@@ -985,9 +1006,10 @@ def build_sandbox_agent(out_dir: str | None) -> "object":
             # minutes before the run reports anything. Connect gets its own
             # short budget so an unreachable host fails fast instead of
             # waiting out the read. Note the read timeout does not bound a
-            # server that keeps sending keep-alive padding — see
-            # sandbox_request_timeout() for what this does and does not catch.
-            timeout=httpx.Timeout(
+            # server that keeps sending keep-alive padding — that is what
+            # ModelSettings.timeout below is for; see sandbox_request_timeout()
+            # for what each does and does not catch.
+            timeout=httpx2.Timeout(
                 float(sandbox_request_timeout()), connect=SANDBOX_CONNECT_TIMEOUT_SECONDS
             ),
             max_retries=sandbox_max_retries(),
@@ -1014,7 +1036,9 @@ def build_sandbox_agent(out_dir: str | None) -> "object":
         tools=[ask_user, attach_file, send_preview_to_thread, check_thread_messages,
                say_in_thread],
         # Slightly cooler than the chat agent: code tasks want determinism.
-        model_settings=ModelSettings(temperature=0.5),
+        # timeout: the wall-clock bound on each model call that the client's
+        # read timeout above cannot provide (see sandbox_model_call_timeout).
+        model_settings=ModelSettings(temperature=0.5, timeout=sandbox_model_call_timeout()),
     )
 
 

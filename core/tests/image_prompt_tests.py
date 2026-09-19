@@ -1,4 +1,4 @@
-import httpx
+import httpx2
 import pytest
 from openai import APITimeoutError
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -143,7 +143,7 @@ async def test_build_falls_back_when_the_call_fails(monkeypatch):
     prompt quality, not the image."""
     monkeypatch.delenv("IMAGE_PROMPT_REWRITE_ENABLED", raising=False)
     client = _mock_client("")
-    timeout = APITimeoutError(request=httpx.Request("POST", "http://llamacpp:8080/v1"))
+    timeout = APITimeoutError(request=httpx2.Request("POST", "http://llamacpp:8080/v1"))
     client.chat.completions.create = AsyncMock(side_effect=timeout)
     with patch.object(image_prompt, "_get_client", return_value=client):
         assert await image_prompt.build_image_prompt("draw me a fox") == ("draw me a fox", "")

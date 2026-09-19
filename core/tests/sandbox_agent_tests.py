@@ -2156,6 +2156,91 @@ def test_max_retries_ignores_negative(monkeypatch):
     assert sandbox_agent.sandbox_max_retries() == 2
 
 
+# ---------------------- sandbox_model_call_timeout ----------------------
+
+def test_model_call_timeout_is_the_documented_worst_case(monkeypatch):
+    """(1 + retries) x request timeout: the figure SANDBOX_MAX_RETRIES' docs
+    already gave as the worst case, now enforced as a wall-clock bound."""
+    monkeypatch.setenv("SANDBOX_REQUEST_TIMEOUT_SECONDS", "100")
+    monkeypatch.setenv("SANDBOX_MAX_RETRIES", "2")
+    assert sandbox_agent.sandbox_model_call_timeout() == 300.0
+    monkeypatch.setenv("SANDBOX_MAX_RETRIES", "0")
+    assert sandbox_agent.sandbox_model_call_timeout() == 100.0
+
+
+def test_build_sandbox_agent_bounds_each_model_call(monkeypatch):
+    _clear_llm_env(monkeypatch)
+    monkeypatch.setenv("SANDBOX_REQUEST_TIMEOUT_SECONDS", "100")
+    monkeypatch.setenv("SANDBOX_MAX_RETRIES", "1")
+    agent = sandbox_agent.build_sandbox_agent(None)
+
+    assert agent.model_settings.timeout == 200.0
+    # Regression: openai>=3 talks HTTPX2 and stores a legacy httpx.Timeout as
+    # one opaque object in every phase of the underlying client's timeout
+    # instead of translating it. The per-phase budgets must be plain floats.
+    inner = agent.model._client._client.timeout
+    assert (inner.connect, inner.read) == (
+        sandbox_agent.SANDBOX_CONNECT_TIMEOUT_SECONDS, 100.0)
+
+
+@pytest.mark.asyncio
+async def test_model_call_timeout_bounds_a_server_that_dribbles_padding():
+    """The case the read timeout cannot catch (OpenRouter pads non-streaming
+    responses with whitespace, resetting the read timer on every byte) is
+    exactly what ModelSettings.timeout is here for. Pinned against a real
+    chat-completions call so an SDK release that quietly made the timeout
+    Responses-only would fail here rather than in prod."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    import httpx2
+    from agents import (Agent, AsyncOpenAI, ModelSettings, ModelTimeoutError,
+                        OpenAIChatCompletionsModel, RunConfig, Runner)
+
+    class Dribble(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            try:
+                while True:
+                    self.wfile.write(b" ")
+                    self.wfile.flush()
+                    time.sleep(0.05)
+            except OSError:
+                pass  # client gave up: exactly what is being tested
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Dribble)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        model = OpenAIChatCompletionsModel(
+            model="x",
+            openai_client=AsyncOpenAI(
+                base_url=f"http://127.0.0.1:{server.server_address[1]}/v1", api_key="x",
+                # a read timeout shorter than the wall-clock one, to prove
+                # the padding really does keep it from ever firing
+                timeout=httpx2.Timeout(0.3, connect=1.0), max_retries=0,
+            ),
+        )
+        agent = Agent(name="a", instructions="", model=model,
+                      model_settings=ModelSettings(timeout=0.6))
+        started = time.monotonic()
+        with pytest.raises(ModelTimeoutError):
+            await asyncio.wait_for(
+                Runner.run(agent, "hi", max_turns=1,
+                           run_config=RunConfig(tracing_disabled=True)),
+                timeout=5,
+            )
+        assert time.monotonic() - started < 3
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 @pytest.mark.asyncio
 async def test_persist_sandbox_snapshot_noop_without_snapshot_id():
     session = MagicMock()
