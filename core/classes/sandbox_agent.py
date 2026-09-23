@@ -2019,7 +2019,7 @@ _STEERING_STATUS = {
     "done": "done",
     "answered": "answered",
     "noted": "taken into account",
-    "accepted": "accepted, but the sandbox did not confirm it was finished",
+    "accepted": "accepted by the sandbox",
     "declined": "declined by the sandbox",
     "superseded": "superseded by a later message",
     "deferred": "left for a follow-up in this thread",
@@ -2027,7 +2027,11 @@ _STEERING_STATUS = {
     "unseen": "arrived too late for the sandbox to see it; NOT applied",
     "late": "arrived as the run was finishing; NOT applied (the user can ask again in this thread)",
 }
-_HANDLED_STATUSES = {"done", "answered", "noted"}
+# "accepted" counts as handled: the model replied it would apply it, and in
+# live testing the change was there even when it never went on to say done.
+# Treating it as unconfirmed made the outer model hedge about work the user
+# could see was finished.
+_HANDLED_STATUSES = {"done", "answered", "noted", "accepted"}
 
 
 def sandbox_steering_note(steering) -> str:
@@ -2060,9 +2064,9 @@ def sandbox_steering_note(steering) -> str:
     note = ("\n\nPeople posted in the sandbox's thread while it worked. What became "
             "of each message:\n" + "\n".join(lines) + "\n")
     if handled:
-        note += ("Treat the ones marked done, answered or taken into account as part "
-                 "of what was asked: do not call the result a mistake or offer to "
-                 "undo it. ")
+        note += ("Treat the ones marked done, accepted, answered or taken into "
+                 "account as part of what was asked: do not call the result a "
+                 "mistake or offer to undo it. ")
     note += ("Do not claim any other message was applied; if one matters, tell the "
              "user it was not done and that they can ask again in the thread.")
     return note
@@ -2072,8 +2076,8 @@ def sandbox_steering_note(steering) -> str:
 # sits under "Sandbox closed" in the thread, for the people who wrote them.
 # "accepted" (the model replied will_apply but never said done) is left out
 # on purpose: the writer already got a 👍 reply and can see the result, so a
-# ⚠️ line for it read as noise in live testing. The outer model still hears
-# about it via sandbox_steering_note.
+# ⚠️ line for it read as noise in live testing. sandbox_steering_note treats
+# it as handled for the same reason.
 _UNRESOLVED_LABELS = {
     "unacknowledged": "Never answered",
     "unseen": "Not seen in time",

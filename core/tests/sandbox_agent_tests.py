@@ -3812,3 +3812,14 @@ def test_closing_note_lists_unhandled_messages_but_not_accepted_ones():
     assert "wizard hat" not in note
     assert "Never answered: “and a cape”" in note
     assert sandbox_agent.sandbox_unresolved_note(rows[:1], in_thread=True) == ""
+
+
+def test_steering_note_treats_an_accepted_message_as_handled():
+    # The model replied it would apply it; the outer model must not hedge
+    # about it or call the result a mistake.
+    rows = [{"author": "ana", "text": "make it a silly cow", "status": "accepted",
+             "reply": "on it"}]
+    note = sandbox_agent.sandbox_steering_note(rows)
+    assert "“make it a silly cow” → accepted by the sandbox" in note
+    assert "do not call the result a mistake" in note
+    assert "not confirm" not in note
