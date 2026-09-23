@@ -174,9 +174,7 @@ class SandboxConversation:
         self.ledger = ledger if ledger is not None else inbox.RunLedger(thread_id=0)
         self.thread = thread
         self._tool_lock = asyncio.Lock()
-        self._staged: tuple[list[int], int, int] | None = None
-        # Revision of the ledger the last COMPLETED model call saw.
-        self.seen_revision = 0
+        self._staged: tuple[list[int], int] | None = None
         # Ids that a respond_to_updates in the latest response covers.
         self.batch_ack: set[int] = set()
         self.model_calls = 0
@@ -202,7 +200,7 @@ class SandboxConversation:
         try:
             anchor = len(items)
             staged = self.ledger.unpresented()
-            self._staged = ([e.seq for e in staged], anchor, self.ledger.revision)
+            self._staged = ([e.seq for e in staged], anchor)
             placed: dict[int, list[inbox.ThreadEvent]] = {}
             for e in self.ledger.events:
                 if e.stage != inbox.RECEIVED and e.anchor is not None:
@@ -220,6 +218,9 @@ class SandboxConversation:
             return ModelInputData(input=out, instructions=instructions)
         except Exception as e:
             logger.warning(f"Sandbox conversation: input filter failed, sending input unchanged: {e}")
+            # The call goes out without the messages, so nothing may be
+            # committed as presented after it.
+            self._staged = None
             return ModelInputData(input=items, instructions=instructions)
 
     # -- 2. commit after a completed call --------------------------------------
@@ -229,11 +230,10 @@ class SandboxConversation:
         was staged was really seen."""
         self.model_calls += 1
         if self._staged is not None:
-            seqs, anchor, revision = self._staged
+            seqs, anchor = self._staged
             self._staged = None
             for e in self.ledger.mark_presented(seqs, anchor):
                 observe_sandbox_input_presentation(e.presented_at - e.received_at)
-            self.seen_revision = revision
         acked: set[int] = set()
         for item in getattr(response, "output", None) or []:
             if getattr(item, "type", None) != "function_call":

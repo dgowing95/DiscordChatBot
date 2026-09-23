@@ -70,8 +70,11 @@ MAX_PENDING_MESSAGES = 20
 MAX_PENDING_CHARS = 4000
 MAX_MESSAGE_CHARS = 1000
 # Bound on the whole retained record, handled or not. Only RESOLVED events
-# are ever compacted away (oldest first); unresolved guidance is never
-# silently evicted — the pending caps above reject new input instead.
+# are ever compacted away (oldest first); unresolved guidance — including
+# ADDRESSED ones, accepted but never marked done — is never silently
+# evicted. When the record is at this bound and nothing in it is resolved,
+# deliver() rejects new input (FULL) instead, so the context the coordinator
+# re-sends on every call stays bounded either way.
 MAX_RETAINED_EVENTS = 60
 # Messages that arrive after the finalization boundary (see finalize()).
 MAX_FOLLOW_UPS = 10
@@ -253,6 +256,9 @@ class RunLedger:
         if len(pending) >= MAX_PENDING_MESSAGES:
             return FULL
         if sum(len(e.text) for e in pending) + len(text) > MAX_PENDING_CHARS:
+            return FULL
+        if (len(self.events) >= MAX_RETAINED_EVENTS
+                and all(e.stage != RESOLVED for e in self.events)):
             return FULL
         self.revision += 1
         event.seq = self.revision

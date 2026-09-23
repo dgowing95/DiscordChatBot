@@ -612,3 +612,22 @@ async def test_respond_to_updates_accepts_a_bare_number():
                       tool_call_id="r1", tool_arguments=raw)
     await sandbox_agent.respond_to_updates.on_invoke_tool(ctx, raw)
     assert conv.ledger.events[0].outcome == "will_apply"
+
+
+def test_a_filter_failure_after_staging_commits_nothing():
+    from agents.run_config import CallModelData, ModelInputData
+    conv = _conversation()
+    _deliver(conv, 11, "make it blue")
+    data = CallModelData(model_data=ModelInputData(input=[{"role": "user", "content": "t"}],
+                                                   instructions=None),
+                         agent=MagicMock(), context=None)
+    real_render = conv_mod.render_event
+    conv_mod.render_event = MagicMock(side_effect=RuntimeError("boom"))
+    try:
+        out = conv.input_filter(data)
+    finally:
+        conv_mod.render_event = real_render
+    assert out.input == [{"role": "user", "content": "t"}]
+    conv.on_model_response(MagicMock(output=[]))
+    # the model never saw it, so it must not count as presented
+    assert conv.ledger.events[0].stage == inbox.RECEIVED

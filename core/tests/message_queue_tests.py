@@ -340,3 +340,15 @@ async def test_a_reply_reference_is_passed_along(claimed_thread):
         await main_mod.on_message(msg)
 
     assert claimed_thread.events[0].reply_to == 555
+
+
+@pytest.mark.asyncio
+async def test_an_empty_message_is_explained_too(claimed_thread):
+    # e.g. a sticker: no text and no attachments
+    main_mod = _import_main()
+    with patch.object(main_mod, "client", MagicMock()):
+        msg = _thread_message("")
+        await main_mod.on_message(msg)
+
+    msg.add_reaction.assert_awaited_once_with("🚫")
+    assert "only read text" in msg.reply.await_args.args[0]

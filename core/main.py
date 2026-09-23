@@ -206,6 +206,8 @@ _SANDBOX_REACTIONS = {
     sandbox_thread_inbox.FINISHING: "⏳",
 }
 _SANDBOX_REPLIES = {
+    sandbox_thread_inbox.EMPTY: (
+        "🚫 The running sandbox can only read text — send that as a text message."),
     sandbox_thread_inbox.FINISHING: (
         "⏳ This sandbox run is finishing, so that hasn't been applied. Once it "
         "closes, @mention me in this thread to carry on with it."),

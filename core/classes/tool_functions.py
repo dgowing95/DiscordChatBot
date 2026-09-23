@@ -616,8 +616,13 @@ async def _save_conversation_record(snapshot_id, outcomes, outcome: str, ledger)
     from classes.sandbox_conversation_store import SandboxConversationStore, build_record
 
     question = None
-    if ledger is not None and ledger.question is not None:
-        question = ledger.question.text
+    if ledger is not None:
+        # Re-read at save time: the claim is held through the closing note,
+        # so a message can still land in ledger.follow_ups after the caller
+        # took its snapshot — and it was promised it would be kept.
+        outcomes = ledger.outcomes()
+        if ledger.question is not None:
+            question = ledger.question.text
     try:
         await SandboxConversationStore().save(
             snapshot_id, build_record(outcomes, outcome=outcome, open_question=question))

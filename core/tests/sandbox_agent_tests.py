@@ -3753,3 +3753,26 @@ async def test_every_pass_of_a_run_shares_one_group_id():
         await prod_sandbox_agent.run_sandbox_task("t")
 
     assert len(captured) == 1 and captured[0].startswith("sandbox-")
+
+
+@pytest.mark.asyncio
+async def test_a_message_during_the_closing_note_is_still_saved(clean_inbox, _no_conversation_record_redis):
+    # The claim is held through the closing note, and ⏳ promised the
+    # message would be kept — so the saved record must include it.
+    message = MagicMock()
+    message.author.id = 1
+    thread, patches = _sandbox_tool_patches(_text_result("done"))
+    thread.send = AsyncMock()
+
+    async def _embed(channel, description, *args, **kwargs):
+        if kwargs.get("title") == "Sandbox closed":
+            clean_inbox.deliver(thread.id, 77, 1, "ana", "and a csv too")
+
+    with patches[0], patches[1], patches[2], patches[3], \
+         patch.object(prod_tool_functions.Common, "send_tool_discord_embed",
+                      AsyncMock(side_effect=_embed)):
+        await prod_tool_functions.run_code_sandbox.on_invoke_tool(
+            _tool_context(message), json.dumps({"task": "print 42"}))
+
+    snapshot_id, record = _no_conversation_record_redis.save.await_args.args
+    assert [c["text"] for c in record["carry"]] == ["and a csv too"]

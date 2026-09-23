@@ -315,3 +315,15 @@ def test_given_up_events_stop_blocking_but_stay_unresolved():
     ledger.give_up_on(ledger.events[0])
     assert ledger.unaddressed() == []
     assert ledger.outcomes()[0]["status"] == "unacknowledged"
+
+
+def test_a_record_full_of_unresolved_guidance_rejects_new_input():
+    # Accepted-but-never-done events cannot be compacted, and every one is
+    # re-sent on each model call, so the record must stop growing instead.
+    ledger = _ledger()
+    for i in range(inbox.MAX_RETAINED_EVENTS):
+        ledger.deliver(i + 1, 1, "ana", f"m{i}")
+        ledger.mark_presented([i + 1], anchor=1)
+        ledger.record_decision([i + 1], "will_apply")
+    assert ledger.deliver(1000, 1, "ana", "one more") == inbox.FULL
+    assert len(ledger.events) == inbox.MAX_RETAINED_EVENTS
