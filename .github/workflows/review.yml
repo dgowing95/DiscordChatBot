@@ -1,0 +1,59 @@
+name: Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]    
+
+jobs:
+  code_review:
+    # Drafts are the batching area: review once the author marks the PR ready, then review
+    # only subsequent fix ranges. This avoids spending a full review on every work-in-progress
+    # push while preserving a full pass for opened/ready/reopened PRs.
+    if: github.event.pull_request.draft == false
+    runs-on: [ ubuntu-latest ]
+    timeout-minutes: 45
+    concurrency:
+      group: review-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Run OpenCodeReview
+        uses: alibaba/open-code-review@7f8f254d8407b26edff06f2e3a5940906f1f28ae # v1.11.9
+        with:
+          llm_url: https://opencode.ai/zen/go/v1/chat/completions
+          llm_auth_token: ${{ secrets.OPENCODE_API_KEY }}
+          llm_model: glm-5.3-flash
+          llm_use_anthropic: 'false'
+          # Pin the installed CLI as well as the action commit. The action otherwise installs
+          # `latest`, which can change review behaviour without a repository diff.
+          ocr_version: 1.11.9
+          # The action's default extra_body is {"thinking": {"type": "disabled"}}.
+          # Some of the upstreams OpenCode Go balances glm-5.3-flash across
+          # reject that field with a 400 (unknown field / Z.ai 1210).
+          llm_extra_body: '{}'
+          # OpenCode Go requires a stable per-conversation session id for
+          # routing/prompt caching; without it every request 400s with
+          # MissingSessionID. https://opencode.ai/docs/go/#where-can-i-use-it
+          # Repository-qualified so PR numbers can't collide across repos
+          # sharing this self-hosted runner.
+          llm_extra_headers: x-opencode-session=${{ github.repository }}-pr-${{ github.event.pull_request.number }}
+          # Minutes (1-120), validated by the action's own input check; the default is 15.
+          review_task_timeout: 40
+          # A synchronization is a narrow regression pass over the new fix range. Full reviews
+          # retain the default two internal rounds for recall.
+          effort: ${{ github.event.action == 'synchronize' && 'low' || 'medium' }}
+          sticky_summary: 'true'
+          checkpoint_range: 'true'
+          incremental: 'true'
+          # Low-severity findings remain visible in the sticky summary without creating a thread
+          # that agents feel obliged to fix. Style and documentation are likewise advisory.
+          route_severity_below: low
+          route_categories: style,documentation
+          # The PR body carries scope, invariants, non-goals, and verification; the title alone
+          # did not give the reviewer enough information to distinguish defects from intent.
+          background: >-
+            PR title: ${{ github.event.pull_request.title }}
+
+            PR description: ${{ github.event.pull_request.body }}
