@@ -59,6 +59,8 @@ from dataclasses import dataclass, field
 import discord
 from agents import RunHooks
 
+from classes.sandbox_conversation import GATE_REFUSAL_PREFIX
+
 logger = logging.getLogger(__name__)
 
 EDIT_INTERVAL_SECONDS = 15.0  # Discord allows 5 edits/minute per channel
@@ -169,6 +171,9 @@ class _Block:
     output: str = ""
     exit_code: int | None = None
     process_id: int | None = None
+    # Refused by the conversation gate: it never ran, so it must not sit in
+    # the embed looking like a command still running.
+    held: bool = False
 
 
 def _fence(text: str, lang: str = "") -> str:
@@ -254,6 +259,11 @@ class SandboxTranscript:
         block.exit_code = exit_code
         block.process_id = process_id
 
+    def mark_held(self) -> None:
+        """The latest command was refused by the conversation gate (thread
+        input to answer first) and never ran."""
+        self._current_block().held = True
+
     def set_thinking(self, thinking: bool) -> None:
         self._thinking = bool(thinking)
 
@@ -275,6 +285,8 @@ class SandboxTranscript:
     def _state_color(self) -> int:
         if self._blocks:
             last = self._blocks[-1]
+            if last.held:
+                return COLOR_TOOL
             if last.exit_code is None:
                 return COLOR_RUNNING
             if last.exit_code != 0:
@@ -282,6 +294,8 @@ class SandboxTranscript:
         return COLOR_TOOL
 
     def _status_line(self, block: _Block) -> str:
+        if block.held:
+            return "⏸ not run — answering thread messages first"
         if block.exit_code is not None:
             if block.exit_code == 0:
                 return "exit 0"
@@ -410,6 +424,10 @@ class SandboxProgressHooks(RunHooks):
     async def on_tool_end(self, context, agent, tool, result) -> None:
         name = getattr(tool, "name", None)
         if name not in ("exec_command", "write_stdin"):
+            return
+        if name == "exec_command" and str(result).startswith(GATE_REFUSAL_PREFIX):
+            self._note(self.transcript.mark_held)
+            await self._maybe_flush()
             return
         parsed = parse_exec_result(result)
         # A pure write_stdin poll with no fresh output and no exit adds

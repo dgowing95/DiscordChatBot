@@ -308,31 +308,10 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
         return ("I can't run that in the sandbox — it was blocked by the safety "
                 "guard. Please rephrase with a safe, non-harmful task.")
 
-    from classes.config_manager import configManager
-    from classes.sandbox_agent import (
-        ensure_sandbox_thread,
-        run_sandbox_task,
-        sandbox_max_turns,
-        sandbox_closing_note,
-        sandbox_snapshot_exists,
-        sandbox_snapshot_id_for,
-        sandbox_snapshot_remaining_seconds,
-        sandbox_outcome_note,
-        sandbox_timeout,
-        sandbox_tool_result,
-        sandbox_workspace_note,
-        MAX_ARTIFACT_BYTES,
-        MAX_ARTIFACT_FILES,
-    )
-    from classes.sandbox_progress import (
-        DESCRIPTION_CHARS,
-        SandboxProgressHooks,
-        sandbox_progress_updates_enabled,
-    )
+    from classes.sandbox_agent import ensure_sandbox_thread
     from classes import sandbox_thread_inbox
 
     original_message = wrapper.context.get("original_message")
-    discord_client = wrapper.context.get("discord_client")
     requesting_user_id = wrapper.context.get("user_id")
     # A sandbox thread this outer turn already resolved. The context dict is
     # one object for the whole Runner.run (text_llm_handler builds it once),
@@ -355,23 +334,88 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
     # redirect that final reply into the same thread.
     wrapper.context["sandbox_thread"] = channel
     in_thread = isinstance(channel, discord.Thread)
-    # Backstop for the concurrency guard in main.py's on_message. Two paths
-    # get past that one: queue lag (two mentions land before either worker
-    # starts, so both see no active run) and the outer model emitting two
-    # run_code_sandbox calls in a single turn. Either way two containers
+    # Claimed immediately after the thread is resolved and BEFORE any other
+    # await: the old check-then-register had several awaits in between
+    # (snapshot lookup, config read, embeds), so two runs could both pass the
+    # check. Two paths reach this with a run already claimed: queue lag (two
+    # mentions land before either worker starts) and the outer model emitting
+    # two run_code_sandbox calls in a single turn. Either way two containers
     # would race to persist to dcb:sandbox_snapshot:{thread_id} on teardown
-    # and the last to finish would clobber the other — so forward the task
-    # into the run already in flight instead of starting a second one.
-    if in_thread and sandbox_thread_inbox.is_run_active(channel.id):
-        sandbox_thread_inbox.deliver(
-            channel.id, getattr(original_message, "id", 0),
-            getattr(getattr(original_message, "author", None), "display_name", "the user"),
-            task,
-        )
+    # and the last to finish would clobber the other — so the task is
+    # forwarded into the run already in flight instead of starting a second.
+    ledger = None
+    if in_thread:
+        ledger = sandbox_thread_inbox.claim_run(channel.id, requesting_user_id)
+        if ledger is None:
+            return _forward_to_running_sandbox(channel, original_message, task)
+    try:
+        return await _run_claimed_sandbox(
+            wrapper, task, channel, thread_created, in_thread, ledger)
+    finally:
+        # Held through artifact delivery and the closing note, not just the
+        # run: the claim used to end before delivery, so a message posted
+        # while files were still uploading went to the outer LLM instead and
+        # was answered out of context. release_run only drops THIS ledger,
+        # so a stale caller cannot end somebody else's run.
+        if ledger is not None:
+            from classes.sandbox_conversation import record_exit_metrics
+            record_exit_metrics(ledger)
+            sandbox_thread_inbox.release_run(channel.id, ledger)
+
+
+def _forward_to_running_sandbox(channel, original_message, task: str) -> str:
+    """Hands a second run_code_sandbox call to the run already claimed in
+    this thread, and tells the outer model honestly whether that worked."""
+    from classes import sandbox_thread_inbox
+
+    author = getattr(original_message, "author", None)
+    outcome = sandbox_thread_inbox.deliver(
+        channel.id,
+        getattr(original_message, "id", None),
+        getattr(author, "id", None),
+        getattr(author, "display_name", "the user"),
+        task,
+    )
+    if outcome in (sandbox_thread_inbox.ACCEPTED, sandbox_thread_inbox.DUPLICATE):
         return ("A sandbox is already running in this thread, so this request was "
                 "handed to the run in progress instead of starting a second one. "
                 "Tell the user it was passed along to the sandbox that's already "
                 "working, and do not retry.")
+    if outcome == sandbox_thread_inbox.FINISHING:
+        return ("A sandbox run in this thread is finishing, so this request could not "
+                "be applied to it; it has been noted for the next run here. Tell the "
+                "user to @mention you in this thread once it has closed to carry on "
+                "with it, and do not retry now.")
+    return ("A sandbox is already running in this thread and could not take this "
+            "request (it is too long, or the run already has too many unread "
+            "messages). Tell the user to ask again in the thread once it has "
+            "finished, and do not retry now.")
+
+
+async def _run_claimed_sandbox(wrapper, task, channel, thread_created, in_thread, ledger) -> str:
+    """run_code_sandbox after the thread has been resolved and (in a thread)
+    claimed: announce, run, deliver, close. Split out only so the claim's
+    release can sit in one `finally` around all of it."""
+    from classes.config_manager import configManager
+    from classes.sandbox_agent import (
+        run_sandbox_task,
+        sandbox_snapshot_exists,
+        sandbox_snapshot_id_for,
+        sandbox_outcome_note,
+        sandbox_tool_result,
+        sandbox_unresolved_note,
+        sandbox_workspace_note,
+    )
+    from classes.sandbox_conversation_store import SandboxConversationStore, resume_preamble
+    from classes.sandbox_progress import (
+        DESCRIPTION_CHARS,
+        SandboxProgressHooks,
+        sandbox_progress_updates_enabled,
+    )
+
+    original_message = wrapper.context.get("original_message")
+    discord_client = wrapper.context.get("discord_client")
+    requesting_user_id = wrapper.context.get("user_id")
     if thread_created:
         try:
             await Common.send_tool_discord_embed(
@@ -386,6 +430,17 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
     snapshot_id = sandbox_snapshot_id_for(channel)
     resumed = await sandbox_snapshot_exists(snapshot_id)
     workspace_note = sandbox_workspace_note(resumed)
+    # Loose ends the previous run in this thread left behind (messages that
+    # arrived too late, an unanswered question). Offered to this run as
+    # context — a follow-up in the thread IS the explicit resume — and
+    # replaced by this run's own record at the end. Independent of the
+    # workspace snapshot: either can be missing without the other.
+    run_task = task
+    if snapshot_id is not None:
+        try:
+            run_task = resume_preamble(await SandboxConversationStore().load(snapshot_id)) + task
+        except Exception as e:
+            logger.warning(f"Sandbox: could not load this thread's conversation record: {e}")
 
     progress = None
     # Per-guild toggle (/sandbox_progress_updates, default off). A config
@@ -413,36 +468,30 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
             channel,
             f"{workspace_note}\nRunning in sandbox: {shown}",
         )
-        # Only in a real thread: begin_run() below is gated the same way, and
-        # main.py only routes messages to a run it can see as active. Sent
-        # unconditionally, this told a user in the parent channel (the
-        # thread-creation-failed fallback) that their messages would reach the
-        # sandbox, when nothing would have picked them up.
-        if in_thread:
-            await Common.send_tool_discord_embed(
-                channel,
-                "📨 Messages you send here will be received by the sandbox AI"
-                " while the sandbox is running. The AI may or may not respond.",
-                0xB0F400,
-                "Thread Linked to Sandbox",
-            )
-
+    # Sent whatever the progress setting: conversational replies are not
+    # part of the optional progress embed, so a user needs to know they can
+    # talk to the run either way. Only in a real thread, where a run is
+    # claimed and main.py routes messages to it; sent in the parent channel
+    # (the thread-creation-failed fallback) it would promise a conversation
+    # nothing would pick up.
     if in_thread:
-        sandbox_thread_inbox.begin_run(channel.id)
-    # What people said to the run while it happened. main.py routes those
-    # messages to the sandbox instead of enqueuing them, and the outer
-    # model's history was built before the run started, so without this it
-    # answers a request it never saw change — observed: a mid-run "make the
-    # milk red" produced a red image the outer model called a mistake.
-    steering = ""
+        await Common.send_tool_discord_embed(
+            channel,
+            "📨 Reply here while it runs — no @mention needed — to change the task "
+            "or ask a question. It will answer before its next step.",
+            0xB0F400,
+            "Thread Linked to Sandbox",
+        )
+
     try:
         result = await run_sandbox_task(
-            task,
+            run_task,
             progress,
             thread=channel,
             client=discord_client,
             requesting_user_id=requesting_user_id,
             resumed=resumed,
+            ledger=ledger,
         )
     except Exception as e:
         logger.warning(f"Sandbox task failed: {e}")
@@ -450,23 +499,14 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
             await progress.finalize("❌ Stopped: the sandbox itself failed.")
         # The "Running in sandbox" embed already went out, so this path needs
         # a closing note too or the thread is left looking mid-run forever.
+        outcomes = ledger.outcomes() if ledger is not None else []
         await _send_sandbox_closing_note(
-            channel, snapshot_id, in_thread, "❌ Stopped: the sandbox itself failed.")
+            channel, snapshot_id, in_thread,
+            "❌ Stopped: the sandbox itself failed." + sandbox_unresolved_note(outcomes, in_thread))
+        await _save_conversation_record(snapshot_id, outcomes, "infra_error", ledger)
         return ("The sandbox task failed (the code sandbox may be unavailable). "
                 "Tell the user the sandbox is not working right now and do "
                 "not retry the same task.")
-    finally:
-        # Must be in a finally: leaving the thread registered would silently
-        # swallow every later message posted there (main.py routes them to a
-        # run that no longer exists) instead of answering them. history()
-        # first — end_run drops the transcript along with the queue.
-        #
-        # The `except` path above cannot see this: its return value is already
-        # built by the time a finally runs. Accepted — that path means the
-        # sandbox itself died, so there is no result for steering to explain.
-        if in_thread:
-            steering = sandbox_thread_inbox.history(channel.id)
-            sandbox_thread_inbox.end_run(channel.id)
 
     # Ground truth from the run itself. It only disagrees with the badge
     # already posted above when the saved workspace turned out not to be
@@ -494,6 +534,14 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
         # the last "still running" / thinking snapshot)
         note = "✅ Done." if result.ok else sandbox_outcome_note(result.error)
         await progress.finalize(note)
+
+    # Acknowledgements the sandbox wrote while Discord was refusing sends.
+    # Posted now, before the result, so the thread reads in order.
+    for reply in getattr(result, "unsent_replies", None) or []:
+        try:
+            await channel.send(reply[:1900])
+        except Exception as e:
+            logger.warning(f"Sandbox: failed to post a delayed reply: {e}")
 
     # The sandbox agent's own closing message, written FOR the user (see
     # SANDBOX_INSTRUCTIONS' final bullet). It rides on the first file so the
@@ -528,6 +576,11 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
         except Exception as e:
             logger.warning(f"Sandbox: failed to post the agent's closing message: {e}")
 
+    # What happened to each thread message. Read from the live ledger rather
+    # than the result, which was built before delivery: anything posted while
+    # the files were uploading was filed as a follow-up in the meantime.
+    outcomes = ledger.outcomes() if ledger is not None else list(getattr(result, "conversation", None) or [])
+
     # After the artifacts, before the return: the thread's "here is how the run
     # ended, and how long you can pick it back up" marker. The outcome line only
     # goes out when the run did NOT finish normally. Posted on every path where
@@ -535,7 +588,9 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
     # returns (content guard, forwarded-to-a-running-run) where nothing opened.
     outcome = "" if result.ok else sandbox_outcome_note(result.error)
     remaining = await _send_sandbox_closing_note(
-        channel, snapshot_id, in_thread, outcome)
+        channel, snapshot_id, in_thread, outcome + sandbox_unresolved_note(outcomes, in_thread))
+    await _save_conversation_record(
+        snapshot_id, outcomes, "ok" if result.ok else (result.error or "failed"), ledger)
 
     # Everything the outer model is told is built by sandbox_tool_result
     # (sandbox_agent.py) — pure, and unit-tested without a Discord channel.
@@ -547,9 +602,27 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
         sent_names=sent_names,
         in_thread=in_thread,
         resumable=remaining is not None,
-        steering=steering,
+        steering=outcomes,
         resume_correction=resume_correction,
     )
+
+
+async def _save_conversation_record(snapshot_id, outcomes, outcome: str, ledger) -> None:
+    """Persists this run's loose ends for the next run in the thread (see
+    classes/sandbox_conversation_store.py). Best-effort and independent of
+    the workspace snapshot; a failure is logged, never raised."""
+    if snapshot_id is None:
+        return
+    from classes.sandbox_conversation_store import SandboxConversationStore, build_record
+
+    question = None
+    if ledger is not None and ledger.question is not None:
+        question = ledger.question.text
+    try:
+        await SandboxConversationStore().save(
+            snapshot_id, build_record(outcomes, outcome=outcome, open_question=question))
+    except Exception as e:
+        logger.warning(f"Sandbox: could not save this thread's conversation record: {e}")
 
 
 @function_tool

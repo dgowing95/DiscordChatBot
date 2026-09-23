@@ -542,3 +542,22 @@ def test_hooks_pass_the_workspace_note_into_the_transcript():
     hooks = SandboxProgressHooks(MagicMock(), "do a thing", workspace_note="🆕 **Fresh**")
     _, spec = hooks.transcript.render_message()
     assert spec.description.startswith("🆕 **Fresh**\n")
+
+
+@pytest.mark.asyncio
+async def test_a_command_the_gate_refused_is_shown_as_held_not_running():
+    # A refused command never ran; left as-is it would sit in the embed as
+    # "… still running" with the running colour until the run ended.
+    channel, message = _channel_with_message()
+    hooks = SandboxProgressHooks(channel, "t", edit_interval=0)
+    await hooks.start()
+
+    args = _ctx(json.dumps({"cmd": "make red.png"}))
+    await hooks.on_tool_start(args, None, _tool("exec_command"))
+    await hooks.on_tool_end(args, None, _tool("exec_command"),
+                            "Not run (exec_command): thread message(s) #1 need a response first.")
+
+    _, embed = _last_flush(message)
+    assert "not run" in embed.fields[0].value
+    assert "still running" not in embed.fields[0].value
+    assert embed.color.value == COLOR_TOOL

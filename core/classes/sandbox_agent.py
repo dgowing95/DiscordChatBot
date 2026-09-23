@@ -25,9 +25,12 @@ functions so the pure helpers below are testable without them.
 import logging
 import asyncio
 import io
+import json
 import os
 import posixpath
+import re
 import time
+import uuid
 from dataclasses import dataclass, field
 
 import discord
@@ -50,6 +53,12 @@ from agents import (
 from agents.sandbox.config import DEFAULT_PYTHON_SANDBOX_IMAGE
 
 from classes import sandbox_thread_inbox
+from classes.sandbox_conversation import (
+    MAX_CONTINUATIONS,
+    MIN_CONTINUATION_TURNS,
+    SandboxConversation,
+    make_agent_hooks,
+)
 from classes.llm_config import DEFAULT_LLM_API_KEY, DEFAULT_LLM_HOST, DEFAULT_MODEL, env_or
 
 logger = logging.getLogger(__name__)
@@ -155,17 +164,17 @@ specification.
 - Do the work: write files, run commands, read the output, iterate until the
   task is done. If a step fails, read the error, fix it and retry.
 - If the task includes code or data, create it exactly as given.
-- For most ambiguity, make a reasonable assumption and state it rather than
-  asking. Use `ask_user` only when genuinely blocked by something you cannot
-  reasonably decide yourself, and keep working while you wait if there is
-  anything useful left to do.
-- People can talk to you in the thread while you work. Their messages are
-  appended to your command output as `[thread message from <name>]: ...`;
-  `check_thread_messages` fetches any waiting ones on demand. Treat them as
-  the user steering you: adapt straight away rather than finishing what you
-  had planned, and use `say_in_thread` to say what you are changing.
-- `send_preview_to_thread` shows the user something worth seeing before you
-  are finished (a partial plot, a draft file), without ending the task.
+- For most ambiguity, make a reasonable assumption and state it. Use
+  `ask_user` only for a choice that really changes the result:
+  `blocking=false` plus a `default` lets you keep working meanwhile.
+- People can message you in the thread while you work, as
+  `[thread message #N from ...]`. Answer each FIRST with
+  `respond_to_updates` (your other tools refuse to run until you do), then
+  act on it straight away; mark it `done` once it really is. E.g.
+  `respond_to_updates(message_ids="3", decision="will_apply", reply="Keeping
+  the layout, making the bars blue.")` and re-render in the same response.
+- For something the user will judge (a chart, a design), show an early
+  draft with `send_preview_to_thread` rather than only the final result.
 - {output_bullet}
 - {budget_bullet}
 - Once you have confirmed a result is correct, stop — do not re-verify what
@@ -429,8 +438,7 @@ def _with_elapsed_note(original_invoke):
     """Wraps a shell tool's on_invoke_tool so each command reports how much
     of the run's time budget has been spent.
 
-    Same delivery argument as _with_thread_messages, which it composes with:
-    a small local model will not remember to check a clock, but it cannot
+    A small local model will not remember to check a clock, but it cannot
     avoid reading the output of the command it just ran.
 
     Exception-safe by design: a failure here degrades to "no marker", never
@@ -449,59 +457,146 @@ def _with_elapsed_note(original_invoke):
     return _invoke
 
 
-def _with_thread_messages(original_invoke):
-    """Wraps a shell tool's on_invoke_tool so anything people posted in the
-    thread since the last command is appended to the command's output.
+def _conversation(ctx):
+    """The run's SandboxConversation from a tool's context, or None (tests
+    and any path that never set one — every wrapper then passes through)."""
+    context = getattr(ctx, "context", None)
+    return context.get("conversation") if isinstance(context, dict) else None
 
-    This is the primary way mid-run steering reaches the model. There is also
-    an explicit `check_thread_messages` tool, but a small local model reliably
-    forgets to poll, whereas it cannot avoid reading the result of the command
-    it just ran — so piggy-backing on every shell call is what actually makes
-    "make it blue instead" land within one turn.
 
-    Exception-safe by design: the inbox is an enhancement, and a failure here
-    must degrade to "no messages delivered", never break a shell call the run
-    depends on.
+def _gated_invoke(original_invoke, tool_name: str, *, busy: bool = False):
+    """Wraps a tool's on_invoke_tool so it only runs when no thread input is
+    waiting for an answer — see sandbox_conversation's "side effects are
+    gated". A refused call returns the refusal as its result and has no
+    side effect. busy marks the run as executing while it runs, which is
+    what lets main.py say "received, I'll review this before my next step"
+    for a message that lands during a long command.
     """
     async def _invoke(ctx, raw_input):
-        result = await original_invoke(ctx, raw_input)
-        try:
-            context = ctx.context if isinstance(getattr(ctx, "context", None), dict) else {}
-            thread = context.get("thread")
-            if thread is None:
-                return result
-            pending = sandbox_thread_inbox.drain(thread.id)
-            if not pending:
-                return result
-            return f"{result}\n\n{pending}"
-        except Exception as e:
-            logger.warning(f"Sandbox inbox: could not attach thread messages to a tool result: {e}")
-            return result
+        conversation = _conversation(ctx)
+        if conversation is None:
+            return await original_invoke(ctx, raw_input)
+        return await conversation.run_gated(
+            tool_name, lambda: original_invoke(ctx, raw_input), busy=busy)
 
     return _invoke
+
+
+# Longest a shell call keeps the model waiting without a conversation
+# checkpoint. The model's own yield_time_ms (exec_command defaults to 10s,
+# and it may ask for far longer) is honoured, but in slices of this size:
+# between slices the wrapper checks for thread input and, if something
+# arrived, hands control back with the command still running. Slicing inside
+# ONE tool call is deliberate — clamping yield_time_ms instead would turn
+# every command longer than this into an extra write_stdin polling turn out
+# of a budget as small as 10.
+SHELL_CHECKPOINT_SECONDS = 5.0
+_RUNNING_SESSION_RE = re.compile(r"Process running with session ID (\d+)")
+
+
+def _with_shell_checkpoints(exec_invoke, poll_invoke):
+    """Wraps exec_command so a long command yields at SHELL_CHECKPOINT_SECONDS
+    intervals when new thread input is waiting, instead of only when the
+    model's full yield_time_ms is up.
+
+    Works entirely through the two public tool invokes: exec_command with its
+    yield clamped to one slice, then write_stdin polls (empty input) on the
+    session id the SDK reports, until the command exits, the requested wait
+    is used up, or someone posts in the thread. The slices come back merged
+    into one SDK-shaped result (_merge_shell_chunks). Without write_stdin (no
+    PTY) or without a conversation this is a plain pass-through.
+    """
+    async def _invoke(ctx, raw_input):
+        conversation = _conversation(ctx)
+        if conversation is None or poll_invoke is None:
+            return await exec_invoke(ctx, raw_input)
+        try:
+            args = json.loads(raw_input or "{}")
+        except (TypeError, ValueError):
+            return await exec_invoke(ctx, raw_input)
+        if not isinstance(args, dict):
+            return await exec_invoke(ctx, raw_input)
+        try:
+            requested = float(args.get("yield_time_ms", 10_000)) / 1000
+        except (TypeError, ValueError):
+            return await exec_invoke(ctx, raw_input)
+        slice_s = SHELL_CHECKPOINT_SECONDS
+        if requested <= slice_s:
+            return await exec_invoke(ctx, raw_input)
+        started = time.monotonic()
+        first = dict(args, yield_time_ms=int(slice_s * 1000))
+        chunks = [await exec_invoke(ctx, json.dumps(first))]
+        note = ""
+        while True:
+            match = _RUNNING_SESSION_RE.search(str(chunks[-1]))
+            if match is None:
+                break
+            if conversation.has_new_input():
+                note = (f"[The command is still running as session {match.group(1)}. New "
+                        "thread input arrived, so control is back with you early; poll it "
+                        "later with write_stdin.]")
+                break
+            remaining = requested - (time.monotonic() - started)
+            if remaining <= 0.05:
+                break
+            poll = {"session_id": int(match.group(1)), "chars": "",
+                    "yield_time_ms": int(min(slice_s, remaining) * 1000)}
+            if args.get("max_output_tokens") is not None:
+                poll["max_output_tokens"] = args["max_output_tokens"]
+            chunks.append(await poll_invoke(ctx, json.dumps(poll)))
+        merged = _merge_shell_chunks(chunks)
+        return f"{merged}\n\n{note}" if note else merged
+
+    return _invoke
+
+
+_SDK_OUTPUT_SEPARATOR = "\nOutput:\n"
+
+
+def _merge_shell_chunks(chunks) -> str:
+    """One SDK-shaped result from several slices of the same command: the
+    LAST slice's header (so the exit code / still-running line is current)
+    and every slice's output, in order. Keeps the result readable for the
+    model and parseable by sandbox_progress.parse_exec_result, which expects
+    exactly one header. Anything not in the SDK's shape is joined verbatim."""
+    chunks = [str(c) for c in chunks]
+    if len(chunks) == 1:
+        return chunks[0]
+    header, outputs = None, []
+    for chunk in chunks:
+        head, sep, out = chunk.partition(_SDK_OUTPUT_SEPARATOR)
+        if not sep:
+            return "\n\n".join(chunks)
+        header = head
+        outputs.append(out)
+    return header + _SDK_OUTPUT_SEPARATOR + "".join(outputs)
 
 
 def _configure_shell_tools(toolset) -> None:
     """configure_tools callback (see agents.sandbox.capabilities.Shell):
     wraps both shell tools so malformed calls become model-visible errors
-    (see _tolerant_tool_invoke) and so live thread messages ride back on
-    every command's output (see _with_thread_messages).
+    (see _tolerant_tool_invoke), every result reports the time used
+    (_with_elapsed_note), a long command yields early when someone posts in
+    the thread (_with_shell_checkpoints), and a NEW command is refused while
+    thread input is unanswered (_gated_invoke).
 
-    Order matters: _with_thread_messages goes on the OUTSIDE, so it also
-    appends to the "Tool call rejected" string _tolerant_tool_invoke
-    substitutes for a malformed call. Nested the other way, the ValidationError
-    would unwind past the inbox drain and an interjection would be silently
-    dropped just because the model's tool call happened to be malformed.
-    _with_elapsed_note sits between them for the same reason, and so that a
-    steering message stays last in the result — the position the model is
-    most likely to act on.
+    write_stdin is deliberately not gated: observing or stopping a command
+    that is already running is exactly what the model may need to do while
+    it reviews new input. Only starting new work is held back.
+
+    Order matters: the gate is outermost, so a refused command runs nothing
+    at all; the elapsed note wraps the checkpointed call once, so the time
+    marker appears once at the end rather than after every slice.
     """
-    def _wrap(invoke):
-        return _with_thread_messages(_with_elapsed_note(_tolerant_tool_invoke(invoke)))
-
-    toolset.exec_command.on_invoke_tool = _wrap(toolset.exec_command.on_invoke_tool)
+    tolerant_exec = _tolerant_tool_invoke(toolset.exec_command.on_invoke_tool)
+    tolerant_poll = None
     if toolset.write_stdin is not None:
-        toolset.write_stdin.on_invoke_tool = _wrap(toolset.write_stdin.on_invoke_tool)
+        tolerant_poll = _tolerant_tool_invoke(toolset.write_stdin.on_invoke_tool)
+        toolset.write_stdin.on_invoke_tool = _with_elapsed_note(tolerant_poll)
+    toolset.exec_command.on_invoke_tool = _gated_invoke(
+        _with_elapsed_note(_with_shell_checkpoints(tolerant_exec, tolerant_poll)),
+        "exec_command", busy=True,
+    )
 
 
 def _thread_name(task: str) -> str:
@@ -704,20 +799,28 @@ def _ask_user_context(wrapper: RunContextWrapper[dict]) -> dict:
 
 
 @function_tool
-async def ask_user(wrapper: RunContextWrapper[dict], question: str) -> str:
-    """Ask the user who requested this task a question and block until they
-    reply in the Discord thread. Costs you time from the run's budget.
+async def ask_user(
+    wrapper: RunContextWrapper[dict],
+    question: str,
+    blocking: bool = True,
+    choices: list[str] | None = None,
+    default: str = "",
+) -> str:
+    """Ask the user who requested this task a question in the Discord thread.
 
     Args:
-        question: A specific, self-contained question. Avoid vague or
-            open-ended questions; ask exactly what you need to know to
-            continue.
+        question: A specific, self-contained question about a choice that
+            changes the result. Not a request for approval of routine steps.
+        blocking: True pauses all other work until they reply (or the wait
+            times out) — only for information you truly cannot proceed
+            without. False posts it and returns at once so you keep working.
+        choices: Optional short suggested answers.
+        default: What you will do if nobody answers. Strongly recommended
+            when blocking is false.
     """
     ctx = _ask_user_context(wrapper)
-    thread = ctx.get("thread")
-    client = ctx.get("client")
-    requesting_user_id = ctx.get("requesting_user_id")
-    if thread is None or client is None or requesting_user_id is None:
+    conversation = ctx.get("conversation")
+    if ctx.get("thread") is None or conversation is None:
         return "No interactive thread is available right now — proceed using your best judgement."
 
     timeout = float(sandbox_ask_user_timeout())
@@ -728,82 +831,57 @@ async def ask_user(wrapper: RunContextWrapper[dict], question: str) -> str:
         # a question asked late in a run must not outlive the outer timeout
         # that will cut the whole run off anyway.
         timeout = max(1.0, min(timeout, remaining))
-
-    try:
-        await thread.send(
-            f"🤖 {question}\n-# Reply in this thread — no @mention needed."
-        )
-    except Exception as e:
-        logger.warning(f"Sandbox ask_user: failed to send question: {e}")
-        return "Could not reach the user (failed to send the question) — proceed using your best judgement."
-
-    def _is_reply(message) -> bool:
-        return (
-            message.channel.id == thread.id
-            and message.author.id == requesting_user_id
-            and not message.author.bot
-        )
-
-    try:
-        reply = await client.wait_for("message", check=_is_reply, timeout=timeout)
-    except asyncio.TimeoutError:
-        return _with_pending(thread, (
-            f"No response within {int(timeout)}s — proceed using your best judgement "
-            "and note this assumption in your final report."
-        ))
-    except Exception as e:
-        logger.warning(f"Sandbox ask_user: wait_for failed: {e}")
-        return _with_pending(thread, "Could not get the user's reply — proceed using your best judgement.")
-    # discord.py dispatches a message to wait_for futures AND to on_message
-    # independently, so this same reply was also queued in the thread inbox.
-    # Drop it there or the model gets it twice: once as the answer to its
-    # question, once as an unrelated interjection.
-    try:
-        sandbox_thread_inbox.consume(thread.id, reply.id)
-    except Exception as e:
-        logger.warning(f"Sandbox ask_user: could not de-duplicate the reply: {e}")
-    return _with_pending(thread, reply.content or "(the user replied with no text)")
-
-
-def _with_pending(thread, text: str) -> str:
-    """Appends anything else waiting in the thread inbox to a tool result.
-
-    Anything people said while the model was blocked in ask_user is at least
-    as relevant as the answer itself, so it rides back on the same result
-    rather than waiting for the next shell command to pick it up.
-    """
-    try:
-        pending = sandbox_thread_inbox.drain(thread.id)
-    except Exception as e:
-        logger.warning(f"Sandbox inbox: could not read pending thread messages: {e}")
-        return text
-    return f"{text}\n\n{pending}" if pending else text
+    # One pipeline for answers: the reply is a thread message like any other,
+    # recorded by the ledger and shown to the model at its next call. The old
+    # tool waited on client.wait_for, a SECOND consumer of the same message
+    # that needed de-duplicating against the inbox, accepted any requester
+    # message as "the answer" even when it was a correction, and could miss
+    # a reply that landed before its waiter was installed.
+    return await conversation.ask(
+        question, blocking=blocking, choices=choices, default=(default or "").strip(),
+        timeout=timeout,
+    )
 
 
 @function_tool
-async def check_thread_messages(wrapper: RunContextWrapper[dict]) -> str:
-    """Check for thread messages you have not seen yet, without waiting.
-    Worth doing before you commit to something expensive or hard to undo;
-    routine polling is unnecessary.
+async def respond_to_updates(
+    wrapper: RunContextWrapper[dict],
+    message_ids: str | int | list[str | int],
+    decision: str,
+    reply: str = "",
+) -> str:
+    """Respond to thread message(s) you have been shown. Your reply is posted
+    in the thread. Call it before any other work — until you do, your other
+    tools refuse to run — and again with decision "done" once an accepted
+    change is really made.
+
+    Args:
+        message_ids: The message number(s), e.g. "3" or "3, 4". Several
+            messages with the same decision can share one call.
+        decision: One of: will_apply (you will make this change), done (the
+            change is made), answered (you answered their question in
+            reply), noted (information you have taken into account),
+            declined (you will not, and reply says why), superseded
+            (replaced by a later message), deferred (for a follow-up run).
+        reply: One or two sentences TO THE USER saying how you are handling
+            it, e.g. "Keeping the layout, switching the bars to blue."
     """
-    ctx = _ask_user_context(wrapper)
-    thread = ctx.get("thread")
-    if thread is None:
-        return "No thread is attached to this run, so nobody can send you messages."
-    try:
-        pending = sandbox_thread_inbox.drain(thread.id)
-    except Exception as e:
-        logger.warning(f"Sandbox inbox: check_thread_messages failed: {e}")
-        return "Could not check for new messages."
-    return pending or "No new messages."
+    # message_ids also takes a bare number or a list: small models send
+    # either, and a pydantic rejection here would drop the acknowledgement
+    # while on_model_response had already let the response's gated tools
+    # through on the strength of it. parse_ids copes with all three shapes.
+    conversation = _ask_user_context(wrapper).get("conversation")
+    if conversation is None:
+        return "No thread is attached to this run, so there is nothing to respond to."
+    return await conversation.respond(message_ids, decision, reply)
 
 
 @function_tool
 async def say_in_thread(wrapper: RunContextWrapper[dict], text: str) -> str:
     """Post a short message to the Discord thread and carry on immediately;
-    unlike `ask_user` it does not wait for a reply, so it costs you nothing.
-    Use it when you change course after something the user said, or when an
-    approach fails and you are trying another — not to narrate every command.
+    it does not wait for a reply. Use it when an approach fails and you are
+    trying another — not to narrate every command, and not to answer thread
+    messages (that is respond_to_updates).
 
     Args:
         text: The message to post. Plain text, a sentence or two.
@@ -820,7 +898,7 @@ async def say_in_thread(wrapper: RunContextWrapper[dict], text: str) -> str:
     except Exception as e:
         logger.warning(f"Sandbox say_in_thread: failed to send: {e}")
         return "Could not post that to the thread — carry on with the task."
-    return _with_pending(thread, "Posted to the thread.")
+    return "Posted to the thread."
 
 
 @function_tool
@@ -829,7 +907,7 @@ async def send_preview_to_thread(
 ) -> str:
     """Send a file to the Discord thread right now, without ending the task
     — for showing a partial or in-progress result (a draft plot, an
-    intermediate file).
+    intermediate file) the user can give feedback on.
 
     Args:
         path: Path to the file, relative to your current working directory
@@ -868,7 +946,9 @@ async def send_preview_to_thread(
 
 
 @function_tool
-async def attach_file(wrapper: RunContextWrapper[dict], path: str, caption: str = "") -> str:
+async def attach_file(
+    wrapper: RunContextWrapper[dict], path: str, caption: str = "", remove: bool = False,
+) -> str:
     """Mark a finished file to be delivered to the user when the task ends.
     Only files you attach are sent. Attach the same path again to replace an
     earlier version of it; don't attach your intermediate attempts.
@@ -877,10 +957,11 @@ async def attach_file(wrapper: RunContextWrapper[dict], path: str, caption: str 
         path: Path to the file, relative to your current working directory
             (never an absolute path).
         caption: Optional short caption sent alongside this file.
+        remove: True un-attaches a file you attached earlier that is now
+            outdated (e.g. after the user changed what they want).
     """
     ctx = _ask_user_context(wrapper)
     session = ctx.get("session")
-    thread = ctx.get("thread")
     if session is None:
         return "No sandbox session is available, so nothing can be attached."
     path = (path or "").strip()
@@ -888,6 +969,17 @@ async def attach_file(wrapper: RunContextWrapper[dict], path: str, caption: str 
         return "No path given — nothing was attached."
     if path.startswith("/"):
         return "Use a path relative to your working directory, not an absolute one."
+
+    deliverables = ctx.get("deliverables")
+    name = _attachment_name(path)
+    if remove:
+        if deliverables is None:
+            return "This run cannot attach files."
+        before = len(deliverables)
+        deliverables[:] = [entry for entry in deliverables if entry["path"] != path]
+        if len(deliverables) == before:
+            return f"{name!r} was not attached, so there was nothing to remove."
+        return f"Removed {name!r}; it will not be sent."
 
     # stat, not `test -f` then `wc -c`: one call answers both "does it exist"
     # and "how big is it", and the size is what the caps below need. GNU
@@ -913,33 +1005,41 @@ async def attach_file(wrapper: RunContextWrapper[dict], path: str, caption: str 
             f"{MAX_ARTIFACT_BYTES}-byte limit). Produce a smaller file and attach that."
         )
 
-    deliverables = ctx.get("deliverables")
     if deliverables is None:
         return "This run cannot attach files."
-    name = _attachment_name(path)
     caption = (caption or "").strip()
+    # Which accepted changes this selection already reflects: an attachment
+    # older than the latest accepted change, sitting next to one newer than
+    # it, is probably the pre-change variant — see continuation_nudge.
+    conversation = ctx.get("conversation")
+    change_revision = conversation.ledger.change_revision if conversation is not None else 0
     for entry in deliverables:
         # Re-attaching a path is how the model says "I fixed it", so the new
         # version replaces the old rather than the user receiving both.
         if entry["path"] == path:
-            entry.update(size=size, caption=caption)
-            return _maybe_with_pending(thread, f"Replaced the attached {name!r}; it will be sent when you finish.")
+            entry.update(size=size, caption=caption, change_revision=change_revision)
+            return f"Replaced the attached {name!r}; it will be sent when you finish."
     if len(deliverables) >= MAX_ARTIFACT_FILES:
         return (
             f"You already have {MAX_ARTIFACT_FILES} files attached, which is the "
             "limit. Attach only the finished results the user asked for."
         )
-    deliverables.append({"path": path, "size": size, "caption": caption})
-    return _maybe_with_pending(thread, f"Attached {name!r}; it will be sent to the user when you finish.")
+    deliverables.append({"path": path, "size": size, "caption": caption,
+                         "change_revision": change_revision})
+    return f"Attached {name!r}; it will be sent to the user when you finish."
 
 
-def _maybe_with_pending(thread, text: str) -> str:
-    """_with_pending, but tolerating a run with no thread attached (tests and
-    the no-thread fallback path — see ensure_sandbox_thread)."""
-    return _with_pending(thread, text) if thread is not None else text
+# Gated like a new shell command: choosing what is delivered, or showing a
+# preview, on the basis of a plan the user has since changed is exactly the
+# stale action the gate exists to stop. Wrapped once, here: the wrapper reads
+# the run's conversation from the tool context at call time, so one module-
+# level tool serves every run (and passes straight through without one).
+attach_file.on_invoke_tool = _gated_invoke(attach_file.on_invoke_tool, "attach_file")
+send_preview_to_thread.on_invoke_tool = _gated_invoke(
+    send_preview_to_thread.on_invoke_tool, "send_preview_to_thread")
 
 
-def build_sandbox_agent(out_dir: str | None) -> "object":
+def build_sandbox_agent(out_dir: str | None, conversation=None) -> "object":
     """The nested SandboxAgent that does the work inside the sandbox.
 
     out_dir: whether the sandbox's real output path was already resolved
@@ -983,11 +1083,17 @@ def build_sandbox_agent(out_dir: str | None) -> "object":
     defaults ("gpt-5.4-mini"/"gpt-5.5"), which this bot has no API key
     configured for and must never silently send sandbox content to.
 
-    tools (ask_user, send_preview_to_thread) are in addition to the Shell
-    capability's own tools — SandboxAgent is a dataclass subclass of Agent
-    and accepts tools=[...] the same way. Both tools no-op gracefully (return
-    a string telling the model to proceed on its own) when no Discord thread
-    context was passed into this run — see run_sandbox_task's nested_context.
+    tools (ask_user, respond_to_updates, attach_file, ...) are in addition
+    to the Shell capability's own tools — SandboxAgent is a dataclass
+    subclass of Agent and accepts tools=[...] the same way. The thread tools
+    no-op gracefully (return a string telling the model to proceed on its
+    own) when no Discord thread context was passed into this run — see
+    run_sandbox_task's nested_context.
+
+    conversation: the run's SandboxConversation, whose AgentHooks commit
+    "this input was seen" after each completed model call (see
+    classes/sandbox_conversation.py). None builds an agent without it
+    (tests; the prompt and tools are identical either way).
     """
     from agents.sandbox import MemoryGenerateConfig, MemoryReadConfig, SandboxAgent
     from agents.sandbox.capabilities import Memory, Shell
@@ -1033,8 +1139,9 @@ def build_sandbox_agent(out_dir: str | None) -> "object":
                 ),
             ),
         ],
-        tools=[ask_user, attach_file, send_preview_to_thread, check_thread_messages,
+        tools=[respond_to_updates, ask_user, attach_file, send_preview_to_thread,
                say_in_thread],
+        hooks=make_agent_hooks(conversation) if conversation is not None else None,
         # Slightly cooler than the chat agent: code tasks want determinism.
         # timeout: the wall-clock bound on each model call that the client's
         # read timeout above cannot provide (see sandbox_model_call_timeout).
@@ -1084,13 +1191,22 @@ class SandboxResult:
     attached (or found under out/) but NOT fetched (over MAX_ARTIFACT_FILES /
     MAX_ARTIFACT_BYTES) — populated on both success and failure, empty when
     nothing was skipped, so the caller can tell the model what was dropped
-    and why instead of it going unexplained."""
+    and why instead of it going unexplained.
+
+    conversation is what happened to each thread message during the run —
+    SandboxConversation's ledger outcomes (author, text, status, reply) — so
+    the outer model is told what was actually handled rather than assuming
+    every message was applied. unsent_replies are acknowledgements the model
+    wrote that Discord refused at the time; the caller posts them with the
+    closing note so none is silently lost."""
     text: str
     artifacts: list[SandboxArtifact] = field(default_factory=list)
     ok: bool = True
     error: str | None = None
     skipped_artifacts: list[str] = field(default_factory=list)
     resumed: bool = False
+    conversation: list[dict] = field(default_factory=list)
+    unsent_replies: list[str] = field(default_factory=list)
 
 
 def build_sandbox_client() -> "object":
@@ -1192,7 +1308,7 @@ async def _create_sandbox_session(sandbox_client, snapshot_id: str | None,
     return session, resumed
 
 
-def build_sandbox_run_config(client, session) -> RunConfig:
+def build_sandbox_run_config(client, session, input_filter=None, group_id=None) -> RunConfig:
     """Run config that reuses an already-created container for the run.
 
     Passing a live `session` (rather than just `client`/`options`) makes
@@ -1200,10 +1316,27 @@ def build_sandbox_run_config(client, session) -> RunConfig:
     run the agent inside it, but it will NOT stop or delete the container
     afterward — that becomes our responsibility (see _delete_sandbox_session),
     which is what gives us the window to read artifacts out of it first.
+    It is also what makes a continuation safe: a second Runner.run on the
+    same caller-owned session skips session.start() (the SDK only starts a
+    session it does not own if it is not already running) and never tears
+    it down, so the workspace, cwd and any running process carry over.
+
+    input_filter is SandboxConversation.input_filter — the single path by
+    which thread messages reach the model (see sandbox_conversation.py).
+
+    group_id must be the same for every pass of one run. The Memory
+    capability files each Runner.run under a "rollout" keyed by it, and with
+    none set the SDK makes a fresh id per call — so every continuation would
+    become its own rollout and cost its own extraction model call inside the
+    persist budget at teardown. One id appends the passes to one rollout.
     """
     from agents.sandbox import SandboxRunConfig
 
-    return RunConfig(sandbox=SandboxRunConfig(client=client, session=session))
+    return RunConfig(
+        sandbox=SandboxRunConfig(client=client, session=session),
+        call_model_input_filter=input_filter,
+        group_id=group_id,
+    )
 
 
 async def _delete_sandbox_session(sandbox_client, session) -> None:
@@ -1542,6 +1675,7 @@ async def run_sandbox_task(
     client=None,
     requesting_user_id=None,
     resumed: bool = False,
+    ledger=None,
 ) -> SandboxResult:
     """Run one self-contained task in a fresh Docker sandbox.
 
@@ -1558,11 +1692,14 @@ async def run_sandbox_task(
     tools degrade to telling the model to proceed on its own). When given —
     thread is the Discord thread/channel resolved by
     tool_functions.run_code_sandbox via ensure_sandbox_thread, client is the
-    discord.Client (needed for ask_user's client.wait_for), and
-    requesting_user_id is the id of the user whose replies ask_user accepts —
+    discord.Client, and requesting_user_id is the id of the user who asked —
     they are threaded into the NESTED Runner.run's own `context=`, which the
-    ask_user/send_preview_to_thread tools (see their definitions above) read
-    via wrapper.context. thread also determines whether this run's workspace
+    thread tools (see their definitions above) read via wrapper.context.
+
+    ledger is the thread's claimed sandbox_thread_inbox.RunLedger (see
+    run_code_sandbox): what people post in the thread during the run lands
+    there and is steered into the run by a SandboxConversation built around
+    it. None (no thread, tests) uses a detached ledger nobody can post to. thread also determines whether this run's workspace
     is persisted as a snapshot for a later run in the same thread — see
     sandbox_snapshot_id_for/_create_sandbox_session/_persist_sandbox_snapshot.
 
@@ -1601,6 +1738,7 @@ async def run_sandbox_task(
     not a task that simply ran out of budget.
     """
     snapshot_id = sandbox_snapshot_id_for(thread)
+    conversation = SandboxConversation(ledger, thread)
     sandbox_client = build_sandbox_client()
     session, resumed = await _create_sandbox_session(sandbox_client, snapshot_id, resumed)
     if resumed:
@@ -1613,12 +1751,16 @@ async def run_sandbox_task(
         # after any snapshot restore (session.start(), above) so every
         # restored file is older than it. See _mark_run_start.
         marker = await _mark_run_start(session, out_dir)
-        agent = build_sandbox_agent(out_dir)
+        agent = build_sandbox_agent(out_dir, conversation)
         nested_context = {
             "thread": thread,
             "client": client,
             "requesting_user_id": requesting_user_id,
             "session": session,
+            # The run's conversation coordinator: the tools read it from
+            # here to gate side effects, answer thread messages and ask
+            # questions (see classes/sandbox_conversation.py).
+            "conversation": conversation,
             # Appended to by the attach_file tool; read back below to decide
             # what is delivered. A list rather than a return value because the
             # agent chooses files DURING the run, including on the paths where
@@ -1632,21 +1774,28 @@ async def run_sandbox_task(
             # actually racing.
             "timeout_seconds": sandbox_timeout(),
         }
+        conversation.ledger.state = sandbox_thread_inbox.RUNNING
+        run_config = build_sandbox_run_config(
+            sandbox_client, session, input_filter=conversation.input_filter,
+            group_id=f"sandbox-{uuid.uuid4().hex}")
         try:
+            # ONE wait_for around every pass, so a continuation never
+            # resets the wall-clock budget.
             run_result = await asyncio.wait_for(
-                Runner.run(
-                    agent,
-                    task,
-                    max_turns=sandbox_max_turns(),
-                    run_config=build_sandbox_run_config(sandbox_client, session),
-                    hooks=progress_hooks,
-                    context=nested_context,
-                ),
+                _converse(agent, task, run_config, progress_hooks, nested_context,
+                          conversation),
                 timeout=sandbox_timeout(),
             )
         except asyncio.TimeoutError:
-            return await _failure_result(session, nested_context, out_dir, marker,
-                                         "timeout", resumed=resumed)
+            # Out of time during a continuation: the pass before it had
+            # already produced a final answer, which still stands.
+            run_result = conversation.completed_result
+            if run_result is None:
+                return await _failure_result(session, nested_context, out_dir, marker,
+                                             "timeout", resumed=resumed)
+            logger.warning("Sandbox: timed out during a continuation; delivering the "
+                           "answer from before it")
+            conversation.finalize()
         except MaxTurnsExceeded:
             return await _failure_result(session, nested_context, out_dir, marker,
                                          "max_turns", resumed=resumed)
@@ -1658,10 +1807,78 @@ async def run_sandbox_task(
         artifacts, skip_notes = await _deliver(
             session, nested_context["deliverables"], out_dir, marker)
         return SandboxResult(text=text, artifacts=artifacts, skipped_artifacts=skip_notes,
-                             resumed=resumed)
+                             resumed=resumed, conversation=conversation.ledger.outcomes(),
+                             unsent_replies=list(conversation.unsent_replies))
     finally:
+        # Idempotent, and a no-op when _converse already committed it: this
+        # covers the exits that bypass it (an infra error mid-run), so no
+        # message is accepted into a run that can no longer see it.
+        conversation.finalize()
         await _persist_sandbox_snapshot(session, snapshot_id)
         await _delete_sandbox_session(sandbox_client, session)
+
+
+async def _converse(agent, task, run_config, progress_hooks, nested_context,
+                    conversation: SandboxConversation):
+    """Runs the nested agent to a final answer that has accounted for the
+    thread, then commits the finalization boundary.
+
+    A final answer with thread input still unanswered — including input that
+    arrived while it was being written — gets a CONTINUATION rather than
+    being delivered: a further Runner.run in the same live session, fed the
+    previous run's to_input_list() plus a short note saying what is still
+    open (see SandboxConversation.continuation_nudge). Continuing replays
+    history, never tools: completed tool calls are in that list as
+    call/result pairs, so nothing is executed twice.
+
+    Bounded three ways, so a model that never cooperates cannot loop: at most
+    MAX_CONTINUATIONS extra passes; each pass gets only the turns left of ONE
+    cumulative sandbox_max_turns() budget (counted from raw_responses), and
+    one is only started with MIN_CONTINUATION_TURNS left; and the caller's
+    single wait_for bounds the wall clock. When a bound stops it, the run
+    finishes with the input reported as unresolved rather than hidden — and
+    a continuation that fails (turns, model error) or times out falls back
+    to the previous pass's completed answer rather than to "stopped", since
+    that answer was already final; see conversation.completed_result.
+
+    The final check and conversation.finalize() run with no await between
+    them, so a message cannot slip in after the check and be accepted into a
+    run that will never read it: it becomes a follow-up instead.
+    """
+    turns_left = sandbox_max_turns()
+    run_input = task
+    while True:
+        try:
+            result = await Runner.run(
+                agent,
+                run_input,
+                max_turns=turns_left,
+                run_config=run_config,
+                hooks=progress_hooks,
+                context=nested_context,
+            )
+        except (MaxTurnsExceeded, ModelBehaviorError, ModelRefusalError) as e:
+            # A continuation that fails must not cost the answer the run had
+            # already finished: deliver that one, with the message it was
+            # continuing for reported as not applied by the ledger.
+            previous = conversation.completed_result
+            if previous is None:
+                raise
+            logger.warning(f"Sandbox: continuation failed ({type(e).__name__}); "
+                           "delivering the answer from before it")
+            conversation.finalize()
+            return previous
+        conversation.completed_result = result
+        turns_left -= len(result.raw_responses)
+        nudge = conversation.continuation_nudge(nested_context.get("deliverables"))
+        if (nudge is None or conversation.continuations >= MAX_CONTINUATIONS
+                or turns_left < MIN_CONTINUATION_TURNS):
+            conversation.finalize()
+            return result
+        conversation.note_continuation()
+        logger.info(f"Sandbox: continuing the run ({conversation.continuations}/"
+                    f"{MAX_CONTINUATIONS}, {turns_left} turn(s) left) to account for thread input")
+        run_input = result.to_input_list() + [{"role": "user", "content": f"[sandbox]: {nudge}"}]
 
 
 async def _failure_result(
@@ -1677,10 +1894,17 @@ async def _failure_result(
     before the caller tears it down: the files it had attached, or a swept
     fallback from out_dir if it was cut off before attaching any (see
     _deliver). Recovery failures are swallowed, since it's strictly
-    better-than-nothing on top of returning no artifacts at all. `detail` (e.g. the ModelBehaviorError message) is logged only —
-    never put in SandboxResult.text or shown to the outer model, which
-    should be told to retry with a clearer task, not fed the raw error.
+    better-than-nothing on top of returning no artifacts at all. `detail`
+    (e.g. the ModelBehaviorError message) is logged only — never put in
+    SandboxResult.text or shown to the outer model, which should be told to
+    retry with a clearer task, not fed the raw error.
+
+    A forced stop also finalizes the conversation first, so whatever was
+    still unanswered is reported as incomplete instead of disappearing.
     """
+    conversation = nested_context.get("conversation")
+    if conversation is not None:
+        conversation.finalize()
     logger.warning(f"Sandbox: run stopped ({error}), attempting best-effort artifact recovery"
           + (f": {detail}" if detail else ""))
     artifacts: list[SandboxArtifact] = []
@@ -1695,6 +1919,8 @@ async def _failure_result(
     return SandboxResult(
         text="", artifacts=artifacts, ok=False, error=error, skipped_artifacts=skip_notes,
         resumed=resumed,
+        conversation=conversation.ledger.outcomes() if conversation is not None else [],
+        unsent_replies=list(conversation.unsent_replies) if conversation is not None else [],
     )
 
 
@@ -1775,28 +2001,103 @@ def sandbox_skip_note(skipped: list) -> str:
     )
 
 
-def sandbox_steering_note(steering: str) -> str:
-    """What people said to the run while it happened.
+# How each ledger status (sandbox_thread_inbox.RunLedger.outcomes) is put to
+# the OUTER model. Only "done" and "answered" claim anything was handled;
+# every other status says plainly what did NOT happen, because the old note
+# ("the sandbox received these and adapted") let the outer model claim a
+# change had been made when the nested model had ignored it or never seen it.
+_STEERING_STATUS = {
+    "done": "done",
+    "answered": "answered",
+    "noted": "taken into account",
+    "accepted": "accepted, but the sandbox did not confirm it was finished",
+    "declined": "declined by the sandbox",
+    "superseded": "superseded by a later message",
+    "deferred": "left for a follow-up in this thread",
+    "unacknowledged": "never answered by the sandbox, so it may not have been applied",
+    "unseen": "arrived too late for the sandbox to see it; NOT applied",
+    "late": "arrived as the run was finishing; NOT applied (the user can ask again in this thread)",
+}
+_HANDLED_STATUSES = {"done", "answered", "noted"}
+
+
+def sandbox_steering_note(steering) -> str:
+    """What people said to the run while it happened, and what became of it.
 
     The outer model's history was built before the run started and on_message
     routes these to the sandbox instead of enqueuing them, so without this it
     cannot know the request changed. Observed without it: a mid-run "make the
-    milk red" produced a red image the outer model called a mistake.
+    milk red" produced a red image the outer model called a mistake. So the
+    note still says to treat HANDLED messages as part of the request — but
+    only those, and it states the rest as not applied.
+
+    steering is SandboxResult.conversation (a list of outcome rows).
     """
     if not steering:
         return ""
-    return (
-        "\n\nThe user changed the request while the sandbox worked, in the "
-        f"thread:\n{steering}\nThe sandbox received these and adapted, so the "
-        "result reflects them and not the original wording. Treat them as "
-        "part of what was asked: do not call the result a mistake, do not "
-        "say it went wrong, and do not offer to undo it."
-    )
+    lines = []
+    handled = False
+    for row in steering:
+        status = row.get("status", "")
+        handled = handled or status in _HANDLED_STATUSES
+        text = " ".join(str(row.get("text", "")).split())
+        if len(text) > 200:
+            text = text[:199] + "…"
+        line = f"- {row.get('author', 'someone')}: “{text}” → {_STEERING_STATUS.get(status, status)}"
+        reply = " ".join(str(row.get("reply", "")).split())
+        if reply:
+            line += f" (sandbox said: “{reply[:200]}”)"
+        lines.append(line)
+    note = ("\n\nPeople posted in the sandbox's thread while it worked. What became "
+            "of each message:\n" + "\n".join(lines) + "\n")
+    if handled:
+        note += ("Treat the ones marked done, answered or taken into account as part "
+                 "of what was asked: do not call the result a mistake or offer to "
+                 "undo it. ")
+    note += ("Do not claim any other message was applied; if one matters, tell the "
+             "user it was not done and that they can ask again in the thread.")
+    return note
+
+
+# Closing-embed wording for messages that did not get handled. Short: this
+# sits under "Sandbox closed" in the thread, for the people who wrote them.
+_UNRESOLVED_LABELS = {
+    "accepted": "Accepted but not confirmed finished",
+    "unacknowledged": "Never answered",
+    "unseen": "Not seen in time",
+    "late": "Arrived as it was finishing",
+    "deferred": "Left for a follow-up",
+}
+MAX_UNRESOLVED_LINES = 5
+
+
+def sandbox_unresolved_note(outcomes, in_thread: bool) -> str:
+    """Lines for the closing embed naming each thread message the run did not
+    apply (or did not confirm applying), or "" when every one was handled.
+
+    The plan's rule is that acknowledged input must never silently disappear
+    when a run ends; this is the user-facing half of that, and the outer
+    model's half is sandbox_steering_note.
+    """
+    rows = [r for r in (outcomes or []) if r.get("status") in _UNRESOLVED_LABELS]
+    if not rows:
+        return ""
+    lines = []
+    for r in rows[:MAX_UNRESOLVED_LINES]:
+        text = " ".join(str(r.get("text", "")).split())
+        if len(text) > 80:
+            text = text[:79] + "…"
+        lines.append(f"⚠️ {_UNRESOLVED_LABELS[r['status']]}: “{text}”")
+    if len(rows) > MAX_UNRESOLVED_LINES:
+        lines.append(f"…and {len(rows) - MAX_UNRESOLVED_LINES} more.")
+    if in_thread:
+        lines.append("@mention me in this thread to carry on with these.")
+    return "\n" + "\n".join(lines)
 
 
 def sandbox_tool_result(
     result, *, sent_names: list, in_thread: bool, resumable: bool,
-    steering: str = "", resume_correction: str = "",
+    steering=None, resume_correction: str = "",
 ) -> str:
     """The string run_code_sandbox hands back to the outer model.
 

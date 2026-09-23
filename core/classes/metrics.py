@@ -45,6 +45,28 @@ Metrics (scraped by Prometheus from the /metrics HTTP endpoint):
            The configured context window (LLM_CONTEXT_LENGTH), exported so a
            dashboard has the denominator without hard-coding it.
 
+  Sandbox conversation (classes/sandbox_conversation.py; labels are bounded
+  outcome names — never message ids, thread ids or user text):
+  Counter  discord_bot_sandbox_thread_messages_total{outcome}
+           Thread messages offered to a running sandbox, by delivery result
+           (accepted / duplicate / too_long / full / attachment_only /
+           finishing / ...).
+  Histogram discord_bot_sandbox_input_presentation_seconds
+           Receipt of a thread message to its first completed model call.
+  Histogram discord_bot_sandbox_input_response_seconds
+           Receipt of a thread message to the model's respond_to_updates.
+  Counter  discord_bot_sandbox_stale_actions_blocked_total
+           Tool calls refused because thread input was still unanswered.
+  Counter  discord_bot_sandbox_questions_total{mode,outcome}
+           ask_user questions by mode (blocking/optional) and outcome
+           (posted / replied / timeout / send_failed).
+  Counter  discord_bot_sandbox_unresolved_input_total{status}
+           Messages still unresolved when a run ended, by status
+           (accepted / unacknowledged / unseen / late).
+  Counter  discord_bot_sandbox_continuations_total
+           Extra runner passes started because a run tried to finish with
+           thread input unanswered (or outdated files attached).
+
 Context-window note: this is the PROMPT side, which is what has to fit before
 generation starts. The server-side counterpart is llama.cpp's own
 `llamacpp:n_tokens_max` - "high watermark of the context size observed", which
@@ -166,6 +188,50 @@ llm_context_window_tokens = Gauge(
     "Configured LLM context window in tokens (LLM_CONTEXT_LENGTH)",
 )
 
+# Receipt -> presentation is bounded by one model call plus any running
+# command's checkpoint; receipt -> response adds the model's own turn.
+SANDBOX_INPUT_BUCKETS = (1, 2.5, 5, 10, 20, 30, 60, 120, 300, 600)
+
+sandbox_thread_messages_total = Counter(
+    "discord_bot_sandbox_thread_messages_total",
+    "Thread messages offered to a running sandbox, by delivery result",
+    ["outcome"],
+)
+
+sandbox_input_presentation_seconds = Histogram(
+    "discord_bot_sandbox_input_presentation_seconds",
+    "Seconds from receiving a thread message to its first completed model call",
+    buckets=SANDBOX_INPUT_BUCKETS,
+)
+
+sandbox_input_response_seconds = Histogram(
+    "discord_bot_sandbox_input_response_seconds",
+    "Seconds from receiving a thread message to the sandbox model responding to it",
+    buckets=SANDBOX_INPUT_BUCKETS,
+)
+
+sandbox_stale_actions_blocked_total = Counter(
+    "discord_bot_sandbox_stale_actions_blocked_total",
+    "Sandbox tool calls refused because thread input was still unanswered",
+)
+
+sandbox_questions_total = Counter(
+    "discord_bot_sandbox_questions_total",
+    "Sandbox ask_user questions by mode and outcome",
+    ["mode", "outcome"],
+)
+
+sandbox_unresolved_input_total = Counter(
+    "discord_bot_sandbox_unresolved_input_total",
+    "Thread messages still unresolved when a sandbox run ended, by status",
+    ["status"],
+)
+
+sandbox_continuations_total = Counter(
+    "discord_bot_sandbox_continuations_total",
+    "Extra sandbox runner passes started to account for thread input",
+)
+
 # ---------------------------------------------------------------------------
 # Convenience helpers (labels are always strings; IDs come in as ints)
 # ---------------------------------------------------------------------------
@@ -217,6 +283,34 @@ def inc_queue_drop(guild_id) -> None:
 
 def observe_llm_prompt_tokens(guild_id, tokens: int) -> None:
     llm_prompt_tokens.labels(guild_id=_guild_label(guild_id)).observe(tokens)
+
+
+def inc_sandbox_thread_message(outcome: str) -> None:
+    sandbox_thread_messages_total.labels(outcome=str(outcome)).inc()
+
+
+def observe_sandbox_input_presentation(seconds: float) -> None:
+    sandbox_input_presentation_seconds.observe(max(0.0, seconds))
+
+
+def observe_sandbox_input_response(seconds: float) -> None:
+    sandbox_input_response_seconds.observe(max(0.0, seconds))
+
+
+def inc_sandbox_stale_action_blocked() -> None:
+    sandbox_stale_actions_blocked_total.inc()
+
+
+def inc_sandbox_question(mode: str, outcome: str) -> None:
+    sandbox_questions_total.labels(mode=str(mode), outcome=str(outcome)).inc()
+
+
+def inc_sandbox_unresolved_input(status: str) -> None:
+    sandbox_unresolved_input_total.labels(status=str(status)).inc()
+
+
+def inc_sandbox_continuation() -> None:
+    sandbox_continuations_total.inc()
 
 
 def set_context_window_from_env() -> None:

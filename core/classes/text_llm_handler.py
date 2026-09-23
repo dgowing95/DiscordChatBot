@@ -205,9 +205,10 @@ class TextLLMHandler:
         self.messages = messages
         self.guild_id = guild_id
         # The discord.Client, forwarded to tool-run context as
-        # "discord_client" (see generate()) — needed by run_code_sandbox's
-        # ask_user tool for client.wait_for(). Optional/None for callers
-        # (and tests) that don't need sandbox HITL.
+        # "discord_client" (see generate()) and on into the nested sandbox
+        # run's context. Nothing there waits on it any more (ask_user's
+        # replies arrive through the thread ledger), so it is optional/None
+        # for callers and tests.
         self.client = client
         self.config = configManager()
         self.user_memory = UserMemory(original_message.author.id, guild_id)
