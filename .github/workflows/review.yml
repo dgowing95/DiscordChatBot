@@ -24,7 +24,7 @@ jobs:
         with:
           llm_url: https://opencode.ai/zen/go/v1/chat/completions
           llm_auth_token: ${{ secrets.OPENCODE_API_KEY }}
-          llm_model: glm-5.3-flash
+          llm_model: glm-5.3
           llm_use_anthropic: 'false'
           # Pin the installed CLI as well as the action commit. The action otherwise installs
           # `latest`, which can change review behaviour without a repository diff.
