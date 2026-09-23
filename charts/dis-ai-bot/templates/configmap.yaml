@@ -11,6 +11,7 @@ data:
   MODEL: {{ .Values.model }}
   REASONING_EFFORT: {{ .Values.reasoningEffort | quote }}
   LLM_MAX_TURNS: {{ .Values.llmMaxTurns | toString | quote }}
+  LLM_CALL_TIMEOUT_SECONDS: {{ .Values.llmCallTimeout | toString | quote }}
   MSG_HISTORY_LIMIT: {{ .Values.message_history | toString | quote }}
   SHOW_THINKING: {{ .Values.showThinking | quote }}
   # Queue concurrency: worker task count + bounded queue size (see core/main.py)

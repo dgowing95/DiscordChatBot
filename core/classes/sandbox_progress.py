@@ -59,6 +59,8 @@ from dataclasses import dataclass, field
 import discord
 from agents import RunHooks
 
+from classes.sandbox_conversation import GATE_REFUSAL_PREFIX
+
 logger = logging.getLogger(__name__)
 
 EDIT_INTERVAL_SECONDS = 15.0  # Discord allows 5 edits/minute per channel
@@ -169,6 +171,9 @@ class _Block:
     output: str = ""
     exit_code: int | None = None
     process_id: int | None = None
+    # Refused by the conversation gate: it never ran, so it must not sit in
+    # the embed looking like a command still running.
+    held: bool = False
 
 
 def _fence(text: str, lang: str = "") -> str:
@@ -219,11 +224,13 @@ class SandboxTranscript:
         self._notes.append(note[:NOTE_CHARS])
         del self._notes[:-MAX_NOTES]
 
-    def add_command(self, cmd: str) -> None:
+    def add_command(self, cmd: str) -> _Block:
         cmd = (cmd or "").strip("\n")
         if len(cmd) > FIELD_CMD_CHARS:
             cmd = _head(cmd, FIELD_CMD_CHARS)
-        self._blocks.append(_Block(cmd=cmd))
+        block = _Block(cmd=cmd)
+        self._blocks.append(block)
+        return block
 
     def _current_block(self) -> _Block:
         if not self._blocks:
@@ -240,11 +247,15 @@ class SandboxTranscript:
             block.stdin = _head(block.stdin, FIELD_CMD_CHARS)
 
     def add_output(self, output: str, exit_code: int | None = None,
-                   process_id: int | None = None) -> None:
+                   process_id: int | None = None, block: _Block | None = None) -> None:
+        """block: the command this output belongs to, when the caller knows
+        it (SandboxProgressHooks keys blocks by tool call); otherwise the
+        latest one."""
         out = (output or "").strip("\n")
         if not out and exit_code is None and process_id is None:
             return
-        block = self._current_block()
+        block = block if block is not None else self._current_block()
+        block.held = False
         if out:
             block.output = f"{block.output}\n{out}".strip("\n")
             # the per-field value budget is enforced at render time; keep
@@ -253,6 +264,16 @@ class SandboxTranscript:
                 block.output = _tail(block.output, FIELD_VALUE_CHARS * 2)
         block.exit_code = exit_code
         block.process_id = process_id
+
+    def mark_held(self, block: _Block | None = None) -> None:
+        """A command was refused by the conversation gate (thread input to
+        answer first) and never ran. block is that command's own block; the
+        SDK starts one response's tool calls concurrently, so "the latest
+        block" may belong to a different command. A block that already has
+        output or an exit code evidently ran, and is never marked."""
+        target = block if block is not None else self._current_block()
+        if not target.output and target.exit_code is None:
+            target.held = True
 
     def set_thinking(self, thinking: bool) -> None:
         self._thinking = bool(thinking)
@@ -275,6 +296,8 @@ class SandboxTranscript:
     def _state_color(self) -> int:
         if self._blocks:
             last = self._blocks[-1]
+            if last.held:
+                return COLOR_TOOL
             if last.exit_code is None:
                 return COLOR_RUNNING
             if last.exit_code != 0:
@@ -282,6 +305,8 @@ class SandboxTranscript:
         return COLOR_TOOL
 
     def _status_line(self, block: _Block) -> str:
+        if block.held:
+            return "⏸ not run — answering thread messages first"
         if block.exit_code is not None:
             if block.exit_code == 0:
                 return "exit 0"
@@ -364,6 +389,10 @@ class SandboxProgressHooks(RunHooks):
         self._last_flush = 0.0
         self._backoff_until = 0.0
         self._finalized = False
+        # tool_call_id -> the transcript block its exec_command created.
+        # One response's tool calls start concurrently, so the latest block
+        # is not necessarily the one a finishing call belongs to.
+        self._call_blocks: dict[str, _Block] = {}
 
     # -- lifecycle (called by the tool, not by the SDK) -------------------
 
@@ -400,7 +429,14 @@ class SandboxProgressHooks(RunHooks):
         if name == "exec_command":
             cmd = args.get("cmd")
             if cmd:
-                self._note(self.transcript.add_command, cmd)
+                try:
+                    block = self.transcript.add_command(cmd)
+                    self._dirty = True
+                    call_id = getattr(context, "tool_call_id", None)
+                    if isinstance(call_id, str) and call_id:
+                        self._call_blocks[call_id] = block
+                except Exception as e:  # a progress error must never kill the run
+                    logger.warning(f"Sandbox progress: ignoring transcript error: {e}")
         elif name == "write_stdin":
             chars = args.get("chars") or ""
             if chars.strip("\n"):
@@ -411,7 +447,18 @@ class SandboxProgressHooks(RunHooks):
         name = getattr(tool, "name", None)
         if name not in ("exec_command", "write_stdin"):
             return
+        block = None
+        if name == "exec_command":
+            call_id = getattr(context, "tool_call_id", None)
+            if isinstance(call_id, str):
+                block = self._call_blocks.pop(call_id, None)
+        if name == "exec_command" and str(result).startswith(GATE_REFUSAL_PREFIX):
+            self._note(self.transcript.mark_held, block)
+            await self._maybe_flush()
+            return
         parsed = parse_exec_result(result)
+        if block is not None:
+            parsed["block"] = block
         # A pure write_stdin poll with no fresh output and no exit adds
         # nothing — skip it (polls can arrive every 250ms).
         if name == "write_stdin" and not parsed["output"] and parsed["exit_code"] is None:

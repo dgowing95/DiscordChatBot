@@ -2,6 +2,7 @@ import logging
 import discord
 import os
 import random
+import time
 import aiohttp
 import io
 from classes.message_handler import MessageHandler
@@ -17,6 +18,7 @@ from classes.metrics import (
     inc_messages_processed,
     inc_messages_received,
     inc_queue_drop,
+    inc_sandbox_thread_message,
     set_context_window_from_env,
     set_message_queue_size,
     start_metrics_server_from_env,
@@ -161,22 +163,11 @@ async def on_message(message):
     # blue instead") without an @mention. Returning here is also the
     # concurrency guard: a second run in the same thread would race the
     # first to persist dcb:sandbox_snapshot:{thread_id} on teardown and
-    # silently clobber it. The reaction is the acknowledgement.
-    #
-    # This does NOT break the sandbox's ask_user, which waits on
-    # client.wait_for: discord.py's Client.dispatch resolves wait_for
-    # futures separately from scheduling on_message, so the reply reaches
-    # it either way (sandbox_thread_inbox.consume then de-duplicates it).
+    # silently clobber it. Answers to the sandbox's ask_user questions come
+    # through here too — the ledger is the one pipeline for thread input.
     if (message.author != client.user and not message.author.bot
             and sandbox_thread_inbox.is_run_active(message.channel.id)):
-        delivered = sandbox_thread_inbox.deliver(
-            message.channel.id, message.id,
-            message.author.display_name, message.content,
-        )
-        try:
-            await message.add_reaction("📨" if delivered else "🚫")
-        except Exception as e:
-            logger.warning(f"Sandbox inbox: could not acknowledge {message.id}: {e}")
+        await route_to_sandbox(message)
         return
 
     # The reply filter runs at receive time so only messages the bot will
@@ -205,6 +196,68 @@ async def on_message(message):
     inc_messages_received(guild_id)
     await message_queue.put(message)
     set_message_queue_size(message_queue.qsize())
+
+
+# What a person sees for each delivery result (sandbox_thread_inbox.deliver).
+# A reaction is the receipt; the replies explain every case where the run
+# will NOT act on the message, so nobody mistakes 🚫 for "seen".
+_SANDBOX_REACTIONS = {
+    sandbox_thread_inbox.ACCEPTED: "📨",
+    sandbox_thread_inbox.FINISHING: "⏳",
+}
+_SANDBOX_REPLIES = {
+    sandbox_thread_inbox.EMPTY: (
+        "🚫 The running sandbox can only read text — send that as a text message."),
+    sandbox_thread_inbox.FINISHING: (
+        "⏳ This sandbox run is finishing, so that hasn't been applied. Once it "
+        "closes, @mention me in this thread to carry on with it."),
+    sandbox_thread_inbox.ATTACHMENT_ONLY: (
+        "🚫 The running sandbox can't open attachments — paste the relevant part "
+        "as text instead."),
+    sandbox_thread_inbox.TOO_LONG: (
+        f"🚫 That's too long to pass to the running sandbox (max "
+        f"{sandbox_thread_inbox.MAX_MESSAGE_CHARS} characters) — shorten it or split it up."),
+    sandbox_thread_inbox.FULL: (
+        "🚫 The sandbox has too many unanswered messages right now — give it a "
+        "moment to catch up, then send that again."),
+}
+# How often "received, I'll review it before my next step" may be posted
+# while a command runs: rapid messages get one notice, not one each.
+SANDBOX_RECEIPT_NOTICE_SECONDS = 30
+
+
+async def route_to_sandbox(message) -> None:
+    """Delivers one thread message to the sandbox run claimed there and
+    acknowledges it accurately: 📨 means the run WILL see it, and says
+    nothing about whether it has been applied — the sandbox answers that
+    itself (respond_to_updates)."""
+    ledger = sandbox_thread_inbox.get_run(message.channel.id)
+    reference = getattr(message, "reference", None)
+    outcome = sandbox_thread_inbox.deliver(
+        message.channel.id, message.id,
+        message.author.id, message.author.display_name, message.content,
+        reply_to=getattr(reference, "message_id", None),
+        has_attachments=bool(getattr(message, "attachments", None)),
+    )
+    inc_sandbox_thread_message(outcome)
+    if outcome == sandbox_thread_inbox.DUPLICATE:
+        return
+    try:
+        await message.add_reaction(_SANDBOX_REACTIONS.get(outcome, "🚫"))
+    except Exception as e:
+        logger.warning(f"Sandbox inbox: could not acknowledge {message.id}: {e}")
+    reply = _SANDBOX_REPLIES.get(outcome)
+    if (reply is None and outcome == sandbox_thread_inbox.ACCEPTED and ledger is not None
+            and ledger.busy_since is not None
+            and time.monotonic() - ledger.last_receipt_notice > SANDBOX_RECEIPT_NOTICE_SECONDS):
+        ledger.last_receipt_notice = time.monotonic()
+        reply = "📨 Received — a command is still running; I'll review this before my next step."
+    if reply is None:
+        return
+    try:
+        await message.reply(reply, mention_author=False)
+    except Exception as e:
+        logger.warning(f"Sandbox inbox: could not reply to {message.id}: {e}")
 
 
 async def should_handle_message(message) -> bool:

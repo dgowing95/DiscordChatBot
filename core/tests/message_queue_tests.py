@@ -239,3 +239,116 @@ async def test_process_messages_worker_pool_runs_messages_concurrently():
         "channel B must not wait for the slow channel-A message "
         "(different channels run concurrently)"
     )
+
+# ---------------------- on_message: routing into a running sandbox ----------------------
+
+@pytest.fixture
+def claimed_thread():
+    """A sandbox run claimed in channel 77 (the _message() default)."""
+    from classes import sandbox_thread_inbox as inbox
+    inbox._RUNS.clear()
+    ledger = inbox.claim_run(77, requester_id=777)
+    ledger.state = inbox.RUNNING
+    yield ledger
+    inbox._RUNS.clear()
+
+
+def _thread_message(content="make it blue", **kwargs):
+    msg = _message(content=content, **kwargs)
+    msg.author.bot = False
+    msg.author.display_name = "ana"
+    msg.reference = None
+    msg.add_reaction = AsyncMock()
+    return msg
+
+
+@pytest.mark.asyncio
+async def test_a_message_in_a_running_sandbox_thread_goes_to_the_sandbox(claimed_thread):
+    main_mod = _import_main()
+    queue = asyncio.Queue(maxsize=2)
+    with patch.object(main_mod, "client", MagicMock()), \
+         patch.object(main_mod, "message_queue", queue):
+        msg = _thread_message()
+        await main_mod.on_message(msg)
+
+    assert queue.qsize() == 0  # not the outer LLM's
+    [event] = claimed_thread.events
+    assert (event.text, event.author_id, event.is_requester) == ("make it blue", 777, True)
+    msg.add_reaction.assert_awaited_once_with("📨")
+    msg.reply.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_redelivered_message_is_recorded_once(claimed_thread):
+    main_mod = _import_main()
+    with patch.object(main_mod, "client", MagicMock()):
+        msg = _thread_message()
+        await main_mod.on_message(msg)
+        await main_mod.on_message(msg)
+
+    assert len(claimed_thread.events) == 1
+    msg.add_reaction.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_message_while_a_command_runs_gets_one_receipt_notice(claimed_thread):
+    import time as _time
+    main_mod = _import_main()
+    claimed_thread.busy_since = _time.monotonic()
+    with patch.object(main_mod, "client", MagicMock()):
+        first, second = _thread_message(msg_id=1), _thread_message("and bigger", msg_id=2)
+        await main_mod.on_message(first)
+        await main_mod.on_message(second)
+
+    first.reply.assert_awaited_once()
+    assert "review this before my next step" in first.reply.await_args.args[0]
+    second.reply.assert_not_awaited()  # coalesced
+
+
+@pytest.mark.asyncio
+async def test_a_message_as_the_run_finishes_is_told_it_was_not_applied(claimed_thread):
+    main_mod = _import_main()
+    claimed_thread.finalize()
+    with patch.object(main_mod, "client", MagicMock()):
+        msg = _thread_message("and a csv")
+        await main_mod.on_message(msg)
+
+    msg.add_reaction.assert_awaited_once_with("⏳")
+    assert "hasn't been applied" in msg.reply.await_args.args[0]
+    assert claimed_thread.follow_ups[0].text == "and a csv"
+
+
+@pytest.mark.asyncio
+async def test_an_attachment_only_message_is_not_acknowledged_as_read(claimed_thread):
+    main_mod = _import_main()
+    with patch.object(main_mod, "client", MagicMock()):
+        msg = _thread_message("")
+        msg.attachments = [MagicMock()]
+        await main_mod.on_message(msg)
+
+    msg.add_reaction.assert_awaited_once_with("🚫")
+    assert "can't open attachments" in msg.reply.await_args.args[0]
+    assert claimed_thread.events == []
+
+
+@pytest.mark.asyncio
+async def test_a_reply_reference_is_passed_along(claimed_thread):
+    main_mod = _import_main()
+    with patch.object(main_mod, "client", MagicMock()):
+        msg = _thread_message("png")
+        msg.reference = MagicMock(message_id=555)
+        await main_mod.on_message(msg)
+
+    assert claimed_thread.events[0].reply_to == 555
+
+
+@pytest.mark.asyncio
+async def test_an_empty_message_is_explained_too(claimed_thread):
+    # e.g. a sticker: no text and no attachments
+    main_mod = _import_main()
+    with patch.object(main_mod, "client", MagicMock()):
+        msg = _thread_message("")
+        await main_mod.on_message(msg)
+
+    msg.add_reaction.assert_awaited_once_with("🚫")
+    assert "only read text" in msg.reply.await_args.args[0]

@@ -1,4 +1,5 @@
 import logging
+import math
 import os,aiohttp, discord, io, time
 from classes.user_memory import UserMemory
 from classes.metrics import (
@@ -28,6 +29,28 @@ def llm_max_turns() -> int:
         return value if value > 0 else DEFAULT_LLM_MAX_TURNS
     except (TypeError, ValueError):
         return DEFAULT_LLM_MAX_TURNS
+
+
+# Wall-clock seconds ONE model call (one turn's request, the OpenAI client's
+# own retries included) may take before the run is abandoned. Applied as
+# ModelSettings.timeout, which the SDK's runner enforces by cancelling the
+# call. The client's own timeout is a per-read timeout: it catches a server
+# that goes silent, but a server that keeps the connection warm while it
+# works (OpenRouter pads non-streaming responses) resets it forever, and
+# until now nothing bounded that at all. The default matches the client's
+# 600s so a slow local generation is no more likely to be cut off than
+# before; it only closes the unbounded case.
+DEFAULT_LLM_CALL_TIMEOUT = 600.0
+
+
+def llm_call_timeout() -> float:
+    """Wall-clock seconds per model call (LLM_CALL_TIMEOUT_SECONDS, default 600)."""
+    try:
+        value = float(str(os.environ.get("LLM_CALL_TIMEOUT_SECONDS")).strip())
+        # ModelSettings.timeout is validated as a finite positive float.
+        return value if value > 0 and math.isfinite(value) else DEFAULT_LLM_CALL_TIMEOUT
+    except (TypeError, ValueError):
+        return DEFAULT_LLM_CALL_TIMEOUT
 
 
 
@@ -182,9 +205,10 @@ class TextLLMHandler:
         self.messages = messages
         self.guild_id = guild_id
         # The discord.Client, forwarded to tool-run context as
-        # "discord_client" (see generate()) — needed by run_code_sandbox's
-        # ask_user tool for client.wait_for(). Optional/None for callers
-        # (and tests) that don't need sandbox HITL.
+        # "discord_client" (see generate()) and on into the nested sandbox
+        # run's context. Nothing there waits on it any more (ask_user's
+        # replies arrive through the thread ledger), so it is optional/None
+        # for callers and tests.
         self.client = client
         self.config = configManager()
         self.user_memory = UserMemory(original_message.author.id, guild_id)
@@ -266,7 +290,8 @@ class TextLLMHandler:
                 temperature=self.options["temperature"],
                 frequency_penalty=1.1,
                 top_p=1.0,
-                reasoning={"effort": os.environ.get("REASONING_EFFORT", "medium")}
+                reasoning={"effort": os.environ.get("REASONING_EFFORT", "medium")},
+                timeout=llm_call_timeout(),
             ),
         )
 

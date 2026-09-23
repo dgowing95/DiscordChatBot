@@ -42,7 +42,12 @@ core/                  # the main bot (the app that runs in production)
     sandbox_progress.py    # streams sandbox commands/output to one edited Discord message
                            #   (single embed: one field per command, state-coloured)
     sandbox_snapshot_store.py  # Redis-backed workspace snapshots, keyed by thread id
-    sandbox_thread_inbox.py    # routes thread messages to a sandbox run in flight
+    sandbox_thread_inbox.py    # PURE (stdlib-only) ledger of thread messages to a run in
+                               #   flight: staged events, atomic per-thread claim
+    sandbox_conversation.py    # conversation coordinator: model-input filter, tool gate,
+                               #   respond_to_updates / ask_user, continuation nudges
+    sandbox_conversation_store.py  # per-thread record of loose ends (late messages,
+                               #   open question) for the next run, in Redis
     common.py              # shared helpers (Discord tool embeds)
   tests/               # pytest suite (see Testing below)
   Dockerfile           # python:3.13-slim image, runs main.py
@@ -147,12 +152,14 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
 
    | Concern | Where it lives |
    |---|---|
-   | Orchestration: thread, guard, progress, artifacts, inbox lifecycle | `tool_functions.run_code_sandbox` |
+   | Orchestration: thread, claim, guard, progress, artifacts, closing note | `tool_functions.run_code_sandbox` |
    | What the outer model is told about a finished run | `sandbox_agent.sandbox_tool_result` (pure) |
    | Nested agent, its prompt, session/container lifecycle, artifact selection | `sandbox_agent.py` |
    | Live progress streamed into one edited message | `sandbox_progress.py` |
    | Workspace snapshots in Redis, keyed by thread id | `sandbox_snapshot_store.py` |
-   | Mid-run steering from thread messages | `sandbox_thread_inbox.py` |
+   | Thread messages: ledger, stages, per-thread claim (pure) | `sandbox_thread_inbox.py` |
+   | Steering enforcement: input filter, gate, acks, questions, finishing | `sandbox_conversation.py` |
+   | Loose ends carried to the next run in a thread | `sandbox_conversation_store.py` |
 
    The behaviour worth knowing before you change anything:
 
@@ -163,9 +170,26 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
      workspace is persisted to Redis before teardown and restored on the next
      call in that SAME thread. Resume is thread-local by construction: the
      snapshot id IS the thread id, so asking anywhere else starts fresh.
-   - **A run can be steered while it happens.** Messages posted in an active
-     thread are routed to the sandbox instead of the outer LLM (📨 acknowledges
-     receipt), and reach the model on the back of its next shell result.
+   - **A run is a conversation, and steering is enforced, not hoped for.**
+     Messages posted in a claimed thread go to the run's ledger instead of the
+     outer LLM (📨 = the run WILL see it, never "applied"). They reach the
+     model as their own user-role items at the next model call
+     (`RunConfig.call_model_input_filter` — the one delivery path; the SDK
+     does not keep filter-added items, so the ledger re-inserts each one at
+     its anchor every call). Until the model answers with
+     `respond_to_updates`, new shell commands, `attach_file` and previews are
+     refused; a final answer with input unanswered gets a bounded
+     continuation in the same container. Each message ends with a recorded
+     outcome (done / accepted-but-unconfirmed / declined / never answered /
+     arrived too late), and that — not "the sandbox adapted" — is what the
+     outer model and the closing note report. A message that lands during a
+     model call cannot interrupt it (mid-inference cancellation was judged
+     unsafe); its stale actions are refused instead.
+   - **One run per thread, claimed atomically.** `claim_run` happens right
+     after the thread is resolved and before any other await, and is held
+     through artifact delivery and the closing note. Messages after the
+     finalization boundary become follow-ups (⏳), saved with the thread's
+     conversation record and offered to the next run there.
    - **The sandbox agent chooses what is delivered** (`attach_file`) and writes
      the closing message the user reads. The outer model adds at most a
      sentence.
@@ -199,8 +223,9 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
    versions of a rule follows neither reliably. So when adding guidance, edit
    the existing home rather than restating it nearby — the comment block above
    `SANDBOX_INSTRUCTIONS` records which bullets were merged and why.
-   Sizes worth re-measuring before adding: `SANDBOX_INSTRUCTIONS` ~3700 chars
-   (pinned by a test), `run_code_sandbox` ~1750 including its JSON schema.
+   Sizes worth re-measuring before adding: `SANDBOX_INSTRUCTIONS` ~3850 chars
+   formatted (pinned by a test, ceiling 3950), `run_code_sandbox` ~1750
+   including its JSON schema.
 
    **Prefer a positive example over a list of prohibitions.** The design-
    ownership rule once carried a 350-character negative list ("no dimensions,
@@ -229,6 +254,7 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
 | `MSG_HISTORY_LIMIT` | how many prior channel messages to include, default 5. Chart: `message_history` |
 | `REASONING_EFFORT` | sent to the LLM as the OpenAI-compat `reasoning_effort` field (low/medium/high, default medium). Chart: `reasoningEffort` |
 | `LLM_MAX_TURNS` | max model turns for ONE reply from the main agent (helm: `llmMaxTurns`), default 20. A turn is one model response, however many tool calls it carries. Passed explicitly to `Runner.run` because the SDK's own default of 10 is easily overrun by a reply that chains several sandbox/image calls — and overrunning raises `MaxTurnsExceeded`, which costs the whole answer |
+| `LLM_CALL_TIMEOUT_SECONDS` | wall-clock seconds ONE model call from the main agent may take, the OpenAI client's own retries included (helm: `llmCallTimeout`), default 600 — the same as the client's own timeout, so a slow local generation is no more likely to be cut off than before. Applied as `ModelSettings.timeout`, which the SDK runner enforces by cancelling the call. Needed because the client's timeout is per-read: a server that keeps the connection warm while it works (OpenRouter pads non-streaming responses with whitespace) resets it on every byte and was previously unbounded |
 | `SHOW_THINKING` | `1`/`true` sends the model's reasoning as spoiler-hidden follow-up message(s); default (off) drops it entirely. Chart: `showThinking` |
 | `WORKER_COUNT` | queue worker tasks (default 2, min 1); each handles one message at a time, a per-channel lock keeps same-channel order. Chart: `worker_count` |
 | `QUEUE_MAX_SIZE` | max messages waiting on the bounded queue (default 10, min 1); when full new messages are dropped (a mention gets a short "busy" reply). Chart: `queue_max_size` |
@@ -253,8 +279,8 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
 | `SANDBOX_LLM_API_KEY` | API key for the sandbox agent's LLM; empty (default) = the main `LLM_PASS` placeholder. Chart: `sandbox.apiKey` |
 | `SANDBOX_ASK_USER_TIMEOUT` | max seconds the sandbox's `ask_user` tool waits for a reply in its thread before telling the model to proceed on its own (default 300); also clamped to whatever of the run's own `SANDBOX_TIMEOUT` budget remains. Chart: `sandbox.askUserTimeout` |
 | `SANDBOX_PERSIST_TIMEOUT_SECONDS` | seconds allowed to persist a thread's workspace snapshot to Redis on container teardown, after `SANDBOX_TIMEOUT` has already elapsed (default 180 — generous since the `Memory` capability's own extraction runs here too). Chart: `sandbox.persistTimeout` |
-| `SANDBOX_REQUEST_TIMEOUT_SECONDS` | seconds of silence on one HTTP request to the sandbox's LLM before the client gives up (default 180, down from the OpenAI client's unstated 600). This is httpx's per-read timeout: it catches a hung connection or a server that sends nothing, but NOT one that dribbles keep-alive padding while it works (OpenRouter pads non-streaming responses), which stays bounded only by `SANDBOX_TIMEOUT`. Chart: `sandbox.requestTimeout` |
-| `SANDBOX_MAX_RETRIES` | how many times that client retries a failed request (default 2; 0 disables). Worst-case latency for one model call is (1 + this) x `SANDBOX_REQUEST_TIMEOUT_SECONDS`. Chart: `sandbox.maxRetries` |
+| `SANDBOX_REQUEST_TIMEOUT_SECONDS` | seconds of silence on one HTTP request to the sandbox's LLM before the client gives up (default 180, down from the OpenAI client's unstated 600). This is the HTTP client's per-read timeout: it catches a hung connection or a server that sends nothing, but NOT one that dribbles keep-alive padding while it works (OpenRouter pads non-streaming responses) — that case is caught by the wall-clock bound below. Chart: `sandbox.requestTimeout` |
+| `SANDBOX_MAX_RETRIES` | how many times that client retries a failed request (default 2; 0 disables). One model call is also wall-clock bounded (`ModelSettings.timeout`, see `sandbox_model_call_timeout()`) at (1 + this) x `SANDBOX_REQUEST_TIMEOUT_SECONDS` — the figure that was already the documented worst case for a silent server, now enforced for a padding one too. Chart: `sandbox.maxRetries` |
 | `SANDBOX_SNAPSHOT_MAX_BYTES` | max size of one thread's stored workspace snapshot in Redis (default 50MB). Chart: `sandbox.snapshotMaxBytes` |
 | `SANDBOX_SNAPSHOT_TTL_SECONDS` | how long an unused thread's workspace snapshot survives in Redis (default 604800 = 7 days). Chart: `sandbox.snapshotTtlSeconds` |
 
@@ -304,7 +330,7 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
   ```
 
   This is exactly what CI runs, so a new test file is picked up automatically;
-  there is no list to keep in step. ~460 tests, roughly 15 seconds.
+  there is no list to keep in step. ~580 tests, roughly 15 seconds.
 
 - Tests import production modules as `classes.X`, the same name the app uses
   (it runs with cwd `/app`), and `pyproject.toml` puts `core/` on the path to
@@ -397,6 +423,16 @@ curl -sS -X POST "$TEST_WEBHOOK_URL" \
   `MessageHandler.handle_message` (concurrent generations, serialized sends,
   prompt hint) in `core/tests/message_handler_tests.py`, and the slow-tool
   registration in `ToolMetricsHooks` in `core/tests/metrics_tests.py`.
+- Sandbox thread-message state lives in `core/classes/sandbox_thread_inbox.py`
+  — keep it pure (stdlib only) and keep every mutating function free of
+  `await`: that is what makes `claim_run` / `deliver` / `finalize` atomic on
+  the one event loop. Cover it in `core/tests/sandbox_thread_inbox_tests.py`.
+  Runner-boundary behaviour (where filter-injected messages land, the tool
+  gate, continuations) is tested against the REAL SDK Runner with
+  `agents.testing.ScriptedModel` in `core/tests/sandbox_conversation_tests.py`;
+  extend those rather than mocking `Runner`, since the point is to catch an
+  SDK upgrade that changes the boundary. The `on_message` routing into a
+  running sandbox is tested in `core/tests/message_queue_tests.py`.
 - The free OpenAI Moderations endpoint is aggressively rate-limited (HTTP 429):
   `content_guard.py` retries 429/5xx with backoff, caches verdicts per input, and
   fails open when it cannot get an answer. Tunables are documented at the top of

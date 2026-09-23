@@ -22,6 +22,16 @@ import classes.tool_functions as prod_tool_functions
 # PYTHONPATH=$(pwd) pytest core/tests/sandbox_agent_tests.py
 
 
+@pytest.fixture(autouse=True)
+def _no_conversation_record_redis():
+    """run_code_sandbox loads and saves a per-thread conversation record in
+    Redis; no test here should reach a real one."""
+    store = MagicMock(load=AsyncMock(return_value=None), save=AsyncMock())
+    with patch("classes.sandbox_conversation_store.SandboxConversationStore",
+               return_value=store):
+        yield store
+
+
 # ---------------------- sandbox_enabled ----------------------
 
 def test_enabled_env_values(monkeypatch):
@@ -532,7 +542,9 @@ async def test_run_sandbox_task_resolves_output_dir_before_run(monkeypatch):
         ("mkdir", "-p", "/root/out"),
         ("touch", "--", "/root/.dcb_run_start"),
     ]
-    build_agent.assert_called_once_with("/root/out")
+    build_agent.assert_called_once()
+    assert build_agent.call_args.args[0] == "/root/out"
+    assert isinstance(build_agent.call_args.args[1], prod_sandbox_agent.SandboxConversation)
 
 
 @pytest.mark.asyncio
@@ -555,7 +567,8 @@ async def test_run_sandbox_task_skips_mkdir_when_output_dir_unresolved(monkeypat
         await prod_sandbox_agent.run_sandbox_task("t")
 
     session.exec.assert_not_awaited()
-    build_agent.assert_called_once_with(None)
+    build_agent.assert_called_once()
+    assert build_agent.call_args.args[0] is None
 
 
 @pytest.mark.asyncio
@@ -1736,8 +1749,8 @@ def _ask_user_ctx(**overrides):
     from agents.tool_context import ToolContext
     ctx = {
         "thread": _thread_mock(),
-        "client": MagicMock(),
         "requesting_user_id": 42,
+        "conversation": MagicMock(ask=AsyncMock(return_value="asked")),
     }
     ctx.update(overrides)
     return ToolContext(
@@ -1749,91 +1762,34 @@ def _ask_user_ctx(**overrides):
 
 
 @pytest.mark.asyncio
-async def test_ask_user_returns_the_reply_content():
-    thread = _thread_mock()
-    thread.send = AsyncMock()
-    client = MagicMock()
-    reply = MagicMock()
-    reply.content = "png please"
-    client.wait_for = AsyncMock(return_value=reply)
-    ctx = _ask_user_ctx(thread=thread, client=client)
-
+async def test_ask_user_hands_the_question_to_the_conversation():
+    ctx = _ask_user_ctx()
     result = await prod_sandbox_agent.ask_user.on_invoke_tool(
-        ctx, json.dumps({"question": "png or jpg?"})
-    )
+        ctx, json.dumps({"question": "png or jpg?", "blocking": False,
+                         "choices": ["png", "jpg"], "default": "png"}))
 
-    thread.send.assert_awaited_once()
-    assert "png or jpg?" in thread.send.await_args.args[0]
-    client.wait_for.assert_awaited_once()
-    assert result == "png please"
+    ask = ctx.context["conversation"].ask
+    assert result == "asked"
+    assert ask.await_args.args[0] == "png or jpg?"
+    assert ask.await_args.kwargs["blocking"] is False
+    assert ask.await_args.kwargs["choices"] == ["png", "jpg"]
+    assert ask.await_args.kwargs["default"] == "png"
 
 
 @pytest.mark.asyncio
-async def test_ask_user_reply_check_filters_by_thread_and_user():
-    thread = _thread_mock(thread_id=111)
-    thread.send = AsyncMock()
-    client = MagicMock()
-    client.wait_for = AsyncMock(return_value=MagicMock(content="ok"))
-    ctx = _ask_user_ctx(thread=thread, client=client, requesting_user_id=42)
-
+async def test_ask_user_blocks_by_default():
+    ctx = _ask_user_ctx()
     await prod_sandbox_agent.ask_user.on_invoke_tool(ctx, json.dumps({"question": "q"}))
-
-    check = client.wait_for.await_args.kwargs["check"]
-    right = MagicMock(channel=MagicMock(id=111), author=MagicMock(id=42, bot=False))
-    wrong_channel = MagicMock(channel=MagicMock(id=999), author=MagicMock(id=42, bot=False))
-    wrong_user = MagicMock(channel=MagicMock(id=111), author=MagicMock(id=1, bot=False))
-    from_a_bot = MagicMock(channel=MagicMock(id=111), author=MagicMock(id=42, bot=True))
-    assert check(right) is True
-    assert check(wrong_channel) is False
-    assert check(wrong_user) is False
-    assert check(from_a_bot) is False
-
-
-@pytest.mark.asyncio
-async def test_ask_user_empty_reply_content_still_returns_something():
-    thread = _thread_mock()
-    thread.send = AsyncMock()
-    client = MagicMock()
-    client.wait_for = AsyncMock(return_value=MagicMock(content=""))
-    ctx = _ask_user_ctx(thread=thread, client=client)
-
-    result = await prod_sandbox_agent.ask_user.on_invoke_tool(ctx, json.dumps({"question": "q"}))
-    assert isinstance(result, str) and result
-
-
-@pytest.mark.asyncio
-async def test_ask_user_timeout_tells_model_to_proceed():
-    # Per the user's decision: an unanswered question must never hang or
-    # fail the run — the model is told to proceed on its own judgement.
-    thread = _thread_mock()
-    thread.send = AsyncMock()
-    client = MagicMock()
-    client.wait_for = AsyncMock(side_effect=asyncio.TimeoutError())
-    ctx = _ask_user_ctx(thread=thread, client=client)
-
-    result = await prod_sandbox_agent.ask_user.on_invoke_tool(ctx, json.dumps({"question": "q"}))
-    assert "proceed using your best judgement" in result.lower()
+    assert ctx.context["conversation"].ask.await_args.kwargs["blocking"] is True
 
 
 @pytest.mark.asyncio
 async def test_ask_user_without_thread_context_tells_model_to_proceed():
-    # No thread/client/user available at all (e.g. a nested run started
-    # without HITL context) must degrade gracefully, never raise.
-    ctx = _ask_user_ctx(thread=None, client=None, requesting_user_id=None)
+    # No thread available at all (the no-thread fallback) must degrade
+    # gracefully, never raise.
+    ctx = _ask_user_ctx(thread=None, conversation=None)
     result = await prod_sandbox_agent.ask_user.on_invoke_tool(ctx, json.dumps({"question": "q"}))
     assert "proceed using your best judgement" in result.lower()
-
-
-@pytest.mark.asyncio
-async def test_ask_user_send_failure_tells_model_to_proceed():
-    thread = _thread_mock()
-    thread.send = AsyncMock(side_effect=RuntimeError("discord is down"))
-    client = MagicMock()
-    ctx = _ask_user_ctx(thread=thread, client=client)
-
-    result = await prod_sandbox_agent.ask_user.on_invoke_tool(ctx, json.dumps({"question": "q"}))
-    assert "proceed using your best judgement" in result.lower()
-    client.wait_for.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1841,31 +1797,22 @@ async def test_ask_user_clamps_timeout_to_remaining_sandbox_budget(monkeypatch):
     # A question asked late in a run must not wait past the point the outer
     # sandbox_timeout() would cut the whole run off anyway.
     monkeypatch.setenv("SANDBOX_ASK_USER_TIMEOUT", "300")
-    thread = _thread_mock()
-    thread.send = AsyncMock()
-    client = MagicMock()
-    client.wait_for = AsyncMock(return_value=MagicMock(content="ok"))
     deadline = time.monotonic() + 5  # only ~5s left in the run's own budget
-    ctx = _ask_user_ctx(thread=thread, client=client, deadline=deadline)
+    ctx = _ask_user_ctx(deadline=deadline)
 
     await prod_sandbox_agent.ask_user.on_invoke_tool(ctx, json.dumps({"question": "q"}))
 
-    used_timeout = client.wait_for.await_args.kwargs["timeout"]
-    assert used_timeout <= 5.5
+    assert ctx.context["conversation"].ask.await_args.kwargs["timeout"] <= 5.5
 
 
 @pytest.mark.asyncio
 async def test_ask_user_uses_full_timeout_without_a_deadline(monkeypatch):
     monkeypatch.setenv("SANDBOX_ASK_USER_TIMEOUT", "45")
-    thread = _thread_mock()
-    thread.send = AsyncMock()
-    client = MagicMock()
-    client.wait_for = AsyncMock(return_value=MagicMock(content="ok"))
-    ctx = _ask_user_ctx(thread=thread, client=client, deadline=None)
+    ctx = _ask_user_ctx(deadline=None)
 
     await prod_sandbox_agent.ask_user.on_invoke_tool(ctx, json.dumps({"question": "q"}))
 
-    assert client.wait_for.await_args.kwargs["timeout"] == 45.0
+    assert ctx.context["conversation"].ask.await_args.kwargs["timeout"] == 45.0
 
 
 # ---------------------- send_preview_to_thread ----------------------
@@ -1909,7 +1856,7 @@ async def test_attach_file_records_the_file_for_delivery():
     result = await _attach(ctx, path="out/plot.png", caption="the final one")
 
     assert ctx.context["deliverables"] == [
-        {"path": "out/plot.png", "size": 512, "caption": "the final one"}
+        {"path": "out/plot.png", "size": 512, "caption": "the final one", "change_revision": 0}
     ]
     assert "plot.png" in result
     session.exec.assert_awaited_once_with(
@@ -1927,7 +1874,7 @@ async def test_attach_file_replaces_an_earlier_version_of_the_same_path():
     result = await _attach(ctx, path="out/plot.png", caption="fixed")
 
     assert ctx.context["deliverables"] == [
-        {"path": "out/plot.png", "size": 20, "caption": "fixed"}
+        {"path": "out/plot.png", "size": 20, "caption": "fixed", "change_revision": 0}
     ]
     assert "Replaced" in result
 
@@ -1980,20 +1927,6 @@ async def test_attach_file_refuses_past_the_file_cap():
     assert len(ctx.context["deliverables"]) == sandbox_agent.MAX_ARTIFACT_FILES
     assert "limit" in result
 
-
-@pytest.mark.asyncio
-async def test_attach_file_carries_back_waiting_thread_messages(clean_inbox):
-    # Same delivery argument as ask_user/say_in_thread: a steering message
-    # must not wait for the next shell command to be noticed.
-    thread = _thread_mock(thread_id=88)
-    session = MagicMock()
-    session.exec = AsyncMock(return_value=_exec_result(b"5\n"))
-    clean_inbox.begin_run(88)
-    clean_inbox.deliver(88, 1, "ana", "make it red")
-
-    result = await _attach(_attach_ctx(thread=thread, session=session), path="out/p.png")
-
-    assert "make it red" in result
 
 
 @pytest.mark.asyncio
@@ -2154,6 +2087,91 @@ def test_max_retries_zero_disables_retries(monkeypatch):
 def test_max_retries_ignores_negative(monkeypatch):
     monkeypatch.setenv("SANDBOX_MAX_RETRIES", "-1")
     assert sandbox_agent.sandbox_max_retries() == 2
+
+
+# ---------------------- sandbox_model_call_timeout ----------------------
+
+def test_model_call_timeout_is_the_documented_worst_case(monkeypatch):
+    """(1 + retries) x request timeout: the figure SANDBOX_MAX_RETRIES' docs
+    already gave as the worst case, now enforced as a wall-clock bound."""
+    monkeypatch.setenv("SANDBOX_REQUEST_TIMEOUT_SECONDS", "100")
+    monkeypatch.setenv("SANDBOX_MAX_RETRIES", "2")
+    assert sandbox_agent.sandbox_model_call_timeout() == 300.0
+    monkeypatch.setenv("SANDBOX_MAX_RETRIES", "0")
+    assert sandbox_agent.sandbox_model_call_timeout() == 100.0
+
+
+def test_build_sandbox_agent_bounds_each_model_call(monkeypatch):
+    _clear_llm_env(monkeypatch)
+    monkeypatch.setenv("SANDBOX_REQUEST_TIMEOUT_SECONDS", "100")
+    monkeypatch.setenv("SANDBOX_MAX_RETRIES", "1")
+    agent = sandbox_agent.build_sandbox_agent(None)
+
+    assert agent.model_settings.timeout == 200.0
+    # Regression: openai>=3 talks HTTPX2 and stores a legacy httpx.Timeout as
+    # one opaque object in every phase of the underlying client's timeout
+    # instead of translating it. The per-phase budgets must be plain floats.
+    inner = agent.model._client._client.timeout
+    assert (inner.connect, inner.read) == (
+        sandbox_agent.SANDBOX_CONNECT_TIMEOUT_SECONDS, 100.0)
+
+
+@pytest.mark.asyncio
+async def test_model_call_timeout_bounds_a_server_that_dribbles_padding():
+    """The case the read timeout cannot catch (OpenRouter pads non-streaming
+    responses with whitespace, resetting the read timer on every byte) is
+    exactly what ModelSettings.timeout is here for. Pinned against a real
+    chat-completions call so an SDK release that quietly made the timeout
+    Responses-only would fail here rather than in prod."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    import httpx2
+    from agents import (Agent, AsyncOpenAI, ModelSettings, ModelTimeoutError,
+                        OpenAIChatCompletionsModel, RunConfig, Runner)
+
+    class Dribble(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            try:
+                while True:
+                    self.wfile.write(b" ")
+                    self.wfile.flush()
+                    time.sleep(0.05)
+            except OSError:
+                pass  # client gave up: exactly what is being tested
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Dribble)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        model = OpenAIChatCompletionsModel(
+            model="x",
+            openai_client=AsyncOpenAI(
+                base_url=f"http://127.0.0.1:{server.server_address[1]}/v1", api_key="x",
+                # a read timeout shorter than the wall-clock one, to prove
+                # the padding really does keep it from ever firing
+                timeout=httpx2.Timeout(0.3, connect=1.0), max_retries=0,
+            ),
+        )
+        agent = Agent(name="a", instructions="", model=model,
+                      model_settings=ModelSettings(timeout=0.6))
+        started = time.monotonic()
+        with pytest.raises(ModelTimeoutError):
+            await asyncio.wait_for(
+                Runner.run(agent, "hi", max_turns=1,
+                           run_config=RunConfig(tracing_disabled=True)),
+                timeout=5,
+            )
+        assert time.monotonic() - started < 3
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 @pytest.mark.asyncio
@@ -2474,17 +2492,10 @@ async def test_tool_does_not_notify_when_reusing_an_existing_thread():
 def clean_inbox():
     """The thread inbox is module-level process state; a test that leaves a
     thread registered would change the next test's routing."""
-    from classes import sandbox_thread_inbox as core_inbox
     import classes.sandbox_thread_inbox as prod_inbox
-    core_inbox._PENDING.clear()
-    prod_inbox._PENDING.clear()
-    core_inbox._SEEN.clear()
-    prod_inbox._SEEN.clear()
+    prod_inbox._RUNS.clear()
     yield prod_inbox
-    core_inbox._PENDING.clear()
-    prod_inbox._PENDING.clear()
-    core_inbox._SEEN.clear()
-    prod_inbox._SEEN.clear()
+    prod_inbox._RUNS.clear()
 
 
 @pytest.mark.asyncio
@@ -2654,111 +2665,152 @@ async def test_delete_sandbox_snapshot_swallows_a_redis_failure():
         await prod_sandbox_agent._delete_sandbox_snapshot("42")  # must not raise
 
 
-# ---------------------- live thread messages reach the model ----------------------
+# ---------------------- shell tools: gate and checkpoints ----------------------
+# Thread messages no longer ride on shell output (one delivery path: the
+# model input filter — see sandbox_conversation_tests). What the shell
+# wrappers own now is refusing a NEW command while input is unanswered, and
+# yielding a long command early when someone posts.
 
-def _nested_ctx(thread):
-    return MagicMock(context={"thread": thread})
-
-
-@pytest.mark.asyncio
-async def test_shell_results_carry_pending_thread_messages(clean_inbox):
-    # The primary delivery path: a small local model forgets to poll, but
-    # cannot avoid reading the output of the command it just ran.
-    thread = _thread_mock(thread_id=7)
-    clean_inbox.begin_run(7)
-    clean_inbox.deliver(7, 1, "ana", "make it blue")
-
-    wrapped = prod_sandbox_agent._with_thread_messages(AsyncMock(return_value="exit 0"))
-    out = await wrapped(_nested_ctx(thread), "{}")
-
-    assert out.startswith("exit 0")
-    assert "[thread message from ana]: make it blue" in out
+def _gate_conversation(thread_id=7):
+    from classes import sandbox_thread_inbox as inbox
+    ledger = inbox.RunLedger(thread_id=thread_id, requester_id=1)
+    return prod_sandbox_agent.SandboxConversation(ledger, _thread_mock(thread_id=thread_id))
 
 
 @pytest.mark.asyncio
-async def test_shell_results_are_untouched_when_nobody_said_anything(clean_inbox):
-    thread = _thread_mock(thread_id=7)
-    clean_inbox.begin_run(7)
-    wrapped = prod_sandbox_agent._with_thread_messages(AsyncMock(return_value="exit 0"))
-    assert await wrapped(_nested_ctx(thread), "{}") == "exit 0"
+async def test_a_new_command_is_refused_while_a_message_is_unanswered():
+    conv = _gate_conversation()
+    conv.ledger.deliver(1, 1, "ana", "make it blue")
+    conv.ledger.mark_presented([1], anchor=1)
+    exec_tool = MagicMock()
+    inner = AsyncMock(return_value="exit 0")
+    exec_tool.on_invoke_tool = inner
+    toolset = MagicMock(exec_command=exec_tool, write_stdin=None)
+    prod_sandbox_agent._configure_shell_tools(toolset)
+
+    out = await exec_tool.on_invoke_tool(MagicMock(context={"conversation": conv}), '{"cmd": "ls"}')
+
+    inner.assert_not_awaited()
+    assert "Not run" in out and "#1" in out
 
 
 @pytest.mark.asyncio
-async def test_shell_results_are_untouched_without_a_thread(clean_inbox):
-    wrapped = prod_sandbox_agent._with_thread_messages(AsyncMock(return_value="exit 0"))
-    assert await wrapped(MagicMock(context={}), "{}") == "exit 0"
+async def test_write_stdin_is_never_gated():
+    # Observing or stopping a running command is what the model may need to
+    # do while it reviews new input, so only NEW work is held back.
+    conv = _gate_conversation()
+    conv.ledger.deliver(1, 1, "ana", "make it blue")
+    conv.ledger.mark_presented([1], anchor=1)
+    exec_tool, stdin_tool = MagicMock(), MagicMock()
+    exec_tool.on_invoke_tool = AsyncMock(return_value="exit 0")
+    stdin_tool.on_invoke_tool = AsyncMock(return_value="polled")
+    toolset = MagicMock(exec_command=exec_tool, write_stdin=stdin_tool)
+    prod_sandbox_agent._configure_shell_tools(toolset)
+
+    out = await stdin_tool.on_invoke_tool(
+        MagicMock(context={"conversation": conv}), '{"session_id": 3}')
+
+    assert out == "polled"
 
 
 @pytest.mark.asyncio
-async def test_an_inbox_failure_never_breaks_a_shell_call(clean_inbox):
-    thread = _thread_mock(thread_id=7)
-    wrapped = prod_sandbox_agent._with_thread_messages(AsyncMock(return_value="exit 0"))
-    with patch.object(prod_sandbox_agent.sandbox_thread_inbox, "drain",
-                      side_effect=RuntimeError("boom")):
-        assert await wrapped(_nested_ctx(thread), "{}") == "exit 0"
-
-
-@pytest.mark.asyncio
-async def test_a_rejected_tool_call_still_carries_thread_messages(clean_inbox):
-    # _with_thread_messages wraps the tolerant wrapper, not the other way
-    # round, so an interjection is not dropped just because the model's tool
-    # call happened to be malformed.
+async def test_a_rejected_tool_call_is_still_tolerated_under_the_gate():
     from pydantic import BaseModel, ValidationError
 
     class _Args(BaseModel):
         cmd: str
 
-    err = None
     try:
         _Args.model_validate_json("{}")
     except ValidationError as e:
         err = e
-
-    thread = _thread_mock(thread_id=7)
-    clean_inbox.begin_run(7)
-    clean_inbox.deliver(7, 1, "ana", "make it blue")
-
     exec_tool = MagicMock()
     exec_tool.on_invoke_tool = AsyncMock(side_effect=err)
     toolset = MagicMock(exec_command=exec_tool, write_stdin=None)
     prod_sandbox_agent._configure_shell_tools(toolset)
-    out = await exec_tool.on_invoke_tool(_nested_ctx(thread), "{}")
+
+    out = await exec_tool.on_invoke_tool(
+        MagicMock(context={"conversation": _gate_conversation()}), "{}")
 
     assert "Tool call rejected" in out
-    assert "[thread message from ana]: make it blue" in out
 
 
-# ---------------------- check_thread_messages / say_in_thread ----------------------
+def _running(session_id=5, output="partial"):
+    return (f"Chunk ID: x\nWall time: 5.0 seconds\nProcess running with session ID "
+            f"{session_id}\nOutput:\n{output}")
+
+
+@pytest.mark.asyncio
+async def test_a_long_command_is_waited_on_in_checkpoint_slices(monkeypatch):
+    monkeypatch.setattr(prod_sandbox_agent, "SHELL_CHECKPOINT_SECONDS", 0.05)
+    conv = _gate_conversation()
+    exec_invoke = AsyncMock(return_value=_running())
+    polls = iter([_running(output="more"), "Chunk ID: y\nProcess exited with code 0\nOutput:\ndone"])
+    poll_invoke = AsyncMock(side_effect=lambda ctx, raw: next(polls))
+    wrapped = prod_sandbox_agent._with_shell_checkpoints(exec_invoke, poll_invoke)
+
+    out = await wrapped(MagicMock(context={"conversation": conv}),
+                        json.dumps({"cmd": "pip install x", "yield_time_ms": 60_000}))
+
+    # the first slice is clamped to the checkpoint, the rest are polls
+    assert json.loads(exec_invoke.await_args.args[1])["yield_time_ms"] == 50
+    assert poll_invoke.await_count == 2
+    assert json.loads(poll_invoke.await_args.args[1])["session_id"] == 5
+    # merged into ONE SDK-shaped result: the last slice's status, all output
+    from classes.sandbox_progress import parse_exec_result
+    parsed = parse_exec_result(out)
+    assert parsed == {"output": "partialmoredone", "exit_code": 0, "process_id": None}
+
+
+@pytest.mark.asyncio
+async def test_a_long_command_hands_back_early_when_someone_posts(monkeypatch):
+    monkeypatch.setattr(prod_sandbox_agent, "SHELL_CHECKPOINT_SECONDS", 0.05)
+    conv = _gate_conversation()
+    conv.ledger.state = "running"
+    exec_invoke = AsyncMock(return_value=_running())
+
+    async def _poll(ctx, raw):
+        conv.ledger.deliver(9, 1, "ana", "stop, use the other dataset")
+        return _running(output="still going")
+
+    poll_invoke = AsyncMock(side_effect=_poll)
+    wrapped = prod_sandbox_agent._with_shell_checkpoints(exec_invoke, poll_invoke)
+
+    out = await wrapped(MagicMock(context={"conversation": conv}),
+                        json.dumps({"cmd": "make", "yield_time_ms": 600_000}))
+
+    assert poll_invoke.await_count == 1
+    assert "still running as session 5" in out
+
+
+@pytest.mark.asyncio
+async def test_a_short_command_is_not_sliced():
+    exec_invoke = AsyncMock(return_value="exit 0")
+    poll_invoke = AsyncMock()
+    wrapped = prod_sandbox_agent._with_shell_checkpoints(exec_invoke, poll_invoke)
+
+    raw = json.dumps({"cmd": "ls", "yield_time_ms": 2000})
+    out = await wrapped(MagicMock(context={"conversation": _gate_conversation()}), raw)
+
+    assert out == "exit 0"
+    exec_invoke.assert_awaited_once()
+    assert exec_invoke.await_args.args[1] == raw
+    poll_invoke.assert_not_awaited()
+
+
+
+
+
+
+
+# ---------------------- say_in_thread ----------------------
 
 def _nested_tool_context(context):
     from agents.tool_context import ToolContext
     return ToolContext(context=context, tool_name="t", tool_call_id="t1", tool_arguments="{}")
 
 
-@pytest.mark.asyncio
-async def test_check_thread_messages_returns_what_is_waiting(clean_inbox):
-    thread = _thread_mock(thread_id=7)
-    clean_inbox.begin_run(7)
-    clean_inbox.deliver(7, 1, "ana", "make it blue")
-    out = await prod_sandbox_agent.check_thread_messages.on_invoke_tool(
-        _nested_tool_context({"thread": thread}), "{}")
-    assert "[thread message from ana]: make it blue" in out
 
-
-@pytest.mark.asyncio
-async def test_check_thread_messages_says_so_when_there_are_none(clean_inbox):
-    thread = _thread_mock(thread_id=7)
-    clean_inbox.begin_run(7)
-    out = await prod_sandbox_agent.check_thread_messages.on_invoke_tool(
-        _nested_tool_context({"thread": thread}), "{}")
-    assert out == "No new messages."
-
-
-@pytest.mark.asyncio
-async def test_check_thread_messages_degrades_without_a_thread():
-    out = await prod_sandbox_agent.check_thread_messages.on_invoke_tool(
-        _nested_tool_context({}), "{}")
-    assert "No thread" in out
 
 
 @pytest.mark.asyncio
@@ -2801,7 +2853,15 @@ async def test_say_in_thread_degrades_without_a_thread():
 def test_build_sandbox_agent_exposes_the_thread_io_tools():
     agent = sandbox_agent.build_sandbox_agent(None)
     names = {getattr(t, "name", None) for t in agent.tools}
-    assert {"check_thread_messages", "say_in_thread"} <= names
+    assert {"respond_to_updates", "say_in_thread"} <= names
+    # one delivery path: the old polling tool must not come back
+    assert "check_thread_messages" not in names
+
+
+def test_build_sandbox_agent_attaches_the_conversation_hooks():
+    conv = prod_sandbox_agent.SandboxConversation()
+    agent = sandbox_agent.build_sandbox_agent(None, conv)
+    assert agent.hooks is not None
 
 
 # ---------------------- run_code_sandbox: origin badge & thread routing ----------------------
@@ -2953,7 +3013,8 @@ async def test_tool_forwards_to_the_run_already_going_in_this_thread(clean_inbox
     message.id = 99
     message.author.display_name = "ana"
     thread, patches = _sandbox_tool_patches(_text_result("done"))
-    clean_inbox.begin_run(thread.id)
+    ledger = clean_inbox.claim_run(thread.id, 1)
+    ledger.state = clean_inbox.RUNNING
 
     with patches[0], patches[1], patches[2], patches[3] as run, \
          patch.object(prod_tool_functions.Common, "send_tool_discord_embed",
@@ -2964,7 +3025,75 @@ async def test_tool_forwards_to_the_run_already_going_in_this_thread(clean_inbox
     run.assert_not_awaited()
     embed.assert_not_awaited()
     assert "already running" in out
-    assert clean_inbox.drain(thread.id) == "[thread message from ana]: make it blue"
+    [event] = ledger.events
+    assert (event.author_name, event.text, event.is_requester) == ("ana", "make it blue", True)
+    # the claim belongs to the run in flight, not to the forwarding call
+    assert clean_inbox.get_run(thread.id) is ledger
+
+
+@pytest.mark.asyncio
+async def test_tool_says_so_when_the_running_sandbox_could_not_take_the_request(clean_inbox):
+    message = MagicMock()
+    message.author.id = 1
+    message.id = 99
+    message.author.display_name = "ana"
+    thread, patches = _sandbox_tool_patches(_text_result("done"))
+    ledger = clean_inbox.claim_run(thread.id, 1)
+    ledger.finalize()
+
+    with patches[0], patches[1], patches[2], patches[3], \
+         patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()):
+        out = await prod_tool_functions.run_code_sandbox.on_invoke_tool(
+            _tool_context(message), json.dumps({"task": "make it blue"}))
+
+    assert "finishing" in out and "not be applied" in out
+    assert ledger.follow_ups[0].text == "make it blue"
+
+
+@pytest.mark.asyncio
+async def test_tool_claims_the_thread_before_any_other_await(clean_inbox):
+    # The old guard checked, awaited several things, then registered — so
+    # two runs could both pass the check. The claim now lands before the
+    # snapshot lookup (the first await after the thread is resolved).
+    message = MagicMock()
+    message.author.id = 1
+    thread, patches = _sandbox_tool_patches(_text_result("done"))
+    seen = {}
+
+    async def _exists(snapshot_id):
+        seen["claimed"] = clean_inbox.is_run_active(thread.id)
+        return False
+
+    with patches[0], patches[1], patches[3], \
+         patch.object(prod_sandbox_agent, "sandbox_snapshot_exists", AsyncMock(side_effect=_exists)), \
+         patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()):
+        await prod_tool_functions.run_code_sandbox.on_invoke_tool(
+            _tool_context(message), json.dumps({"task": "print 42"}))
+
+    assert seen["claimed"] is True
+
+
+@pytest.mark.asyncio
+async def test_tool_holds_the_claim_until_the_files_are_delivered(clean_inbox):
+    # A message posted while files upload must still reach the sandbox's
+    # ledger (as a follow-up), not fall through to the outer LLM.
+    message = MagicMock()
+    message.author.id = 1
+    artifact = sandbox_agent.SandboxArtifact(name="plot.png", data=b"x")
+    thread, patches = _sandbox_tool_patches(_text_result("here", [artifact]))
+    seen = {}
+
+    async def _send(*args, **kwargs):
+        seen["active_while_sending"] = clean_inbox.is_run_active(thread.id)
+
+    thread.send = AsyncMock(side_effect=_send)
+    with patches[0], patches[1], patches[2], patches[3], \
+         patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()):
+        await prod_tool_functions.run_code_sandbox.on_invoke_tool(
+            _tool_context(message), json.dumps({"task": "plot"}))
+
+    assert seen["active_while_sending"] is True
+    assert clean_inbox.is_run_active(thread.id) is False
 
 
 @pytest.mark.asyncio
@@ -3076,8 +3205,11 @@ async def test_tool_tells_the_outer_model_what_the_user_said_mid_run(clean_inbox
     thread.send = AsyncMock()
 
     async def run_with_steering(*args, **kwargs):
-        clean_inbox.deliver(thread.id, 1, "ana", "can you make the milk red?")
-        clean_inbox.deliver(thread.id, 2, "ana", "and also fizzy, add bubbles")
+        clean_inbox.deliver(thread.id, 1, 1, "ana", "can you make the milk red?")
+        clean_inbox.deliver(thread.id, 2, 1, "ana", "and also fizzy, add bubbles")
+        ledger = clean_inbox.get_run(thread.id)
+        ledger.mark_presented([1, 2], anchor=1)
+        ledger.record_decision([1, 2], "done", "Red and fizzy now.")
         return _text_result("red fizzy milk")
 
     with patches[0], patches[1], patches[2], \
@@ -3090,6 +3222,37 @@ async def test_tool_tells_the_outer_model_what_the_user_said_mid_run(clean_inbox
     assert "can you make the milk red?" in out
     assert "and also fizzy, add bubbles" in out
     assert "do not call the result a mistake" in out
+    assert "Red and fizzy now." in out
+
+
+@pytest.mark.asyncio
+async def test_tool_does_not_claim_an_unanswered_message_was_applied(clean_inbox):
+    # The old note said "the sandbox received these and adapted" for every
+    # accepted message, even one the nested model ignored or never saw.
+    message = MagicMock()
+    message.author.id = 1
+    thread, patches = _sandbox_tool_patches(_text_result("a red chart"))
+    thread.send = AsyncMock()
+
+    async def run_with_ignored_message(*args, **kwargs):
+        clean_inbox.deliver(thread.id, 1, 1, "ana", "make it blue")
+        clean_inbox.get_run(thread.id).mark_presented([1], anchor=1)
+        return _text_result("a red chart")
+
+    with patches[0], patches[1], patches[2], \
+         patch.object(prod_sandbox_agent, "run_sandbox_task",
+                      AsyncMock(side_effect=run_with_ignored_message)), \
+         patch.object(prod_tool_functions.Common, "send_tool_discord_embed",
+                      AsyncMock()) as embed:
+        out = await prod_tool_functions.run_code_sandbox.on_invoke_tool(
+            _tool_context(message), json.dumps({"task": "chart"}))
+
+    assert "make it blue" in out
+    assert "never answered" in out
+    assert "adapted" not in out
+    assert "do not call the result a mistake" not in out
+    # and the thread's closing note names it for the user too
+    assert "make it blue" in _embed_matching(embed, "Sandbox closed")
 
 
 @pytest.mark.asyncio
@@ -3104,7 +3267,7 @@ async def test_tool_says_nothing_about_steering_when_nobody_interrupted(clean_in
         out = await prod_tool_functions.run_code_sandbox.on_invoke_tool(
             _tool_context(message), json.dumps({"task": "print 42"}))
 
-    assert "changed the request" not in out
+    assert "People posted" not in out
 
 
 @pytest.mark.asyncio
@@ -3116,7 +3279,7 @@ async def test_tool_reports_steering_on_a_stopped_run_too(clean_inbox):
     thread, patches = _sandbox_tool_patches(_timeout_result())
 
     async def run_with_steering(*args, **kwargs):
-        clean_inbox.deliver(thread.id, 1, "ana", "make it red")
+        clean_inbox.deliver(thread.id, 1, 1, "ana", "make it red")
         return _timeout_result()
 
     with patches[0], patches[1], patches[2], \
@@ -3305,7 +3468,7 @@ async def test_tool_posts_no_closing_note_when_forwarding_to_a_running_sandbox(c
     message = MagicMock()
     message.author.id = 1
     thread, patches = _sandbox_tool_patches(_text_result("done"))
-    clean_inbox.begin_run(thread.id)
+    clean_inbox.claim_run(thread.id, 1)
     with patches[0], patches[1], patches[2], patches[3], \
          patch.object(prod_tool_functions.Common, "send_tool_discord_embed",
                       AsyncMock()) as embed:
@@ -3517,27 +3680,6 @@ async def test_a_time_marker_failure_never_breaks_a_shell_call():
     assert await wrapped(exploding, "{}") == "exit 0"
 
 
-@pytest.mark.asyncio
-async def test_steering_messages_stay_last_in_a_shell_result(clean_inbox):
-    # Composition order: tolerant -> elapsed -> thread messages, so the
-    # user's interjection is the final thing in the result rather than being
-    # separated from it by a housekeeping marker.
-    import time as _time
-    thread = _thread_mock(thread_id=7)
-    clean_inbox.begin_run(7)
-    clean_inbox.deliver(7, 1, "ana", "make it blue")
-
-    exec_tool = MagicMock()
-    exec_tool.on_invoke_tool = AsyncMock(return_value="exit 0")
-    toolset = MagicMock(exec_command=exec_tool, write_stdin=None)
-    prod_sandbox_agent._configure_shell_tools(toolset)
-    ctx = MagicMock(context={"thread": thread,
-                             "deadline": _time.monotonic() + 300.0,
-                             "timeout_seconds": 600})
-    out = await exec_tool.on_invoke_tool(ctx, "{}")
-
-    assert out.index("of 600s]") < out.index("[thread message from ana]")
-
 
 @pytest.mark.asyncio
 async def test_the_run_context_carries_the_budget_the_deadline_was_built_from(
@@ -3560,3 +3702,124 @@ async def test_the_run_context_carries_the_budget_the_deadline_was_built_from(
 
     assert captured["timeout_seconds"] == 321
     assert captured["deadline"] is not None
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_during_a_continuation_delivers_the_finished_answer():
+    # The first pass had already produced a final answer; running out of
+    # time while continuing for a late message must not turn it into
+    # "the task timed out".
+    async def _converse(agent, task, run_config, hooks, context, conversation):
+        conversation.completed_result = MagicMock(final_output="your chart")
+        await asyncio.sleep(5)
+
+    patches = _patch_session_lifecycle()
+    with patches[0], patches[1], patches[2], patches[3],          patch.object(prod_sandbox_agent, "_converse", _converse),          patch.object(prod_sandbox_agent, "sandbox_timeout", return_value=0.05),          patch.object(prod_sandbox_agent, "build_sandbox_agent", return_value=MagicMock()),          patch.object(prod_sandbox_agent, "_collect_artifacts", AsyncMock(return_value=([], []))):
+        result = await prod_sandbox_agent.run_sandbox_task("chart")
+
+    assert result.ok is True
+    assert result.text == "your chart"
+
+
+def test_run_config_carries_the_input_filter_and_one_group_id():
+    # One group id for every pass of a run: Memory files each Runner.run
+    # under it, so a fresh id per continuation would cost an extra
+    # extraction call at teardown.
+    def _filter(data):
+        return data
+
+    config = prod_sandbox_agent.build_sandbox_run_config(
+        MagicMock(), MagicMock(), input_filter=_filter, group_id="sandbox-abc")
+    assert config.call_model_input_filter is _filter
+    assert config.group_id == "sandbox-abc"
+
+
+@pytest.mark.asyncio
+async def test_every_pass_of_a_run_shares_one_group_id():
+    captured = []
+
+    def _build(client, session, input_filter=None, group_id=None):
+        captured.append(group_id)
+        return MagicMock()
+
+    patches = _patch_session_lifecycle()
+    runner = MagicMock()
+    runner.run = AsyncMock(return_value=MagicMock(final_output="done"))
+    with patches[0], patches[1], patches[2], patches[3], \
+         patch.object(prod_sandbox_agent, "Runner", runner), \
+         patch.object(prod_sandbox_agent, "build_sandbox_run_config", side_effect=_build), \
+         patch.object(prod_sandbox_agent, "build_sandbox_agent", return_value=MagicMock()), \
+         patch.object(prod_sandbox_agent, "_collect_artifacts", AsyncMock(return_value=([], []))):
+        await prod_sandbox_agent.run_sandbox_task("t")
+
+    assert len(captured) == 1 and captured[0].startswith("sandbox-")
+
+
+@pytest.mark.asyncio
+async def test_a_message_during_the_closing_note_is_still_saved(clean_inbox, _no_conversation_record_redis):
+    # The claim is held through the closing note, and ⏳ promised the
+    # message would be kept — so the saved record must include it.
+    message = MagicMock()
+    message.author.id = 1
+    thread, patches = _sandbox_tool_patches(_text_result("done"))
+    thread.send = AsyncMock()
+
+    async def _embed(channel, description, *args, **kwargs):
+        if kwargs.get("title") == "Sandbox closed":
+            clean_inbox.deliver(thread.id, 77, 1, "ana", "and a csv too")
+
+    with patches[0], patches[1], patches[2], patches[3], \
+         patch.object(prod_tool_functions.Common, "send_tool_discord_embed",
+                      AsyncMock(side_effect=_embed)):
+        await prod_tool_functions.run_code_sandbox.on_invoke_tool(
+            _tool_context(message), json.dumps({"task": "print 42"}))
+
+    snapshot_id, record = _no_conversation_record_redis.save.await_args.args
+    assert [c["text"] for c in record["carry"]] == ["and a csv too"]
+
+
+@pytest.mark.asyncio
+async def test_a_message_during_the_record_save_is_still_saved(clean_inbox, _no_conversation_record_redis):
+    # The save itself awaits Redis while the claim is still held, so a
+    # message can land mid-save; the record must be re-saved with it.
+    message = MagicMock()
+    message.author.id = 1
+    thread, patches = _sandbox_tool_patches(_text_result("done"))
+    thread.send = AsyncMock()
+
+    async def _save(snapshot_id, record):
+        if _no_conversation_record_redis.save.await_count == 1:
+            clean_inbox.deliver(thread.id, 78, 1, "ana", "zip it up")
+
+    _no_conversation_record_redis.save.side_effect = _save
+    with patches[0], patches[1], patches[2], patches[3]:
+        await prod_tool_functions.run_code_sandbox.on_invoke_tool(
+            _tool_context(message), json.dumps({"task": "print 42"}))
+
+    assert _no_conversation_record_redis.save.await_count == 2
+    snapshot_id, record = _no_conversation_record_redis.save.await_args.args
+    assert [c["text"] for c in record["carry"]] == ["zip it up"]
+
+
+def test_closing_note_lists_unhandled_messages_but_not_accepted_ones():
+    # An accepted message already got a 👍 reply in the thread; a ⚠️ line
+    # saying it was "not confirmed finished" read as noise in live testing.
+    rows = [
+        {"author": "ana", "text": "with a wizard hat", "status": "accepted", "reply": "on it"},
+        {"author": "ana", "text": "and a cape", "status": "unacknowledged", "reply": ""},
+    ]
+    note = sandbox_agent.sandbox_unresolved_note(rows, in_thread=True)
+    assert "wizard hat" not in note
+    assert "Never answered: “and a cape”" in note
+    assert sandbox_agent.sandbox_unresolved_note(rows[:1], in_thread=True) == ""
+
+
+def test_steering_note_treats_an_accepted_message_as_handled():
+    # The model replied it would apply it; the outer model must not hedge
+    # about it or call the result a mistake.
+    rows = [{"author": "ana", "text": "make it a silly cow", "status": "accepted",
+             "reply": "on it"}]
+    note = sandbox_agent.sandbox_steering_note(rows)
+    assert "“make it a silly cow” → accepted by the sandbox" in note
+    assert "do not call the result a mistake" in note
+    assert "not confirm" not in note

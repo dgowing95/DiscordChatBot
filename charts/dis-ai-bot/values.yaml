@@ -129,13 +129,13 @@ sandbox:
   persistTimeout: 180
   # Seconds of silence on one HTTP request to the sandbox's LLM before the
   # client gives up on it (down from the OpenAI client's 600s default).
-  # Catches a hung connection or a server that sends nothing; a server that
-  # dribbles keep-alive padding while it works (e.g. OpenRouter's
-  # non-streaming responses) resets this timer and is bounded only by the
-  # timeout above.
+  # Catches a hung connection or a server that sends nothing.
   requestTimeout: 180
   # How many times that client retries a failed request (0 disables retries).
-  # Worst-case latency for one model call is (1 + this) x requestTimeout.
+  # One model call is also wall-clock bounded at (1 + this) x requestTimeout,
+  # which is what catches a server that dribbles keep-alive padding while it
+  # works (e.g. OpenRouter's non-streaming responses) and so never trips the
+  # per-read timeout.
   maxRetries: 2
   # Max size (bytes) of one thread's stored workspace snapshot in Redis
   snapshotMaxBytes: 50000000
@@ -220,6 +220,12 @@ reasoningEffort: "medium"
 # easily overrun by a reply that chains several sandbox/image calls, and
 # overrunning loses the whole answer.
 llmMaxTurns: 20
+# Wall-clock seconds ONE model call from the main agent may take, the OpenAI
+# client's own retries included (default 600, the same as the client's own
+# timeout). The client's timeout is per-read, so a server that keeps the
+# connection warm while it works (OpenRouter pads non-streaming responses)
+# was never bounded before this.
+llmCallTimeout: 600
 message_history: 5
 # Send the model's <think> reasoning to Discord as spoiler-hidden follow-up
 # message(s) (closed by default - click to reveal) instead of discarding it.
