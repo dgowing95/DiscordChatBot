@@ -3799,3 +3799,16 @@ async def test_a_message_during_the_record_save_is_still_saved(clean_inbox, _no_
     assert _no_conversation_record_redis.save.await_count == 2
     snapshot_id, record = _no_conversation_record_redis.save.await_args.args
     assert [c["text"] for c in record["carry"]] == ["zip it up"]
+
+
+def test_closing_note_lists_unhandled_messages_but_not_accepted_ones():
+    # An accepted message already got a 👍 reply in the thread; a ⚠️ line
+    # saying it was "not confirmed finished" read as noise in live testing.
+    rows = [
+        {"author": "ana", "text": "with a wizard hat", "status": "accepted", "reply": "on it"},
+        {"author": "ana", "text": "and a cape", "status": "unacknowledged", "reply": ""},
+    ]
+    note = sandbox_agent.sandbox_unresolved_note(rows, in_thread=True)
+    assert "wizard hat" not in note
+    assert "Never answered: “and a cape”" in note
+    assert sandbox_agent.sandbox_unresolved_note(rows[:1], in_thread=True) == ""

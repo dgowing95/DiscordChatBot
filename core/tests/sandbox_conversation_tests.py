@@ -647,3 +647,51 @@ def test_a_filter_failure_after_staging_commits_nothing():
     conv.on_model_response(MagicMock(output=[]))
     # the model never saw it, so it must not count as presented
     assert conv.ledger.events[0].stage == inbox.RECEIVED
+
+
+@pytest.mark.asyncio
+async def test_the_thread_shows_typing_only_while_the_model_is_generating():
+    # Typing on during each model call, off while a tool runs and after.
+    conv = _conversation()
+    conv.thread.typing = AsyncMock()
+    seen = []
+
+    def _respond(output):
+        def _step(call):
+            seen.append(("model", conv._typing_task is not None))
+            return output
+        return _step
+
+    model = ScriptedModel([
+        ModelStep.respond(_respond([function_call("work", {"what": "a"}, call_id="c1")])),
+        ModelStep.respond(_respond([assistant_message("done", item_id="m1")])),
+    ])
+
+    @function_tool
+    async def work(what: str) -> str:
+        """Do some work."""
+        seen.append(("tool", conv._typing_task is not None))
+        return "ok"
+
+    agent = Agent(name="t", model=model, tools=[work], hooks=make_agent_hooks(conv))
+    await sandbox_agent._converse(agent, "task", RunConfig(), None, {"deliverables": []}, conv)
+
+    assert seen == [("model", True), ("tool", False), ("model", True)]
+    assert conv._typing_task is None
+    conv.thread.typing.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_typing_stops_when_the_run_fails_mid_call(monkeypatch):
+    conv = _conversation()
+    conv.thread.typing = AsyncMock()
+
+    async def _fail(*args, **kwargs):
+        conv.start_typing()
+        raise RuntimeError("model server went away")
+
+    monkeypatch.setattr(sandbox_agent.Runner, "run", _fail)
+    with pytest.raises(RuntimeError):
+        await sandbox_agent._converse(MagicMock(), "task", MagicMock(), None,
+                                      {"deliverables": []}, conv)
+    assert conv._typing_task is None

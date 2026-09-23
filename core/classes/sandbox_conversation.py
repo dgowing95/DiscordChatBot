@@ -185,6 +185,7 @@ class SandboxConversation:
         # that then fails or times out falls back to it (see _converse).
         self.completed_result = None
         self._nudged_files = False
+        self._typing_task: asyncio.Task | None = None
 
     # -- 1. input placement --------------------------------------------------
 
@@ -493,6 +494,36 @@ class SandboxConversation:
         """Commits the finalization boundary (see RunLedger.finalize)."""
         self.ledger.finalize()
 
+    # -- typing indicator ----------------------------------------------------
+
+    def start_typing(self) -> None:
+        """Shows "typing" in the thread while the model generates a response
+        (on_llm_start .. on_llm_end), so the thread looks alive exactly when
+        the run is thinking — not while commands run or ask_user waits. The
+        parent channel's own indicator (main.py) is unrelated and untouched."""
+        if self.thread is None or (self._typing_task is not None
+                                   and not self._typing_task.done()):
+            return
+        self._typing_task = asyncio.create_task(self._keep_typing())
+
+    def stop_typing(self) -> None:
+        """Stops refreshing it; Discord clears the indicator within ~10 s, or
+        at once when the bot next posts in the thread."""
+        if self._typing_task is not None:
+            self._typing_task.cancel()
+            self._typing_task = None
+
+    async def _keep_typing(self) -> None:
+        # One indicator lasts ~10 s, so refresh every 5 s like discord.py's
+        # own typing() does. A failure just ends it: typing is cosmetic.
+        while True:
+            try:
+                await self.thread.typing()
+            except Exception as e:
+                logger.debug(f"Sandbox conversation: could not show typing: {e}")
+                return
+            await asyncio.sleep(5)
+
 
 
 def record_exit_metrics(ledger: inbox.RunLedger) -> None:
@@ -504,11 +535,16 @@ def record_exit_metrics(ledger: inbox.RunLedger) -> None:
 
 
 def make_agent_hooks(conversation: SandboxConversation):
-    """The AgentHooks that commits presentation after each completed call."""
+    """The AgentHooks that commits presentation after each completed call,
+    and shows the thread's typing indicator while a call is in flight."""
     from agents import AgentHooks
 
     class _ConversationHooks(AgentHooks):
+        async def on_llm_start(self, context, agent, system_prompt, input_items):
+            conversation.start_typing()
+
         async def on_llm_end(self, context, agent, response):
+            conversation.stop_typing()
             try:
                 conversation.on_model_response(response)
             except Exception as e:

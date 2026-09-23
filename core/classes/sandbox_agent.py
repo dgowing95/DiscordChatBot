@@ -1850,39 +1850,44 @@ async def _converse(agent, task, run_config, progress_hooks, nested_context,
     """
     turns_left = sandbox_max_turns()
     run_input = task
-    while True:
-        try:
-            result = await Runner.run(
-                agent,
-                run_input,
-                max_turns=turns_left,
-                run_config=run_config,
-                hooks=progress_hooks,
-                context=nested_context,
-            )
-        except (MaxTurnsExceeded, ModelBehaviorError, ModelRefusalError,
-                ModelTimeoutError, APITimeoutError) as e:
-            # A continuation that fails must not cost the answer the run had
-            # already finished: deliver that one, with the message it was
-            # continuing for reported as not applied by the ledger.
-            previous = conversation.completed_result
-            if previous is None:
-                raise
-            logger.warning(f"Sandbox: continuation failed ({type(e).__name__}); "
-                           "delivering the answer from before it")
-            conversation.finalize()
-            return previous
-        conversation.completed_result = result
-        turns_left -= len(result.raw_responses)
-        nudge = conversation.continuation_nudge(nested_context.get("deliverables"))
-        if (nudge is None or conversation.continuations >= MAX_CONTINUATIONS
-                or turns_left < MIN_CONTINUATION_TURNS):
-            conversation.finalize()
-            return result
-        conversation.note_continuation()
-        logger.info(f"Sandbox: continuing the run ({conversation.continuations}/"
-                    f"{MAX_CONTINUATIONS}, {turns_left} turn(s) left) to account for thread input")
-        run_input = result.to_input_list() + [{"role": "user", "content": f"[sandbox]: {nudge}"}]
+    try:
+        while True:
+            try:
+                result = await Runner.run(
+                    agent,
+                    run_input,
+                    max_turns=turns_left,
+                    run_config=run_config,
+                    hooks=progress_hooks,
+                    context=nested_context,
+                )
+            except (MaxTurnsExceeded, ModelBehaviorError, ModelRefusalError,
+                    ModelTimeoutError, APITimeoutError) as e:
+                # A continuation that fails must not cost the answer the run had
+                # already finished: deliver that one, with the message it was
+                # continuing for reported as not applied by the ledger.
+                previous = conversation.completed_result
+                if previous is None:
+                    raise
+                logger.warning(f"Sandbox: continuation failed ({type(e).__name__}); "
+                               "delivering the answer from before it")
+                conversation.finalize()
+                return previous
+            conversation.completed_result = result
+            turns_left -= len(result.raw_responses)
+            nudge = conversation.continuation_nudge(nested_context.get("deliverables"))
+            if (nudge is None or conversation.continuations >= MAX_CONTINUATIONS
+                    or turns_left < MIN_CONTINUATION_TURNS):
+                conversation.finalize()
+                return result
+            conversation.note_continuation()
+            logger.info(f"Sandbox: continuing the run ({conversation.continuations}/"
+                        f"{MAX_CONTINUATIONS}, {turns_left} turn(s) left) to account for thread input")
+            run_input = result.to_input_list() + [{"role": "user", "content": f"[sandbox]: {nudge}"}]
+    finally:
+        # A call that raised or was cancelled (the caller's wait_for) never
+        # reached on_llm_end, which is what normally stops the indicator.
+        conversation.stop_typing()
 
 
 async def _failure_result(
@@ -2065,8 +2070,11 @@ def sandbox_steering_note(steering) -> str:
 
 # Closing-embed wording for messages that did not get handled. Short: this
 # sits under "Sandbox closed" in the thread, for the people who wrote them.
+# "accepted" (the model replied will_apply but never said done) is left out
+# on purpose: the writer already got a 👍 reply and can see the result, so a
+# ⚠️ line for it read as noise in live testing. The outer model still hears
+# about it via sandbox_steering_note.
 _UNRESOLVED_LABELS = {
-    "accepted": "Accepted but not confirmed finished",
     "unacknowledged": "Never answered",
     "unseen": "Not seen in time",
     "late": "Arrived as it was finishing",
