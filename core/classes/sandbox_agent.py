@@ -38,12 +38,14 @@ import discord
 # httpx.Timeout (it lands inside the httpx2 client as an opaque object, not
 # per-phase floats). Nothing else in core needs legacy httpx any more.
 import httpx2
+from openai import APITimeoutError
 from agents import (
     AsyncOpenAI,
     MaxTurnsExceeded,
     ModelBehaviorError,
     ModelRefusalError,
     ModelSettings,
+    ModelTimeoutError,
     OpenAIChatCompletionsModel,
     Runner,
     RunConfig,
@@ -1837,7 +1839,8 @@ async def _converse(agent, task, run_config, progress_hooks, nested_context,
     one is only started with MIN_CONTINUATION_TURNS left; and the caller's
     single wait_for bounds the wall clock. When a bound stops it, the run
     finishes with the input reported as unresolved rather than hidden — and
-    a continuation that fails (turns, model error) or times out falls back
+    a continuation that fails (turns, model error, a model call's own
+    timeout) or times out falls back
     to the previous pass's completed answer rather than to "stopped", since
     that answer was already final; see conversation.completed_result.
 
@@ -1857,7 +1860,8 @@ async def _converse(agent, task, run_config, progress_hooks, nested_context,
                 hooks=progress_hooks,
                 context=nested_context,
             )
-        except (MaxTurnsExceeded, ModelBehaviorError, ModelRefusalError) as e:
+        except (MaxTurnsExceeded, ModelBehaviorError, ModelRefusalError,
+                ModelTimeoutError, APITimeoutError) as e:
             # A continuation that fails must not cost the answer the run had
             # already finished: deliver that one, with the message it was
             # continuing for reported as not applied by the ledger.

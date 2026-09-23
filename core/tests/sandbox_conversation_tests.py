@@ -558,9 +558,25 @@ async def test_attach_file_can_remove_an_outdated_selection():
     assert ctx.context["deliverables"] == []
 
 
-@pytest.mark.asyncio
-async def test_a_failed_continuation_delivers_the_answer_it_was_continuing(monkeypatch):
+def _max_turns():
     from agents import MaxTurnsExceeded
+    return MaxTurnsExceeded("out of turns in the continuation")
+
+
+def _model_timeout():
+    from agents import ModelTimeoutError
+    return ModelTimeoutError(540.0)
+
+
+def _client_timeout():
+    import httpx
+    from openai import APITimeoutError
+    return APITimeoutError(request=httpx.Request("POST", "http://llm/v1/chat/completions"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("make_error", [_max_turns, _model_timeout, _client_timeout])
+async def test_a_failed_continuation_delivers_the_answer_it_was_continuing(monkeypatch, make_error):
     monkeypatch.setenv("SANDBOX_MAX_TURNS", "10")
     conv = _conversation()
     model = ScriptedModel([
@@ -575,7 +591,7 @@ async def test_a_failed_continuation_delivers_the_answer_it_was_continuing(monke
     async def _run_then_fail(*args, **kwargs):
         passes.append(1)
         if len(passes) > 1:
-            raise MaxTurnsExceeded("out of turns in the continuation")
+            raise make_error()
         return await real_run(*args, **kwargs)
 
     monkeypatch.setattr(sandbox_agent.Runner, "run", _run_then_fail)

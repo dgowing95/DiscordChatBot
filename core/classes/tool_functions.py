@@ -607,6 +607,9 @@ async def _run_claimed_sandbox(wrapper, task, channel, thread_created, in_thread
     )
 
 
+_CONVERSATION_SAVE_ATTEMPTS = 5
+
+
 async def _save_conversation_record(snapshot_id, outcomes, outcome: str, ledger) -> None:
     """Persists this run's loose ends for the next run in the thread (see
     classes/sandbox_conversation_store.py). Best-effort and independent of
@@ -615,17 +618,26 @@ async def _save_conversation_record(snapshot_id, outcomes, outcome: str, ledger)
         return
     from classes.sandbox_conversation_store import SandboxConversationStore, build_record
 
-    question = None
-    if ledger is not None:
-        # Re-read at save time: the claim is held through the closing note,
-        # so a message can still land in ledger.follow_ups after the caller
-        # took its snapshot — and it was promised it would be kept.
-        outcomes = ledger.outcomes()
-        if ledger.question is not None:
-            question = ledger.question.text
+    def _current():
+        if ledger is None:
+            return outcomes, None
+        return ledger.outcomes(), (ledger.question.text if ledger.question is not None else None)
+
+    # Read at save time, and again after each save: the claim is held through
+    # the closing note, so a message can land in ledger.follow_ups after the
+    # caller took its snapshot OR while the save itself is awaiting Redis —
+    # and it was promised it would be kept. Follow-ups are capped
+    # (MAX_FOLLOW_UPS), so this settles; the attempt cap is only a backstop.
+    saved = None
     try:
-        await SandboxConversationStore().save(
-            snapshot_id, build_record(outcomes, outcome=outcome, open_question=question))
+        for _ in range(_CONVERSATION_SAVE_ATTEMPTS):
+            current = _current()
+            if current == saved:
+                break
+            rows, question = current
+            await SandboxConversationStore().save(
+                snapshot_id, build_record(rows, outcome=outcome, open_question=question))
+            saved = current
     except Exception as e:
         logger.warning(f"Sandbox: could not save this thread's conversation record: {e}")
 

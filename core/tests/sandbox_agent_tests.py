@@ -3776,3 +3776,26 @@ async def test_a_message_during_the_closing_note_is_still_saved(clean_inbox, _no
 
     snapshot_id, record = _no_conversation_record_redis.save.await_args.args
     assert [c["text"] for c in record["carry"]] == ["and a csv too"]
+
+
+@pytest.mark.asyncio
+async def test_a_message_during_the_record_save_is_still_saved(clean_inbox, _no_conversation_record_redis):
+    # The save itself awaits Redis while the claim is still held, so a
+    # message can land mid-save; the record must be re-saved with it.
+    message = MagicMock()
+    message.author.id = 1
+    thread, patches = _sandbox_tool_patches(_text_result("done"))
+    thread.send = AsyncMock()
+
+    async def _save(snapshot_id, record):
+        if _no_conversation_record_redis.save.await_count == 1:
+            clean_inbox.deliver(thread.id, 78, 1, "ana", "zip it up")
+
+    _no_conversation_record_redis.save.side_effect = _save
+    with patches[0], patches[1], patches[2], patches[3]:
+        await prod_tool_functions.run_code_sandbox.on_invoke_tool(
+            _tool_context(message), json.dumps({"task": "print 42"}))
+
+    assert _no_conversation_record_redis.save.await_count == 2
+    snapshot_id, record = _no_conversation_record_redis.save.await_args.args
+    assert [c["text"] for c in record["carry"]] == ["zip it up"]
