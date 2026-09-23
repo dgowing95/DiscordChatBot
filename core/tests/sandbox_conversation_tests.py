@@ -569,9 +569,9 @@ def _model_timeout():
 
 
 def _client_timeout():
-    import httpx
+    import httpx2
     from openai import APITimeoutError
-    return APITimeoutError(request=httpx.Request("POST", "http://llm/v1/chat/completions"))
+    return APITimeoutError(request=httpx2.Request("POST", "http://llm/v1/chat/completions"))
 
 
 @pytest.mark.asyncio
