@@ -352,3 +352,74 @@ async def test_an_empty_message_is_explained_too(claimed_thread):
 
     msg.add_reaction.assert_awaited_once_with("🚫")
     assert "only read text" in msg.reply.await_args.args[0]
+
+
+# ------------------------- enqueue timestamps (queue-wait metrics) -------------------------
+
+
+def _hist_count(name, **labels):
+    from prometheus_client import REGISTRY
+    return REGISTRY.get_sample_value(f"{name}_count", labels) or 0.0
+
+
+def test_enqueue_registry_round_trip():
+    mq.mark_enqueued(5001, now=10.0)
+    assert mq.pop_enqueued(5001) == 10.0
+    assert mq.pop_enqueued(5001) is None  # popped once
+    assert mq.pop_enqueued(5002) is None  # never marked
+
+
+def test_enqueue_registry_is_bounded(monkeypatch):
+    monkeypatch.setattr(mq, "_enqueued_at", {})
+    monkeypatch.setattr(mq, "MAX_ENQUEUED_TRACKED", 3)
+    for i in range(5):
+        mq.mark_enqueued(i, now=float(i))
+    assert mq.pop_enqueued(0) is None and mq.pop_enqueued(1) is None
+    assert mq.pop_enqueued(4) == 4.0
+
+
+@pytest.mark.asyncio
+async def test_on_message_marks_the_enqueue_time():
+    main_mod = _import_main()
+    bot = MagicMock()
+    queue = asyncio.Queue(maxsize=2)
+    with patch.object(main_mod, "client", bot), \
+         patch.object(main_mod, "message_queue", queue):
+        msg = _message(msg_id=6001, mentions=[bot.user])
+        await main_mod.on_message(msg)
+    assert mq.pop_enqueued(6001) is not None
+
+
+@pytest.mark.asyncio
+async def test_process_messages_observes_queue_wait_and_reply_latency():
+    main_mod = _import_main()
+
+    class FakeHandler:
+        def __init__(self, message, client):
+            self.message = message
+            self.outcome = "replied"
+
+        async def handle_message(self):
+            self.outcome = "llm_error"
+
+    wait_before = _hist_count("discord_bot_queue_wait_seconds", guild_id="4242")
+    reply_before = _hist_count("discord_bot_reply_latency_seconds",
+                               guild_id="4242", outcome="llm_error")
+    timed = _message(msg_id=6101, guild_id=4242)
+    untimed = _message(msg_id=6102, guild_id=4242)  # never marked: nothing observed
+    mq.mark_enqueued(timed.id)
+    queue = asyncio.Queue()
+    with patch.object(main_mod, "message_queue", queue), \
+         patch.object(main_mod, "MessageHandler", FakeHandler):
+        worker = asyncio.create_task(main_mod.process_messages())
+        try:
+            queue.put_nowait(timed)
+            queue.put_nowait(untimed)
+            await queue.join()
+        finally:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+
+    assert _hist_count("discord_bot_queue_wait_seconds", guild_id="4242") == wait_before + 1
+    assert _hist_count("discord_bot_reply_latency_seconds",
+                       guild_id="4242", outcome="llm_error") == reply_before + 1

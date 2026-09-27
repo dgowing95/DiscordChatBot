@@ -97,6 +97,30 @@ def make_message_queue() -> asyncio.Queue:
     return asyncio.Queue(maxsize=queue_max_size())
 
 
+# ---------------------------------------------------------------------------
+# Enqueue timestamps (queue-wait and receipt-to-reply metrics)
+# ---------------------------------------------------------------------------
+#
+# Kept beside the queue rather than in it so the queue still carries plain
+# discord.Message objects. Entries are popped when a worker picks the message
+# up; the cap only matters if something enqueues without ever dequeuing.
+MAX_ENQUEUED_TRACKED = 1024
+_enqueued_at: dict[int, float] = {}
+
+
+def mark_enqueued(message_id: int, now: float | None = None) -> None:
+    """Record when `message_id` went onto the queue."""
+    _enqueued_at[message_id] = time.monotonic() if now is None else now
+    while len(_enqueued_at) > MAX_ENQUEUED_TRACKED:
+        # dicts keep insertion order: drop the oldest
+        del _enqueued_at[next(iter(_enqueued_at))]
+
+
+def pop_enqueued(message_id: int) -> float | None:
+    """The enqueue time of `message_id` (monotonic), or None if unknown."""
+    return _enqueued_at.pop(message_id, None)
+
+
 # One lock per channel id. Creating a lock needs no guard: the event loop is
 # single-threaded and there is no await between the get and the set.
 _channel_locks: dict[int, asyncio.Lock] = {}

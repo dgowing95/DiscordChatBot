@@ -18,6 +18,8 @@ core/                  # the main bot (the app that runs in production)
   main.py              # entrypoint: discord.Client, message queue, slash commands
   classes/
     message_handler.py     # per-message orchestration: history build, send/chunking
+    history_policy.py      # PURE (stdlib-only) which history goes in a prompt: sliding vs
+                           #   anchored window, per-channel anchor store, token budget
     message_queue.py       # PURE (stdlib-only) queue sizing (WORKER_COUNT / QUEUE_MAX_SIZE),
                            #   bounded queue factory + per-channel locks (scoped to build+send)
                            #   + in-flight task registry (prompt hint for still-running slow tools)
@@ -88,9 +90,18 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
    Sizing, the queue factory, the lock registry and the in-flight registry
    live in `core/classes/message_queue.py` (pure, unit-tested).
 2. `MessageHandler.handle_message()` builds the prompt
-   (channel history -- most recent `MSG_HISTORY_LIMIT` (default 5) messages; the
-   user's stored Redis memories are exposed to the agent through its function
-   tools) and calls `TextLLMHandler.generate()`.
+   (channel history -- the messages BEFORE the triggering one, up to
+   `MSG_HISTORY_LIMIT` (default 5) including the trigger; the user's stored
+   Redis memories are exposed to the agent through its function tools) and
+   calls `TextLLMHandler.generate()`. History is read before the trigger's id,
+   not as "newest N minus one", because a trigger that waited in the queue has
+   newer messages above it. `MSG_HISTORY_MODE=anchored` keeps the start of the
+   window fixed between refreshes so llama.cpp can reuse its cached prompt
+   prefix (`classes/history_policy.py` has the rules and why); every message,
+   the trigger included, is formatted by the one `_format_group`, so a trigger
+   serializes exactly as it will as history on the next turn. Older history is
+   dropped whole when the prompt would not fit the llama.cpp per-slot context
+   (read from its `/props`) minus `MSG_HISTORY_RESERVE_TOKENS`.
 3. `TextLLMHandler` uses the **OpenAI `agents` SDK** pointed at the llama.cpp
    server's OpenAI-compatible endpoint (`LLM_HOST/v1`) with function tools attached.
 4. The returned text is cleaned by `MessageHandler.filter_response()` (delegate:
@@ -251,7 +262,10 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
 | `METRICS_PORT` | port to serve the Prometheus `/metrics` endpoint on (default 9464); empty/`0` disables. Chart: `metrics.enabled`/`metrics.port` also add a ClusterIP Service, the pod port, and a kube-prometheus-stack ServiceMonitor (labelled `release: kube-prometheus-stack` — the operator only imports ServiceMonitors with that label). The same `metrics.enabled` switch turns on **llama.cpp's own** `/metrics` (`LLAMA_ARG_ENDPOINT_METRICS`, off upstream by default) plus a second ServiceMonitor for it |
 | `LLM_CONTEXT_LENGTH` | the context window the LLM server was started with (chart: `llamacppContextLength`, which also sets the server's `LLAMA_ARG_CTX_SIZE`), exported as the `discord_bot_llm_context_window_tokens` gauge so a dashboard can express prompt sizes as a fraction of it. Unset leaves the gauge at 0 |
 | `LOG_LEVEL` | root log level (default `INFO`); `DEBUG` also dumps the raw agent run result. Logging replaced bare `print()` calls, which had no level to tune |
-| `MSG_HISTORY_LIMIT` | how many prior channel messages to include, default 5. Chart: `message_history` |
+| `MSG_HISTORY_LIMIT` | messages in a (refreshed) history window, the trigger included, default 5. Chart: `message_history` |
+| `MSG_HISTORY_MODE` | `sliding` (default: always the newest window) or `anchored` (the window's start stays fixed and grows, so the LLM server can reuse its cached prefix, until a refresh). Chart: `history.mode` |
+| `MSG_HISTORY_REFRESH_MESSAGES` | anchored mode: new channel messages since the last refresh (bot replies included, the trigger counted) that move the anchor to the newest window, default 10. Chart: `history.refreshMessages` |
+| `MSG_HISTORY_RESERVE_TOKENS` | tokens of the llama.cpp per-slot context (its `/props`, re-read every 5 minutes) kept free for the system prompt, tool schemas/results and the answer; older history messages are dropped whole past that, default 12000. Nothing is trimmed while the per-slot context is unknown. Chart: `history.reserveTokens` |
 | `REASONING_EFFORT` | sent to the LLM as the OpenAI-compat `reasoning_effort` field (low/medium/high, default medium). Chart: `reasoningEffort` |
 | `LLM_MAX_TURNS` | max model turns for ONE reply from the main agent (helm: `llmMaxTurns`), default 20. A turn is one model response, however many tool calls it carries. Passed explicitly to `Runner.run` because the SDK's own default of 10 is easily overrun by a reply that chains several sandbox/image calls — and overrunning raises `MaxTurnsExceeded`, which costs the whole answer |
 | `LLM_CALL_TIMEOUT_SECONDS` | wall-clock seconds ONE model call from the main agent may take, the OpenAI client's own retries included (helm: `llmCallTimeout`), default 600 — the same as the client's own timeout, so a slow local generation is no more likely to be cut off than before. Applied as `ModelSettings.timeout`, which the SDK runner enforces by cancelling the call. Needed because the client's timeout is per-read: a server that keeps the connection warm while it works (OpenRouter pads non-streaming responses with whitespace) resets it on every byte and was previously unbounded |
@@ -330,7 +344,7 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
   ```
 
   This is exactly what CI runs, so a new test file is picked up automatically;
-  there is no list to keep in step. ~580 tests, roughly 15 seconds.
+  there is no list to keep in step. ~650 tests, roughly 20 seconds.
 
 - Tests import production modules as `classes.X`, the same name the app uses
   (it runs with cwd `/app`), and `pyproject.toml` puts `core/` on the path to
@@ -410,6 +424,17 @@ curl -sS -X POST "$TEST_WEBHOOK_URL" \
   (stdlib only; `extract_reasoning_items` duck-types the SDK's run items rather
   than importing them) and cover new behaviour in
   `core/tests/response_filter_tests.py`.
+- History selection lives in `core/classes/history_policy.py` — keep it pure
+  (stdlib only). Its per-channel state is two message ids, never content:
+  every build re-reads Discord, so edits and deletes need no event handling
+  and eviction only costs a cold refresh. Cover policy changes in
+  `core/tests/history_policy_tests.py` and the Discord-side behaviour
+  (queued triggers, ordering, anchored prefixes, resets, out-of-order
+  workers) in `core/tests/message_history_tests.py`, whose `FakeChannel`
+  mirrors discord.py's `history()` semantics (`after=` keeps the OLDEST
+  `limit` messages). A passing test shows the message list is stable, not
+  that llama.cpp reuses its cache — check `llamacpp:prompt_tokens_cached_total`
+  and the server's checkpoint-restore log lines for that.
 - The queue worker pool, bounded-queue sizing (WORKER_COUNT / QUEUE_MAX_SIZE),
   the per-channel locks (SCOPED to build+send — the LLM/tool phase runs
   unlocked) and the in-flight task registry (register_task_run /

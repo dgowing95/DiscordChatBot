@@ -43,7 +43,44 @@ Metrics (scraped by Prometheus from the /metrics HTTP endpoint):
            context are we actually using"; divide by the gauge below.
   Gauge    discord_bot_llm_context_window_tokens
            The configured context window (LLM_CONTEXT_LENGTH), exported so a
-           dashboard has the denominator without hard-coding it.
+           dashboard has the denominator without hard-coding it. This is the
+           server TOTAL: with several slots one request only gets its share,
+           so use the per-slot gauge below as a request's capacity.
+  Gauge    discord_bot_llm_slot_context_tokens
+           Per-slot context of the running llama.cpp server, read from its
+           /props (default_generation_settings.n_ctx) at startup and every few
+           minutes after, so a server restart/reconfigure is picked up.
+  Gauge    discord_bot_llm_slot_context_available
+           1 when the value above was read on the last attempt, 0 when /props
+           could not be read (the value above is then the last one seen, or 0
+           if it never was) - so "unknown" never passes for a measurement.
+
+  Latency breakdown (receipt -> reply):
+  Histogram discord_bot_queue_wait_seconds{guild_id}
+           Enqueued (on_message) to picked up by a worker.
+  Histogram discord_bot_reply_latency_seconds{guild_id,outcome}
+           Enqueued to handling finished - what the user waits, queue
+           included. outcome: replied / llm_error (the ❌ path) / exception.
+  Histogram discord_bot_stage_seconds{stage,guild_id}
+           One phase of a handle: history_fetch (Discord history reads),
+           attachments (image download + encoding), lock_wait (waiting for
+           the channel lock), send (the chunked reply and reasoning sends).
+  Histogram discord_bot_llm_call_seconds{caller,outcome}
+           ONE model request (a reply makes one per turn). caller: main (the
+           reply agent) / image_prompt (the image-request rewrite, which uses
+           the same local server). outcome: ok / error / cancelled.
+  Histogram discord_bot_llm_completion_tokens{caller}
+           Generated tokens of one model request, when the server reported it
+           (a missing figure is skipped, never recorded as 0).
+
+  History (classes/history_policy.py):
+  Counter  discord_bot_history_refreshes_total{reason}
+           Windows re-taken from the newest messages instead of reused.
+           reason: cold / threshold / burst / reset / token_budget, plus
+           stale_trigger for a private window built for an out-of-order
+           message (never committed).
+  Counter  discord_bot_history_trimmed_messages_total
+           Oldest history messages dropped to fit the per-slot token budget.
 
   Sandbox conversation (classes/sandbox_conversation.py; labels are bounded
   outcome names — never message ids, thread ids or user text):
@@ -188,6 +225,68 @@ llm_context_window_tokens = Gauge(
     "Configured LLM context window in tokens (LLM_CONTEXT_LENGTH)",
 )
 
+llm_slot_context_tokens = Gauge(
+    "discord_bot_llm_slot_context_tokens",
+    "Per-slot context of the LLM server in tokens (from its /props)",
+)
+
+llm_slot_context_available = Gauge(
+    "discord_bot_llm_slot_context_available",
+    "1 when the per-slot context was read from the LLM server on the last attempt, else 0",
+)
+
+# Queue waits and full replies span a quick chat answer to a long sandbox run.
+LATENCY_BUCKETS = (0.1, 0.5, 1, 2.5, 5, 10, 20, 30, 60, 120, 300, 600)
+# Fast phases (history reads, downloads, lock waits, sends).
+STAGE_BUCKETS = (0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60)
+COMPLETION_TOKEN_BUCKETS = (16, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384)
+
+queue_wait_seconds = Histogram(
+    "discord_bot_queue_wait_seconds",
+    "Seconds a message waited on the queue before a worker picked it up",
+    ["guild_id"],
+    buckets=LATENCY_BUCKETS,
+)
+
+reply_latency_seconds = Histogram(
+    "discord_bot_reply_latency_seconds",
+    "Seconds from enqueueing a message to finishing its handling, queue wait included",
+    ["guild_id", "outcome"],
+    buckets=LATENCY_BUCKETS,
+)
+
+stage_seconds = Histogram(
+    "discord_bot_stage_seconds",
+    "Seconds spent in one phase of handling a message",
+    ["stage", "guild_id"],
+    buckets=STAGE_BUCKETS,
+)
+
+llm_call_seconds = Histogram(
+    "discord_bot_llm_call_seconds",
+    "Seconds of one model request",
+    ["caller", "outcome"],
+    buckets=LATENCY_BUCKETS,
+)
+
+llm_completion_tokens = Histogram(
+    "discord_bot_llm_completion_tokens",
+    "Generated tokens of one model request",
+    ["caller"],
+    buckets=COMPLETION_TOKEN_BUCKETS,
+)
+
+history_refreshes_total = Counter(
+    "discord_bot_history_refreshes_total",
+    "History windows re-taken from the newest messages, by reason",
+    ["reason"],
+)
+
+history_trimmed_messages_total = Counter(
+    "discord_bot_history_trimmed_messages_total",
+    "Oldest history messages dropped to fit the per-slot token budget",
+)
+
 # Receipt -> presentation is bounded by one model call plus any running
 # command's checkpoint; receipt -> response adds the model's own turn.
 SANDBOX_INPUT_BUCKETS = (1, 2.5, 5, 10, 20, 30, 60, 120, 300, 600)
@@ -311,6 +410,48 @@ def inc_sandbox_unresolved_input(status: str) -> None:
 
 def inc_sandbox_continuation() -> None:
     sandbox_continuations_total.inc()
+
+
+def set_slot_context(tokens: int | None) -> None:
+    """Publish the per-slot context; None marks it unavailable (value kept)."""
+    if tokens is None:
+        llm_slot_context_available.set(0)
+        return
+    llm_slot_context_tokens.set(tokens)
+    llm_slot_context_available.set(1)
+
+
+def observe_queue_wait(guild_id, seconds: float) -> None:
+    queue_wait_seconds.labels(guild_id=_guild_label(guild_id)).observe(max(0.0, seconds))
+
+
+def observe_reply_latency(guild_id, outcome: str, seconds: float) -> None:
+    reply_latency_seconds.labels(
+        guild_id=_guild_label(guild_id), outcome=str(outcome)).observe(max(0.0, seconds))
+
+
+def observe_stage(stage: str, guild_id, seconds: float) -> None:
+    stage_seconds.labels(stage=str(stage), guild_id=_guild_label(guild_id)).observe(max(0.0, seconds))
+
+
+def observe_llm_call(caller: str, outcome: str, seconds: float) -> None:
+    llm_call_seconds.labels(caller=str(caller), outcome=str(outcome)).observe(max(0.0, seconds))
+
+
+def observe_llm_completion_tokens(caller: str, tokens) -> None:
+    """Skips a missing/zero figure: the SDK reports 0 when the server sent no
+    usage, and recording that would drag the distribution toward zero."""
+    if isinstance(tokens, (int, float)) and not isinstance(tokens, bool) and tokens > 0:
+        llm_completion_tokens.labels(caller=str(caller)).observe(tokens)
+
+
+def inc_history_refresh(reason: str) -> None:
+    history_refreshes_total.labels(reason=str(reason)).inc()
+
+
+def inc_history_trimmed(count: int) -> None:
+    if count > 0:
+        history_trimmed_messages_total.inc(count)
 
 
 def set_context_window_from_env() -> None:

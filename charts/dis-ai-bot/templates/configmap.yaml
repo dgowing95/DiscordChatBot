@@ -13,6 +13,9 @@ data:
   LLM_MAX_TURNS: {{ .Values.llmMaxTurns | toString | quote }}
   LLM_CALL_TIMEOUT_SECONDS: {{ .Values.llmCallTimeout | toString | quote }}
   MSG_HISTORY_LIMIT: {{ .Values.message_history | toString | quote }}
+  MSG_HISTORY_MODE: {{ .Values.history.mode | quote }}
+  MSG_HISTORY_REFRESH_MESSAGES: {{ .Values.history.refreshMessages | toString | quote }}
+  MSG_HISTORY_RESERVE_TOKENS: {{ .Values.history.reserveTokens | toString | quote }}
   SHOW_THINKING: {{ .Values.showThinking | quote }}
   # Queue concurrency: worker task count + bounded queue size (see core/main.py)
   WORKER_COUNT: {{ .Values.worker_count | toString | quote }}
