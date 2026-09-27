@@ -1,6 +1,7 @@
 import logging
 import discord
 import os
+import asyncio
 import random
 import time
 import aiohttp
@@ -13,12 +14,14 @@ from classes.image_generation import generate_image_from_api, image_generation_e
 from classes.image_prompt import build_image_prompt
 from classes.sandbox_agent import sandbox_enabled
 from classes import sandbox_thread_inbox
-from classes.message_queue import make_message_queue, worker_count
+from classes.message_queue import make_message_queue, mark_enqueued, pop_enqueued, worker_count
 from classes.metrics import (
     inc_messages_processed,
     inc_messages_received,
     inc_queue_drop,
     inc_sandbox_thread_message,
+    observe_queue_wait,
+    observe_reply_latency,
     set_context_window_from_env,
     set_message_queue_size,
     start_metrics_server_from_env,
@@ -49,6 +52,16 @@ config = configManager()
 # QUEUE_MAX_SIZE), the per-channel locks and the concurrency model live in
 # classes/message_queue.py (pure, unit-tested in core/tests/).
 message_queue = make_message_queue()
+
+# How often the LLM server's per-slot context is re-read, so a restart or a
+# changed --ctx-size/--parallel reaches the history token budget and the gauge.
+SLOT_CONTEXT_REFRESH_SECONDS = 300
+
+
+async def refresh_slot_context_forever():
+    while True:
+        await TextLLMHandler.refresh_slot_context()
+        await asyncio.sleep(SLOT_CONTEXT_REFRESH_SECONDS)
 
 
 async def register_commands():
@@ -137,6 +150,9 @@ async def on_ready():
     # published as a gauge so a dashboard can express prompt sizes as a
     # fraction of it without hard-coding the number.
     set_context_window_from_env()
+    # The per-slot context (llama.cpp /props) is what one request can actually
+    # use, and what the history token budget is measured against.
+    client.loop.create_task(refresh_slot_context_forever())
     # Start the worker pool immediately so the bot still consumes messages
     # even if the model check or command sync fails (e.g. server not up yet
     # after a power cycle).
@@ -194,6 +210,7 @@ async def on_message(message):
         return
 
     inc_messages_received(guild_id)
+    mark_enqueued(message.id)
     await message_queue.put(message)
     set_message_queue_size(message_queue.qsize())
 
@@ -297,6 +314,12 @@ async def process_messages():
         # on_message, so handle it directly.
         guild_id = message.guild.id if message.guild else 0
         logger.info("Picking up message from queue")
+        # None when the message was not enqueued through on_message: then
+        # there is nothing to measure, and no zero is recorded in its place.
+        enqueued_at = pop_enqueued(message.id)
+        if enqueued_at is not None:
+            observe_queue_wait(guild_id, time.monotonic() - enqueued_at)
+        outcome = "exception"
         try:
             # The per-channel lock is SCOPED inside handle_message to the two
             # fast phases (build + send) — see classes/message_queue.py — so
@@ -306,6 +329,7 @@ async def process_messages():
             # during the (unlocked) LLM/tool phase.
             async with message.channel.typing():
                 await handler.handle_message()
+            outcome = getattr(handler, "outcome", "replied")
             inc_messages_processed(guild_id)
             message_queue.task_done()
             logger.info("Done with message from queue")
@@ -313,6 +337,8 @@ async def process_messages():
             logger.warning("Error handling message: " + str(e))
             message_queue.task_done()
             logger.info("Done with message from queue")
+        if enqueued_at is not None:
+            observe_reply_latency(guild_id, outcome, time.monotonic() - enqueued_at)
 
 
 if __name__ == "__main__":

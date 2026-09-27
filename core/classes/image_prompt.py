@@ -26,10 +26,12 @@ Environment variables:
     IMAGE_PROMPT_LLM_API_KEY      API key (default: LLM_PASS)
     IMAGE_PROMPT_TIMEOUT          seconds to wait for the rewrite (default 60)
 """
+import asyncio
 import json
 import logging
 import os
 import re
+import time
 
 # APITimeoutError subclasses APIConnectionError, so the one name covers the
 # whole "backend is unreachable or too slow" class.
@@ -41,6 +43,7 @@ from classes.llm_config import (
     DEFAULT_MODEL,
     env_or,
 )
+from classes.metrics import observe_llm_call, observe_llm_completion_tokens
 from classes.response_filter import strip_thinking
 
 logger = logging.getLogger(__name__)
@@ -171,7 +174,24 @@ def parse_rewrite(content: str) -> tuple[str, str] | None:
 async def _complete(request: str, no_thinking: bool) -> str:
     """One chat completion for the rewrite. Raises like the client does."""
     extra = {"extra_body": _NO_THINKING} if no_thinking else {}
-    response = await _get_client().chat.completions.create(
+    started = time.monotonic()
+    outcome = "error"
+    try:
+        response = await _create(request, extra)
+        outcome = "ok"
+    except asyncio.CancelledError:
+        outcome = "cancelled"
+        raise
+    finally:
+        observe_llm_call("image_prompt", outcome, time.monotonic() - started)
+    usage = getattr(response, "usage", None)
+    observe_llm_completion_tokens("image_prompt", getattr(usage, "completion_tokens", None))
+    return response.choices[0].message.content
+
+
+async def _create(request: str, extra: dict):
+    """The bare API call; _complete times it."""
+    return await _get_client().chat.completions.create(
         model=rewrite_model(),
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -186,7 +206,6 @@ async def _complete(request: str, no_thinking: bool) -> str:
         max_tokens=2048,
         **extra,
     )
-    return response.choices[0].message.content
 
 
 async def build_image_prompt(request: str) -> tuple[str, str]:

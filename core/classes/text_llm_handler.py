@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import math
 import os,aiohttp, discord, io, time
@@ -6,8 +7,11 @@ from classes.metrics import (
     inc_llm_error,
     inc_tool_call,
     inc_tool_error,
+    observe_llm_call,
+    observe_llm_completion_tokens,
     observe_llm_prompt_tokens,
     observe_tool_duration,
+    set_slot_context,
 )
 from agents import Agent, Runner, OpenAIChatCompletionsModel, AsyncOpenAI, FunctionTool, function_tool, RunContextWrapper, ModelSettings, RunHooks
 from classes.config_manager import configManager
@@ -101,6 +105,31 @@ def _get_main_model_client() -> OpenAIChatCompletionsModel:
     return _main_model_client
 
 
+# Per-slot context of the LLM server (llama.cpp /props), refreshed by main.py.
+# None until the first successful read: the history token budget then does
+# not trim at all rather than guessing a capacity.
+_slot_context: int | None = None
+
+
+def slot_context_tokens() -> int | None:
+    """The last per-slot context read from the LLM server, or None."""
+    return _slot_context
+
+
+def parse_slot_context(props) -> int | None:
+    """Per-slot context from a llama.cpp /props body, or None.
+
+    default_generation_settings.n_ctx is the SLOT context (the server's
+    --ctx-size divided across --parallel slots, rounded up to its padding), not
+    the configured total - the number one request can actually fill.
+    """
+    try:
+        value = int(props["default_generation_settings"]["n_ctx"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 class ToolMetricsHooks(RunHooks):
     """RunHooks that record per-tool metrics AND track the long tools in the
     in-flight registry (classes.message_queue).
@@ -130,6 +159,32 @@ class ToolMetricsHooks(RunHooks):
     def __init__(self, guild_id):
         self.guild_id = guild_id
         self._starts: dict[str, tuple[float, str]] = {}
+        # Start of the model request in progress. One run's requests are
+        # sequential, so one slot is enough; a request that raises never
+        # reaches on_llm_end, so generate() closes it via abandon_llm_call().
+        self._llm_started: float | None = None
+
+    async def on_llm_start(self, context, agent, system_prompt, input_items) -> None:
+        self._llm_started = time.monotonic()
+
+    async def on_llm_end(self, context, agent, response) -> None:
+        try:
+            started, self._llm_started = self._llm_started, None
+            if started is not None:
+                observe_llm_call("main", "ok", time.monotonic() - started)
+            usage = getattr(response, "usage", None)
+            observe_llm_completion_tokens("main", getattr(usage, "output_tokens", None))
+        except Exception as e:
+            logger.warning(f"Metrics llm_end hook failed: {e}")
+
+    def abandon_llm_call(self, outcome: str) -> None:
+        """Record the request in progress, if any, as ended with `outcome`."""
+        try:
+            started, self._llm_started = self._llm_started, None
+            if started is not None:
+                observe_llm_call("main", outcome, time.monotonic() - started)
+        except Exception as e:
+            logger.warning(f"Metrics llm abandon failed: {e}")
 
     def _key(self, context, tool) -> str:
         # ToolContext carries a tool_call_id; several concurrent calls of the
@@ -250,6 +305,34 @@ class TextLLMHandler:
         except Exception as e:
             logger.warning(f"Could not reach LLM server at {url}: {e}")
       
+    @staticmethod
+    async def refresh_slot_context() -> int | None:
+        """Re-read the per-slot context from {LLM_HOST}/props (never raises).
+
+        On failure the last value is kept for the token budget but the gauge
+        is marked unavailable, so a dashboard can tell stale from measured.
+        """
+        global _slot_context
+        url = llm_host() + "/props"
+        value = None
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                    if response.status == 200:
+                        value = parse_slot_context(await response.json())
+                    else:
+                        logger.info(f"LLM server /props returned {response.status}")
+        except Exception as e:
+            logger.info(f"Could not read LLM server /props at {url}: {e}")
+        if value is None:
+            set_slot_context(None)
+            return _slot_context
+        if value != _slot_context:
+            logger.info(f"LLM per-slot context: {value} tokens")
+        _slot_context = value
+        set_slot_context(value)
+        return value
+
     async def get_settings(self):
         self.system = await self.config.get_setting("system", self.guild_id) or "An AI Story Teller"
         self.model = llm_model()
@@ -324,10 +407,11 @@ class TextLLMHandler:
       messages_for_run = self.messages + [
           {"role": "user", "content": f"(Current datetime: {datetime})"}
       ]
+      hooks = ToolMetricsHooks(self.guild_id)
       try:
          response = await Runner.run(self.agent, messages_for_run, context=user_info,
                                      max_turns=llm_max_turns(),
-                                     hooks=ToolMetricsHooks(self.guild_id))
+                                     hooks=hooks)
          logger.info('Response generated')
          logger.debug(response)
          final_output = response.final_output
@@ -335,7 +419,11 @@ class TextLLMHandler:
          self._record_prompt_tokens(response.raw_responses)
          self.sandbox_thread = user_info.get("sandbox_thread")
          return final_output
+      except asyncio.CancelledError:
+         hooks.abandon_llm_call("cancelled")
+         raise
       except Exception as e:
+         hooks.abandon_llm_call("error")
          self.sandbox_thread = user_info.get("sandbox_thread")
          logger.warning('Failed to get response from LLM: ' + str(e))
          # A run that died part-way (MaxTurnsExceeded after a few chained

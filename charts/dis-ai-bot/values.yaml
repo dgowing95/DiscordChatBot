@@ -227,6 +227,20 @@ llmMaxTurns: 20
 # was never bounded before this.
 llmCallTimeout: 600
 message_history: 5
+# How the message_history window moves (core/classes/history_policy.py).
+#   sliding:  always the newest message_history messages. The start of the
+#             prompt changes on every message, so llama.cpp re-prefills it all.
+#   anchored: the start stays fixed and new messages are appended, so the
+#             server can reuse its cached prefix; the window jumps to the
+#             newest message_history messages once refreshMessages more channel
+#             messages (bot replies included) have arrived.
+# reserveTokens is held back from the llama.cpp per-slot context for the system
+# prompt, tool schemas, tool results and the answer; older history messages are
+# dropped whole when the rest would not fit.
+history:
+  mode: sliding
+  refreshMessages: 10
+  reserveTokens: 12000
 # Send the model's <think> reasoning to Discord as spoiler-hidden follow-up
 # message(s) (closed by default - click to reveal) instead of discarding it.
 # Off by default: the reasoning is dropped.

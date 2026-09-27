@@ -13,7 +13,10 @@ import os
 import sys
 import urllib.error
 import urllib.request
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+from prometheus_client import REGISTRY
 
 # Same dual-import setup as image_generation_tests.py: the app imports
 # classes.* (cwd = core/) while most tests import classes.*.
@@ -317,3 +320,134 @@ def test_record_prompt_tokens_survives_missing_usage():
     no_usage.usage = None
     _record([no_usage, _model_response(0), _model_response(None)])
     assert label._sum.get() == before
+
+
+# ---------------------- latency breakdown and per-slot capacity ----------------------
+
+def _sample(name, **labels):
+    return REGISTRY.get_sample_value(name, labels) or 0.0
+
+
+def test_completion_tokens_skip_unknown_values():
+    before = _sample("discord_bot_llm_completion_tokens_count", caller="unit")
+    for unknown in (None, 0, MagicMock(), True):
+        m.observe_llm_completion_tokens("unit", unknown)
+    assert _sample("discord_bot_llm_completion_tokens_count", caller="unit") == before
+    m.observe_llm_completion_tokens("unit", 42)
+    assert _sample("discord_bot_llm_completion_tokens_count", caller="unit") == before + 1
+
+
+def test_slot_context_gauges_mark_unavailable_without_zeroing():
+    m.set_slot_context(30208)
+    assert _sample("discord_bot_llm_slot_context_tokens") == 30208
+    assert _sample("discord_bot_llm_slot_context_available") == 1
+    m.set_slot_context(None)
+    assert _sample("discord_bot_llm_slot_context_tokens") == 30208
+    assert _sample("discord_bot_llm_slot_context_available") == 0
+
+
+def test_history_counters():
+    before = _sample("discord_bot_history_refreshes_total", reason="unit")
+    m.inc_history_refresh("unit")
+    assert _sample("discord_bot_history_refreshes_total", reason="unit") == before + 1
+    trimmed = _sample("discord_bot_history_trimmed_messages_total")
+    m.inc_history_trimmed(0)
+    m.inc_history_trimmed(3)
+    assert _sample("discord_bot_history_trimmed_messages_total") == trimmed + 3
+
+
+def _run_agent(model, hooks):
+    from agents import Agent, Runner
+    agent = Agent(name="t", instructions="x", model=model)
+    return Runner.run(agent, "hi", hooks=hooks, context={})
+
+
+@pytest.mark.asyncio
+async def test_llm_hooks_time_each_model_call_through_the_real_runner():
+    from agents.testing import ModelStep, ScriptedModel, assistant_message
+    from agents.usage import Usage
+    from classes.text_llm_handler import ToolMetricsHooks
+
+    ok_before = _sample("discord_bot_llm_call_seconds_count", caller="main", outcome="ok")
+    tok_before = _sample("discord_bot_llm_completion_tokens_count", caller="main")
+    hooks = ToolMetricsHooks(guild_id=1)
+    model = ScriptedModel([ModelStep(output=[assistant_message("done")],
+                                     usage=Usage(requests=1, output_tokens=17))])
+    result = await _run_agent(model, hooks)
+
+    assert result.final_output == "done"
+    assert _sample("discord_bot_llm_call_seconds_count", caller="main", outcome="ok") == ok_before + 1
+    assert _sample("discord_bot_llm_completion_tokens_count", caller="main") == tok_before + 1
+    assert hooks._llm_started is None
+
+
+@pytest.mark.asyncio
+async def test_llm_hooks_failed_call_is_recorded_as_an_error_not_a_zero():
+    """on_llm_end never fires for a call that raises; generate() closes the
+    pending call with abandon_llm_call, which is what this mirrors."""
+    from agents.testing import ModelStep, ScriptedModel
+    from classes.text_llm_handler import ToolMetricsHooks
+
+    ok_before = _sample("discord_bot_llm_call_seconds_count", caller="main", outcome="ok")
+    err_before = _sample("discord_bot_llm_call_seconds_count", caller="main", outcome="error")
+    tok_before = _sample("discord_bot_llm_completion_tokens_count", caller="main")
+    hooks = ToolMetricsHooks(guild_id=1)
+    model = ScriptedModel([ModelStep.raise_error(RuntimeError("server down"))])
+    with pytest.raises(RuntimeError):
+        await _run_agent(model, hooks)
+    assert hooks._llm_started is not None
+    hooks.abandon_llm_call("error")
+    hooks.abandon_llm_call("error")  # nothing pending any more: no second sample
+
+    assert _sample("discord_bot_llm_call_seconds_count", caller="main", outcome="error") == err_before + 1
+    assert _sample("discord_bot_llm_call_seconds_count", caller="main", outcome="ok") == ok_before
+    assert _sample("discord_bot_llm_completion_tokens_count", caller="main") == tok_before
+
+
+def test_parse_slot_context():
+    from classes.text_llm_handler import parse_slot_context
+    assert parse_slot_context({"default_generation_settings": {"n_ctx": 30208},
+                               "total_slots": 2}) == 30208
+    for bad in ({}, {"default_generation_settings": {}}, None,
+                {"default_generation_settings": {"n_ctx": 0}},
+                {"default_generation_settings": {"n_ctx": "x"}}):
+        assert parse_slot_context(bad) is None
+
+
+def _props_session(status=200, body=None, exc=None):
+    response = MagicMock()
+    response.status = status
+    response.json = AsyncMock(return_value=body)
+    response.__aenter__ = AsyncMock(return_value=response)
+    response.__aexit__ = AsyncMock(return_value=False)
+    session = MagicMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=False)
+    session.get = MagicMock(side_effect=exc) if exc else MagicMock(return_value=response)
+    return session
+
+
+@pytest.mark.asyncio
+async def test_refresh_slot_context_success_then_failure_keeps_last_value(monkeypatch):
+    from classes import text_llm_handler as tlh
+    monkeypatch.setattr(tlh, "_slot_context", None)
+    body = {"default_generation_settings": {"n_ctx": 30208}}
+    with patch.object(tlh.aiohttp, "ClientSession", return_value=_props_session(body=body)):
+        assert await tlh.TextLLMHandler.refresh_slot_context() == 30208
+    assert tlh.slot_context_tokens() == 30208
+    assert _sample("discord_bot_llm_slot_context_available") == 1
+
+    with patch.object(tlh.aiohttp, "ClientSession",
+                      return_value=_props_session(exc=OSError("refused"))):
+        assert await tlh.TextLLMHandler.refresh_slot_context() == 30208
+    assert tlh.slot_context_tokens() == 30208
+    assert _sample("discord_bot_llm_slot_context_available") == 0
+
+
+@pytest.mark.asyncio
+async def test_refresh_slot_context_unknown_stays_none(monkeypatch):
+    from classes import text_llm_handler as tlh
+    monkeypatch.setattr(tlh, "_slot_context", None)
+    with patch.object(tlh.aiohttp, "ClientSession", return_value=_props_session(status=503)):
+        assert await tlh.TextLLMHandler.refresh_slot_context() is None
+    assert tlh.slot_context_tokens() is None

@@ -1,19 +1,45 @@
 import logging
 import asyncio, re, json, time, os, io, base64
+import contextlib
 import aiohttp
+import discord
 import pillow_heif
 from PIL import Image
 
 # Teaches Pillow to open HEIC/HEIF (and AVIF); their output is re-encoded to PNG
 # further down (Ollama cannot decode HEIF), so format detection just needs to work.
 pillow_heif.register_heif_opener()
-from classes.text_llm_handler import TextLLMHandler
+from classes.text_llm_handler import TextLLMHandler, slot_context_tokens
+from classes import history_policy
+from classes.history_policy import (
+    ANCHORED,
+    KEEP,
+    REFRESH,
+    REASON_TOKEN_BUDGET,
+    Decision,
+    estimate_tokens,
+    history_budget,
+    history_limit,
+    history_mode,
+    initial_decision,
+    max_window,
+    refresh_messages,
+    reserve_tokens,
+    state_after_refresh,
+    trim_count,
+    window_decision,
+)
 from classes.response_filter import (
     chunk_for_discord,
     filter_response as clean_response,
     format_thinking_for_discord,
 )
-from classes.metrics import observe_response_generation
+from classes.metrics import (
+    inc_history_refresh,
+    inc_history_trimmed,
+    observe_response_generation,
+    observe_stage,
+)
 from classes.message_queue import get_channel_lock, in_flight_hint
 
 logger = logging.getLogger(__name__)
@@ -52,6 +78,12 @@ def encode_image_for_llm(data: bytes):
     img.convert("RGBA").save(out, format="PNG")
     return out.getvalue(), "image/png"
 
+
+def is_reset(message) -> bool:
+    """A `!reset_history` message: history before it (and it) is left out."""
+    return (message.content or "").lower() == "!reset_history"
+
+
 class MessageHandler:
 
     def __init__(self, message, client):
@@ -59,53 +91,155 @@ class MessageHandler:
         self.client = client
         self.text_response = ""
         self.discord_message_object = None
+        # How the handle ended, for the reply-latency metric (main.py):
+        # "replied", or "llm_error" when the run failed and got the ❌.
+        self.outcome = "replied"
+        self._attachment_seconds = 0.0
 
+    def _guild_id(self):
+        guild = getattr(self.message, "guild", None)
+        return guild.id if guild else 0
+
+    def _observe_stage(self, stage, started):
+        observe_stage(stage, self._guild_id(), time.monotonic() - started)
+
+    @contextlib.asynccontextmanager
+    async def _channel_lock(self):
+        """The channel's scoped lock, with the wait for it measured."""
+        started = time.monotonic()
+        async with get_channel_lock(self.message.channel.id):
+            self._observe_stage("lock_wait", started)
+            yield
 
     async def build_messages(self):
-       self.history = [message async for message in self.message.channel.history(limit=int(os.environ.get("MSG_HISTORY_LIMIT", 5)))]
-       self.history.pop(0) # Remove current message
+        """Build self.messages: channel history, then the triggering message.
 
-       formatted_history = []
-       # One shared session for every attachment download in this build
-       # (across all history messages + the current message), instead of a
-       # fresh aiohttp.ClientSession per attachment.
-       async with aiohttp.ClientSession() as session:
-           for message in self.history:
+        History is read from Discord BEFORE the trigger's id rather than as
+        "the newest N minus the first": a message that waited in the queue
+        has newer messages above it, and dropping the newest one used to drop
+        someone else's message while the trigger appeared twice.
 
-              if message.content.lower() == "!reset_history":
-                  break
+        Which history goes in is the history policy's call (sliding or
+        anchored - see classes/history_policy.py). Every message, the trigger
+        included, goes through the same _format_group, so this turn's trigger
+        serializes exactly as it will as history next turn; that is what lets
+        the LLM server reuse its cached prefix.
+        """
+        self._attachment_seconds = 0.0
+        limit = history_limit()
+        budget = history_budget(slot_context_tokens(), reserve_tokens())
+        # One shared session for every attachment download in this build.
+        async with aiohttp.ClientSession() as session:
+            trigger = await self._format_group(self.message, session, role="user", always=True)
+            fixed = estimate_tokens(trigger)
+            if history_mode() == ANCHORED:
+                groups = await self._anchored_groups(limit, budget, fixed, session)
+            else:
+                recent = await self._fetch_recent(limit - 1)
+                groups = [(m.id, await self._format_group(m, session)) for m in recent]
+                groups = self._trim(groups, fixed, budget)
+        observe_stage("attachments", self._guild_id(), self._attachment_seconds)
+        self.messages = [entry for _, entries in groups for entry in entries] + trigger
 
+    async def _anchored_groups(self, limit, budget, fixed, session):
+        """History groups for anchored mode; commits the anchor on a refresh."""
+        store = history_policy.store()
+        key = (self._guild_id(), self.message.channel.id)
+        trigger_id = self.message.id
+        refresh_every = refresh_messages()
+        state = store.get(key)
+        decision = initial_decision(state, trigger_id)
+        formatted = {}  # message id -> entries, so a refresh re-downloads nothing
+        groups = None
+        if decision is None:
+            fetched = await self._fetch_after(state.after_id, max_window(limit, refresh_every) + 1)
+            decision = window_decision(
+                state, trigger_id, [(m.id, is_reset(m)) for m in fetched], limit, refresh_every)
+            if decision.kind == KEEP:
+                groups = [(m.id, await self._format_group(m, session)) for m in fetched]
+                formatted = dict(groups)
+                tokens = fixed + sum(estimate_tokens(entries) for _, entries in groups)
+                if budget is not None and tokens > budget:
+                    decision = Decision(REFRESH, REASON_TOKEN_BUDGET)
+                    groups = None
+        if groups is None:
+            groups = []
+            for m in await self._fetch_recent(limit - 1):
+                entries = formatted.get(m.id)
+                if entries is None:
+                    entries = await self._format_group(m, session)
+                groups.append((m.id, entries))
+        groups = self._trim(groups, fixed, budget)
+        if decision.kind != KEEP:
+            inc_history_refresh(decision.reason)
+            logger.info(f"History {decision.kind} ({decision.reason}) in channel "
+                        f"{self.message.channel.id} for message {trigger_id}")
+        if decision.kind == REFRESH:
+            store.commit(key, state_after_refresh([mid for mid, _ in groups], trigger_id))
+        return groups
 
-              for embed in message.embeds:
-                  embed_dict = embed.to_dict()
-                  embed_dict.pop('fields', None)
-                  content = json.dumps(embed_dict)
-                  formatted_history.append({
-                      'role': "assistant" if message.author.id == self.client.user.id else "user",
-                      'content': f"Discord Embed from '{message.author.name}' converted to JSON: {content}"
-                  })
+    def _trim(self, groups, fixed, budget):
+        """Drop the oldest whole messages until the prompt fits the budget."""
+        drop = trim_count([estimate_tokens(entries) for _, entries in groups], fixed, budget)
+        if drop:
+            inc_history_trimmed(drop)
+            logger.info(f"History trimmed {drop} oldest message(s) to fit the "
+                        f"{budget}-token budget (message {self.message.id})")
+        return groups[drop:]
 
-              image_parts = await self.download_image_parts(message.attachments, session=session)
-              if len(message.content) == 0 and not image_parts:
-                 continue
+    async def _fetch_recent(self, count):
+        """The newest `count` messages before the trigger, oldest first,
+        stopping at (and leaving out) a `!reset_history`."""
+        if count <= 0:
+            return []
+        started = time.monotonic()
+        found = []
+        async for m in self.message.channel.history(limit=count, before=self.message, oldest_first=False):
+            if is_reset(m):
+                break
+            found.append(m)
+        self._observe_stage("history_fetch", started)
+        found.reverse()
+        return found
 
-              text = f"Message from '{message.author.name}': {message.content.replace(f'<@{self.client.user.id}>', '').strip()}"
-              # With images the content becomes a list of parts (base64 images + text);
-              # the agents SDK forwards them as multimodal chat-completions input.
-              formatted_history.append({
-                 'role': "assistant" if message.author.id == self.client.user.id else "user",
-                 'content': [*image_parts, {"type": "text", "text": text}] if image_parts else text
-              })
-           formatted_history.reverse()  # Reverse the history to have the oldest message first
+    async def _fetch_after(self, after_id, cap):
+        """Up to `cap` messages after `after_id` (exclusive) and before the
+        trigger, oldest first. Resets are kept: the policy acts on them."""
+        started = time.monotonic()
+        found = [m async for m in self.message.channel.history(
+            limit=cap, after=discord.Object(id=after_id), before=self.message, oldest_first=True)]
+        self._observe_stage("history_fetch", started)
+        return found
 
-           self.message.content = self.clean_message_content(self.message)
-           image_parts = await self.download_image_parts(self.message.attachments, session=session)
-       user_text = f"Message from '{self.message.author.name}': {self.message.content}"
-       formatted_history.append({
-            'role': 'user',
-            'content': [*image_parts, {"type": "text", "text": user_text}] if image_parts else user_text
-       })
-       self.messages = formatted_history
+    async def _format_group(self, message, session, role=None, always=False):
+        """One Discord message as prompt entries: its text (with any images)
+        first, then its embeds in order - how Discord shows it.
+
+        Never mutates the message. `always` keeps an entry for a message with
+        no text or images (the trigger must always be in the prompt).
+        """
+        if role is None:
+            role = "assistant" if message.author.id == self.client.user.id else "user"
+        entries = []
+        started = time.monotonic()
+        image_parts = await self.download_image_parts(message.attachments, session=session)
+        self._attachment_seconds += time.monotonic() - started
+        if message.content or image_parts or always:
+            text = f"Message from '{message.author.name}': {self.clean_message_content(message)}"
+            # With images the content becomes a list of parts (base64 images + text);
+            # the agents SDK forwards them as multimodal chat-completions input.
+            entries.append({
+                'role': role,
+                'content': [*image_parts, {"type": "text", "text": text}] if image_parts else text,
+            })
+        for embed in message.embeds:
+            embed_dict = embed.to_dict()
+            embed_dict.pop('fields', None)
+            entries.append({
+                'role': role,
+                'content': f"Discord Embed from '{message.author.name}' converted to JSON: {json.dumps(embed_dict)}",
+            })
+        return entries
 
 
     async def download_image_parts(self, attachments, session=None) -> list:
@@ -169,7 +303,7 @@ class MessageHandler:
 
 
     def clean_message_content(self, message):
-        return message.content.replace(f'<@{self.client.user.id}>', '').strip()
+        return (message.content or "").replace(f'<@{self.client.user.id}>', '').strip()
     
 
 
@@ -225,7 +359,7 @@ class MessageHandler:
         # deadlock is possible. (channel.typing() is held by
         # main.process_messages for the whole handle, so the channel keeps
         # showing "typing" during the unlocked LLM phase.)
-        async with get_channel_lock(self.message.channel.id):
+        async with self._channel_lock():
             # 1) Build the prompt under the lock: the channel.history() read
             #    is a consistent snapshot (no half-sent replies from a
             #    concurrent same-channel handle).
@@ -263,16 +397,21 @@ class MessageHandler:
             # calls). Its tools have already posted their embeds and files,
             # so a bare ❌ reads as "the tool worked but the bot went quiet" —
             # send the reasoning it did produce so the failure is legible.
+            self.outcome = "llm_error"
             await self.message.add_reaction('❌')
             if thinking:
-                async with get_channel_lock(self.message.channel.id):
+                async with self._channel_lock():
+                    started = time.monotonic()
                     await self.handle_thinking_send(thinking, channel=target_channel)
+                    self._observe_stage("send", started)
         else:
             response = self.filter_response(response)
             # 3) Send under the lock: serializes the chunked replies of
             #    concurrent same-channel handles (no interleaved chunks).
-            async with get_channel_lock(self.message.channel.id):
+            async with self._channel_lock():
+                started = time.monotonic()
                 await self.handle_message_send(response, channel=target_channel)
                 if thinking:
                     await self.handle_thinking_send(thinking, channel=target_channel)
+                self._observe_stage("send", started)
         observe_response_generation(self.message.guild.id, time.monotonic() - start)
