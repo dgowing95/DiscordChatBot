@@ -9,7 +9,7 @@ uvicorn[standard]==0.52.4
 # Juggernaut-XL (single-file) pipeline at startup on v2.31-v2.37 (2026-09-16).
 # CI cannot catch this because the image is only built, never run.
 diffusers==0.40.0
-transformers==5.16.1
+transformers==5.17.0
 # Encodes prompts past CLIP's 77-token window (see _build_compel in main.py).
 # Compel 2.4 supports Transformers 5 and preserves chunked long prompts. It
 # brings the Jupyter/notebook stack transitively; that trade-off is deliberate.
