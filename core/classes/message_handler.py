@@ -10,7 +10,7 @@ from PIL import Image
 # further down (Ollama cannot decode HEIF), so format detection just needs to work.
 pillow_heif.register_heif_opener()
 from classes.text_llm_handler import TextLLMHandler, slot_context_tokens
-from classes import history_policy
+from classes import attachment_cache, history_policy
 from classes.history_policy import (
     ANCHORED,
     KEEP,
@@ -35,10 +35,13 @@ from classes.response_filter import (
     format_thinking_for_discord,
 )
 from classes.metrics import (
+    inc_attachment_cache_lookup,
+    inc_attachment_download_failure,
     inc_history_refresh,
     inc_history_trimmed,
     observe_response_generation,
     observe_stage,
+    set_attachment_cache_bytes,
 )
 from classes.message_queue import get_channel_lock, in_flight_hint
 
@@ -46,6 +49,12 @@ logger = logging.getLogger(__name__)
 
 # Max image attachments forwarded to the LLM per message (keeps prompts a sane size).
 MAX_IMAGES_PER_MESSAGE = 3
+# Image downloads running at once, across every build in the process.
+DOWNLOAD_CONCURRENCY = 4
+DOWNLOAD_TIMEOUT_SECONDS = 30
+# Stands in for an image while estimating tokens (estimate_tokens counts
+# every image the same, whatever its data).
+_PLACEHOLDER_IMAGE = {"type": "input_image", "image_url": ""}
 
 # 1/0: send the model's <think> reasoning to Discord, collapsed behind a
 # spoiler-hidden code block (default: off — the reasoning is dropped).
@@ -79,6 +88,97 @@ def encode_image_for_llm(data: bytes):
     return out.getvalue(), "image/png"
 
 
+def _encode_data_url(data: bytes):
+    """encode_image_for_llm plus base64, as one call for a worker thread."""
+    try:
+        encoded = encode_image_for_llm(data)
+    except Exception:
+        return None
+    if encoded is None:
+        return None
+    image_data, ctype = encoded
+    return f"data:{ctype};base64,{base64.b64encode(image_data).decode()}"
+
+
+def image_targets(attachments) -> list:
+    """(attachment id, url, content type) for the attachments sent to the
+    LLM: images only, at most MAX_IMAGES_PER_MESSAGE."""
+    targets = []
+    for attachment in attachments or []:
+        if len(targets) >= MAX_IMAGES_PER_MESSAGE:
+            break
+        content_type = (attachment.content_type or "").lower()
+        if not content_type.startswith("image/"):
+            continue
+        url = attachment.proxy_url or attachment.url
+        if not url:
+            continue
+        targets.append((attachment.id, url, content_type))
+    return targets
+
+
+# One HTTP session and one download limit shared by every build, each tied
+# to the event loop it was made on (the tests run a loop per test).
+_session = None
+_session_loop = None
+_download_slots = None
+_download_slots_loop = None
+
+
+def _http_session():
+    global _session, _session_loop
+    loop = asyncio.get_running_loop()
+    if _session is None or _session.closed or _session_loop is not loop:
+        _session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=DOWNLOAD_TIMEOUT_SECONDS))
+        _session_loop = loop
+    return _session
+
+
+def _download_semaphore():
+    global _download_slots, _download_slots_loop
+    loop = asyncio.get_running_loop()
+    if _download_slots is None or _download_slots_loop is not loop:
+        _download_slots = asyncio.Semaphore(DOWNLOAD_CONCURRENCY)
+        _download_slots_loop = loop
+    return _download_slots
+
+
+async def close_http_session():
+    """Close the shared download session (bot shutdown)."""
+    global _session
+    if _session is not None and not _session.closed:
+        await _session.close()
+    _session = None
+
+
+async def _download(url):
+    try:
+        async with _download_semaphore():
+            async with _http_session().get(url) as resp:
+                if resp.status != 200:
+                    logger.warning(f"Failed to download image {url}: HTTP {resp.status}")
+                    inc_attachment_download_failure("http")
+                    return None
+                return await resp.read()
+    except Exception as e:
+        logger.warning(f"Failed to download image {url}: {e}")
+        inc_attachment_download_failure("error")
+        return None
+
+
+async def load_image_data_url(url, content_type):
+    """Download one image and return it as a base64 data URL, or None."""
+    data = await _download(url)
+    if not data:
+        return None
+    data_url = await asyncio.to_thread(_encode_data_url, data)
+    if data_url is None:
+        logger.warning(f"Skipping image {url}: not a decodable image (format={content_type!r})")
+        inc_attachment_download_failure("undecodable")
+    return data_url
+
+
 def is_reset(message) -> bool:
     """A `!reset_history` message: history before it (and it) is left out."""
     return (message.content or "").lower() == "!reset_history"
@@ -94,7 +194,8 @@ class MessageHandler:
         # How the handle ended, for the reply-latency metric (main.py):
         # "replied", or "llm_error" when the run failed and got the ❌.
         self.outcome = "replied"
-        self._attachment_seconds = 0.0
+        self._history = []
+        self._generation = 0
 
     def _guild_id(self):
         guild = getattr(self.message, "guild", None)
@@ -114,73 +215,102 @@ class MessageHandler:
     async def build_messages(self):
         """Build self.messages: channel history, then the triggering message.
 
+        Two halves, so handle_message can hold the channel lock for the first
+        only: selecting reads Discord and picks the window, preparing
+        downloads and encodes the images."""
+        await self.select_messages()
+        await self.prepare_messages()
+
+    async def select_messages(self):
+        """Choose the history messages for this prompt (run under the lock).
+
         History is read from Discord BEFORE the trigger's id rather than as
         "the newest N minus the first": a message that waited in the queue
         has newer messages above it, and dropping the newest one used to drop
         someone else's message while the trigger appeared twice.
 
         Which history goes in is the history policy's call (sliding or
-        anchored - see classes/history_policy.py). Every message, the trigger
-        included, goes through the same _format_group, so this turn's trigger
-        serializes exactly as it will as history next turn; that is what lets
-        the LLM server reuse its cached prefix.
+        anchored - see classes/history_policy.py). Token estimates use a
+        placeholder per image: estimate_tokens counts every image the same,
+        so the estimate matches the prepared prompt (or is a little high if a
+        download fails). Nothing is downloaded here.
         """
-        self._attachment_seconds = 0.0
+        self._generation = attachment_cache.cache().generation()
         limit = history_limit()
         budget = history_budget(slot_context_tokens(), reserve_tokens())
-        # One shared session for every attachment download in this build.
-        async with aiohttp.ClientSession() as session:
-            trigger = await self._format_group(self.message, session, role="user", always=True)
-            fixed = estimate_tokens(trigger)
-            if history_mode() == ANCHORED:
-                groups = await self._anchored_groups(limit, budget, fixed, session)
-            else:
-                recent = await self._fetch_recent(limit - 1)
-                groups = [(m.id, await self._format_group(m, session)) for m in recent]
-                groups = self._trim(groups, fixed, budget)
-        observe_stage("attachments", self._guild_id(), self._attachment_seconds)
-        self.messages = [entry for _, entries in groups for entry in entries] + trigger
+        fixed = self._estimate(self.message, always=True)
+        if history_mode() == ANCHORED:
+            groups = await self._anchored_groups(limit, budget, fixed)
+        else:
+            recent = await self._fetch_recent(limit - 1)
+            groups = self._trim([(m, self._estimate(m)) for m in recent], fixed, budget)
+        self._history = [m for m, _ in groups]
 
-    async def _anchored_groups(self, limit, budget, fixed, session):
-        """History groups for anchored mode; commits the anchor on a refresh."""
+    async def prepare_messages(self):
+        """Download/encode the selected messages' images and build
+        self.messages (run outside the lock).
+
+        Every message, the trigger included, goes through the same
+        _format_group, so this turn's trigger serializes exactly as it will
+        as history next turn; that is what lets the LLM server reuse its
+        cached prefix. A history message deleted since select_messages (its
+        delete event reached the attachment cache in between) is left out.
+        """
+        history = self._history
+        wanted = [m for m in [*history, self.message] if image_targets(m.attachments)]
+        started = time.monotonic()
+        parts = await asyncio.gather(*(self.image_parts(m) for m in wanted))
+        if wanted:
+            observe_stage("attachments", self._guild_id(), time.monotonic() - started)
+        parts = {m.id: p for m, p in zip(wanted, parts)}
+        deleted = attachment_cache.cache().deleted_since(
+            self._generation, self.message.channel.id, [m.id for m in history])
+        messages = []
+        for m in history:
+            if m.id not in deleted:
+                messages.extend(self._format_group(m, parts.get(m.id, [])))
+        messages.extend(self._format_group(
+            self.message, parts.get(self.message.id, []), role="user", always=True))
+        self.messages = messages
+
+    def _estimate(self, message, always=False):
+        placeholders = [_PLACEHOLDER_IMAGE] * len(image_targets(message.attachments))
+        return estimate_tokens(self._format_group(message, placeholders, always=always))
+
+    async def _anchored_groups(self, limit, budget, fixed):
+        """(message, tokens) history pairs for anchored mode; commits the
+        anchor on a refresh."""
         store = history_policy.store()
         key = (self._guild_id(), self.message.channel.id)
         trigger_id = self.message.id
         refresh_every = refresh_messages()
         state = store.get(key)
         decision = initial_decision(state, trigger_id)
-        formatted = {}  # message id -> entries, so a refresh re-downloads nothing
         groups = None
         if decision is None:
             fetched = await self._fetch_after(state.after_id, max_window(limit, refresh_every) + 1)
             decision = window_decision(
                 state, trigger_id, [(m.id, is_reset(m)) for m in fetched], limit, refresh_every)
             if decision.kind == KEEP:
-                groups = [(m.id, await self._format_group(m, session)) for m in fetched]
-                formatted = dict(groups)
-                tokens = fixed + sum(estimate_tokens(entries) for _, entries in groups)
+                groups = [(m, self._estimate(m)) for m in fetched]
+                tokens = fixed + sum(t for _, t in groups)
                 if budget is not None and tokens > budget:
                     decision = Decision(REFRESH, REASON_TOKEN_BUDGET)
                     groups = None
         if groups is None:
-            groups = []
-            for m in await self._fetch_recent(limit - 1):
-                entries = formatted.get(m.id)
-                if entries is None:
-                    entries = await self._format_group(m, session)
-                groups.append((m.id, entries))
+            groups = [(m, self._estimate(m)) for m in await self._fetch_recent(limit - 1)]
         groups = self._trim(groups, fixed, budget)
         if decision.kind != KEEP:
             inc_history_refresh(decision.reason)
             logger.info(f"History {decision.kind} ({decision.reason}) in channel "
                         f"{self.message.channel.id} for message {trigger_id}")
         if decision.kind == REFRESH:
-            store.commit(key, state_after_refresh([mid for mid, _ in groups], trigger_id))
+            store.commit(key, state_after_refresh([m.id for m, _ in groups], trigger_id))
         return groups
 
     def _trim(self, groups, fixed, budget):
         """Drop the oldest whole messages until the prompt fits the budget."""
-        drop = trim_count([estimate_tokens(entries) for _, entries in groups], fixed, budget)
+        drop = trim_count([tokens for _, tokens in groups], fixed, budget)
         if drop:
             inc_history_trimmed(drop)
             logger.info(f"History trimmed {drop} oldest message(s) to fit the "
@@ -211,7 +341,7 @@ class MessageHandler:
         self._observe_stage("history_fetch", started)
         return found
 
-    async def _format_group(self, message, session, role=None, always=False):
+    def _format_group(self, message, image_parts, role=None, always=False):
         """One Discord message as prompt entries: its text (with any images)
         first, then its embeds in order - how Discord shows it.
 
@@ -221,9 +351,6 @@ class MessageHandler:
         if role is None:
             role = "assistant" if message.author.id == self.client.user.id else "user"
         entries = []
-        started = time.monotonic()
-        image_parts = await self.download_image_parts(message.attachments, session=session)
-        self._attachment_seconds += time.monotonic() - started
         if message.content or image_parts or always:
             text = f"Message from '{message.author.name}': {self.clean_message_content(message)}"
             # With images the content becomes a list of parts (base64 images + text);
@@ -242,64 +369,31 @@ class MessageHandler:
         return entries
 
 
-    async def download_image_parts(self, attachments, session=None) -> list:
-        """Download image attachments and return them as chat-content image parts.
+    async def image_parts(self, message) -> list:
+        """A message's image attachments as chat-content image parts.
 
-        Each part is {'type': 'input_image', 'image_url': '<base64 data URL>'} which
-        the agents SDK converts to the OpenAI 'image_url' wire format for the LLM.
-        Non-image attachments and failed downloads are skipped.
-
-        `session` lets a caller (build_messages) share one aiohttp session
-        across every attachment of every message in a build instead of
-        opening a fresh one per attachment; when omitted, one is opened
-        just for this call. Downloads for this call's attachments run
-        concurrently."""
-        targets = []  # (url, content_type)
-        for attachment in attachments or []:
-            if len(targets) >= MAX_IMAGES_PER_MESSAGE:
-                break
-            content_type = (attachment.content_type or "").lower()
-            if not content_type.startswith("image/"):
-                continue
-            url = attachment.proxy_url or attachment.url
-            if not url:
-                continue
-            targets.append((url, content_type))
-
+        Each part is {'type': 'input_image', 'image_url': '<base64 data URL>'}
+        which the agents SDK converts to the OpenAI 'image_url' wire format
+        for the LLM. Encoded images come from the attachment cache; the rest
+        are downloaded (at most DOWNLOAD_CONCURRENCY at once, process-wide).
+        Non-image attachments and failed downloads are skipped, and a failure
+        is not cached, so the next build retries it."""
+        targets = image_targets(message.attachments)
         if not targets:
             return []
+        cache = attachment_cache.cache()
+        channel_id = self.message.channel.id
 
-        async def _download(sess, url):
-            try:
-                async with sess.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                    if resp.status != 200:
-                        logger.warning(f"Failed to download image {url}: HTTP {resp.status}")
-                        return None
-                    return await resp.read()
-            except Exception as e:
-                logger.warning(f"Failed to download image {url}: {e}")
-                return None
+        async def _one(attachment_id, url, content_type):
+            value, result = await cache.get_or_load(
+                (channel_id, message.id, attachment_id),
+                lambda: load_image_data_url(url, content_type))
+            inc_attachment_cache_lookup(result)
+            return value
 
-        if session is not None:
-            downloads = await asyncio.gather(*(_download(session, url) for url, _ in targets))
-        else:
-            async with aiohttp.ClientSession() as own_session:
-                downloads = await asyncio.gather(*(_download(own_session, url) for url, _ in targets))
-
-        parts = []
-        for (url, content_type), data in zip(targets, downloads):
-            if not data:
-                continue
-            encoded = await asyncio.to_thread(encode_image_for_llm, data)
-            if encoded is None:
-                logger.warning(f"Skipping image {url}: not a decodable image (format={content_type!r})")
-                continue
-            image_data, ctype = encoded
-            parts.append({
-                "type": "input_image",
-                "image_url": f"data:{ctype};base64,{base64.b64encode(image_data).decode()}",
-            })
-        return parts
+        urls = await asyncio.gather(*(_one(*t) for t in targets))
+        set_attachment_cache_bytes(cache.bytes)
+        return [{"type": "input_image", "image_url": u} for u in urls if u]
 
 
     def clean_message_content(self, message):
@@ -360,18 +454,22 @@ class MessageHandler:
         # main.process_messages for the whole handle, so the channel keeps
         # showing "typing" during the unlocked LLM phase.)
         async with self._channel_lock():
-            # 1) Build the prompt under the lock: the channel.history() read
-            #    is a consistent snapshot (no half-sent replies from a
+            # 1) Select the history under the lock: the channel.history()
+            #    read is a consistent snapshot (no half-sent replies from a
             #    concurrent same-channel handle).
-            await self.build_messages()
+            await self.select_messages()
             # If an earlier message's slow tool is still running (or just
             # finished) in this channel, tell the model — it can then answer
             # follow-ups honestly ("it's still running") instead of guessing
             # that the previous request went unanswered.
             hint = in_flight_hint(self.message.channel.id)
-            if hint:
-                self.messages.append({"role": "user", "content": hint})
-        # 2) LLM run + tool calls UNLOCKED (the slow phase; other messages —
+        # 2) Images are downloaded/encoded (or taken from the attachment
+        #    cache) after the lock is released, so a slow CDN does not hold
+        #    up other handles in this channel.
+        await self.prepare_messages()
+        if hint:
+            self.messages.append({"role": "user", "content": hint})
+        # 3) LLM run + tool calls UNLOCKED (the slow phase; other messages —
         #    same channel or not — can build/generate concurrently).
         ollama = TextLLMHandler(
             self.messages, self.message.guild.id, self.message,
@@ -406,7 +504,7 @@ class MessageHandler:
                     self._observe_stage("send", started)
         else:
             response = self.filter_response(response)
-            # 3) Send under the lock: serializes the chunked replies of
+            # 4) Send under the lock: serializes the chunked replies of
             #    concurrent same-channel handles (no interleaved chunks).
             async with self._channel_lock():
                 started = time.monotonic()

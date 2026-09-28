@@ -6,14 +6,14 @@ import random
 import time
 import aiohttp
 import io
-from classes.message_handler import MessageHandler
+from classes.message_handler import MessageHandler, close_http_session
 from classes.text_llm_handler import TextLLMHandler
 from classes.llm_config import llm_model
 from classes.config_manager import configManager
 from classes.image_generation import generate_image_from_api, image_generation_enabled
 from classes.image_prompt import build_image_prompt
 from classes.sandbox_agent import sandbox_enabled
-from classes import sandbox_thread_inbox
+from classes import attachment_cache, sandbox_thread_inbox
 from classes.message_queue import make_message_queue, mark_enqueued, pop_enqueued, worker_count
 from classes.metrics import (
     inc_messages_processed,
@@ -22,6 +22,7 @@ from classes.metrics import (
     inc_sandbox_thread_message,
     observe_queue_wait,
     observe_reply_latency,
+    set_attachment_cache_bytes,
     set_context_window_from_env,
     set_message_queue_size,
     start_metrics_server_from_env,
@@ -45,7 +46,17 @@ if os.environ.get("CONTENT_GUARD_DEBUG", "1").strip().lower() not in ("0", "fals
 intents = discord.Intents.default()
 intents.message_content = True
 
-client = discord.Client(intents=intents)
+
+
+class Bot(discord.Client):
+    async def close(self):
+        # The image-download session is shared by every prompt build, so it
+        # outlives them all and is closed here, once.
+        await close_http_session()
+        await super().close()
+
+
+client = Bot(intents=intents)
 config = configManager()
 
 # Bounded queue shared by the worker pool. Sizing (WORKER_COUNT /
@@ -170,6 +181,33 @@ async def on_ready():
         return
     await register_commands()
     
+
+
+def invalidate_attachments(channel_id, message_ids, deleted):
+    """Drop cached images of deleted/edited messages, so a deleted image
+    is neither kept in memory nor sent to the model again."""
+    cache = attachment_cache.cache()
+    for message_id in message_ids:
+        cache.invalidate_message(channel_id, message_id, deleted=deleted)
+    set_attachment_cache_bytes(cache.bytes)
+
+
+# Raw events: they fire for messages outside discord.py's message cache too.
+@client.event
+async def on_raw_message_delete(payload):
+    invalidate_attachments(payload.channel_id, [payload.message_id], deleted=True)
+
+
+@client.event
+async def on_raw_bulk_message_delete(payload):
+    invalidate_attachments(payload.channel_id, payload.message_ids, deleted=True)
+
+
+@client.event
+async def on_raw_message_edit(payload):
+    # An edit can remove an attachment; a message that is still there is
+    # simply cached again on its next build.
+    invalidate_attachments(payload.channel_id, [payload.message_id], deleted=False)
 
 
 @client.event

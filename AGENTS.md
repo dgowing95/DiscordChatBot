@@ -20,6 +20,8 @@ core/                  # the main bot (the app that runs in production)
     message_handler.py     # per-message orchestration: history build, send/chunking
     history_policy.py      # PURE (stdlib-only) which history goes in a prompt: sliding vs
                            #   anchored window, per-channel anchor store, token budget
+    attachment_cache.py    # PURE (stdlib-only) encoded images kept between prompt builds:
+                           #   LRU + TTL, shared in-flight loads, delete/edit invalidation
     message_queue.py       # PURE (stdlib-only) queue sizing (WORKER_COUNT / QUEUE_MAX_SIZE),
                            #   bounded queue factory + per-channel locks (scoped to build+send)
                            #   + in-flight task registry (prompt hint for still-running slow tools)
@@ -102,6 +104,14 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
    serializes exactly as it will as history on the next turn. Older history is
    dropped whole when the prompt would not fit the llama.cpp per-slot context
    (read from its `/props`) minus `MSG_HISTORY_RESERVE_TOKENS`.
+   The build has two halves: `select_messages` (under the channel lock: reads
+   Discord and picks the window, estimating a flat token cost per image) and
+   `prepare_messages` (after the lock: downloads and encodes the images). Encoded
+   images are kept in `classes/attachment_cache.py` (64 MiB, 15 minutes, keyed by
+   channel/message/attachment id, not URL), at most 4 downloads run at once
+   through one shared aiohttp session, and Discord's raw delete/edit events in
+   `main.py` drop a message's images; a history message deleted while images
+   download is left out of the prompt.
 3. `TextLLMHandler` uses the **OpenAI `agents` SDK** pointed at the llama.cpp
    server's OpenAI-compatible endpoint (`LLM_HOST/v1`) with function tools attached.
 4. The returned text is cleaned by `MessageHandler.filter_response()` (delegate:
@@ -435,6 +445,14 @@ curl -sS -X POST "$TEST_WEBHOOK_URL" \
   `limit` messages). A passing test shows the message list is stable, not
   that llama.cpp reuses its cache — check `llamacpp:prompt_tokens_cached_total`
   and the server's checkpoint-restore log lines for that.
+- The attachment cache (`core/classes/attachment_cache.py`) is pure too
+  (stdlib only). It keeps only the final base64 data URL, so a cached build
+  sends exactly the bytes an uncached one would (prefix reuse depends on it).
+  Keys are ids, never the signed CDN URL, which expires. Failed or
+  undecodable downloads are never stored, so the next build retries them.
+  Cover it in `core/tests/attachment_cache_tests.py` and the download path
+  (lock not held, concurrency limit, deletion during a download) in
+  `core/tests/message_handler_tests.py`.
 - The queue worker pool, bounded-queue sizing (WORKER_COUNT / QUEUE_MAX_SIZE),
   the per-channel locks (SCOPED to build+send — the LLM/tool phase runs
   unlocked) and the in-flight task registry (register_task_run /
