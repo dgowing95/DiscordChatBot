@@ -17,6 +17,7 @@ from agents import Agent, Runner, OpenAIChatCompletionsModel, AsyncOpenAI, Funct
 from classes.config_manager import configManager
 from classes.response_filter import extract_reasoning_items, extract_thinking
 from classes.llm_config import llm_api_key, llm_host, llm_model, parse_temperature
+from classes.reply_policy import INSTRUCTION as DOUBLE_REPLY_INSTRUCTION
 
 # Max turns for ONE reply from the main agent (a turn = one model response,
 # however many tool calls it carries). The SDK's own default is 10, which a
@@ -254,6 +255,8 @@ class ToolMetricsHooks(RunHooks):
                 logger.warning(f"In-flight registry tool_end failed: {e}")
 
 class TextLLMHandler:
+    # Set by MessageHandler after eligibility is chosen under the build lock.
+    allow_double_reply = False
 
     def __init__(self, messages, guild_id, original_message, client=None):
         self.original_message = original_message
@@ -407,6 +410,8 @@ class TextLLMHandler:
       messages_for_run = self.messages + [
           {"role": "user", "content": f"(Current datetime: {datetime})"}
       ]
+      if self.allow_double_reply:
+          messages_for_run.append({"role": "user", "content": DOUBLE_REPLY_INSTRUCTION})
       hooks = ToolMetricsHooks(self.guild_id)
       try:
          response = await Runner.run(self.agent, messages_for_run, context=user_info,
