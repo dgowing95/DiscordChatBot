@@ -451,3 +451,14 @@ async def test_refresh_slot_context_unknown_stays_none(monkeypatch):
     with patch.object(tlh.aiohttp, "ClientSession", return_value=_props_session(status=503)):
         assert await tlh.TextLLMHandler.refresh_slot_context() is None
     assert tlh.slot_context_tokens() is None
+
+
+def test_attachment_cache_metrics():
+    before = _sample("discord_bot_attachment_cache_lookups_total", result="hit")
+    m.inc_attachment_cache_lookup("hit")
+    assert _sample("discord_bot_attachment_cache_lookups_total", result="hit") == before + 1
+    before = _sample("discord_bot_attachment_download_failures_total", reason="http")
+    m.inc_attachment_download_failure("http")
+    assert _sample("discord_bot_attachment_download_failures_total", reason="http") == before + 1
+    m.set_attachment_cache_bytes(1234)
+    assert _sample("discord_bot_attachment_cache_bytes") == 1234

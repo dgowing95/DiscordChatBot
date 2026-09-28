@@ -82,6 +82,18 @@ Metrics (scraped by Prometheus from the /metrics HTTP endpoint):
   Counter  discord_bot_history_trimmed_messages_total
            Oldest history messages dropped to fit the per-slot token budget.
 
+  Attachments (classes/attachment_cache.py):
+  Counter  discord_bot_attachment_cache_lookups_total{result}
+           Image attachments looked up while building a prompt. result: hit
+           (already encoded) / miss (downloaded now) / coalesced (joined a
+           download another build had already started).
+  Gauge    discord_bot_attachment_cache_bytes
+           Bytes held by the cache (the base64 data URLs it keeps).
+  Counter  discord_bot_attachment_download_failures_total{reason}
+           Images left out of a prompt: http (non-200) / error (network,
+           timeout) / undecodable (not an image). Never cached, so the next
+           build tries again.
+
   Sandbox conversation (classes/sandbox_conversation.py; labels are bounded
   outcome names — never message ids, thread ids or user text):
   Counter  discord_bot_sandbox_thread_messages_total{outcome}
@@ -287,6 +299,23 @@ history_trimmed_messages_total = Counter(
     "Oldest history messages dropped to fit the per-slot token budget",
 )
 
+attachment_cache_lookups_total = Counter(
+    "discord_bot_attachment_cache_lookups_total",
+    "Image attachment lookups while building a prompt, by result",
+    ["result"],
+)
+
+attachment_cache_bytes = Gauge(
+    "discord_bot_attachment_cache_bytes",
+    "Bytes held by the attachment cache",
+)
+
+attachment_download_failures_total = Counter(
+    "discord_bot_attachment_download_failures_total",
+    "Image attachments that could not be downloaded or decoded, by reason",
+    ["reason"],
+)
+
 # Receipt -> presentation is bounded by one model call plus any running
 # command's checkpoint; receipt -> response adds the model's own turn.
 SANDBOX_INPUT_BUCKETS = (1, 2.5, 5, 10, 20, 30, 60, 120, 300, 600)
@@ -452,6 +481,18 @@ def inc_history_refresh(reason: str) -> None:
 def inc_history_trimmed(count: int) -> None:
     if count > 0:
         history_trimmed_messages_total.inc(count)
+
+
+def inc_attachment_cache_lookup(result: str) -> None:
+    attachment_cache_lookups_total.labels(result=str(result)).inc()
+
+
+def set_attachment_cache_bytes(n: int) -> None:
+    attachment_cache_bytes.set(n)
+
+
+def inc_attachment_download_failure(reason: str) -> None:
+    attachment_download_failures_total.labels(reason=str(reason)).inc()
 
 
 def set_context_window_from_env() -> None:

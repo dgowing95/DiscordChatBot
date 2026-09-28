@@ -18,6 +18,7 @@ from classes.message_handler import (
     MessageHandler,
     encode_image_for_llm,
 )
+from classes import attachment_cache
 from classes import message_queue as mq
 
 # To run this pytest file from the command line, use:
@@ -32,33 +33,18 @@ def _make_image(fmt="JPEG", size=(16, 16), color=(200, 30, 30)):
 
 
 def _handler():
-    # Skip __init__ (it needs REDIS_HOST); download_image_parts does not use self state.
+    # Skip __init__ (it needs REDIS_HOST).
     return MessageHandler.__new__(MessageHandler)
 
 
-def _attachment(url="http://cdn.example/x.png", content_type="image/png"):
+def _attachment(url="http://cdn.example/x.png", content_type="image/png", att_id=None):
     att = MagicMock()
+    if att_id is not None:
+        att.id = att_id
     att.url = url
     att.proxy_url = url
     att.content_type = content_type
     return att
-
-
-def _mock_client_session(payload=b"", status=200, raise_exc=None):
-    response = MagicMock()
-    response.status = status
-    response.headers = {"Content-Type": "image/png"}
-    response.read = AsyncMock(return_value=payload)
-    if raise_exc:
-        response.read.side_effect = raise_exc
-    response.__aenter__ = AsyncMock(return_value=response)
-    response.__aexit__ = AsyncMock(return_value=False)
-
-    session = MagicMock()
-    session.__aenter__ = AsyncMock(return_value=session)
-    session.__aexit__ = AsyncMock(return_value=False)
-    session.get = MagicMock(return_value=response)
-    return session
 
 
 def _part_image(part):
@@ -115,16 +101,113 @@ def test_invalid_bytes_return_none():
     assert encode_image_for_llm(b"") is None
 
 
-# ------------------- download_image_parts (mocked io) --------------------
+
+# ------------- image_parts / prepare_messages (mocked io, real cache) -------------
+#
+# Downloads go through the module's shared session (_http_session), patched
+# here with a fake that records every GET. The attachment cache is the real
+# one, reset around each test.
+
+
+class _FakeResponse:
+    def __init__(self, payload, status):
+        self.status = status
+        self._payload = payload
+
+    async def read(self):
+        if isinstance(self._payload, Exception):
+            raise self._payload
+        return self._payload
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakeSession:
+    """GET url -> payload (bytes or an Exception) / status. `gate`, when set,
+    holds every GET until it is released, so concurrency can be measured."""
+
+    def __init__(self, payload=b"", status=200, by_url=None, gate=None, on_get=None):
+        self.payload = payload
+        self.status = status
+        self.by_url = by_url or {}
+        self.gate = gate
+        self.on_get = on_get
+        self.calls = []
+        self.active = 0
+        self.peak = 0
+
+    def get(self, url):
+        session = self
+
+        class _Ctx:
+            async def __aenter__(self_inner):
+                session.calls.append(url)
+                session.active += 1
+                session.peak = max(session.peak, session.active)
+                try:
+                    if session.on_get:
+                        session.on_get(url)
+                    if session.gate is not None:
+                        await session.gate.wait()
+                finally:
+                    session.active -= 1
+                payload, status = session.by_url.get(url, (session.payload, session.status))
+                return _FakeResponse(payload, status)
+
+            async def __aexit__(self_inner, *exc):
+                return False
+        return _Ctx()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_attachment_cache():
+    attachment_cache.reset()
+    yield
+    attachment_cache.reset()
+
+
+def _use_session(session):
+    return patch("classes.message_handler._http_session", return_value=session)
+
+
+def _image_message(attachments, mid=10, channel_id=99, content="look", author_id=1):
+    msg = MagicMock()
+    msg.id = mid
+    msg.content = content
+    msg.attachments = attachments
+    msg.embeds = []
+    msg.guild = MagicMock()
+    msg.guild.id = 1
+    msg.channel = MagicMock()
+    msg.channel.id = channel_id
+    msg.author.id = author_id
+    msg.author.name = "alice"
+    return msg
+
+
+def _image_handler(message):
+    handler = _handler()
+    handler.message = message
+    handler.client = MagicMock()
+    handler.client.user.id = 999
+    handler._history = []
+    handler._generation = 0
+    return handler
+
+
+async def _parts(attachments, session):
+    msg = _image_message(attachments)
+    with _use_session(session):
+        return await _image_handler(msg).image_parts(msg)
+
 
 @pytest.mark.asyncio
 async def test_image_attachment_becomes_decodable_data_url():
-    payload = _make_image("JPEG")
-    handler = _handler()
-    with patch("classes.message_handler.aiohttp.ClientSession",
-               return_value=_mock_client_session(payload=payload)):
-        parts = await handler.download_image_parts([_attachment()])
-
+    parts = await _parts([_attachment()], _FakeSession(payload=_make_image("JPEG")))
     assert len(parts) == 1
     ctype, data = _part_image(parts[0])
     assert ctype == "data:image/jpeg"
@@ -133,12 +216,7 @@ async def test_image_attachment_becomes_decodable_data_url():
 
 @pytest.mark.asyncio
 async def test_webp_attachment_arrives_as_png_for_the_llm():
-    payload = _make_image("WEBP")
-    handler = _handler()
-    with patch("classes.message_handler.aiohttp.ClientSession",
-               return_value=_mock_client_session(payload=payload)):
-        parts = await handler.download_image_parts([_attachment()])
-
+    parts = await _parts([_attachment()], _FakeSession(payload=_make_image("WEBP")))
     assert len(parts) == 1
     ctype, data = _part_image(parts[0])
     assert ctype == "data:image/png"
@@ -147,12 +225,8 @@ async def test_webp_attachment_arrives_as_png_for_the_llm():
 
 @pytest.mark.asyncio
 async def test_heic_attachment_arrives_as_png_for_the_llm():
-    payload = _make_image("HEIF")
-    handler = _handler()
-    with patch("classes.message_handler.aiohttp.ClientSession",
-               return_value=_mock_client_session(payload=payload)):
-        parts = await handler.download_image_parts([_attachment(content_type="image/heic")])
-
+    parts = await _parts([_attachment(content_type="image/heic")],
+                         _FakeSession(payload=_make_image("HEIF")))
     assert len(parts) == 1
     ctype, data = _part_image(parts[0])
     assert ctype == "data:image/png"
@@ -161,72 +235,193 @@ async def test_heic_attachment_arrives_as_png_for_the_llm():
 
 @pytest.mark.asyncio
 async def test_undecodable_download_is_skipped():
-    handler = _handler()
-    with patch("classes.message_handler.aiohttp.ClientSession",
-               return_value=_mock_client_session(payload=b"not an image")):
-        parts = await handler.download_image_parts([_attachment()])
-    assert parts == []
+    assert await _parts([_attachment()], _FakeSession(payload=b"not an image")) == []
 
 
 @pytest.mark.asyncio
 async def test_non_image_attachments_are_skipped():
-    handler = _handler()
-    with patch("classes.message_handler.aiohttp.ClientSession",
-               return_value=_mock_client_session()):
-        parts = await handler.download_image_parts([
-            _attachment(url="http://cdn.example/v.mp4", content_type="video/mp4"),
-            _attachment(url="http://cdn.example/f.pdf", content_type="application/pdf"),
-            _attachment(content_type=None),
-        ])
-
+    session = _FakeSession()
+    parts = await _parts([
+        _attachment(url="http://cdn.example/v.mp4", content_type="video/mp4"),
+        _attachment(url="http://cdn.example/f.pdf", content_type="application/pdf"),
+        _attachment(content_type=None),
+    ], session)
     assert parts == []
+    assert session.calls == []
 
 
 @pytest.mark.asyncio
 async def test_download_failure_is_skipped():
-    handler = _handler()
-    with patch("classes.message_handler.aiohttp.ClientSession",
-               return_value=_mock_client_session(raise_exc=ConnectionError("down"))):
-        parts = await handler.download_image_parts([_attachment()])
-    assert parts == []
+    assert await _parts([_attachment()], _FakeSession(payload=ConnectionError("down"))) == []
 
 
 @pytest.mark.asyncio
 async def test_non_200_response_is_skipped():
-    handler = _handler()
-    with patch("classes.message_handler.aiohttp.ClientSession",
-               return_value=_mock_client_session(status=404)):
-        parts = await handler.download_image_parts([_attachment()])
-    assert parts == []
+    assert await _parts([_attachment()], _FakeSession(status=404)) == []
 
 
 @pytest.mark.asyncio
 async def test_max_images_per_message_cap():
-    handler = _handler()
-    payload = _make_image("JPEG")
     attachments = [_attachment(url=f"http://cdn.example/{i}.png")
                    for i in range(MAX_IMAGES_PER_MESSAGE + 3)]
-    with patch("classes.message_handler.aiohttp.ClientSession",
-               return_value=_mock_client_session(payload=payload)):
-        parts = await handler.download_image_parts(attachments)
+    parts = await _parts(attachments, _FakeSession(payload=_make_image("JPEG")))
     assert len(parts) == MAX_IMAGES_PER_MESSAGE
 
 
 @pytest.mark.asyncio
 async def test_mixed_good_and_bad_attachments_only_sends_valid_images():
-    handler = _handler()
-    with patch("classes.message_handler.aiohttp.ClientSession",
-               side_effect=lambda: _mock_client_session(payload=_make_image("JPEG"))):
-        parts = await handler.download_image_parts([
-            _attachment(url="http://cdn.example/a.jpg", content_type="image/jpeg"),
-            _attachment(url="http://cdn.example/b.png", content_type="image/png"),
-            _attachment(url="http://cdn.example/c.txt", content_type="text/plain"),
-        ])
+    parts = await _parts([
+        _attachment(url="http://cdn.example/a.jpg", content_type="image/jpeg"),
+        _attachment(url="http://cdn.example/b.png", content_type="image/png"),
+        _attachment(url="http://cdn.example/c.txt", content_type="text/plain"),
+    ], _FakeSession(payload=_make_image("JPEG")))
     assert len(parts) == 2
     for part in parts:
         ctype, data = _part_image(part)
         assert ctype == "data:image/jpeg"
         _decode(data)
+
+
+@pytest.mark.asyncio
+async def test_a_second_build_takes_the_image_from_the_cache():
+    session = _FakeSession(payload=_make_image("JPEG"))
+    att = _attachment(att_id=5)
+    first = await _parts([att], session)
+    second = await _parts([att], session)
+    assert session.calls == ["http://cdn.example/x.png"]
+    # Byte-for-byte the same, so llama.cpp can still reuse the prefix.
+    assert first == second
+
+
+@pytest.mark.asyncio
+async def test_an_expired_url_for_a_cached_attachment_is_still_a_hit():
+    session = _FakeSession(payload=_make_image("JPEG"))
+    await _parts([_attachment(url="http://cdn.example/x.png?ex=1", att_id=5)], session)
+    parts = await _parts([_attachment(url="http://cdn.example/x.png?ex=2", att_id=5)],
+                         _FakeSession(status=403))
+    assert len(parts) == 1
+    assert session.calls == ["http://cdn.example/x.png?ex=1"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_download_is_retried_on_the_next_build():
+    att = _attachment(att_id=5)
+    assert await _parts([att], _FakeSession(status=500)) == []
+    session = _FakeSession(payload=_make_image("JPEG"))
+    assert len(await _parts([att], session)) == 1
+    assert len(session.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_builds_share_one_download():
+    gate = asyncio.Event()
+    session = _FakeSession(payload=_make_image("JPEG"), gate=gate)
+    att = _attachment(att_id=5)
+    tasks = [asyncio.ensure_future(_parts([att], session)) for _ in range(3)]
+    await asyncio.sleep(0.01)
+    gate.set()
+    results = await asyncio.gather(*tasks)
+    assert len(session.calls) == 1
+    assert results[0] == results[1] == results[2] != []
+
+
+@pytest.mark.asyncio
+async def test_at_most_four_downloads_run_at_once():
+    from classes.message_handler import DOWNLOAD_CONCURRENCY
+    gate = asyncio.Event()
+    session = _FakeSession(payload=_make_image("JPEG"), gate=gate)
+    messages = [_image_message([_attachment(url=f"http://cdn.example/{i}.png")], mid=100 + i)
+                for i in range(DOWNLOAD_CONCURRENCY + 3)]
+    with _use_session(session):
+        tasks = [asyncio.ensure_future(_image_handler(m).image_parts(m)) for m in messages]
+        await asyncio.sleep(0.05)
+        assert session.active == DOWNLOAD_CONCURRENCY
+        gate.set()
+        results = await asyncio.gather(*tasks)
+    assert session.peak == DOWNLOAD_CONCURRENCY == 4
+    assert all(len(r) == 1 for r in results)
+
+
+def _history_channel(messages, channel_id=99):
+    ch = MagicMock()
+    ch.id = channel_id
+
+    def history(limit=100, before=None, after=None, oldest_first=None):
+        found = [m for m in messages if m.id < before.id][-limit:]
+
+        async def _gen():
+            for m in (found if oldest_first else reversed(found)):
+                yield m
+        return _gen()
+    ch.history = history
+    for m in messages:
+        m.channel = ch
+    return ch
+
+
+@pytest.mark.asyncio
+async def test_images_are_downloaded_outside_the_channel_lock(monkeypatch):
+    monkeypatch.setenv("MSG_HISTORY_MODE", "sliding")
+    old = _image_message([_attachment(url="http://cdn.example/old.png")], mid=1)
+    trigger = _image_message([_attachment(url="http://cdn.example/new.png")], mid=2)
+    ch = _history_channel([old, trigger])
+    held = []
+    session = _FakeSession(payload=_make_image("JPEG"),
+                           on_get=lambda url: held.append(mq.get_channel_lock(ch.id).locked()))
+    handler = _image_handler(trigger)
+    captured = {}
+
+    class _FakeLLM:
+        def __init__(self, messages, *args, **kwargs):
+            captured["messages"] = messages
+            self.reasoning = ""
+
+        async def generate(self):
+            return "ok"
+
+    ch.send = AsyncMock()
+    with _use_session(session), patch("classes.message_handler.TextLLMHandler", _FakeLLM), \
+            patch("classes.message_handler.slot_context_tokens", return_value=None):
+        await handler.handle_message()
+
+    assert sorted(session.calls) == ["http://cdn.example/new.png", "http://cdn.example/old.png"]
+    assert held == [False, False]
+    images = [p for e in captured["messages"] if isinstance(e["content"], list)
+              for p in e["content"] if p["type"] == "input_image"]
+    assert len(images) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_message_deleted_while_images_download_is_left_out(monkeypatch):
+    monkeypatch.setenv("MSG_HISTORY_MODE", "sliding")
+    old = _image_message([_attachment(url="http://cdn.example/old.png")], mid=1, content="old")
+    kept = _image_message([], mid=2, content="kept")
+    trigger = _image_message([], mid=3, content="now")
+    ch = _history_channel([old, kept, trigger])
+    session = _FakeSession(
+        payload=_make_image("JPEG"),
+        on_get=lambda url: attachment_cache.cache().invalidate_message(ch.id, 1, deleted=True))
+    handler = _image_handler(trigger)
+    with _use_session(session), patch("classes.message_handler.slot_context_tokens", return_value=None):
+        await handler.build_messages()
+
+    texts = [e["content"] for e in handler.messages]
+    assert texts == ["Message from 'alice': kept", "Message from 'alice': now"]
+    # ...and the late download did not put the deleted image back.
+    assert len(attachment_cache.cache()) == 0
+
+
+@pytest.mark.asyncio
+async def test_no_attachments_stage_without_images(monkeypatch):
+    monkeypatch.setenv("MSG_HISTORY_MODE", "sliding")
+    trigger = _image_message([], mid=3, content="now")
+    _history_channel([trigger])
+    handler = _image_handler(trigger)
+    with patch("classes.message_handler.observe_stage") as observe, \
+            patch("classes.message_handler.slot_context_tokens", return_value=None):
+        await handler.build_messages()
+    assert "attachments" not in [c.args[0] for c in observe.call_args_list]
+
 
 
 # ------------------- handle_message: scoped per-channel lock -------------------
@@ -266,9 +461,13 @@ def _handled(handler, msg, set_messages):
     handler.message = msg
     handler.client = MagicMock()
 
-    async def _build():
+    async def _select():
+        pass
+
+    async def _prepare():
         set_messages(handler)
-    handler.build_messages = _build
+    handler.select_messages = _select
+    handler.prepare_messages = _prepare
     return handler
 
 

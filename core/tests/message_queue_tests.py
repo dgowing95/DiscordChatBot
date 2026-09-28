@@ -423,3 +423,60 @@ async def test_process_messages_observes_queue_wait_and_reply_latency():
     assert _hist_count("discord_bot_queue_wait_seconds", guild_id="4242") == wait_before + 1
     assert _hist_count("discord_bot_reply_latency_seconds",
                        guild_id="4242", outcome="llm_error") == reply_before + 1
+
+
+# ---------------- attachment cache invalidation (main.py raw events) ----------------
+
+@pytest.fixture
+def _cache():
+    from classes import attachment_cache
+    attachment_cache.reset()
+    cache = attachment_cache.cache()
+    loop = asyncio.new_event_loop()
+    for key in [(77, 1, 10), (77, 2, 20), (77, 3, 30)]:
+        loop.run_until_complete(cache.get_or_load(key, _value_loader()))
+    loop.close()
+    yield cache
+    attachment_cache.reset()
+
+
+def _value_loader():
+    async def load():
+        return "data:x"
+    return load
+
+
+@pytest.mark.asyncio
+async def test_a_deleted_message_drops_its_cached_images(_cache):
+    m = _import_main()
+    gen = _cache.generation()
+    await m.on_raw_message_delete(MagicMock(channel_id=77, message_id=1))
+    assert _cache.get((77, 1, 10)) is None
+    assert _cache.get((77, 2, 20)) == "data:x"
+    assert _cache.deleted_since(gen, 77, [1, 2]) == {1}
+
+
+@pytest.mark.asyncio
+async def test_a_bulk_delete_drops_every_messages_images(_cache):
+    m = _import_main()
+    await m.on_raw_bulk_message_delete(MagicMock(channel_id=77, message_ids={1, 2}))
+    assert len(_cache) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_edit_drops_images_but_is_not_a_deletion(_cache):
+    m = _import_main()
+    gen = _cache.generation()
+    await m.on_raw_message_edit(MagicMock(channel_id=77, message_id=3))
+    assert _cache.get((77, 3, 30)) is None
+    assert _cache.deleted_since(gen, 77, [3]) == set()
+
+
+@pytest.mark.asyncio
+async def test_closing_the_bot_closes_the_download_session():
+    m = _import_main()
+    with patch.object(m, "close_http_session", AsyncMock()) as close, \
+            patch("discord.Client.close", AsyncMock()) as parent_close:
+        await m.client.close()
+    close.assert_awaited_once()
+    parent_close.assert_awaited_once()
