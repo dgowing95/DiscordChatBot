@@ -12,6 +12,9 @@ jobs:
     if: github.event.pull_request.draft == false
     runs-on: [ ubuntu-latest ]
     timeout-minutes: 45
+    env:
+      # The npm launcher self-updates in the background and can remove ocr during this job.
+      OCR_NO_UPDATE: '1'
     concurrency:
       group: review-${{ github.event.pull_request.number }}
       cancel-in-progress: true
@@ -26,6 +29,9 @@ jobs:
           llm_auth_token: ${{ secrets.OPENCODE_API_KEY }}
           llm_model: glm-5.3-flash
           llm_use_anthropic: 'false'
+          # Large reviews have hit the default 300-second request deadline before response headers.
+          llm_timeout: '600'
+          review_concurrency: '2'
           # Pin the installed CLI as well as the action commit. The action otherwise installs
           # `latest`, which can change review behaviour without a repository diff.
           ocr_version: 1.11.9
