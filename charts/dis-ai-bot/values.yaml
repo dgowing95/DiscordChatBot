@@ -245,6 +245,11 @@ history:
 # message(s) (closed by default - click to reveal) instead of discarding it.
 # Off by default: the reasoning is dropped.
 showThinking: false
+# Opportunity for two short conversational messages; the model may choose one.
+# Set chance to 0 to disable. Cooldown counts delivered replies per channel.
+doubleReply:
+  chance: 0.08
+  cooldownReplies: 10
 # core queue concurrency (see core/main.py): how many queue worker tasks run
 # (each handles one message at a time; a per-channel lock keeps same-channel
 # order) and the max messages waiting in the bounded queue (once full, new

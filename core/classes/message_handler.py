@@ -1,6 +1,7 @@
 import logging
 import asyncio, re, json, time, os, io, base64
 import contextlib
+import random
 import aiohttp
 import discord
 import pillow_heif
@@ -10,7 +11,7 @@ from PIL import Image
 # further down (Ollama cannot decode HEIF), so format detection just needs to work.
 pillow_heif.register_heif_opener()
 from classes.text_llm_handler import TextLLMHandler, slot_context_tokens
-from classes import attachment_cache, history_policy
+from classes import attachment_cache, history_policy, reply_policy
 from classes.history_policy import (
     ANCHORED,
     KEEP,
@@ -463,6 +464,7 @@ class MessageHandler:
             # follow-ups honestly ("it's still running") instead of guessing
             # that the previous request went unanswered.
             hint = in_flight_hint(self.message.channel.id)
+            allow_double_reply = reply_policy.policy.eligible(self.message.channel.id)
         # 2) Images are downloaded/encoded (or taken from the attachment
         #    cache) after the lock is released, so a slow CDN does not hold
         #    up other handles in this channel.
@@ -475,6 +477,7 @@ class MessageHandler:
             self.messages, self.message.guild.id, self.message,
             client=self.client,
         )
+        ollama.allow_double_reply = allow_double_reply
         response = await ollama.generate()
 
         # generate() collects the reasoning itself: our llama.cpp server
@@ -508,7 +511,25 @@ class MessageHandler:
             #    concurrent same-channel handles (no interleaved chunks).
             async with self._channel_lock():
                 started = time.monotonic()
-                await self.handle_message_send(response, channel=target_channel)
+                parts = reply_policy.reply_parts(
+                    response,
+                    allowed=(allow_double_reply
+                             and not getattr(ollama, "sandbox_thread", None)
+                             and reply_policy.policy.available(target_channel.id)),
+                )
+                if len(parts) == 2:
+                    await self.handle_message_send(parts[0], channel=target_channel)
+                    reply_policy.policy.started_pair(target_channel.id)
+                    await asyncio.sleep(random.uniform(0.8, 1.5))
+                    await self.handle_message_send(parts[1], channel=target_channel)
+                    logger.debug("Double reply delivered in channel %s", target_channel.id)
+                else:
+                    if reply_policy.MARKER in response:
+                        logger.debug("Double reply fallback (eligibility, cooldown or validation) in channel %s",
+                                     target_channel.id)
+                    await self.handle_message_send(parts[0], channel=target_channel)
+                    if parts[0]:
+                        reply_policy.policy.sent_single(target_channel.id)
                 if thinking:
                     await self.handle_thinking_send(thinking, channel=target_channel)
                 self._observe_stage("send", started)

@@ -57,6 +57,20 @@ docker compose logs core -f
 code edits without a rebuild. Changing `MODEL` needs `docker compose up -d` (a plain
 `restart` does not re-read `.env`).
 
+## Occasional two-message replies
+
+The bot can send two short, related channel messages from one generation, with a
+0.8–1.5 second pause. By default, 8% of replies offer the model this option; it can
+still choose one message. After a pair, ten successful replies in that channel
+must pass before another opportunity. Code and sandbox reports use normal delivery.
+
+Set `DOUBLE_REPLY_CHANCE` (0–1, default `0.08`; `0` disables) and
+`DOUBLE_REPLY_COOLDOWN_REPLIES` (nonnegative integer, default `10`) in `.env` for
+Compose, or `doubleReply.chance` and `doubleReply.cooldownReplies` in Helm values.
+Cooldowns live in memory for the 4,096 most recently used channels and reset on
+restart or eviction. Actual double-sends are less frequent than the opportunity
+rate; observe conversations to tune it. `LOG_LEVEL=DEBUG` logs pairs and fallbacks.
+
 ## Tests
 
 ```bash
