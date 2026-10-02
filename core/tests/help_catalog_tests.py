@@ -28,6 +28,7 @@ def _import_main():
 def _all_on(monkeypatch):
     monkeypatch.setenv("IMAGE_GEN_ENABLED", "1")
     monkeypatch.setenv("SANDBOX_ENABLED", "1")
+    monkeypatch.setenv("AUTOMATIONS_ENABLED", "1")
 
 
 def test_every_agent_tool_has_help(monkeypatch):
@@ -46,6 +47,9 @@ class FakeCommandTree:
     def command(self, name, description=""):
         self.names.append(name)
         return lambda fn: fn
+
+    def add_command(self, command):
+        self.names.append(command.name)
 
     async def sync(self):
         return []

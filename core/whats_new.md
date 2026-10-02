@@ -12,14 +12,10 @@ first time someone triggers the bot after that release is deployed.
   (checked by core/tests/whats_new_tests.py).
 -->
 
-## What's New announcements
-After each update I post a short list of the new features like this one, once per server.
-How to use: nothing to do - it appears with my next reply after an update.
+## Scheduled actions
+Ask me to do something once or on a recurring interval, day, or weekday. I run it in the channel where you create it and use the current time when it runs.
+How to use: ask "Every day at 9am, find today's Wordle answer" or use `/schedule create`.
 
-## /help
-A quick list of everything I can do, only visible to you.
-How to use: type `/help`.
-
-## /whats_new
-See the latest new features again at any time, only visible to you.
-How to use: type `/whats_new`.
+## Message rules
+Set a word, phrase, or substring that triggers an action when someone posts it in this channel. Matching rules answer together in one response.
+How to use: ask "When someone says wordle, find today's answer" or use `/rule create`.

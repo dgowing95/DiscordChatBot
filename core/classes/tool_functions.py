@@ -34,7 +34,7 @@ async def web_search(wrapper: RunContextWrapper[dict], search_request: str) -> s
                 "guard. Please rephrase with a safe, non-harmful query.")
 
     await Common.send_tool_discord_embed(
-        wrapper.context.get("original_message").channel,
+        wrapper.context["channel"],
         f"Searching the web for: {search_request}",
     )
     try:
@@ -60,7 +60,7 @@ async def fetch_url(wrapper: RunContextWrapper[dict], url: str) -> str:
                 "guard.")
 
     await Common.send_tool_discord_embed(
-        wrapper.context.get("original_message").channel,
+        wrapper.context["channel"],
         f"Visiting URL: {url}",
     )
     try:
@@ -203,13 +203,14 @@ async def generate_image(wrapper: RunContextWrapper[dict], prompt: str) -> str:
 
     message = wrapper.context.get("original_message")
     logger.info(f"Generating image for prompt: {prompt}")
-    await add_emoji_to_message(message, "🎨")
+    if message is not None:
+        await add_emoji_to_message(message, "🎨")
     # The rewritten prompt, not the requested one, is what the embed shows:
     # what the image model was actually given is the thing worth seeing when
     # the result does not match what was asked for.
     image_prompt, negative_prompt = await build_image_prompt(prompt)
     await Common.send_tool_discord_embed(
-        message.channel,
+        wrapper.context["channel"],
         f"Generating image: {image_prompt}",
     )
     try:
@@ -219,7 +220,7 @@ async def generate_image(wrapper: RunContextWrapper[dict], prompt: str) -> str:
         return ("Image generation failed. Tell the user the image service is "
                 "unavailable right now and do not retry.")
     try:
-        await message.channel.send(
+        await wrapper.context["channel"].send(
             file=discord.File(io.BytesIO(image_bytes), filename="generated-image.png")
         )
     except Exception as e:
@@ -312,6 +313,9 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
     from classes import sandbox_thread_inbox
 
     original_message = wrapper.context.get("original_message")
+    if original_message is None:
+        original_message = await wrapper.context["channel"].send("🐳 Starting code sandbox…")
+        wrapper.context["original_message"] = original_message
     requesting_user_id = wrapper.context.get("user_id")
     # A sandbox thread this outer turn already resolved. The context dict is
     # one object for the whole Runner.run (text_llm_handler builds it once),
@@ -347,7 +351,8 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
     if in_thread:
         ledger = sandbox_thread_inbox.claim_run(channel.id, requesting_user_id)
         if ledger is None:
-            return _forward_to_running_sandbox(channel, original_message, task)
+            return _forward_to_running_sandbox(channel, original_message, task,
+                                               actor_id=requesting_user_id if wrapper.context.get("automatic") else None)
     try:
         return await _run_claimed_sandbox(
             wrapper, task, channel, thread_created, in_thread, ledger)
@@ -363,7 +368,7 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
             sandbox_thread_inbox.release_run(channel.id, ledger)
 
 
-def _forward_to_running_sandbox(channel, original_message, task: str) -> str:
+def _forward_to_running_sandbox(channel, original_message, task: str, actor_id=None) -> str:
     """Hands a second run_code_sandbox call to the run already claimed in
     this thread, and tells the outer model honestly whether that worked."""
     from classes import sandbox_thread_inbox
@@ -372,7 +377,7 @@ def _forward_to_running_sandbox(channel, original_message, task: str) -> str:
     outcome = sandbox_thread_inbox.deliver(
         channel.id,
         getattr(original_message, "id", None),
-        getattr(author, "id", None),
+        actor_id if actor_id is not None else getattr(author, "id", None),
         getattr(author, "display_name", "the user"),
         task,
     )
@@ -666,7 +671,7 @@ async def change_personality(wrapper: RunContextWrapper[dict], personality: str)
 
         embed = discord.Embed(title="Personality Updated",
                       description=personality)
-        await wrapper.context.get("original_message").channel.send(embed=embed)
+        await wrapper.context["channel"].send(embed=embed)
         return True
     except Exception as e:
         logger.warning(f"An error occurred while changing personality: {e}")

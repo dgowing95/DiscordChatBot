@@ -141,6 +141,9 @@ class _FakeCommandTree:
             return fn
         return deco
 
+    def add_command(self, command):
+        self.commands.append((command.name, command))
+
     async def sync(self):
         return [MagicMock(name=f"synced-{i}") for i in range(len(self.commands))]
 

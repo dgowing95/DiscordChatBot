@@ -209,7 +209,7 @@ class ToolMetricsHooks(RunHooks):
         # The user_info dict passed to Runner.run(context=...) carries the
         # original message; the hook's `context` is the RunContextWrapper,
         # so the dict lives on context.context.
-        return context.context.get("original_message").channel.id
+        return (context.context.get("channel") or context.context["original_message"].channel).id
 
     # Hook failures must never abort the run (same rule as sandbox_progress).
 
@@ -255,17 +255,18 @@ class ToolMetricsHooks(RunHooks):
                 logger.warning(f"In-flight registry tool_end failed: {e}")
 
 
-def agent_tools() -> list:
+def agent_tools(automatic: bool = False) -> list:
     """The function tools the main agent gets. A function of its own so the
     /help sync test (core/tests/help_catalog_tests.py) can list them."""
     tools = [
         web_search,
         fetch_url,
-        store_memory,
-        remove_memory,
-        clear_memories,
         change_personality,
     ]
+    if not automatic:
+        tools.extend((store_memory, remove_memory, clear_memories))
+        from classes.automation_tools import automation_tools
+        tools.extend(automation_tools())
     # The image tool only exists when the diffusion service is enabled
     # (IMAGE_GEN_ENABLED; set from the helm chart's diffusion.enabled).
     if image_generation_enabled():
@@ -282,7 +283,8 @@ class TextLLMHandler:
     # Set by MessageHandler after eligibility is chosen under the build lock.
     allow_double_reply = False
 
-    def __init__(self, messages, guild_id, original_message, client=None):
+    def __init__(self, messages, guild_id, original_message, client=None,
+                 actor_id=None, channel=None, automatic=False):
         self.original_message = original_message
         self.messages = messages
         self.guild_id = guild_id
@@ -293,7 +295,10 @@ class TextLLMHandler:
         # for callers and tests.
         self.client = client
         self.config = configManager()
-        self.user_memory = UserMemory(original_message.author.id, guild_id)
+        self.actor_id = actor_id if actor_id is not None else original_message.author.id
+        self.channel = channel if channel is not None else original_message.channel
+        self.automatic = automatic
+        self.user_memory = None if automatic else UserMemory(self.actor_id, guild_id)
         # Filled in by generate(): the model's internal reasoning for this
         # run, which the caller sends to Discord behind a spoiler when
         # SHOW_THINKING is on. It cannot be recovered from the returned
@@ -373,7 +378,7 @@ class TextLLMHandler:
 
     async def get_client(self):
         main_model_client = _get_main_model_client()
-        tools = agent_tools()
+        tools = agent_tools(getattr(self, "automatic", False))
 
         self.agent = Agent(
             name="Assistant",
@@ -392,10 +397,12 @@ class TextLLMHandler:
     async def generate(self):
       await self.get_settings()
       user_info = {
-        "data": await self.user_memory.get() or [],
-        "user_id": self.original_message.author.id,
+        "data": await self.user_memory.get() or [] if getattr(self, "user_memory", None) else [],
+        "user_id": self.actor_id if hasattr(self, "actor_id") else self.original_message.author.id,
         "guild_id": self.guild_id,
         "original_message": self.original_message,
+        "channel": self.channel if hasattr(self, "channel") else self.original_message.channel,
+        "automatic": getattr(self, "automatic", False),
         "discord_client": self.client,
         "redis_save_tool_calls": 0,
         "personality_tool_calls": 0,
@@ -418,7 +425,7 @@ class TextLLMHandler:
       messages_for_run = self.messages + [
           {"role": "user", "content": f"(Current datetime: {datetime})"}
       ]
-      if self.allow_double_reply:
+      if self.allow_double_reply and not getattr(self, "automatic", False):
           messages_for_run.append({"role": "user", "content": DOUBLE_REPLY_INSTRUCTION})
       hooks = ToolMetricsHooks(self.guild_id)
       try:
