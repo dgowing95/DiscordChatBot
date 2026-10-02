@@ -27,7 +27,7 @@ jobs:
         with:
           llm_url: https://opencode.ai/zen/go/v1/chat/completions
           llm_auth_token: ${{ secrets.OPENCODE_API_KEY }}
-          llm_model: glm-5.3-flash
+          llm_model: deepseek-v4.1-flash
           llm_use_anthropic: 'false'
           # Large reviews have hit the default 300-second request deadline before response headers.
           llm_timeout: '600'
@@ -36,8 +36,8 @@ jobs:
           # `latest`, which can change review behaviour without a repository diff.
           ocr_version: 1.11.9
           # The action's default extra_body is {"thinking": {"type": "disabled"}}.
-          # Some of the upstreams OpenCode Go balances glm-5.3-flash across
-          # reject that field with a 400 (unknown field / Z.ai 1210).
+          # Some of the upstreams OpenCode Go balances models across
+          # reject that field with a 400 (seen with glm-5.3-flash: unknown field / Z.ai 1210).
           llm_extra_body: '{}'
           # OpenCode Go requires a stable per-conversation session id for
           # routing/prompt caching; without it every request 400s with
