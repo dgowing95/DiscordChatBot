@@ -139,6 +139,26 @@ def anchor_timing(timing, now):
     return timing
 
 
+# How late a run may start and still count as on time when the next run is
+# chosen. Without it, an interval equal to the minimum gap (the shortest the
+# form allows) skipped every other slot: a run due at T starts a few seconds
+# late, T + interval is then a few seconds short of the gap, and the next
+# slot goes. Queue waits and the 15 second poll fit well inside it.
+ON_TIME_GRACE = timedelta(minutes=15)
+
+
+def following_run(timing, tz_name, occurrence, started, now, min_hours):
+    """The run after one that was due at `occurrence` and started at
+    `started`. It is the next slot after this occurrence (so missed slots
+    are never replayed one by one) that is also at least the minimum gap
+    after the run actually started, less ON_TIME_GRACE (so a late catch-up
+    run is not followed straight away by the next slot), and never in the
+    past."""
+    earliest = started + timedelta(hours=min_hours) - ON_TIME_GRACE
+    after = max(occurrence, earliest - timedelta(microseconds=1), now)
+    return next_run(timing, tz_name, after)
+
+
 def validate_schedule(timing, tz_name, min_hours, now):
     tz_name = resolve_timezone(tz_name)
     if timing["type"] == "once":

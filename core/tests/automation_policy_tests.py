@@ -5,7 +5,7 @@ import pytest
 from datetime import timedelta
 
 from classes.automation_policy import (
-    anchor_timing, describe, form_values, matches, next_run, parse_clock, quota_message, resolve_timezone,
+    anchor_timing, describe, following_run, form_values, matches, next_run, parse_clock, quota_message, resolve_timezone,
     timing_from_form,
     validate_schedule,
 )
@@ -134,3 +134,32 @@ def test_quota_message_says_how_to_make_room():
     assert "one-off" in text
     assert "one-off" not in quota_message("rule", 4, 4)
     assert quota_message("rule", 0, 0) == "Rules are turned off on this server."
+
+
+def test_interval_equal_to_minimum_runs_every_slot():
+    # Every 4 hours with the default 4 hour minimum: the run due at 08:00
+    # starts and finishes a little late, and must still be followed at 12:00.
+    timing = {"type": "interval", "every": 4, "unit": "hours", "start": "2026-01-01T04:00:00+00:00"}
+    due = at("2026-01-01T08:00:00")
+    assert following_run(timing, "Europe/London", due, due + timedelta(seconds=20),
+                         due + timedelta(minutes=2), 4) == at("2026-01-01T12:00:00")
+
+
+def test_late_run_keeps_the_minimum_gap():
+    timing = {"type": "interval", "every": 4, "unit": "hours", "start": "2026-01-01T04:00:00+00:00"}
+    due = at("2026-01-01T08:00:00")
+    started = due + timedelta(hours=1)
+    assert following_run(timing, "Europe/London", due, started, started + timedelta(minutes=1), 4) == at(
+        "2026-01-01T16:00:00")
+
+
+def test_catch_up_after_downtime_runs_once_then_resumes_the_timetable():
+    timing = {"type": "interval", "every": 4, "unit": "hours", "start": "2026-01-01T04:00:00+00:00"}
+    stale = at("2026-01-01T08:00:00")
+    started = at("2026-01-03T09:30:00")
+    # Not 12:00 on the 1st (which would replay every missed slot, one per poll).
+    assert following_run(timing, "Europe/London", stale, started, started, 4) == at("2026-01-03T16:00:00")
+    daily = {"type": "daily", "time": "09:00"}
+    late = at("2026-01-05T15:00:00")
+    assert following_run(daily, "Europe/London", at("2026-01-05T09:00:00"), late, late, 4) == at(
+        "2026-01-06T09:00:00")

@@ -52,7 +52,7 @@ async def test_automatic_run_uses_saved_action_and_origin_channel(monkeypatch):
                editor_id=8, kind="rule", action="find answer")
     class Store:
         async def get(self, guild, ident): return row
-        async def finish(self, record, outcome, detail=""): finished.append(outcome)
+        async def finish(self, record, outcome, detail="", started_at=None): finished.append(outcome)
         async def release(self, claim): pass
     class Channel:
         id = 4
@@ -96,7 +96,7 @@ async def test_editor_who_left_suspends_the_entry(monkeypatch):
     class Store:
         async def get(self, guild, ident): return row
         async def update(self, guild, ident, actor, revision, **changes): updates.append(changes)
-        async def finish(self, record, outcome, detail=""): finished.append((outcome, detail))
+        async def finish(self, record, outcome, detail="", started_at=None): finished.append((outcome, detail))
         async def release(self, claim): pass
     class Channel:
         id = 4

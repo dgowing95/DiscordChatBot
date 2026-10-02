@@ -2,11 +2,11 @@
 import json
 import secrets
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
 from redis.exceptions import WatchError
 from classes.redis_client import text_client
-from classes.automation_policy import anchor_timing, matches, quota_message, resolve_timezone, next_run, settings, validate_schedule
+from classes.automation_policy import anchor_timing, following_run, matches, quota_message, resolve_timezone, settings, validate_schedule
 
 PREFIX = "dcb:automations:v1"
 
@@ -222,7 +222,10 @@ return 1"""
         ok = await self.redis.eval(script, 3, key, busy, cd, token, max(1, cooldown))
         return (key, busy, token) if ok else None
 
-    async def finish(self, row, outcome, detail=""):
+    async def finish(self, row, outcome, detail="", started_at=None):
+        """Record an outcome and, for a schedule, pick its next run.
+        `started_at` is when the run began; unknown (an interrupted run)
+        counts as now, which errs towards a later next run."""
         key = _key(row["guild_id"], row["id"])
         for _ in range(8):
             async with self.redis.pipeline(transaction=True) as pipe:
@@ -241,8 +244,10 @@ return 1"""
                             current["status"] = "completed" if outcome == "completed" else "failed"
                             terminal = True
                         else:
-                            minimum = timedelta(hours=settings()["min_hours"])
-                            current["next_run"] = next_run(row["timing"], row["timezone"], now + minimum - timedelta(microseconds=1)).timestamp()
+                            occurrence = datetime.fromtimestamp(row["next_run"], timezone.utc)
+                            current["next_run"] = following_run(
+                                row["timing"], row["timezone"], occurrence, started_at or now, now,
+                                settings()["min_hours"]).timestamp()
                     pipe.multi()
                     pipe.set(key, json.dumps(current), ex=604800 if terminal else None)
                     if row["kind"] == "schedule" and advance:

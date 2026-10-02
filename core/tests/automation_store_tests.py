@@ -95,9 +95,11 @@ async def test_interval_keeps_its_grid_through_runs_and_edits(store):
     first = row["next_run"]
     edited = await store.update(106, row["id"], 309, row["revision"], action="changed")
     assert edited["next_run"] == first
-    await store.finish(edited, "completed")
-    # Finishing just now asks for the first slot 4h+ away: the next grid
-    # point, which is the original first run (it is still a day off).
+    # Run the occurrence a day before the first one, as if it were due now:
+    # the next run is the next grid point, the original first run.
+    from datetime import datetime, timezone
+    due_now = {**edited, "next_run": first - 86400}
+    await store.finish(due_now, "completed", started_at=datetime.fromtimestamp(first - 86400, timezone.utc))
     assert (await store.get(106, row["id"]))["next_run"] == first
 
 

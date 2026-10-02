@@ -133,6 +133,7 @@ async def execute(job, client):
     store = AutomationStore()
     kind = job.records[0]["kind"]
     started = time.monotonic()
+    started_at = datetime.now(timezone.utc)
     observe_automation_wait(kind, started - job.enqueued_at)
     outcome = "skipped"
     rows = []
@@ -202,7 +203,7 @@ async def execute(job, client):
                 for chunk in format_thinking_for_discord(handler.reasoning):
                     await channel.send(chunk)
         for row in rows:
-            await store.finish(row, "completed")
+            await store.finish(row, "completed", started_at=started_at)
         outcome = "completed"
         inc_automation(kind, outcome)
         logger.info("Completed automation kind=%s ids=%s", kind, [r["id"] for r in rows])
@@ -215,7 +216,7 @@ async def execute(job, client):
             try:
                 if isinstance(exc, AccessLost):
                     await store.update(row["guild_id"], row["id"], row["editor_id"], row["revision"], status="suspended")
-                await store.finish(row, outcome, str(exc))
+                await store.finish(row, outcome, str(exc), started_at=started_at)
             except Exception:
                 logger.exception("Could not record automation failure")
         if channel and not send_started:
@@ -224,7 +225,7 @@ async def execute(job, client):
                                    if isinstance(exc, AccessLost) else
                                    "❌ An automatic run failed. Check its status with /schedule or /rule.")
             except Exception:
-                pass
+                logger.warning("Could not send the failure notice for %s", [r["id"] for r in rows], exc_info=True)
     finally:
         if job.renewal_task:
             job.renewal_task.cancel()
