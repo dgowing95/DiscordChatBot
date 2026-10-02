@@ -6,7 +6,7 @@ from datetime import datetime, timezone, timedelta
 
 from redis.exceptions import WatchError
 from classes.redis_client import text_client
-from classes.automation_policy import anchor_timing, matches, next_run, settings, validate_schedule
+from classes.automation_policy import anchor_timing, matches, resolve_timezone, next_run, settings, validate_schedule
 
 PREFIX = "dcb:automations:v1"
 
@@ -63,7 +63,7 @@ class AutomationStore:
                   "kind": kind, "action": action.strip(), "status": "enabled", "revision": 1,
                   "created_at": now.isoformat(), "updated_at": now.isoformat(), "last_result": None}
         if kind == "schedule":
-            record["timezone"] = fields.get("timezone") or cfg["timezone"]
+            record["timezone"] = resolve_timezone(fields.get("timezone") or cfg["timezone"])
             record["timing"] = anchor_timing(fields["timing"], now)
             record["next_run"] = validate_schedule(record["timing"], record["timezone"], cfg["min_hours"], now).timestamp()
         else:
@@ -115,6 +115,8 @@ class AutomationStore:
                     if changes.keys() - allowed:
                         raise AutomationError("Unsupported edit")
                     now = datetime.now(timezone.utc)
+                    if "timezone" in changes:
+                        changes["timezone"] = resolve_timezone(changes["timezone"])
                     if "timing" in changes:
                         changes["timing"] = anchor_timing(changes["timing"], now)
                     row.update(changes)

@@ -5,7 +5,8 @@ import pytest
 from datetime import timedelta
 
 from classes.automation_policy import (
-    anchor_timing, describe, form_values, matches, next_run, parse_clock, timing_from_form, validate_schedule,
+    anchor_timing, describe, form_values, matches, next_run, parse_clock, resolve_timezone, timing_from_form,
+    validate_schedule,
 )
 
 UTC = timezone.utc
@@ -105,3 +106,22 @@ def test_form_values_prefill_same_type_and_keep_action_when_switching():
     again = timing_from_form("interval", form_values(row, "interval"))
     assert next_run(again, "Europe/London", at("2026-07-02T00:00:00")) == next_run(
         row["timing"], "Europe/London", at("2026-07-02T00:00:00"))
+
+
+@pytest.mark.parametrize("typed, canonical", [
+    ("Europe/London", "Europe/London"), ("europe/london", "Europe/London"), ("  Europe/London ", "Europe/London"),
+    ("america/new york", "America/New_York"), ("London", "Europe/London"), ("tokyo", "Asia/Tokyo"), ("utc", "UTC")])
+def test_resolve_timezone_forgives_case_spaces_and_bare_cities(typed, canonical):
+    assert resolve_timezone(typed) == canonical
+
+
+@pytest.mark.parametrize("typed, suggestion", [("Europe/Londn", "Europe/London"), ("Londn", "Europe/London")])
+def test_resolve_timezone_suggests_close_names(typed, suggestion):
+    with pytest.raises(ValueError, match=f"Did you mean .*{suggestion}"):
+        resolve_timezone(typed)
+
+
+@pytest.mark.parametrize("typed", ["Mars/Base", "../../etc/passwd", ""])
+def test_resolve_timezone_rejects_unknown_names(typed):
+    with pytest.raises(ValueError, match="Unknown timezone"):
+        resolve_timezone(typed)

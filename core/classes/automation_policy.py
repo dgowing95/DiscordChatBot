@@ -1,11 +1,42 @@
 """Pure validation, recurrence and message matching for server automations."""
 from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo, available_timezones
+import difflib
+import functools
 import os
 import re
 
 UTC = timezone.utc
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+
+
+@functools.lru_cache(maxsize=1)
+def _zone_names():
+    """lower-cased name -> canonical name, and lower-cased city -> names."""
+    by_name, by_city = {}, {}
+    for name in available_timezones():
+        by_name[name.lower()] = name
+        if "/" in name:
+            by_city.setdefault(name.rsplit("/", 1)[1].lower(), []).append(name)
+    return by_name, by_city
+
+
+def resolve_timezone(text):
+    """A typed timezone -> its canonical IANA name. Capitals, surrounding
+    spaces and spaces for underscores are forgiven ('europe/london',
+    'america/new york'), and a bare city resolves when exactly one zone has
+    it ('London'). Anything else is an error that suggests close names."""
+    cleaned = "_".join(str(text or "").split()).lower()
+    by_name, by_city = _zone_names()
+    if cleaned in by_name:
+        return by_name[cleaned]
+    if len(by_city.get(cleaned, ())) == 1:
+        return by_city[cleaned][0]
+    suggestions = [by_name[name] for name in difflib.get_close_matches(cleaned, list(by_name), n=3, cutoff=0.6)]
+    for city in difflib.get_close_matches(cleaned, list(by_city), n=3, cutoff=0.75):
+        suggestions.extend(name for name in by_city[city] if name not in suggestions)
+    hint = f" Did you mean {', '.join(suggestions[:3])}?" if suggestions else ""
+    raise ValueError(f"Unknown timezone {str(text).strip()!r}; use an IANA name like Europe/London or America/New_York.{hint}")
 
 
 def settings():
@@ -14,8 +45,7 @@ def settings():
         if value < minimum:
             raise ValueError(f"{name} must be at least {minimum}")
         return value
-    tz = os.getenv("AUTOMATIONS_TIMEZONE", "Europe/London")
-    ZoneInfo(tz)
+    tz = resolve_timezone(os.getenv("AUTOMATIONS_TIMEZONE", "Europe/London"))
     return {
         "enabled": os.getenv("AUTOMATIONS_ENABLED", "1").lower() not in ("0", "false", "off"),
         "timezone": tz,
@@ -110,10 +140,7 @@ def anchor_timing(timing, now):
 
 
 def validate_schedule(timing, tz_name, min_hours, now):
-    try:
-        ZoneInfo(tz_name)
-    except (ZoneInfoNotFoundError, ValueError):
-        raise ValueError(f"Unknown timezone {tz_name!r}; use an IANA name like Europe/London")
+    tz_name = resolve_timezone(tz_name)
     if timing["type"] == "once":
         value = next_run(timing, tz_name, now)
         if value is None:

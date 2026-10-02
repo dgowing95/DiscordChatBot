@@ -116,3 +116,14 @@ async def test_deleting_finished_one_off_and_rule_drops_them(store, monkeypatch)
     rule = await store.create(107, 208, 309, "rule", "answer", pattern="wordle")
     await store.update(107, rule["id"], 309, rule["revision"], status="deleted")
     assert await store.list(107, "rule") == []
+
+
+@pytest.mark.asyncio
+async def test_timezone_is_stored_in_canonical_form(store):
+    row = await store.create(108, 209, 310, "schedule", "answer",
+                             timing={"type": "daily", "time": "09:00"}, timezone=" europe/london ")
+    assert row["timezone"] == "Europe/London"
+    edited = await store.update(108, row["id"], 310, row["revision"], timezone="new york")
+    assert edited["timezone"] == "America/New_York"
+    with pytest.raises(ValueError, match="Did you mean"):
+        await store.update(108, row["id"], 310, edited["revision"], timezone="Europe/Londn")
