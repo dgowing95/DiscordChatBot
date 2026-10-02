@@ -50,7 +50,7 @@ pycparser==3.0
 # let Dependabot bump it ahead of pydantic, which broke resolution on #94.
 pydantic==2.13.5
 Pygments==2.21.0
-PyJWT==2.13.0
+PyJWT==2.15.0
 python-dotenv==1.2.3
 python-multipart==0.0.32
 redis==8.1.0
