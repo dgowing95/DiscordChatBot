@@ -44,11 +44,28 @@ jobs:
         id: whats_new
         run: |
           set -euo pipefail
-          prev=$(git describe --tags --abbrev=0 --match 'v*' "${VERSION}^" 2>/dev/null || true)
-          if [ -z "$prev" ] || ! git diff --quiet "$prev" "$VERSION" -- core/whats_new.md; then
+          # Fails closed: a git error must stop the release, not read as
+          # "changed" and silently re-ship the previous release's notes.
+          if prev=$(git describe --tags --abbrev=0 --match 'v*' "${VERSION}^" 2>/dev/null); then
+            set +e
+            git diff --quiet "$prev" "$VERSION" -- core/whats_new.md
+            diff_status=$?
+            set -e
+            if [ "$diff_status" -eq 0 ]; then
+              changed=false
+            elif [ "$diff_status" -eq 1 ]; then
+              changed=true
+            else
+              echo "git diff failed (exit $diff_status) comparing $prev..$VERSION" >&2
+              exit 1
+            fi
+          elif [ -z "$(git tag -l 'v*' | grep -vxF "$VERSION" || true)" ]; then
+            # The very first release: there is nothing earlier to diff against.
+            prev=""
             changed=true
           else
-            changed=false
+            echo "No earlier v* tag found before $VERSION although v* tags exist" >&2
+            exit 1
           fi
           echo "Previous tag: ${prev:-none}; whats_new.md changed: $changed"
           echo "changed=$changed" >> "$GITHUB_OUTPUT"

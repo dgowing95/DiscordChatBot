@@ -84,8 +84,12 @@ def load_notes(path=None) -> list[tuple[str, str]]:
         return []
     key = (str(path), mtime)
     if key not in _cache:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            return []
         _cache.clear()
-        _cache[key] = parse_notes(path.read_text(encoding="utf-8"))
+        _cache[key] = parse_notes(text)
     return _cache[key]
 
 

@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import pytest
 
+from classes import message_queue as mq
 from classes import whats_new
 from classes.common import embed_from_data
 from classes.message_handler import MessageHandler
@@ -50,6 +51,18 @@ def test_parse_notes_no_features(text):
 
 def test_load_notes_missing_file(tmp_path):
     assert whats_new.load_notes(tmp_path / "nope.md") == []
+
+
+def test_load_notes_unreadable_file(tmp_path, monkeypatch):
+    path = tmp_path / "notes.md"
+    path.write_text("## A\nb\n", encoding="utf-8")
+
+    def unreadable(*args, **kwargs):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(type(path), "read_text", unreadable)
+    whats_new._cache.clear()
+    assert whats_new.load_notes(path) == []
 
 
 def test_load_notes_reads_file(tmp_path):
@@ -137,6 +150,9 @@ def announce(monkeypatch, tmp_path):
     m = _import_main()
     redis = FakeRedis()
     monkeypatch.setattr(m, "text_client", lambda: redis)
+    # Fresh locks, as in reply_policy_tests: _channel_locks is module-global,
+    # and an asyncio.Lock binds to the first event loop that contends on it.
+    monkeypatch.setattr(mq, "_channel_locks", {})
     notes = tmp_path / "whats_new.md"
     notes.write_text("## Feature\nDoes things.\n", encoding="utf-8")
     monkeypatch.setattr(whats_new, "DEFAULT_NOTES_PATH", notes)

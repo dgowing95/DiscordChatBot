@@ -39,13 +39,12 @@ def test_every_agent_tool_has_help(monkeypatch):
 
 class FakeCommandTree:
     """Records the names register_commands() gives @command_tree.command."""
-    names: list = []
 
     def __init__(self, *args, **kwargs):
-        FakeCommandTree.names = []
+        self.names = []
 
     def command(self, name, description=""):
-        FakeCommandTree.names.append(name)
+        self.names.append(name)
         return lambda fn: fn
 
     async def sync(self):
@@ -55,9 +54,16 @@ class FakeCommandTree:
 def test_every_slash_command_has_help(monkeypatch):
     m = _import_main()
     _all_on(monkeypatch)
-    monkeypatch.setattr(m.discord.app_commands, "CommandTree", FakeCommandTree)
+    trees = []
+
+    def make_tree(*args, **kwargs):
+        trees.append(FakeCommandTree())
+        return trees[-1]
+
+    monkeypatch.setattr(m.discord.app_commands, "CommandTree", make_tree)
     asyncio.run(m.register_commands())
-    assert set(FakeCommandTree.names) == help_catalog.documented_commands()
+    assert len(trees) == 1
+    assert set(trees[0].names) == help_catalog.documented_commands()
 
 
 @pytest.mark.parametrize("image, sandbox", [(True, True), (False, False), (True, False)])
