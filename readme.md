@@ -8,6 +8,10 @@ Beyond chat it can search the web, read a URL, generate images, and hand a task 
 **code sandbox** — a throwaway Docker container with its own agent that writes and
 actually runs code, in a Discord thread you can talk to while it works.
 
+In Discord, `/help` lists everything it can do. After each release it posts a short
+"What's new" list of the new features once per server (turn off with
+`whatsNew.enabled=false`), and `/whats_new` shows it again on demand.
+
 It is designed to run on Kubernetes via the Helm chart in `charts/dis-ai-bot`, with a
 docker-compose stack for local development.
 
@@ -86,6 +90,8 @@ exactly what CI runs.
 Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a
 pull request and follow the [Code of Conduct](CODE_OF_CONDUCT.md). Report suspected
 vulnerabilities privately according to [SECURITY.md](SECURITY.md), not in a public issue.
+Pull requests that add a user-facing feature should also rewrite `core/whats_new.md`
+(the notes the bot announces after the release); see CONTRIBUTING.md.
 
 ## More
 

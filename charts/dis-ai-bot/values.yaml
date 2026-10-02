@@ -245,6 +245,10 @@ history:
 # message(s) (closed by default - click to reveal) instead of discarding it.
 # Off by default: the reasoning is dropped.
 showThinking: false
+# Post each release's "What's new" feature list once per server, after the
+# bot's first reply on the new version (notes: core/whats_new.md).
+whatsNew:
+  enabled: true
 # Opportunity for two short conversational messages; the model may choose one.
 # Set chance to 0 to disable. Cooldown counts delivered replies per channel.
 doubleReply:

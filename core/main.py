@@ -13,8 +13,12 @@ from classes.config_manager import configManager
 from classes.image_generation import generate_image_from_api, image_generation_enabled
 from classes.image_prompt import build_image_prompt
 from classes.sandbox_agent import sandbox_enabled
-from classes import attachment_cache, sandbox_thread_inbox
-from classes.message_queue import make_message_queue, mark_enqueued, pop_enqueued, worker_count
+from classes import attachment_cache, help_catalog, sandbox_thread_inbox, whats_new
+from classes.common import embed_from_data
+from classes.redis_client import text_client
+from classes.message_queue import (
+    get_channel_lock, make_message_queue, mark_enqueued, pop_enqueued, worker_count,
+)
 from classes.metrics import (
     inc_messages_processed,
     inc_messages_received,
@@ -104,6 +108,30 @@ async def register_commands():
         chance = await config.get_setting("response_chance", ctx.guild.id) or 5
         await ctx.response.send_message(content=f"Response chance is currently: \"{chance}%\"")
     
+    # Ephemeral, so neither reply ever lands in channel.history (and so in a
+    # prompt), and nobody else's channel fills up with a help listing.
+    @command_tree.command(name="help", description="See everything the bot can do")
+    async def help_cmd(ctx):
+        data = help_catalog.help_embed_data(image_generation_enabled(), sandbox_enabled())
+        await ctx.response.send_message(embed=embed_from_data(data), ephemeral=True)
+
+    @command_tree.command(name="whats_new", description="See the new features in the current version")
+    async def whats_new_cmd(ctx):
+        version = whats_new.app_version()
+        notes = whats_new.load_notes() if version else []
+        if notes:
+            await ctx.response.send_message(
+                embed=embed_from_data(whats_new.notes_embed_data(version, notes)), ephemeral=True)
+        elif version:
+            await ctx.response.send_message(
+                content=f"No new features in {version}. Try /help to see everything I can do.",
+                ephemeral=True)
+        else:
+            await ctx.response.send_message(
+                content="I don't know which version I'm running (a development build), "
+                        "so there are no release notes. Try /help.",
+                ephemeral=True)
+
     # Only offered when the code sandbox is enabled (SANDBOX_ENABLED; set
     # from the helm chart's sandbox.enabled). Per-guild toggle, default off:
     # when true, run_code_sandbox streams the sandbox's commands and output
@@ -342,6 +370,46 @@ async def random_chance_reply(message) -> bool:
     return random.uniform(0, 100) < chance
 
 
+async def maybe_announce_whats_new(message) -> None:
+    """Posts this version's What's New embed in the message's channel the
+    first time a guild triggers the bot on it (see classes/whats_new.py).
+
+    One atomic SET ... GET claims the announcement, so two workers handling
+    the same guild at once cannot both post it. Only the latest version is
+    stored, which is also what skips a version a guild never triggered on.
+    A release without features ships an empty notes file and posts nothing.
+    Sent under the channel lock, like replies, so it never lands between
+    another worker's reply chunks. A failed send gives the claim back, so a
+    one-off Discord error does not cost the guild this version's notes.
+    Fail-soft: an announcement must never cost a reply."""
+    if message.guild is None or not whats_new.whats_new_enabled():
+        return
+    version = whats_new.app_version()
+    if not version:
+        return
+    try:
+        notes = whats_new.load_notes()
+        if not notes:
+            return
+        redis = text_client()
+        key = whats_new.seen_key(message.guild.id)
+        previous = await redis.set(key, version, get=True)
+        if previous == version:
+            return
+        embed = embed_from_data(whats_new.notes_embed_data(version, notes))
+        try:
+            async with get_channel_lock(message.channel.id):
+                await message.channel.send(embed=embed)
+        except Exception:
+            if previous is None:
+                await redis.delete(key)
+            else:
+                await redis.set(key, previous)
+            raise
+    except Exception as e:
+        logger.warning(f"What's New announcement failed: {e}")
+
+
 async def process_messages():
     while True:
         message = await message_queue.get()
@@ -368,6 +436,9 @@ async def process_messages():
             async with message.channel.typing():
                 await handler.handle_message()
             outcome = getattr(handler, "outcome", "replied")
+            # Only after a real reply: not after the ❌ of a failed run.
+            if outcome == "replied":
+                await maybe_announce_whats_new(message)
             inc_messages_processed(guild_id)
             message_queue.task_done()
             logger.info("Done with message from queue")

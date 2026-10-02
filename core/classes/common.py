@@ -32,3 +32,15 @@ class Common:
         )
         await channel.send(embed=embed)
 
+
+
+def embed_from_data(data: dict) -> discord.Embed:
+    """A discord.Embed from the plain dicts the pure modules build
+    (whats_new.notes_embed_data, help_catalog.help_embed_data), which keep
+    those modules free of the discord import and unit-testable."""
+    embed = discord.Embed(title=data.get("title"), color=data.get("color"))
+    for field in data.get("fields", ()):
+        embed.add_field(name=field["name"], value=field["value"], inline=False)
+    if data.get("footer"):
+        embed.set_footer(text=data["footer"])
+    return embed

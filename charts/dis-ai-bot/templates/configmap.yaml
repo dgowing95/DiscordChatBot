@@ -17,6 +17,7 @@ data:
   MSG_HISTORY_REFRESH_MESSAGES: {{ .Values.history.refreshMessages | toString | quote }}
   MSG_HISTORY_RESERVE_TOKENS: {{ .Values.history.reserveTokens | toString | quote }}
   SHOW_THINKING: {{ .Values.showThinking | quote }}
+  WHATS_NEW_ENABLED: {{ .Values.whatsNew.enabled | quote }}
   DOUBLE_REPLY_CHANCE: {{ .Values.doubleReply.chance | toString | quote }}
   DOUBLE_REPLY_COOLDOWN_REPLIES: {{ .Values.doubleReply.cooldownReplies | toString | quote }}
   # Queue concurrency: worker task count + bounded queue size (see core/main.py)
