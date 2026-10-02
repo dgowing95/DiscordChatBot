@@ -1,6 +1,6 @@
 # Schedules and rules
 
-Automations are shared by server members. Anyone who can view and send in an automation's channel can inspect and manage it. Its channel stays fixed. Use `/schedule` or `/rule` to create, list, view, edit, delete, pause, or resume entries, or ask the bot in chat. Management replies are visible only to you.
+Automations are shared by server members. Anyone who can view and send in an automation's channel can inspect and manage it. Its channel stays fixed. Use `/schedule` or `/rule` to create, list, view, edit, delete, pause, or resume entries, or ask the bot in chat. `/schedule create` asks for the type (once, repeat every, daily or weekly) and opens a form with just that type's fields; `/schedule edit` does the same with the form filled in. `/rule create` and `/rule edit` open a form directly. The other commands autocomplete the entry as you type. Management replies are visible only to you.
 
 Schedules can run once, at elapsed hour/day/week intervals, daily at a local clock time, or weekly on a weekday. The default timezone is Europe/London; specify another IANA timezone when creating a schedule. Daily and weekly entries use local clock time. A time skipped by daylight saving is skipped; a repeated time runs once at its first occurrence. After downtime a recurring schedule catches up once and resumes its timetable. Started runs are not replayed after a restart because tools may have already sent content. A one-off that finishes or fails releases its quota slot and remains viewable for seven days.
 

@@ -1,11 +1,26 @@
-"""Discord slash management for schedules and rules."""
+"""Discord slash management for schedules and rules.
+
+Creating and editing happen in forms (modals), not slash options: Discord
+cannot hide one slash option based on another's value, so a single command
+offered "every" on a one-off schedule. Instead `/schedule create` and
+`/schedule edit` first ask for the schedule type with buttons, then open a
+form holding only that type's fields, each with a description.
+"""
 from datetime import datetime
-from typing import Literal
 import discord
 from discord import app_commands
 
-from classes.automation_policy import settings, timing_text
+from classes.automation_policy import (
+    WEEKDAYS, form_values, settings, timing_from_form, timing_text,
+)
 from classes.automation_store import AutomationError, AutomationStore
+
+SCHEDULE_TYPES = (("once", "Once"), ("interval", "Repeat every…"), ("daily", "Daily"), ("weekly", "Weekly"))
+TYPE_TITLES = {"once": "one-off", "interval": "repeating", "daily": "daily", "weekly": "weekly"}
+UNITS = (("Hours", "hours"), ("Days", "days"), ("Weeks", "weeks"))
+MATCH_MODES = (("Whole word or phrase", "word", "\"cat\" matches \"my cat\" but not \"concatenate\""),
+               ("Anywhere in the text", "substring", "\"cat\" also matches inside \"concatenate\""))
+ERRORS = (AutomationError, ValueError, KeyError)
 
 
 def _access(ctx, channel):
@@ -51,147 +66,269 @@ def _display(row):
     return "\n".join(lines)[:1900]
 
 
+def _summary(row):
+    detail = (timing_text(row["timing"], row["timezone"]) if row["kind"] == "schedule"
+              else f"\"{row['pattern']}\"")
+    return f"{row['id']} — {row['status']}, {detail}: {row['action']}"[:100]
+
+
 async def _respond(ctx, operation):
     try:
         result = await operation()
         await ctx.response.send_message(result, ephemeral=True)
-    except (AutomationError, ValueError, KeyError) as exc:
+    except ERRORS as exc:
         await ctx.response.send_message(f"❌ {exc}", ephemeral=True)
 
 
-class ActionModal(discord.ui.Modal):
-    action = discord.ui.TextInput(label="Action to perform", style=discord.TextStyle.paragraph, max_length=1500)
+def _text(form, name, label, description, values, placeholder=None, required=True, paragraph=False, max_length=None):
+    field = discord.ui.TextInput(
+        style=discord.TextStyle.paragraph if paragraph else discord.TextStyle.short,
+        default=values.get(name) or None, placeholder=placeholder, required=required, max_length=max_length)
+    form.add_item(discord.ui.Label(text=label, description=description, component=field))
+    form.fields[name] = field
 
-    def __init__(self, kind, channel, fields):
-        super().__init__(title=f"Create {kind}")
-        self.kind, self.channel, self.fields = kind, channel, fields
+
+def _select(form, name, label, description, options, values):
+    current = values.get(name)
+    field = discord.ui.Select(options=[
+        discord.SelectOption(label=text, value=value, description=hint, default=value == current)
+        for text, value, *rest in options for hint in [rest[0] if rest else None]])
+    form.add_item(discord.ui.Label(text=label, description=description, component=field))
+    form.fields[name] = field
+
+
+def _read(fields):
+    return {name: (field.values[0] if field.values else "") if isinstance(field, discord.ui.Select)
+            else str(field.value) for name, field in fields.items()}
+
+
+class RetryView(discord.ui.View):
+    """Shown with a form error, so a rejected form can be reopened with what
+    was typed instead of starting again."""
+
+    def __init__(self, reopen):
+        super().__init__(timeout=600)
+        self.reopen = reopen
+
+    @discord.ui.button(label="Fix and try again", style=discord.ButtonStyle.primary)
+    async def retry(self, ctx, button):
+        await ctx.response.send_modal(self.reopen())
+
+
+async def _submit(ctx, operation, reopen):
+    try:
+        result = await operation()
+        await ctx.response.send_message(result, ephemeral=True)
+    except ERRORS as exc:
+        await ctx.response.send_message(f"❌ {exc}", ephemeral=True, view=RetryView(reopen))
+
+
+class ScheduleForm(discord.ui.Modal):
+    """One schedule type's fields. With `row` it edits that schedule."""
+
+    def __init__(self, kind, channel, row=None, values=None):
+        verb = f"Edit schedule {row['id']}" if row else "New schedule"
+        super().__init__(title=f"{verb}: {TYPE_TITLES[kind]}"[:45])
+        self.kind, self.channel, self.row = kind, channel, row
+        self.fields = {}
+        values = values if values is not None else (form_values(row, kind) if row else {})
+        min_hours = settings()["min_hours"]
+        if kind == "once":
+            _text(self, "when", "Date and time", "When it runs, as YYYY-MM-DD HH:MM (24-hour), in the timezone below",
+                  values, placeholder="2026-10-03 09:00")
+        elif kind == "interval":
+            _text(self, "every", "Every", f"How many hours, days or weeks between runs (at least {min_hours} hours)",
+                  values, placeholder="6", max_length=4)
+            _select(self, "unit", "Unit", "Pick what 'Every' counts", UNITS, {"unit": "hours", **values})
+            _text(self, "start", "First run (optional)",
+                  "YYYY-MM-DD HH:MM. Leave empty to run first one interval from now", values,
+                  placeholder="2026-10-03 09:00", required=False)
+        else:
+            if kind == "weekly":
+                _select(self, "weekday", "Day", "The day of the week it runs",
+                        [(day.capitalize(), day) for day in WEEKDAYS], values)
+            _text(self, "time", "Time", "24-hour local time, like 09:00 or 17:30 (9am works too)",
+                  values, placeholder="09:00", max_length=8)
+        _text(self, "timezone", "Timezone", "IANA name, like Europe/London or America/New_York",
+              {"timezone": values.get("timezone") or settings()["timezone"]}, max_length=64)
+        _text(self, "action", "Action", "What the bot should do each time, as you would ask it in chat",
+              values, placeholder="Provide today's Wordle answer", paragraph=True, max_length=1500)
 
     async def on_submit(self, ctx):
-        async def op():
-            _access(ctx, self.channel)
-            row = await AutomationStore().create(ctx.guild.id, self.channel.id, ctx.user.id,
-                                                  self.kind, str(self.action), **self.fields)
+        values = _read(self.fields)
+
+        async def operation():
+            timing = timing_from_form(self.kind, values)
+            store = AutomationStore()
+            if self.row:
+                await _show(ctx, "schedule", self.row["id"])
+                row = await store.update(ctx.guild.id, self.row["id"], ctx.user.id, self.row["revision"],
+                                         timing=timing, timezone=values["timezone"].strip(), action=values["action"])
+            else:
+                _access(ctx, self.channel)
+                row = await store.create(ctx.guild.id, self.channel.id, ctx.user.id, "schedule", values["action"],
+                                         timing=timing, timezone=values["timezone"].strip())
             return _display(row)
-        await _respond(ctx, op)
+        await _submit(ctx, operation, lambda: ScheduleForm(self.kind, self.channel, self.row, values))
 
 
-class EditModal(discord.ui.Modal):
-    action = discord.ui.TextInput(label="New action", style=discord.TextStyle.paragraph, max_length=1500)
+class ScheduleTypePicker(discord.ui.View):
+    """The buttons /schedule create and /schedule edit show first. The
+    current type of an edited schedule is highlighted."""
 
-    def __init__(self, row, changes=None):
-        super().__init__(title=f"Edit {row['kind']} {row['id']}")
-        self.row = row
-        self.changes = changes or {}
-        self.action.default = row["action"]
+    def __init__(self, channel, row=None):
+        super().__init__(timeout=600)
+        current = row["timing"]["type"] if row else None
+        for kind, label in SCHEDULE_TYPES:
+            button = discord.ui.Button(
+                label=f"{label} (current)" if kind == current else label,
+                style=discord.ButtonStyle.primary if kind == current or not row else discord.ButtonStyle.secondary)
+            button.callback = self._opener(kind, channel, row)
+            self.add_item(button)
+
+    @staticmethod
+    def _opener(kind, channel, row):
+        async def open_form(ctx):
+            await ctx.response.send_modal(ScheduleForm(kind, channel, row))
+        return open_form
+
+
+class RuleForm(discord.ui.Modal):
+    def __init__(self, channel, row=None, values=None):
+        super().__init__(title=f"Edit rule {row['id']}" if row else "New message rule")
+        self.channel, self.row = channel, row
+        self.fields = {}
+        values = values if values is not None else (
+            {"pattern": row["pattern"], "match_mode": row["match_mode"], "action": row["action"]} if row
+            else {"match_mode": "word"})
+        _text(self, "pattern", "Word or phrase", "Text to look for in new messages in this channel (any case)",
+              values, placeholder="wordle", max_length=200)
+        _select(self, "match_mode", "How to match", "Whole words only, or anywhere in the text",
+                MATCH_MODES, values)
+        _text(self, "action", "Action", "What the bot should do when it matches, as you would ask it in chat",
+              values, placeholder="Reply with an encouraging sentence about Wordle", paragraph=True, max_length=1500)
 
     async def on_submit(self, ctx):
-        async def op():
-            await _show(ctx, self.row["kind"], self.row["id"])
-            changes = {"action": str(self.action), **self.changes}
-            row = await AutomationStore().update(ctx.guild.id, self.row["id"], ctx.user.id,
-                                                 self.row["revision"], **changes)
+        values = _read(self.fields)
+
+        async def operation():
+            store = AutomationStore()
+            if self.row:
+                await _show(ctx, "rule", self.row["id"])
+                row = await store.update(ctx.guild.id, self.row["id"], ctx.user.id, self.row["revision"],
+                                         pattern=values["pattern"].strip(), match_mode=values["match_mode"],
+                                         action=values["action"])
+            else:
+                _access(ctx, self.channel)
+                row = await store.create(ctx.guild.id, self.channel.id, ctx.user.id, "rule", values["action"],
+                                         pattern=values["pattern"], match_mode=values["match_mode"])
             return _display(row)
-        await _respond(ctx, op)
+        await _submit(ctx, operation, lambda: RuleForm(self.channel, self.row, values))
+
+
+def _entry_autocomplete(kind):
+    async def complete(ctx: discord.Interaction, current: str):
+        if ctx.guild is None:
+            return []
+        choices = []
+        try:
+            rows = await AutomationStore().list(ctx.guild.id, kind)
+        except Exception:
+            return []
+        for row in rows:
+            try:
+                _access(ctx, ctx.guild.get_channel_or_thread(row["channel_id"]))
+            except AutomationError:
+                continue
+            label = _summary(row)
+            if current.lower() in label.lower():
+                choices.append(app_commands.Choice(name=label, value=row["id"]))
+        return choices[:25]
+    return complete
 
 
 def register_automation_commands(tree):
     schedule = app_commands.Group(name="schedule", description="Manage scheduled actions")
     rule = app_commands.Group(name="rule", description="Manage message rules")
 
-    @schedule.command(name="create", description="Create a timed action in this channel")
-    async def schedule_create(ctx: discord.Interaction, timing_type: Literal["once", "interval", "daily", "weekly"], at: str = "", every: int = 0, start: str = "",
-                              unit: Literal["hours", "days", "weeks"] = "hours", local_time: str = "", weekday: str = "",
-                              timezone: str = ""):
+    @schedule.command(name="create", description="Create a timed action in this channel (opens a form)")
+    async def schedule_create(ctx: discord.Interaction):
         try:
             _access(ctx, ctx.channel)
         except AutomationError as exc:
             await ctx.response.send_message(f"❌ {exc}", ephemeral=True)
             return
-        timing = {"type": timing_type}
-        if timing_type == "once": timing["at"] = at
-        elif timing_type == "interval": timing.update(every=every, unit=unit, **({"start": start} if start else {}))
-        else: timing.update(time=local_time, **({"weekday": weekday.lower()} if timing_type == "weekly" else {}))
-        await ctx.response.send_modal(ActionModal("schedule", ctx.channel,
-                                                  {"timing": timing, "timezone": timezone or settings()["timezone"]}))
+        await ctx.response.send_message("What kind of schedule?", view=ScheduleTypePicker(ctx.channel),
+                                        ephemeral=True)
 
-    @rule.command(name="create", description="Create a message rule in this channel")
-    async def rule_create(ctx: discord.Interaction, pattern: str, match_mode: Literal["word", "substring"] = "word"):
+    @rule.command(name="create", description="Create a message rule in this channel (opens a form)")
+    async def rule_create(ctx: discord.Interaction):
         try:
             _access(ctx, ctx.channel)
         except AutomationError as exc:
             await ctx.response.send_message(f"❌ {exc}", ephemeral=True)
             return
-        await ctx.response.send_modal(ActionModal("rule", ctx.channel,
-                                                  {"pattern": pattern, "match_mode": match_mode}))
+        await ctx.response.send_modal(RuleForm(ctx.channel))
 
     for group, kind in ((schedule, "schedule"), (rule, "rule")):
         def callbacks(kind):
-          async def list_entries(ctx: discord.Interaction):
-            async def op():
-                if ctx.guild is None: raise AutomationError("Use this in a server")
-                rows = await AutomationStore().list(ctx.guild.id, kind)
-                visible = []
-                for row in rows:
-                    channel = ctx.guild.get_channel_or_thread(row["channel_id"])
-                    try: _access(ctx, channel)
-                    except AutomationError: continue
-                    outcome = (row.get("last_result") or {}).get("status", "never run")
-                    next_at = (f" next <t:{int(row['next_run'])}:f>" if row["kind"] == "schedule"
-                               and row["status"] == "enabled" else "")
-                    visible.append(f"`{row['id']}` <#{row['channel_id']}> {row['status']} ({outcome}){next_at} — {row['action'][:60]}")
-                return "\n".join(visible)[:1900] or "No entries you can access."
-            await _respond(ctx, op)
+            async def list_entries(ctx: discord.Interaction):
+                async def op():
+                    if ctx.guild is None:
+                        raise AutomationError("Use this in a server")
+                    rows = await AutomationStore().list(ctx.guild.id, kind)
+                    visible = []
+                    for row in rows:
+                        channel = ctx.guild.get_channel_or_thread(row["channel_id"])
+                        try:
+                            _access(ctx, channel)
+                        except AutomationError:
+                            continue
+                        outcome = (row.get("last_result") or {}).get("status", "never run")
+                        next_at = (f" next <t:{int(row['next_run'])}:f>" if row["kind"] == "schedule"
+                                   and row["status"] == "enabled" else "")
+                        visible.append(f"`{row['id']}` <#{row['channel_id']}> {row['status']} ({outcome}){next_at}"
+                                       f" — {row['action'][:60]}")
+                    return "\n".join(visible)[:1900] or "No entries you can access."
+                await _respond(ctx, op)
 
-          async def view_entry(ctx: discord.Interaction, entry_id: str):
-            await _respond(ctx, lambda: _view(ctx, kind, entry_id))
+            async def view_entry(ctx: discord.Interaction, entry: str):
+                await _respond(ctx, lambda: _view(ctx, kind, entry))
 
-          async def delete_entry(ctx: discord.Interaction, entry_id: str):
-            await _respond(ctx, lambda: _set_status(ctx, kind, entry_id, "deleted"))
+            async def edit_entry(ctx: discord.Interaction, entry: str):
+                try:
+                    row = await _show(ctx, kind, entry)
+                except ERRORS as exc:
+                    await ctx.response.send_message(f"❌ {exc}", ephemeral=True)
+                    return
+                channel = ctx.guild.get_channel_or_thread(row["channel_id"])
+                if kind == "rule":
+                    await ctx.response.send_modal(RuleForm(channel, row))
+                    return
+                await ctx.response.send_message(
+                    f"Editing schedule `{row['id']}` ({timing_text(row['timing'], row['timezone'])}).\n"
+                    "Pick the current type to change its time or action, or another type to switch.",
+                    view=ScheduleTypePicker(channel, row), ephemeral=True)
 
-          async def pause_entry(ctx: discord.Interaction, entry_id: str):
-            await _respond(ctx, lambda: _set_status(ctx, kind, entry_id, "paused"))
+            async def delete_entry(ctx: discord.Interaction, entry: str):
+                await _respond(ctx, lambda: _set_status(ctx, kind, entry, "deleted"))
 
-          async def resume_entry(ctx: discord.Interaction, entry_id: str):
-            await _respond(ctx, lambda: _set_status(ctx, kind, entry_id, "enabled"))
-          return list_entries, view_entry, delete_entry, pause_entry, resume_entry
+            async def pause_entry(ctx: discord.Interaction, entry: str):
+                await _respond(ctx, lambda: _set_status(ctx, kind, entry, "paused"))
 
-        list_entries, view_entry, delete_entry, pause_entry, resume_entry = callbacks(kind)
-        for name, callback, description in (
-            ("list", list_entries, "List accessible entries"), ("view", view_entry, "Inspect an entry"),
-            ("delete", delete_entry, "Delete an entry"),
-            ("pause", pause_entry, "Pause an entry"), ("resume", resume_entry, "Resume an entry")):
+            async def resume_entry(ctx: discord.Interaction, entry: str):
+                await _respond(ctx, lambda: _set_status(ctx, kind, entry, "enabled"))
+            return list_entries, view_entry, edit_entry, delete_entry, pause_entry, resume_entry
+
+        list_entries, *by_entry = callbacks(kind)
+        group.command(name="list", description=f"List the {kind}s you can access")(list_entries)
+        for name, callback, description in zip(
+                ("view", "edit", "delete", "pause", "resume"), by_entry,
+                (f"Show a {kind}'s details", f"Edit a {kind} (opens a form)", f"Delete a {kind}",
+                 f"Stop a {kind} until resumed", f"Turn a paused {kind} back on")):
+            callback = app_commands.autocomplete(entry=_entry_autocomplete(kind))(callback)
+            callback = app_commands.describe(entry=f"The {kind} - start typing to pick from the list")(callback)
             group.command(name=name, description=description)(callback)
-
-    @schedule.command(name="edit", description="Edit schedule timing and action")
-    async def schedule_edit(ctx: discord.Interaction, entry_id: str,
-                            timing_type: Literal["keep", "once", "interval", "daily", "weekly"] = "keep",
-                            at: str = "", every: int = 0, unit: Literal["hours", "days", "weeks"] = "hours",
-                            start: str = "", local_time: str = "", weekday: str = "", timezone: str = ""):
-        try:
-            row = await _show(ctx, "schedule", entry_id)
-            changes = {}
-            if timing_type != "keep":
-                timing = {"type": timing_type}
-                if timing_type == "once": timing["at"] = at
-                elif timing_type == "interval": timing.update(every=every, unit=unit, **({"start": start} if start else {}))
-                else: timing.update(time=local_time, **({"weekday": weekday.lower()} if timing_type == "weekly" else {}))
-                changes["timing"] = timing
-            if timezone: changes["timezone"] = timezone
-            await ctx.response.send_modal(EditModal(row, changes))
-        except AutomationError as exc:
-            await ctx.response.send_message(f"❌ {exc}", ephemeral=True)
-
-    @rule.command(name="edit", description="Edit rule matching and action")
-    async def rule_edit(ctx: discord.Interaction, entry_id: str, pattern: str = "",
-                        match_mode: Literal["keep", "word", "substring"] = "keep"):
-        try:
-            row = await _show(ctx, "rule", entry_id)
-            changes = {}
-            if pattern: changes["pattern"] = pattern
-            if match_mode != "keep": changes["match_mode"] = match_mode
-            await ctx.response.send_modal(EditModal(row, changes))
-        except AutomationError as exc:
-            await ctx.response.send_message(f"❌ {exc}", ephemeral=True)
     tree.add_command(schedule)
     tree.add_command(rule)
 
@@ -203,4 +340,6 @@ async def _view(ctx, kind, ident):
 async def _set_status(ctx, kind, ident, status):
     row = await _show(ctx, kind, ident)
     updated = await AutomationStore().update(ctx.guild.id, ident, ctx.user.id, row["revision"], status=status)
+    if status == "deleted":
+        return f"Deleted {kind} `{ident}`. A run that already started may still finish."
     return _display(updated) + "\nA run that already started may still finish."

@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from classes.text_llm_handler import TextLLMHandler, agent_tools
 
 
@@ -37,3 +39,54 @@ def test_slash_groups_offer_same_management_operations():
     for group in groups:
         assert {command.name for command in group.commands} == {
             "create", "list", "view", "edit", "delete", "pause", "resume"}
+
+
+def _commands(group):
+    return {command.name: command for command in group.commands}
+
+
+def test_create_takes_no_slash_options_and_entries_autocomplete():
+    from classes.automation_commands import register_automation_commands
+    groups = []
+    class Tree:
+        def add_command(self, group): groups.append(group)
+    register_automation_commands(Tree())
+    for group in groups:
+        commands = _commands(group)
+        assert commands["create"].parameters == [] and commands["list"].parameters == []
+        for name in ("view", "edit", "delete", "pause", "resume"):
+            (entry,) = commands[name].parameters
+            assert entry.name == "entry" and entry.autocomplete and entry.description
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["once", "interval", "daily", "weekly"])
+async def test_schedule_forms_hold_only_their_fields_within_discord_limits(kind):
+    from classes.automation_commands import ScheduleForm
+    form = ScheduleForm(kind, channel=None)
+    expected = {"once": {"when"}, "interval": {"every", "unit", "start"},
+                "daily": {"time"}, "weekly": {"weekday", "time"}}[kind] | {"timezone", "action"}
+    assert set(form.fields) == expected
+    _check_limits(form)
+
+
+@pytest.mark.asyncio
+async def test_edit_form_is_prefilled_and_rule_form_fits():
+    from classes.automation_commands import RuleForm, ScheduleForm
+    row = {"id": "abc", "kind": "schedule", "timezone": "Europe/London", "action": "find it",
+           "timing": {"type": "weekly", "weekday": "friday", "time": "09:00"}}
+    form = ScheduleForm("weekly", channel=None, row=row)
+    assert form.fields["time"].default == "09:00"
+    assert form.fields["action"].default == "find it"
+    assert [o.value for o in form.fields["weekday"].options if o.default] == ["friday"]
+    _check_limits(form)
+    _check_limits(RuleForm(channel=None))
+
+
+def _check_limits(form):
+    import discord
+    assert len(form.title) <= 45
+    labels = [item for item in form.children if isinstance(item, discord.ui.Label)]
+    assert 0 < len(labels) <= 5 and len(labels) == len(form.children)
+    for label in labels:
+        assert len(label.text) <= 45 and len(label.description or "") <= 100

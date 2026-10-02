@@ -26,10 +26,32 @@ def settings():
     }
 
 
-def _local_occurrence(day, clock, zone):
-    hour, minute = map(int, clock.split(":"))
+def parse_clock(text):
+    """'9', '9:30', '09:30', '9am', '9:30pm' -> 'HH:MM' (24-hour)."""
+    match = re.fullmatch(r"\s*(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)?\s*", text.lower())
+    if not match:
+        raise ValueError(f"Could not read the time {text!r}; use 24-hour HH:MM like 09:00 or 17:30")
+    hour, minute, half = int(match[1]), int(match[2] or 0), match[3]
+    if half:
+        if not 1 <= hour <= 12:
+            raise ValueError(f"Could not read the time {text!r}; with am/pm the hour must be 1-12")
+        hour = hour % 12 + (12 if half.startswith("p") else 0)
     if hour > 23 or minute > 59:
-        raise ValueError("Time must be HH:MM")
+        raise ValueError(f"Could not read the time {text!r}; use 24-hour HH:MM like 09:00 or 17:30")
+    return f"{hour:02d}:{minute:02d}"
+
+
+def parse_when(text):
+    """'2026-10-03 09:00' (or ISO with T / an offset) -> ISO string; naive
+    values are read in the schedule's timezone later."""
+    try:
+        return datetime.fromisoformat(text.strip()).isoformat()
+    except ValueError:
+        raise ValueError(f"Could not read the date and time {text!r}; use YYYY-MM-DD HH:MM like 2026-10-03 09:00")
+
+
+def _local_occurrence(day, clock, zone):
+    hour, minute = map(int, parse_clock(clock).split(":"))
     local = datetime(day.year, day.month, day.day, hour, minute, tzinfo=zone, fold=0)
     utc = local.astimezone(UTC)
     # A spring-forward wall time round-trips to a different clock time.
@@ -100,7 +122,7 @@ def validate_schedule(timing, tz_name, min_hours, now):
         value = next_run(timing, tz_name, now)
         later = next_run(timing, tz_name, value)
         if later - value < timedelta(hours=min_hours):
-            raise ValueError(f"Recurring executions must be at least {min_hours} hours apart")
+            raise ValueError(f"Repeating schedules must be at least {min_hours} hours apart")
         if timing["type"] in ("daily", "weekly") and min_hours > (24 if timing["type"] == "daily" else 168):
             raise ValueError("Minimum interval exceeds this recurrence")
     return value
@@ -143,3 +165,56 @@ def describe(row):
             local = datetime.fromtimestamp(row["next_run"], UTC).astimezone(ZoneInfo(row["timezone"]))
             out["next_run_local"] = f"{local.isoformat(timespec='minutes')} ({row['timezone']})"
     return out
+
+
+def timing_from_form(kind, values):
+    """Turn the text a person typed into a schedule form into a timing dict,
+    with an error message that says which field to fix."""
+    if kind == "once":
+        return {"type": "once", "at": parse_when(values.get("when", ""))}
+    if kind == "interval":
+        raw = values.get("every", "").strip()
+        if not raw.isdigit() or int(raw) < 1:
+            raise ValueError(f"'Every' must be a whole number of at least 1, like 6 (got {raw!r})")
+        unit = values.get("unit") or "hours"
+        if unit not in ("hours", "days", "weeks"):
+            raise ValueError("Choose hours, days or weeks")
+        timing = {"type": "interval", "every": int(raw), "unit": unit}
+        if values.get("start", "").strip():
+            timing["start"] = parse_when(values["start"])
+        return timing
+    if kind == "daily":
+        return {"type": "daily", "time": parse_clock(values.get("time", ""))}
+    if kind == "weekly":
+        if values.get("weekday") not in WEEKDAYS:
+            raise ValueError("Choose a day of the week")
+        return {"type": "weekly", "weekday": values["weekday"], "time": parse_clock(values.get("time", ""))}
+    raise ValueError("Unknown schedule type")
+
+
+def form_values(row, kind):
+    """The form fields for `kind`, prefilled from an existing schedule. A
+    different kind keeps only the timezone and action."""
+    values = {"timezone": row.get("timezone", ""), "action": row.get("action", "")}
+    timing = row.get("timing") or {}
+    if timing.get("type") != kind:
+        return values
+    zone = ZoneInfo(row["timezone"])
+
+    def local(text):
+        value = datetime.fromisoformat(text)
+        if value.tzinfo is not None:
+            value = value.astimezone(zone)
+        return value.strftime("%Y-%m-%d %H:%M")
+
+    if kind == "once":
+        values["when"] = local(timing["at"])
+    elif kind == "interval":
+        values.update(every=str(timing["every"]), unit=timing["unit"])
+        if timing.get("start"):
+            values["start"] = local(timing["start"])
+    else:
+        values["time"] = timing.get("time", "")
+        if kind == "weekly":
+            values["weekday"] = timing.get("weekday", "")
+    return values
