@@ -30,6 +30,7 @@ from classes.history_policy import (
     trim_count,
     window_decision,
 )
+from classes.whats_new import ANNOUNCEMENT_FOOTER
 from classes.response_filter import (
     chunk_for_discord,
     filter_response as clean_response,
@@ -183,6 +184,14 @@ async def load_image_data_url(url, content_type):
 def is_reset(message) -> bool:
     """A `!reset_history` message: history before it (and it) is left out."""
     return (message.content or "").lower() == "!reset_history"
+
+
+def is_announcement(embed, message, client) -> bool:
+    """The bot's own What's New embed (marked by its footer). Kept out of the
+    prompt: a release announcement is not part of the conversation, and it
+    would shift anchored-mode prompt prefixes."""
+    footer = getattr(getattr(embed, "footer", None), "text", None)
+    return footer == ANNOUNCEMENT_FOOTER and message.author.id == client.user.id
 
 
 class MessageHandler:
@@ -361,6 +370,8 @@ class MessageHandler:
                 'content': [*image_parts, {"type": "text", "text": text}] if image_parts else text,
             })
         for embed in message.embeds:
+            if is_announcement(embed, message, self.client):
+                continue
             embed_dict = embed.to_dict()
             embed_dict.pop('fields', None)
             entries.append({

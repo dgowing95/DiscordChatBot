@@ -16,6 +16,8 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: read
+    outputs:
+      whats_new_changed: ${{ steps.whats_new.outputs.changed }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -33,6 +35,40 @@ jobs:
             echo "Release commit $GITHUB_SHA is not reachable from main." >&2
             exit 1
           fi
+      # core/whats_new.md is one fixed file that feature PRs rewrite, so a
+      # release without features still carries the previous release's notes.
+      # Only a file that changed since the previous tag belongs to this
+      # release; otherwise it is blanked in the image and left off the
+      # GitHub release (see core/classes/whats_new.py).
+      - name: Did this release change the What's New notes?
+        id: whats_new
+        run: |
+          set -euo pipefail
+          # Fails closed: a git error must stop the release, not read as
+          # "changed" and silently re-ship the previous release's notes.
+          if prev=$(git describe --tags --abbrev=0 --match 'v*' "${VERSION}^" 2>/dev/null); then
+            set +e
+            git diff --quiet "$prev" "$VERSION" -- core/whats_new.md
+            diff_status=$?
+            set -e
+            if [ "$diff_status" -eq 0 ]; then
+              changed=false
+            elif [ "$diff_status" -eq 1 ]; then
+              changed=true
+            else
+              echo "git diff failed (exit $diff_status) comparing $prev..$VERSION" >&2
+              exit 1
+            fi
+          elif [ -z "$(git tag -l 'v*' | grep -vxF "$VERSION" || true)" ]; then
+            # The very first release: there is nothing earlier to diff against.
+            prev=""
+            changed=true
+          else
+            echo "No earlier v* tag found before $VERSION although v* tags exist" >&2
+            exit 1
+          fi
+          echo "Previous tag: ${prev:-none}; whats_new.md changed: $changed"
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
 
   run_tests:
     needs: validate_release
@@ -56,7 +92,7 @@ jobs:
         run: pytest
 
   build_images:
-    needs: run_tests
+    needs: [validate_release, run_tests]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -71,12 +107,16 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Blank unchanged What's New notes
+        if: needs.validate_release.outputs.whats_new_changed != 'true'
+        run: ': > core/whats_new.md'
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Build and push Core docker image
         uses: docker/build-push-action@v6
         with:
           push: true
+          build-args: APP_VERSION=${{ env.VERSION }}
           tags: ghcr.io/dgowing95/discordchatbot:core-${{ env.VERSION }},ghcr.io/dgowing95/discordchatbot:core-latest
           context: ./core
           cache-from: type=registry,ref=ghcr.io/dgowing95/discordchatbot:core-buildcache
@@ -137,7 +177,7 @@ jobs:
           path: dchatbot-${{ env.VERSION }}.tgz
 
   create_release:
-    needs: build_chart
+    needs: [validate_release, build_chart]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -152,8 +192,19 @@ jobs:
         with:
           name: helm-dis-ai-bot-${{ env.VERSION }}
       - name: Create Release
+        env:
+          WHATS_NEW_CHANGED: ${{ needs.validate_release.outputs.whats_new_changed }}
         run: |
+          set -euo pipefail
+          notes_args=()
+          if [ "$WHATS_NEW_CHANGED" = "true" ]; then
+            # Drop the authoring comment and nest the headings; gh puts the
+            # generated notes after this text.
+            { echo "## What's new"; echo; perl -0pe 's/<!--.*?-->//gs' core/whats_new.md \
+                | sed 's/^## /### /'; } > whats_new_release.md
+            notes_args=(--notes-file whats_new_release.md)
+          fi
           gh release create "$VERSION" \
             --title "Release $VERSION" \
-            --generate-notes
+            --generate-notes "${notes_args[@]}"
           gh release upload "$VERSION" "dchatbot-$VERSION.tgz"

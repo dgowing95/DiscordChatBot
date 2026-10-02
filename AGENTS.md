@@ -52,7 +52,12 @@ core/                  # the main bot (the app that runs in production)
                                #   respond_to_updates / ask_user, continuation nudges
     sandbox_conversation_store.py  # per-thread record of loose ends (late messages,
                                #   open question) for the next run, in Redis
-    common.py              # shared helpers (Discord tool embeds)
+    common.py              # shared helpers (Discord tool embeds, embed_from_data)
+    whats_new.py           # PURE (stdlib-only) What's New notes: parse core/whats_new.md,
+                           #   APP_VERSION / WHATS_NEW_ENABLED, embed data + Discord limits
+    help_catalog.py        # PURE (stdlib-only) the hand-written /help listing
+  whats_new.md         # the NEXT release's user-facing features (see "What's New
+                       #   notes" below) - rewritten by every feature PR
   tests/               # pytest suite (see Testing below)
   Dockerfile           # python:3.13-slim image, runs main.py
   requirements.txt     # runtime only
@@ -225,6 +230,45 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
    source, and this list is only a map. Start with `sandbox_agent.py`'s module
    docstring, then `run_sandbox_task`, `_deliver` and `sandbox_tool_result`.
 
+8. What's New and /help: after the first successful reply in a guild on a
+   new version, `main.maybe_announce_whats_new` posts that version's feature
+   notes (`core/whats_new.md`) as one embed in the same channel. One atomic
+   Redis `SET dcb:{guild}:whats_new_seen <version> GET` claims it, so it is
+   shown once per guild per version even with several workers, and since only
+   the latest version is stored a version a guild never triggered on is
+   skipped, never shown late. The embed's footer marks it, and
+   `MessageHandler._format_group` drops it from prompts. `/help` (from
+   `classes/help_catalog.py`) and `/whats_new` reply ephemerally. See "What's
+   New notes" below for how the notes are written and released.
+
+### What's New notes (write these in every feature PR)
+
+`core/whats_new.md` holds the user-facing features of the NEXT release. Every
+push to `main` is its own release (auto-tag), so the file belongs to the PR
+being merged:
+
+- **AI agents: when a PR adds or changes something a Discord user can see or
+  do, REPLACE the whole file** with one `## Feature name` section per feature,
+  written from the PR's contents: one or two plain sentences on what it does,
+  then a `How to use:` line (the command to type or what to ask). Never append
+  to the previous release's notes.
+- Features only. No bug fixes, security, performance, refactors, CI or docs.
+- **No user-facing features? Leave the file untouched.** Do not clear it:
+  `release.yaml` diffs it against the previous tag and, when unchanged, blanks
+  it in the image and leaves it off the GitHub release, so old notes are never
+  re-announced. (Editing it, even for a typo, makes it this release's notes.)
+- Limits are tested (`core/tests/whats_new_tests.py`): max 25 sections,
+  1024 characters per section, 6000 overall.
+- The version is not in the file: `release.yaml` bakes the tag into the core
+  image as `APP_VERSION`. Unset (local compose, PR builds) means no
+  announcement; set it in `.env` to try one.
+- A changed file also goes at the top of the GitHub release page.
+
+**/help is hand-written** (`classes/help_catalog.py`). A new agent tool
+(`text_llm_handler.agent_tools`) or slash command (`main.register_commands`)
+needs an entry there, gated with `requires` when it can be switched off;
+`core/tests/help_catalog_tests.py` fails until it has one.
+
 ### Prompt surface
 
    Everything the models are told lives in code, in three places: the
@@ -279,6 +323,8 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
 | `REASONING_EFFORT` | sent to the LLM as the OpenAI-compat `reasoning_effort` field (low/medium/high, default medium). Chart: `reasoningEffort` |
 | `LLM_MAX_TURNS` | max model turns for ONE reply from the main agent (helm: `llmMaxTurns`), default 20. A turn is one model response, however many tool calls it carries. Passed explicitly to `Runner.run` because the SDK's own default of 10 is easily overrun by a reply that chains several sandbox/image calls — and overrunning raises `MaxTurnsExceeded`, which costs the whole answer |
 | `LLM_CALL_TIMEOUT_SECONDS` | wall-clock seconds ONE model call from the main agent may take, the OpenAI client's own retries included (helm: `llmCallTimeout`), default 600 — the same as the client's own timeout, so a slow local generation is no more likely to be cut off than before. Applied as `ModelSettings.timeout`, which the SDK runner enforces by cancelling the call. Needed because the client's timeout is per-read: a server that keeps the connection warm while it works (OpenRouter pads non-streaming responses with whitespace) resets it on every byte and was previously unbounded |
+| `WHATS_NEW_ENABLED` | `0`/`false` stops the automatic What's New embed (default: on); `/whats_new` still works. Chart: `whatsNew.enabled` |
+| `APP_VERSION` | the release tag, baked into the core image by `release.yaml` (`--build-arg`), not configured. Unset = no What's New announcement |
 | `SHOW_THINKING` | `1`/`true` sends the model's reasoning as spoiler-hidden follow-up message(s); default (off) drops it entirely. Chart: `showThinking` |
 | `DOUBLE_REPLY_CHANCE` | Probability of offering two short chat messages from one generation (default `0.08`, range 0–1; `0` disables). The model may choose one. Chart: `doubleReply.chance` |
 | `DOUBLE_REPLY_COOLDOWN_REPLIES` | Successful replies per channel required after a pair (default `10`, nonnegative). Process-local state, capped at 4096 channels; resets on restart/eviction. Chart: `doubleReply.cooldownReplies` |

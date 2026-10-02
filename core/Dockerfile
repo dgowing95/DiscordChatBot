@@ -11,6 +11,13 @@ RUN pip --no-cache-dir install -r requirements.txt
 # neither of which is wanted here.
 COPY . /app
 
+# The release tag (release.yaml passes it). Read by classes/whats_new.py to
+# announce each version's notes once per server; unset in local and PR builds,
+# which turns the announcement off. After the COPY so the dependency layer
+# above stays cached across releases.
+ARG APP_VERSION=""
+ENV APP_VERSION=$APP_VERSION
+
 # Deliberately still runs as root. Dropping to a non-root user needs that user
 # to be in the group owning the mounted /var/run/docker.sock, or run_code_sandbox
 # loses access to the daemon entirely - and that GID is a property of the host,

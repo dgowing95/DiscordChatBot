@@ -254,6 +254,30 @@ class ToolMetricsHooks(RunHooks):
             except Exception as e:
                 logger.warning(f"In-flight registry tool_end failed: {e}")
 
+
+def agent_tools() -> list:
+    """The function tools the main agent gets. A function of its own so the
+    /help sync test (core/tests/help_catalog_tests.py) can list them."""
+    tools = [
+        web_search,
+        fetch_url,
+        store_memory,
+        remove_memory,
+        clear_memories,
+        change_personality,
+    ]
+    # The image tool only exists when the diffusion service is enabled
+    # (IMAGE_GEN_ENABLED; set from the helm chart's diffusion.enabled).
+    if image_generation_enabled():
+        tools.append(generate_image)
+
+    # Sandbox tool (nested SandboxAgent in a throwaway Docker container);
+    # needs the Docker socket mounted (SANDBOX_ENABLED; chart sandbox.enabled).
+    if sandbox_enabled():
+        tools.append(run_code_sandbox)
+    return tools
+
+
 class TextLLMHandler:
     # Set by MessageHandler after eligibility is chosen under the build lock.
     allow_double_reply = False
@@ -349,23 +373,7 @@ class TextLLMHandler:
 
     async def get_client(self):
         main_model_client = _get_main_model_client()
-        tools = [
-            web_search,
-            fetch_url,
-            store_memory,
-            remove_memory,
-            clear_memories,
-            change_personality,
-        ]
-        # The image tool only exists when the diffusion service is enabled
-        # (IMAGE_GEN_ENABLED; set from the helm chart's diffusion.enabled).
-        if image_generation_enabled():
-            tools.append(generate_image)
-
-        # Sandbox tool (nested SandboxAgent in a throwaway Docker container);
-        # needs the Docker socket mounted (SANDBOX_ENABLED; chart sandbox.enabled).
-        if sandbox_enabled():
-            tools.append(run_code_sandbox)
+        tools = agent_tools()
 
         self.agent = Agent(
             name="Assistant",
