@@ -16,6 +16,7 @@ from classes.whats_new import EMBED_COLOR
 
 IMAGE = "image"
 SANDBOX = "sandbox"
+AUTOMATIONS = "automations"
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,10 @@ ASK_ENTRIES = (
               "charts, gifs...). I work in a thread you can reply in to steer me, and "
               "pick up where I left off when you @mention me there again.",
               tools=("run_code_sandbox",), requires=SANDBOX),
+    HelpEntry("⏰ Schedules and rules", "Ask me to schedule an action or react to a word in this channel.",
+              tools=("list_schedules", "get_schedule", "create_schedule", "update_schedule", "delete_schedule",
+                     "list_rules", "get_rule", "create_rule", "update_rule", "delete_rule"),
+              requires=AUTOMATIONS),
 )
 
 COMMAND_ENTRIES = (
@@ -61,6 +66,10 @@ COMMAND_ENTRIES = (
               command="generate_image", requires=IMAGE),
     HelpEntry("/sandbox_progress_updates", "Turn live progress for code runs on or off.",
               command="sandbox_progress_updates", requires=SANDBOX),
+    HelpEntry("/schedule", "Create, list, view, edit, delete, pause or resume schedules.",
+              command="schedule", requires=AUTOMATIONS),
+    HelpEntry("/rule", "Create, list, view, edit, delete, pause or resume message rules.",
+              command="rule", requires=AUTOMATIONS),
 )
 
 TIPS = (
@@ -77,6 +86,9 @@ def _shown(entry: HelpEntry, image_enabled: bool, sandbox_enabled: bool) -> bool
         return image_enabled
     if entry.requires == SANDBOX:
         return sandbox_enabled
+    if entry.requires == AUTOMATIONS:
+        from classes.automation_policy import settings
+        return settings()["enabled"]
     return True
 
 

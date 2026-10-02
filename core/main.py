@@ -16,6 +16,8 @@ from classes.sandbox_agent import sandbox_enabled
 from classes import attachment_cache, help_catalog, sandbox_thread_inbox, whats_new
 from classes.common import embed_from_data
 from classes.redis_client import text_client
+from classes import automation_runner
+from classes.automation_policy import settings as automation_settings
 from classes.message_queue import (
     get_channel_lock, make_message_queue, mark_enqueued, pop_enqueued, worker_count,
 )
@@ -54,6 +56,15 @@ intents.message_content = True
 
 class Bot(discord.Client):
     async def close(self):
+        for task in getattr(self, "background_tasks", []):
+            task.cancel()
+        if getattr(self, "background_tasks", None):
+            await asyncio.gather(*self.background_tasks, return_exceptions=True)
+        while not message_queue.empty():
+            item = message_queue.get_nowait()
+            if isinstance(item, automation_runner.AutomationJob) and item.renewal_task:
+                item.renewal_task.cancel()
+            message_queue.task_done()
         # The image-download session is shared by every prompt build, so it
         # outlives them all and is closed here, once.
         await close_http_session()
@@ -82,6 +93,9 @@ async def refresh_slot_context_forever():
 async def register_commands():
     logger.info("Registering commands")
     command_tree = discord.app_commands.CommandTree(client=client, fallback_to_global=True)
+    if automation_settings()["enabled"]:
+        from classes.automation_commands import register_automation_commands
+        register_automation_commands(command_tree)
 
     @command_tree.command(name="system", description="Change the behaviour/personality of the bot")
     async def change_system(ctx, system: str):
@@ -191,14 +205,19 @@ async def on_ready():
     set_context_window_from_env()
     # The per-slot context (llama.cpp /props) is what one request can actually
     # use, and what the history token budget is measured against.
-    client.loop.create_task(refresh_slot_context_forever())
+    if not getattr(client, "background_tasks", None):
+        client.background_tasks = [client.loop.create_task(refresh_slot_context_forever())]
+        if automation_settings()["enabled"]:
+            client.background_tasks.append(client.loop.create_task(schedule_forever()))
     # Start the worker pool immediately so the bot still consumes messages
     # even if the model check or command sync fails (e.g. server not up yet
     # after a power cycle).
     count = worker_count()
     logger.info(f"Starting {count} queue worker(s)")
-    for _ in range(count):
-        client.loop.create_task(process_messages())
+    if not getattr(client, "workers_started", False):
+        client.workers_started = True
+        for _ in range(count):
+            client.background_tasks.append(client.loop.create_task(process_messages()))
     try:
         # Same accessor the bot itself uses, so an unset MODEL cannot make
         # the readiness check verify a different model than the one requested.
@@ -250,6 +269,9 @@ async def on_message(message):
     if (message.author != client.user and not message.author.bot
             and sandbox_thread_inbox.is_run_active(message.channel.id)):
         await route_to_sandbox(message)
+        return
+    if await automation_runner.match_message(message, message_queue):
+        set_message_queue_size(message_queue.qsize())
         return
 
     # The reply filter runs at receive time so only messages the bot will
@@ -414,6 +436,12 @@ async def process_messages():
     while True:
         message = await message_queue.get()
         set_message_queue_size(message_queue.qsize())
+        if isinstance(message, automation_runner.AutomationJob):
+            try:
+                await automation_runner.execute(message, client)
+            finally:
+                message_queue.task_done()
+            continue
         handler = MessageHandler(message, client)
 
         # Every queued message already passed should_handle_message() in
@@ -450,7 +478,18 @@ async def process_messages():
             observe_reply_latency(guild_id, outcome, time.monotonic() - enqueued_at)
 
 
+async def schedule_forever():
+    while True:
+        try:
+            await automation_runner.poll_schedules(message_queue)
+            set_message_queue_size(message_queue.qsize())
+        except Exception:
+            logger.exception("Schedule poll failed")
+        await asyncio.sleep(15)
+
+
 if __name__ == "__main__":
     # Guarded so the module can be imported (by the tests, and by anything
     # that just wants to inspect it) without connecting to Discord.
+    automation_settings()
     client.run(os.environ['DISCORD_TOKEN'])

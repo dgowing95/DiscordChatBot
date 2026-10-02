@@ -23,6 +23,12 @@ data:
   # Queue concurrency: worker task count + bounded queue size (see core/main.py)
   WORKER_COUNT: {{ .Values.worker_count | toString | quote }}
   QUEUE_MAX_SIZE: {{ .Values.queue_max_size | toString | quote }}
+  AUTOMATIONS_ENABLED: {{ .Values.automations.enabled | quote }}
+  AUTOMATIONS_TIMEZONE: {{ .Values.automations.timezone | quote }}
+  SCHEDULE_MIN_INTERVAL_HOURS: {{ .Values.schedules.minIntervalHours | toString | quote }}
+  SCHEDULE_MAX_PER_GUILD: {{ .Values.schedules.maxPerGuild | toString | quote }}
+  RULE_MAX_PER_GUILD: {{ .Values.rules.maxPerGuild | toString | quote }}
+  RULE_COOLDOWN_SECONDS: {{ .Values.rules.cooldownSeconds | toString | quote }}
   # Image generation (diffusion): core only registers the generate_image tool
   # when IMAGE_GEN_ENABLED is true; the diffusion pod reads the IMAGE_* settings
   DIFFUSION_URL: {{ if .Values.diffusion.url }}{{ .Values.diffusion.url }}{{ else }}http://{{ .Release.Name }}-diffusion-service.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.diffusion.port }}{{ end }}

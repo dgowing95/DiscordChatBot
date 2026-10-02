@@ -106,6 +106,23 @@ diffusion:
   # placed on the same card.
   visibleDevices: ""
 
+# Schedules and message rules (docs/automations.md), stored in Redis.
+# enabled: false stops running them and hides /schedule, /rule and the chat
+# tools, but keeps what is stored. A maxPerGuild of 0 blocks new entries of
+# that kind; lowering a limit keeps existing entries.
+automations:
+  enabled: true
+  # Default IANA timezone for new schedules (each can override it)
+  timezone: Europe/London
+schedules:
+  # Minimum hours between runs of a recurring schedule (one-offs are exempt)
+  minIntervalHours: 4
+  maxPerGuild: 1
+rules:
+  maxPerGuild: 4
+  # Seconds before the same rule can fire again
+  cooldownSeconds: 60
+
 # Code sandbox (run_code_sandbox LLM tool): a nested SandboxAgent runs each
 # task in a throwaway Docker container ON THE NODE (agents.sandbox
 # DockerSandboxClient). Requires a Docker daemon on the node: its socket is

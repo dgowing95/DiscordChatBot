@@ -219,6 +219,32 @@ message_queue_size = Gauge(
     "Number of messages waiting on the processing queue",
 )
 
+automation_runs_total = Counter(
+    "discord_bot_automation_runs_total",
+    "Automatic runs by admission or terminal outcome",
+    ["kind", "outcome"],
+)
+automation_queue_wait_seconds = Histogram(
+    "discord_bot_automation_queue_wait_seconds", "Automatic run queue wait", ["kind"],
+    buckets=(0.1, 1, 5, 15, 30, 60, 120, 300, 600),
+)
+automation_execution_seconds = Histogram(
+    "discord_bot_automation_execution_seconds", "Automatic run duration", ["kind", "outcome"],
+    buckets=(1, 5, 15, 30, 60, 120, 300, 600, 1200),
+)
+
+
+def inc_automation(kind, outcome):
+    automation_runs_total.labels(kind=kind, outcome=outcome).inc()
+
+
+def observe_automation_wait(kind, seconds):
+    automation_queue_wait_seconds.labels(kind=kind).observe(max(0, seconds))
+
+
+def observe_automation_execution(kind, outcome, seconds):
+    automation_execution_seconds.labels(kind=kind, outcome=outcome).observe(max(0, seconds))
+
 queue_drops_total = Counter(
     "discord_bot_message_queue_drops_total",
     "Messages dropped because the processing queue was full",

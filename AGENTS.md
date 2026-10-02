@@ -56,6 +56,12 @@ core/                  # the main bot (the app that runs in production)
     whats_new.py           # PURE (stdlib-only) What's New notes: parse core/whats_new.md,
                            #   APP_VERSION / WHATS_NEW_ENABLED, embed data + Discord limits
     help_catalog.py        # PURE (stdlib-only) the hand-written /help listing
+    automation_policy.py   # PURE (stdlib-only) schedule timing, DST, minimum gap,
+                           #   rule matching, AUTOMATIONS_* / SCHEDULE_* / RULE_* settings
+    automation_store.py    # versioned Redis records, quotas, revisions, atomic claims
+    automation_runner.py   # rule admission, 15s schedule poll, automatic run execution
+    automation_commands.py # /schedule and /rule slash command groups
+    automation_tools.py    # the matching chat tools (list/get/create/update/delete)
   whats_new.md         # the NEXT release's user-facing features (see "What's New
                        #   notes" below) - rewritten by every feature PR
   tests/               # pytest suite (see Testing below)
@@ -67,6 +73,7 @@ diffusionservice/      # standalone image service (text->image; FastAPI + diffus
                        #   CPU-offloaded for low VRAM)
                        #   generation_params.py is the stdlib-only half (guidance /
                        #   negative-prompt policy), so it is unit-testable without torch
+docs/automations.md    # user-facing guide to schedules and rules
 charts/dis-ai-bot/     # Helm chart (credentials render into templates/secret.yaml,
                        #   everything else into templates/configmap.yaml)
 pyproject.toml         # pytest configuration - why bare `pytest` works from the repo root
@@ -241,6 +248,25 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
    `classes/help_catalog.py`) and `/whats_new` reply ephemerally. See "What's
    New notes" below for how the notes are written and released.
 
+9. Schedules and rules (`docs/automations.md`): per-guild automations stored
+   under `dcb:automations:v1` in Redis. `automation_policy.py` is the pure half
+   (timing, DST, matching, settings); `automation_store.py` keeps versioned
+   records and does quotas, optimistic-revision edits and claims atomically
+   (WATCH/MULTI and Lua). Automatic work rides the SAME bounded queue as chat,
+   as `AutomationJob` items, so `WORKER_COUNT` and the channel locks still
+   bound it. `schedule_forever` (main.py) polls due schedules every 15 seconds
+   and admits only what the queue has room for; rule matching runs in
+   `on_message` after sandbox steering and, when a rule is admitted, replaces
+   the ordinary reply. An automatic run builds a `TextLLMHandler` with
+   `automatic=True`, `actor_id` (the entry's last editor) and `channel`
+   instead of a source message: memory and automation tools are left off, no
+   personal memory is loaded, and double replies are off. A run is never
+   replayed after it starts (a `started` marker survives the claim), since
+   tools may already have posted; the next poll records it as `interrupted`.
+   A lost channel, a departed editor or a bot without send permission
+   suspends the entry instead of failing every occurrence. Interval schedules
+   store their anchor (`timing.start`) at creation, so the grid never drifts.
+
 ### What's New notes (write these in every feature PR)
 
 `core/whats_new.md` holds the user-facing features of the NEXT release. Every
@@ -328,6 +354,11 @@ needs an entry there, gated with `requires` when it can be switched off;
 | `SHOW_THINKING` | `1`/`true` sends the model's reasoning as spoiler-hidden follow-up message(s); default (off) drops it entirely. Chart: `showThinking` |
 | `DOUBLE_REPLY_CHANCE` | Probability of offering two short chat messages from one generation (default `0.08`, range 0–1; `0` disables). The model may choose one. Chart: `doubleReply.chance` |
 | `DOUBLE_REPLY_COOLDOWN_REPLIES` | Successful replies per channel required after a pair (default `10`, nonnegative). Process-local state, capped at 4096 channels; resets on restart/eviction. Chart: `doubleReply.cooldownReplies` |
+| `AUTOMATIONS_ENABLED` | `0`/`false` stops schedules and rules from running and hides `/schedule`, `/rule` and their chat tools; stored entries are kept (default: on). Chart: `automations.enabled` |
+| `AUTOMATIONS_TIMEZONE` | default IANA timezone for new schedules (default `Europe/London`); validated at startup. Chart: `automations.timezone` |
+| `SCHEDULE_MIN_INTERVAL_HOURS` | minimum hours between runs of a recurring schedule, catch-ups included (default 4, min 1). One-offs are exempt. Chart: `schedules.minIntervalHours` |
+| `SCHEDULE_MAX_PER_GUILD` / `RULE_MAX_PER_GUILD` | active entries per server (defaults 1 / 4; 0 blocks new ones). Lowering a limit keeps existing entries. Chart: `schedules.maxPerGuild` / `rules.maxPerGuild` |
+| `RULE_COOLDOWN_SECONDS` | seconds before the same rule can fire again (default 60). Chart: `rules.cooldownSeconds` |
 | `WORKER_COUNT` | queue worker tasks (default 2, min 1); each handles one message at a time, a per-channel lock keeps same-channel order. Chart: `worker_count` |
 | `QUEUE_MAX_SIZE` | max messages waiting on the bounded queue (default 10, min 1); when full new messages are dropped (a mention gets a short "busy" reply). Chart: `queue_max_size` |
 | `LLAMA_ARG_CACHE_TYPE_K`, `LLAMA_ARG_CACHE_TYPE_V` | optional; compose `llamacpp` service only: KV cache quantization type (llama.cpp `-ctk`/`-ctv`), default `q4_0`; in the Helm chart set via `llamacpp.cacheTypeK`/`cacheTypeV` |
