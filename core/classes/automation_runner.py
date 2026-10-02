@@ -187,21 +187,25 @@ async def execute(job, client):
             prompt = "A message matched these rules. Execute their actions together in order and send one response. "
             prompt += f"Current UTC time: {now.isoformat()}. Message by {job.message.author.display_name}: {job.message.content}\n"
             prompt += "\n".join(f"{i}. {row['action']}" for i, row in enumerate(rows, 1))
-        handler = TextLLMHandler([{"role": "user", "content": prompt}], rows[0]["guild_id"], None,
-                                 client=client, actor_id=rows[0]["editor_id"], channel=channel, automatic=True)
-        result = await handler.generate()
-        if result == "Error":
-            raise RuntimeError("Model run failed")
-        output = clean_response(result, mention=str(client.user.id))
-        async with get_channel_lock(channel.id):
-            send_started = True
-            for chunk in chunk_for_discord(output):
-                await channel.send(chunk)
-            if handler.sandbox_thread:
-                await channel.send(f"Sandbox work: {handler.sandbox_thread.mention}")
-            if handler.reasoning and os.getenv("SHOW_THINKING", "0").lower() in ("1", "true"):
-                for chunk in format_thinking_for_discord(handler.reasoning):
+        # Same indicator an ordinary reply shows (main.process_messages): it
+        # spans the model run and the send, so the channel shows the bot
+        # typing for as long as it is working on the scheduled/rule action.
+        async with channel.typing():
+            handler = TextLLMHandler([{"role": "user", "content": prompt}], rows[0]["guild_id"], None,
+                                     client=client, actor_id=rows[0]["editor_id"], channel=channel, automatic=True)
+            result = await handler.generate()
+            if result == "Error":
+                raise RuntimeError("Model run failed")
+            output = clean_response(result, mention=str(client.user.id))
+            async with get_channel_lock(channel.id):
+                send_started = True
+                for chunk in chunk_for_discord(output):
                     await channel.send(chunk)
+                if handler.sandbox_thread:
+                    await channel.send(f"Sandbox work: {handler.sandbox_thread.mention}")
+                if handler.reasoning and os.getenv("SHOW_THINKING", "0").lower() in ("1", "true"):
+                    for chunk in format_thinking_for_discord(handler.reasoning):
+                        await channel.send(chunk)
         for row in rows:
             await store.finish(row, "completed", started_at=started_at)
         outcome = "completed"

@@ -54,11 +54,16 @@ async def test_automatic_run_uses_saved_action_and_origin_channel(monkeypatch):
         async def get(self, guild, ident): return row
         async def finish(self, record, outcome, detail="", started_at=None): finished.append(outcome)
         async def release(self, claim): pass
+    typing = []
+    class Typing:
+        async def __aenter__(self): typing.append("start")
+        async def __aexit__(self, *exc): typing.append("stop")
     class Channel:
         id = 4
         def permissions_for(self, member):
             return SimpleNamespace(view_channel=True, send_messages=True)
-        async def send(self, text): sent.append(text)
+        def typing(self): return Typing()
+        async def send(self, text): sent.append((text, list(typing)))
     channel = Channel()
     member = SimpleNamespace(id=8)
     guild = SimpleNamespace(get_member=lambda user_id: member)
@@ -71,14 +76,17 @@ async def test_automatic_run_uses_saved_action_and_origin_channel(monkeypatch):
             args.append((messages, guild_id, original_message, kw))
             self.reasoning = ""
             self.sandbox_thread = None
-        async def generate(self): return "Done"
+        async def generate(self):
+            assert typing == ["start"], "the channel must show typing while the model runs"
+            return "Done"
     monkeypatch.setattr(automation_runner, "AutomationStore", Store)
     monkeypatch.setattr(automation_runner, "TextLLMHandler", Handler)
     trigger = message()
     trigger.author.display_name = "Alice"
     job = automation_runner.AutomationJob([row], [("key", "busy", "token")], trigger, 0)
     await automation_runner.execute(job, client)
-    assert sent == ["Done"]
+    assert sent == [("Done", ["start"])]
+    assert typing == ["start", "stop"]
     assert finished == ["completed"]
     assert args[0][0][0]["content"].find("find answer") >= 0
     assert args[0][2] is None
