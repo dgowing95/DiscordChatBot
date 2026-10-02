@@ -245,3 +245,12 @@ def form_values(row, kind):
         if kind == "weekly":
             values["weekday"] = timing.get("weekday", "")
     return values
+
+
+def quota_message(kind, count, limit):
+    """What someone is told when a server has no room for another entry."""
+    if limit == 0:
+        return f"{kind.capitalize()}s are turned off on this server."
+    freed = " A one-off schedule frees its slot once it has run." if kind == "schedule" else ""
+    return (f"This server already has {count} of {limit} allowed {kind}s (paused ones count too). "
+            f"Delete one with `/{kind} delete` (see `/{kind} list`) to make room.{freed}")

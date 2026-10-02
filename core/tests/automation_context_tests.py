@@ -90,3 +90,28 @@ def _check_limits(form):
     assert 0 < len(labels) <= 5 and len(labels) == len(form.children)
     for label in labels:
         assert len(label.text) <= 45 and len(label.description or "") <= 100
+
+
+@pytest.mark.asyncio
+async def test_create_on_a_full_server_explains_instead_of_opening_a_form(monkeypatch):
+    from unittest.mock import AsyncMock
+    from classes import automation_commands
+    from classes.automation_store import QuotaError
+    class Store:
+        async def check_quota(self, guild, kind):
+            raise QuotaError(f"This server already has 1 of 1 allowed {kind}s")
+    monkeypatch.setattr(automation_commands, "AutomationStore", Store)
+    groups = []
+    class Tree:
+        def add_command(self, group): groups.append(group)
+    automation_commands.register_automation_commands(Tree())
+    perms = SimpleNamespace(view_channel=True, send_messages=True)
+    guild = SimpleNamespace(id=1, me=object())
+    channel = SimpleNamespace(guild=guild, permissions_for=lambda member: perms)
+    for group in groups:
+        ctx = SimpleNamespace(guild=guild, channel=channel, user=object(),
+                              response=SimpleNamespace(send_message=AsyncMock(), send_modal=AsyncMock()))
+        await _commands(group)["create"].callback(ctx)
+        ctx.response.send_modal.assert_not_called()
+        args, kwargs = ctx.response.send_message.call_args
+        assert "1 of 1 allowed" in args[0] and kwargs.get("ephemeral") and "view" not in kwargs

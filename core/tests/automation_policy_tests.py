@@ -5,7 +5,8 @@ import pytest
 from datetime import timedelta
 
 from classes.automation_policy import (
-    anchor_timing, describe, form_values, matches, next_run, parse_clock, resolve_timezone, timing_from_form,
+    anchor_timing, describe, form_values, matches, next_run, parse_clock, quota_message, resolve_timezone,
+    timing_from_form,
     validate_schedule,
 )
 
@@ -125,3 +126,11 @@ def test_resolve_timezone_suggests_close_names(typed, suggestion):
 def test_resolve_timezone_rejects_unknown_names(typed):
     with pytest.raises(ValueError, match="Unknown timezone"):
         resolve_timezone(typed)
+
+
+def test_quota_message_says_how_to_make_room():
+    text = quota_message("schedule", 1, 1)
+    assert "1 of 1 allowed schedules" in text and "/schedule delete" in text and "/schedule list" in text
+    assert "one-off" in text
+    assert "one-off" not in quota_message("rule", 4, 4)
+    assert quota_message("rule", 0, 0) == "Rules are turned off on this server."

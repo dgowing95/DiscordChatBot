@@ -6,13 +6,18 @@ from datetime import datetime, timezone, timedelta
 
 from redis.exceptions import WatchError
 from classes.redis_client import text_client
-from classes.automation_policy import anchor_timing, matches, resolve_timezone, next_run, settings, validate_schedule
+from classes.automation_policy import anchor_timing, matches, quota_message, resolve_timezone, next_run, settings, validate_schedule
 
 PREFIX = "dcb:automations:v1"
 
 
 class AutomationError(ValueError):
     pass
+
+
+class QuotaError(AutomationError):
+    """The server has no room for another entry of this kind. Editing the
+    request cannot fix it, so forms offer no retry for it."""
 
 
 def _key(guild, ident):
@@ -49,10 +54,28 @@ class AutomationStore:
         rows = [await self.get(guild, ident) for ident in ids]
         return [row for row in rows if row]
 
+    async def _active_count(self, guild, kind, ids=None):
+        if ids is None:
+            ids = await self.redis.zrange(_index(guild, kind), 0, -1)
+        rows = [await self.get(guild, ident) for ident in ids]
+        return sum(1 for row in rows if row and _active(row))
+
+    async def check_quota(self, guild, kind, count=None):
+        """Raise QuotaError when the server is full. Called up front so a
+        form is never filled in for nothing; create() checks again inside
+        its transaction, which is what actually enforces the limit."""
+        limit = settings()["schedule_limit" if kind == "schedule" else "rule_limit"]
+        if count is None:
+            count = await self._active_count(guild, kind)
+        if count >= limit:
+            raise QuotaError(quota_message(kind, count, limit))
+
     async def create(self, guild, channel, actor, kind, action, **fields):
         cfg = settings()
         if not cfg["enabled"]:
             raise AutomationError("Automations are disabled")
+        if kind in ("schedule", "rule"):
+            await self.check_quota(guild, kind)
         if kind not in ("schedule", "rule") or not action.strip():
             raise AutomationError("A schedule or rule needs an action")
         if len(action) > 1500:
@@ -78,11 +101,7 @@ class AutomationStore:
                 try:
                     await pipe.watch(index)
                     ids = await pipe.zrange(index, 0, -1)
-                    rows = [await self.get(guild, ident) for ident in ids]
-                    count = sum(1 for row in rows if row and _active(row))
-                    limit = cfg["schedule_limit" if kind == "schedule" else "rule_limit"]
-                    if count >= limit:
-                        raise AutomationError(f"Server {kind} limit is {limit}")
+                    await self.check_quota(guild, kind, await self._active_count(guild, kind, ids))
                     pipe.multi()
                     pipe.set(_key(guild, record["id"]), json.dumps(record))
                     pipe.zadd(index, {record["id"]: now.timestamp()})

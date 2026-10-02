@@ -127,3 +127,17 @@ async def test_timezone_is_stored_in_canonical_form(store):
     assert edited["timezone"] == "America/New_York"
     with pytest.raises(ValueError, match="Did you mean"):
         await store.update(108, row["id"], 310, edited["revision"], timezone="Europe/Londn")
+
+
+@pytest.mark.asyncio
+async def test_full_or_disabled_server_gets_quota_error_before_timing_checks(store, monkeypatch):
+    from classes.automation_store import QuotaError
+    monkeypatch.setenv("RULE_MAX_PER_GUILD", "1")
+    await store.create(109, 210, 311, "rule", "answer", pattern="wordle")
+    with pytest.raises(QuotaError, match="1 of 1 allowed rules"):
+        await store.check_quota(109, "rule")
+    with pytest.raises(QuotaError, match="/rule delete"):
+        await store.create(109, 210, 311, "rule", "answer", pattern="")
+    monkeypatch.setenv("SCHEDULE_MAX_PER_GUILD", "0")
+    with pytest.raises(QuotaError, match="turned off"):
+        await store.create(109, 210, 311, "schedule", "x", timing={"type": "daily", "time": "nonsense"})

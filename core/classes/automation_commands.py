@@ -13,7 +13,7 @@ from discord import app_commands
 from classes.automation_policy import (
     WEEKDAYS, form_values, settings, timing_from_form, timing_text,
 )
-from classes.automation_store import AutomationError, AutomationStore
+from classes.automation_store import AutomationError, AutomationStore, QuotaError
 
 SCHEDULE_TYPES = (("once", "Once"), ("interval", "Repeat every…"), ("daily", "Daily"), ("weekly", "Weekly"))
 TYPE_TITLES = {"once": "one-off", "interval": "repeating", "daily": "daily", "weekly": "weekly"}
@@ -119,6 +119,8 @@ async def _submit(ctx, operation, reopen):
     try:
         result = await operation()
         await ctx.response.send_message(result, ephemeral=True)
+    except QuotaError as exc:
+        await ctx.response.send_message(f"❌ {exc}", ephemeral=True)
     except ERRORS as exc:
         await ctx.response.send_message(f"❌ {exc}", ephemeral=True, view=RetryView(reopen))
 
@@ -255,6 +257,7 @@ def register_automation_commands(tree):
     async def schedule_create(ctx: discord.Interaction):
         try:
             _access(ctx, ctx.channel)
+            await AutomationStore().check_quota(ctx.guild.id, "schedule")
         except AutomationError as exc:
             await ctx.response.send_message(f"❌ {exc}", ephemeral=True)
             return
@@ -265,6 +268,7 @@ def register_automation_commands(tree):
     async def rule_create(ctx: discord.Interaction):
         try:
             _access(ctx, ctx.channel)
+            await AutomationStore().check_quota(ctx.guild.id, "rule")
         except AutomationError as exc:
             await ctx.response.send_message(f"❌ {exc}", ephemeral=True)
             return
