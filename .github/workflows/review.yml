@@ -23,7 +23,7 @@ jobs:
       pull-requests: write
     steps:
       - name: Run OpenCodeReview
-        uses: alibaba/open-code-review@7f8f254d8407b26edff06f2e3a5940906f1f28ae # v1.11.9
+        uses: alibaba/open-code-review@7a571b78d3493b249f6ad14d835c6a79a0a67d2e # v1.12.6
         with:
           llm_url: https://opencode.ai/zen/go/v1/chat/completions
           llm_auth_token: ${{ secrets.OPENCODE_API_KEY }}
