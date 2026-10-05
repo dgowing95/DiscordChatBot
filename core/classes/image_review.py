@@ -11,10 +11,10 @@ picture lacked ("stick arms + pizza phone"). Two fixes ride on one call:
   * a retry: what is missing goes into one more attempt that stresses it
     (image_generation.create_image), and the better of the two is posted.
 
-One vision chat completion against an OpenAI-compatible server -- by default
-the bot's own llama.cpp, whose model has its vision projector loaded. Fails
-soft: any error or unparseable answer returns None, and the image is posted
-unchecked rather than not at all.
+One vision chat completion (two for an edit; see review_image) against an
+OpenAI-compatible server -- by default the bot's own llama.cpp, whose model
+has its vision projector loaded. Fails soft: any error or unparseable answer
+returns None, and the image is posted unchecked rather than not at all.
 
 Environment variables:
     IMAGE_REVIEW_ENABLED      "0"/"false"/"no"/"off" to post images unchecked
@@ -161,8 +161,10 @@ def review_request_text(user_request: str, description: str, is_edit: bool) -> s
         lines.append(f"The person asked: {user_request.strip()}")
     lines.append(f"The picture was described to the image model as: {description.strip()}")
     if is_edit:
-        lines.append("This is an edit of an earlier picture: check that the requested "
-                     "change is clearly visible.")
+        lines.append("This is an edit. The FIRST picture is the one the person wanted "
+                     "changed and the SECOND is the result. Judge the second against the "
+                     "first: the requested change must be clearly visible between them. "
+                     "\"shows\" describes the second picture only.")
     return "\n".join(lines)
 
 
@@ -185,7 +187,10 @@ def parse_review(content: str) -> ImageReview | None:
         raw_missing = [raw_missing]
     if not isinstance(raw_missing, list):
         return None
-    missing = tuple(str(item).strip() for item in raw_missing if str(item).strip())
+    # Strings only: a model saying "nothing" as [null] must not become a miss
+    # called "None", with a retry and a caption admitting it is not there.
+    missing = tuple(item.strip() for item in raw_missing
+                    if isinstance(item, str) and item.strip())
     return ImageReview(shows=shows, missing=missing[:MAX_MISSING])
 
 
@@ -203,19 +208,61 @@ def prefer_second(first: ImageReview | None, second: ImageReview | None) -> bool
     return len(second.missing) <= len(first.missing)
 
 
+def merge_reviews(reviews) -> ImageReview | None:
+    """One verdict from several looks at the same picture: the first
+    description, and everything any look found missing (deduplicated)."""
+    found = [review for review in reviews if review is not None]
+    if not found:
+        return None
+    missing, seen = [], set()
+    for review in found:
+        for item in review.missing:
+            if item.lower() not in seen:
+                seen.add(item.lower())
+                missing.append(item)
+    return ImageReview(shows=found[0].shows, missing=tuple(missing[:MAX_MISSING]))
+
+
 async def review_image(png: bytes, user_request: str, description: str,
-                       is_edit: bool = False) -> ImageReview | None:
-    """What the image shows and what it is missing, or None if unchecked."""
+                       reference: bytes | None = None) -> ImageReview | None:
+    """What the image shows and what it is missing, or None if unchecked.
+
+    For an edit, `reference` is the picture that was edited, and the result is
+    looked at twice -- on its own, and next to the original -- because each
+    look misses what the other catches. Measured with the bot's model on five
+    edits whose answer was known: shown only the result, a "much fatter" edit
+    that had barely changed passed (it can see she is fat, not that she got
+    FATTER -- live, that one was captioned "cranked up the size"), and so did
+    an unchanged copy. Shown both, those were caught, but arms that had only
+    had dark lines drawn on them passed every time: the model counted the lines
+    as the change. A new picture gets the single look.
+    """
     if not review_enabled():
         return None
+    looks = [_look(png, user_request, description, None)]
+    if reference is not None:
+        looks.append(_look(png, user_request, description, reference))
+    review = merge_reviews(await asyncio.gather(*looks))
+    if review is None:
+        inc_image_review("error")
+        return None
+    inc_image_review("match" if review.matches else "mismatch")
+    logger.info(f"Image review: shows={review.shows!r} missing={list(review.missing)}")
+    return review
+
+
+async def _look(png: bytes, user_request: str, description: str,
+                reference: bytes | None) -> ImageReview | None:
+    """One vision call: the result alone, or the original then the result."""
     try:
-        data_url = await asyncio.to_thread(encode_for_review, png)
+        images = [png] if reference is None else [reference, png]
+        data_urls = [await asyncio.to_thread(encode_for_review, image) for image in images]
+        text = review_request_text(user_request, description, reference is not None)
         content = await _llm.complete(
             [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": [
-                    {"type": "text", "text": review_request_text(user_request, description, is_edit)},
-                    {"type": "image_url", "image_url": {"url": data_url}},
+                {"role": "user", "content": [{"type": "text", "text": text}] + [
+                    {"type": "image_url", "image_url": {"url": url}} for url in data_urls
                 ]},
             ],
             # Greedy. Measured on prod's model with four saved pictures, four
@@ -225,15 +272,9 @@ async def review_image(png: bytes, user_request: str, description: str,
             max_tokens=1024,
         )
     except Exception as e:
-        logger.warning(f"Image review failed ({e}); posting the image unchecked")
-        inc_image_review("error")
+        logger.warning(f"Image review failed ({e})")
         return None
     review = parse_review(content)
     if review is None:
-        logger.warning(f"Image review returned no usable JSON ({(content or '')[:200]!r}); "
-                       f"posting the image unchecked")
-        inc_image_review("error")
-        return None
-    inc_image_review("match" if review.matches else "mismatch")
-    logger.info(f"Image review: shows={review.shows!r} missing={list(review.missing)}")
+        logger.warning(f"Image review returned no usable JSON ({(content or '')[:200]!r})")
     return review

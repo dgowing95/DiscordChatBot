@@ -196,7 +196,9 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
 
    **Editing** works only on images the bot generated
    (`image_generation.pick_edit_source`: attachment `generated-image.png` from
-   the bot — the replied-to one, else the newest in the last 20 messages).
+   the bot — the replied-to one, else the newest among the channel's 20
+   newest messages, which may be NEWER than the request: the model often
+   makes a picture and then edits it within the same reply).
    Uploaded photos are never edited, which keeps "make him fatter" off photos of
    real people.
 7. Code sandbox: when enabled (`SANDBOX_ENABLED`, from the chart's

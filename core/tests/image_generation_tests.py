@@ -233,7 +233,7 @@ async def test_a_matching_image_is_made_once(monkeypatch):
     assert result.png == b"ONE" and result.attempts == 1 and result.review == MATCH
     api.assert_awaited_once()
     # checked against the person's own words AND the description
-    assert review.await_args.args[1:] == ("make her arms skinny", "an obese woman with stick arms", False)
+    assert review.await_args.args[1:] == ("make her arms skinny", "an obese woman with stick arms", None)
 
 
 @pytest.mark.asyncio
@@ -306,7 +306,8 @@ async def test_an_edit_retries_from_the_original_reference(monkeypatch):
     result = await _run(patches, "make her arms thin", reference=b"ORIGINAL")
 
     assert [call.args[2] for call in api.await_args_list] == [b"ORIGINAL", b"ORIGINAL"]
-    assert review.await_args.args[3] is True
+    # the check compares each attempt against the picture being edited
+    assert [call.args[3] for call in review.await_args_list] == [b"ORIGINAL", b"ORIGINAL"]
     assert result.edited is True
 
 
@@ -411,7 +412,20 @@ async def test_find_edit_source_fetches_an_unresolved_reply():
     channel = _FakeChannel([_message(BOT, "generated-image.png", message_id=9)], {5: replied})
 
     assert await image_generation.find_edit_source(channel, trigger, BOT) == b"<generated-image.png@5>"
-    assert channel.history_kwargs["before"] is trigger
+
+
+@pytest.mark.asyncio
+async def test_find_edit_source_sees_an_image_posted_after_the_request():
+    """The model often makes a picture, sees what it missed and edits it in
+    the SAME reply -- that picture is newer than the request. Looking only
+    before the request edited an older, unrelated picture instead."""
+    trigger = _message(7, message_id=10)
+    just_made = _message(BOT, "generated-image.png", message_id=12)
+    older = _message(BOT, "generated-image.png", message_id=4)
+    channel = _FakeChannel([just_made, trigger, older])
+
+    assert await image_generation.find_edit_source(channel, trigger, BOT) == b"<generated-image.png@12>"
+    assert "before" not in channel.history_kwargs
 
 
 @pytest.mark.asyncio
@@ -419,7 +433,6 @@ async def test_find_edit_source_without_a_trigger_scans_the_channel():
     """Automatic runs have no source message."""
     channel = _FakeChannel([_message(BOT, "generated-image.png", message_id=9)])
     assert await image_generation.find_edit_source(channel, None, BOT) == b"<generated-image.png@9>"
-    assert "before" not in channel.history_kwargs
 
 
 @pytest.mark.asyncio

@@ -364,8 +364,10 @@ def load_pipeline():
     else:
         p = p.to("cuda" if has_cuda else "cpu")
     pipe = p
-    # A pipeline that takes `image` can edit; SD/SDXL text-to-image ones cannot.
-    EDITS = "image" in inspect.signature(p.__call__).parameters
+    # Only the FLUX.2 path (_generate_flux2) passes a reference image on, so
+    # only it may advertise editing; the signature check guards a klein
+    # variant whose pipeline does not take one.
+    EDITS = FAMILY == "flux2" and "image" in inspect.signature(p.__call__).parameters
     if LONG_PROMPT and FAMILY == "sd":
         try:
             compel = _build_compel(p)
@@ -440,15 +442,15 @@ def decode_reference(data: str | None, width: int, height: int):
         return None
     try:
         raw = base64.b64decode(data, validate=True)
-    except (binascii.Error, ValueError):
-        raise ValueError("reference_image is not valid base64")
+    except (binascii.Error, ValueError) as e:
+        raise ValueError("reference_image is not valid base64") from e
     if len(raw) > MAX_REFERENCE_BYTES:
         raise ValueError(f"reference_image is over {MAX_REFERENCE_BYTES // (1024 * 1024)} MB")
     try:
         image = Image.open(io.BytesIO(raw))
         image.load()
-    except Exception:
-        raise ValueError("reference_image is not a readable image")
+    except Exception as e:
+        raise ValueError("reference_image is not a readable image") from e
     return ImageOps.fit(image.convert("RGB"), (width, height), Image.LANCZOS)
 
 
@@ -497,7 +499,11 @@ def generate_bytes(request: GenerateRequest, reference=None) -> bytes:
         return _generate_flux2(request, reference)
     prompt = request.prompt
     negative = merge_negative_prompt(request.negative_prompt, NEGATIVE_PROMPT, DISTILLED)
-    guidance = resolve_guidance(MODEL, request.guidance_scale, GUIDANCE)
+    # DISTILLED, not the name alone: a repo whose model_index.json flags it
+    # must get the guidance pin too, or its negative prompt is dropped while
+    # guidance stays at the pipeline's 7.5/5.0.
+    guidance = resolve_guidance(MODEL, request.guidance_scale, GUIDANCE,
+                                family=FAMILY, distilled=DISTILLED)
 
     kwargs = dict(num_inference_steps=STEPS, width=WIDTH, height=HEIGHT)
     if guidance is not None:
@@ -581,9 +587,12 @@ async def generate(request: GenerateRequest):
             raise HTTPException(status_code=422, detail=f"{MODEL} cannot edit images")
         try:
             # Decoded here, before queueing, so a bad upload is a 422 now
-            # rather than a 500 after waiting its turn.
-            reference = decode_reference(request.reference_image, WIDTH, HEIGHT)
+            # rather than a 500 after waiting its turn -- in a thread, so a
+            # large decode does not stall /health and the other requests.
+            reference = await asyncio.to_thread(decode_reference, request.reference_image,
+                                                WIDTH, HEIGHT)
         except ValueError as e:
+            logger.info(f"Rejected a reference image: {e!r} (cause: {e.__cause__!r})")
             raise HTTPException(status_code=422, detail=str(e))
         request.reference_image = None  # the decoded copy is all the worker needs
 

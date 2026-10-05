@@ -39,8 +39,8 @@ HEALTH_TIMEOUT_SECONDS = 10
 # can be told apart from the other images it posts (sandbox artifacts, charts),
 # which are not offered for editing.
 GENERATED_IMAGE_FILENAME = "generated-image.png"
-# How far back in the channel to look for the picture to edit when the request
-# does not reply to one.
+# How many of the channel's newest messages to look through for the picture to
+# edit when the request does not reply to one.
 EDIT_LOOKBACK_MESSAGES = 20
 
 
@@ -201,7 +201,7 @@ async def create_image(description: str, user_request: str = "", reference: byte
             logger.warning(f"Image retry failed ({e}); keeping the first attempt")
             break
         attempts += 1
-        review = await image_review.review_image(png, user_request, description, is_edit)
+        review = await image_review.review_image(png, user_request, description, reference)
         current = ImageResult(png, prompt, review, attempts, is_edit)
         if best is None or image_review.prefer_second(best.review, review):
             best = current
@@ -269,8 +269,14 @@ def pick_edit_source(replied_to, recent, bot_id):
 async def find_edit_source(channel, trigger, bot_id) -> bytes | None:
     """The bytes of the image to edit (pick_edit_source), or None.
 
-    `trigger` is the message asking for the edit; None for automatic runs,
-    which then look at the channel's newest messages."""
+    `trigger` is the message asking for the edit (None for automatic runs);
+    only its reply target is read from it. The fallback scans the channel's
+    NEWEST messages, not the ones before the trigger: the picture to change
+    is often one the bot posted after it -- in the same reply, when the model
+    makes an image, sees what it missed and edits it. Scanning before the
+    trigger skipped exactly that picture and edited an older, unrelated one
+    (found in a live test: a request for a kitchen scene was edited from a
+    lighthouse picture posted earlier in the channel)."""
     replied_to = None
     reply = getattr(trigger, "reference", None)
     if reply is not None and getattr(reply, "message_id", None):
@@ -283,9 +289,7 @@ async def find_edit_source(channel, trigger, bot_id) -> bytes | None:
             except Exception as e:
                 logger.info(f"Could not fetch the replied-to message ({e!r})")
     try:
-        history = (channel.history(limit=EDIT_LOOKBACK_MESSAGES, before=trigger)
-                   if trigger is not None else channel.history(limit=EDIT_LOOKBACK_MESSAGES))
-        recent = [message async for message in history]
+        recent = [message async for message in channel.history(limit=EDIT_LOOKBACK_MESSAGES)]
     except Exception as e:
         logger.warning(f"Could not read channel history for an image to edit ({e!r})")
         recent = []

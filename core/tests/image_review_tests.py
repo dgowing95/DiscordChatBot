@@ -53,6 +53,12 @@ def test_parse_nothing_missing_is_a_match():
     assert review.matches is True
 
 
+def test_parse_ignores_non_text_entries():
+    """[null] is a model's way of saying "nothing"; it is not a miss called "None"."""
+    review = image_review.parse_review('{"shows": "A red fox.", "missing": [null, 3, {"a": 1}]}')
+    assert review.missing == () and review.matches
+
+
 def test_parse_accepts_a_single_string_and_caps_the_list():
     assert image_review.parse_review('{"shows": "x", "missing": "a hat"}').missing == ("a hat",)
     many = image_review.parse_review('{"shows": "x", "missing": ["a", "b", "c", "d", "e", " "]}')
@@ -100,7 +106,7 @@ def test_request_text_leads_with_the_persons_own_words():
 def test_request_text_without_a_person_uses_the_description():
     text = image_review.review_request_text("", "a red fox", True)
     assert "asked" not in text and "a red fox" in text
-    assert "change is clearly visible" in text
+    assert "FIRST picture" in text and "clearly visible" in text
 
 
 def test_encode_for_review_shrinks_to_a_jpeg():
@@ -120,7 +126,7 @@ async def test_review_sends_the_image_and_returns_the_verdict(monkeypatch):
     client = _mock_client('{"shows": "A red fox in snow.", "missing": []}')
     with patch.object(image_review._llm, "_get_client", return_value=client), \
          patch.object(image_review, "inc_image_review") as counted:
-        review = await image_review.review_image(_png(), "draw a fox", "a red fox", False)
+        review = await image_review.review_image(_png(), "draw a fox", "a red fox")
 
     assert review == ImageReview("A red fox in snow.", ())
     counted.assert_called_once_with("match")
@@ -130,6 +136,40 @@ async def test_review_sends_the_image_and_returns_the_verdict(monkeypatch):
     assert parts[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
     # thinking off, like the rewrite: a reasoning model would spend the budget first
     assert kwargs["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+
+
+def _sizes(parts):
+    return [Image.open(io.BytesIO(base64.b64decode(p["image_url"]["url"].split(",", 1)[1]))).size
+            for p in parts if p["type"] == "image_url"]
+
+
+@pytest.mark.asyncio
+async def test_an_edit_is_looked_at_alone_and_next_to_the_original(monkeypatch):
+    """Alone, the checker passed a "much fatter" edit that had barely changed
+    (it can see she is fat, not that she got fatter); next to the original, it
+    passed arms that only had lines drawn on them. Each look catches what the
+    other misses."""
+    monkeypatch.delenv("IMAGE_REVIEW_ENABLED", raising=False)
+    client = _mock_client('{"shows": "A fatter woman.", "missing": []}')
+    before, after = _png((800, 400)), _png((1024, 1024))
+    with patch.object(image_review._llm, "_get_client", return_value=client):
+        await image_review.review_image(after, "make her fatter", "make her much fatter", reference=before)
+
+    calls = [call.kwargs["messages"][1]["content"] for call in client.chat.completions.create.await_args_list]
+    by_images = sorted(calls, key=len)
+    assert [_sizes(parts) for parts in by_images] == [[(640, 640)], [(640, 320), (640, 640)]]
+    # the comparison is told which is which: the original (the wide one) first
+    assert "FIRST picture" in by_images[1][0]["text"]
+    assert "FIRST picture" not in by_images[0][0]["text"]
+
+
+def test_merged_verdicts_keep_every_miss_once():
+    alone = ImageReview("A woman with thick arms.", ("very thin arms",))
+    compared = ImageReview("A woman.", ("Very thin arms", "a fatter body than before"))
+    assert image_review.merge_reviews([alone, compared]) == ImageReview(
+        "A woman with thick arms.", ("very thin arms", "a fatter body than before"))
+    assert image_review.merge_reviews([None, compared]) == compared
+    assert image_review.merge_reviews([None, None]) is None
 
 
 @pytest.mark.asyncio
