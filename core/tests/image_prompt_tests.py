@@ -1,6 +1,6 @@
 import httpx2
 import pytest
-from openai import APITimeoutError
+from openai import APITimeoutError, BadRequestError, UnprocessableEntityError
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Imported as `classes.X`, the same name the app uses (it runs with cwd=core/,
@@ -168,6 +168,13 @@ async def test_build_disables_thinking_on_the_first_try(monkeypatch):
     assert kwargs["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
 
 
+def _rejected(status=400):
+    """What a backend that refuses chat_template_kwargs raises."""
+    cls = BadRequestError if status == 400 else UnprocessableEntityError
+    response = httpx2.Response(status, request=httpx2.Request("POST", "http://llamacpp:8080/v1"))
+    return cls("unknown field chat_template_kwargs", response=response, body=None)
+
+
 @pytest.mark.asyncio
 async def test_build_retries_once_without_the_thinking_option(monkeypatch):
     """chat_template_kwargs is not in the OpenAI schema, so a backend may
@@ -175,8 +182,7 @@ async def test_build_retries_once_without_the_thinking_option(monkeypatch):
     monkeypatch.delenv("IMAGE_PROMPT_REWRITE_ENABLED", raising=False)
     client = _mock_client('{"prompt": "a red fox"}')
     ok = client.chat.completions.create.return_value
-    client.chat.completions.create = AsyncMock(
-        side_effect=[Exception("unknown field chat_template_kwargs"), ok, ok])
+    client.chat.completions.create = AsyncMock(side_effect=[_rejected(), ok, ok])
 
     with patch.object(image_prompt._llm, "_get_client", return_value=client):
         assert await image_prompt.build_image_prompt("draw me a fox") == ("a red fox", "")
@@ -215,12 +221,51 @@ async def test_build_keeps_disabling_thinking_when_the_retry_also_fails(monkeypa
     thinking left on is what breaks this feature."""
     monkeypatch.delenv("IMAGE_PROMPT_REWRITE_ENABLED", raising=False)
     client = _mock_client("")
-    client.chat.completions.create = AsyncMock(side_effect=Exception("upstream 500"))
+    client.chat.completions.create = AsyncMock(
+        side_effect=[_rejected(422), Exception("upstream 500")])
     with patch.object(image_prompt._llm, "_get_client", return_value=client):
         assert await image_prompt.build_image_prompt("draw me a fox") == ("draw me a fox", "")
 
     assert client.chat.completions.create.await_count == 2
     assert image_prompt._llm.send_no_thinking is True
+
+
+@pytest.mark.asyncio
+async def test_build_does_not_blame_the_option_for_a_server_error(monkeypatch):
+    """A 5xx or rate limit says nothing about chat_template_kwargs. Retrying
+    without it -- and latching when that retry happened to work -- would turn
+    thinking back on for the whole process over one bad minute."""
+    monkeypatch.delenv("IMAGE_PROMPT_REWRITE_ENABLED", raising=False)
+    client = _mock_client('{"prompt": "a red fox"}')
+    ok = client.chat.completions.create.return_value
+    client.chat.completions.create = AsyncMock(side_effect=[Exception("upstream 500"), ok])
+    with patch.object(image_prompt._llm, "_get_client", return_value=client):
+        assert await image_prompt.build_image_prompt("draw me a fox") == ("draw me a fox", "")
+
+    assert client.chat.completions.create.await_count == 1
+    assert image_prompt._llm.send_no_thinking is True
+
+
+@pytest.mark.asyncio
+async def test_a_call_judges_the_option_by_what_it_sent(monkeypatch):
+    """An edit is checked by two calls at once on one SideLLM. When the other
+    call latches the option off mid-flight, this call's rejection -- of a
+    request that DID carry the option -- must still get its retry."""
+    client = _mock_client('{"prompt": "a red fox"}')
+    ok = client.chat.completions.create.return_value
+    llm = image_prompt._llm
+
+    async def create(**kwargs):
+        if "extra_body" in kwargs:
+            llm.send_no_thinking = False  # the other call latched meanwhile
+            raise _rejected()
+        return ok
+
+    client.chat.completions.create = AsyncMock(side_effect=create)
+    with patch.object(llm, "_get_client", return_value=client):
+        assert await llm.complete([{"role": "user", "content": "x"}],
+                                  temperature=0.0, max_tokens=10) == '{"prompt": "a red fox"}'
+    assert client.chat.completions.create.await_count == 2
 
 
 @pytest.mark.asyncio

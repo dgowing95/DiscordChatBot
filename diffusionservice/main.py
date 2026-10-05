@@ -449,9 +449,9 @@ def decode_reference(data: str | None, width: int, height: int):
     try:
         image = Image.open(io.BytesIO(raw))
         image.load()
+        return ImageOps.fit(image.convert("RGB"), (width, height), Image.LANCZOS)
     except Exception as e:
         raise ValueError("reference_image is not a readable image") from e
-    return ImageOps.fit(image.convert("RGB"), (width, height), Image.LANCZOS)
 
 
 def _png(image) -> bytes:

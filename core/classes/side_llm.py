@@ -14,8 +14,9 @@ different one per job. They share the awkward parts, which live here:
     to nothing, so the job falls soft on EVERY call -- or it spends the whole
     timeout generating reasoning nobody reads. llama.cpp forwards
     chat_template_kwargs into the chat template, and Qwen3 honours
-    enable_thinking. A backend that rejects the field (it is not part of the
-    OpenAI schema) gets one retry without it, and is not asked again;
+    enable_thinking. A backend that rejects the request with the field (a
+    400/422; it is not part of the OpenAI schema) gets one retry without it,
+    and is not asked again;
   * every call is timed into discord_bot_llm_call_seconds{caller=...}.
 
 Callers own their prompts, parsing and fallbacks: complete() raises like the
@@ -25,9 +26,7 @@ import asyncio
 import logging
 import time
 
-# APITimeoutError subclasses APIConnectionError, so the one name covers the
-# whole "backend is unreachable or too slow" class.
-from openai import APIConnectionError, AsyncOpenAI
+from openai import AsyncOpenAI, BadRequestError, UnprocessableEntityError
 
 from classes.metrics import observe_llm_call, observe_llm_completion_tokens
 
@@ -68,24 +67,28 @@ class SideLLM:
 
     async def complete(self, messages, *, temperature: float, max_tokens: int) -> str:
         """The answer's text. Raises when the call fails."""
+        # Read once: whether THIS call sent the option decides whether its own
+        # failure says anything about it. Re-reading the shared latch after an
+        # await let a concurrent call (an edit is checked twice at once) flip
+        # it mid-call and turn this call's rejection into a plain failure.
+        no_thinking = self.send_no_thinking
         try:
-            return await self._complete(messages, temperature, max_tokens, self.send_no_thinking)
-        except APIConnectionError:
-            # The backend is down or slow. The thinking option is not the
-            # cause, so retrying would only spend the timeout a second time.
-            raise
-        except Exception as e:
-            if not self.send_no_thinking:
+            return await self._complete(messages, temperature, max_tokens, no_thinking)
+        except (BadRequestError, UnprocessableEntityError) as e:
+            # The server refused the request itself, which is what a backend
+            # that does not accept chat_template_kwargs does (it is not part of
+            # the OpenAI schema). Anything else -- a 5xx, a rate limit, the
+            # backend being down or slow -- says nothing about the option, and
+            # a retry that then happened to work would wrongly latch thinking
+            # back on for the whole process.
+            if not no_thinking:
                 raise
-            # Could be the backend rejecting chat_template_kwargs rather than
-            # anything wrong with the call. Try once without it.
-            logger.info(f"{self.caller}: call failed with thinking disabled ({e}); "
+            logger.info(f"{self.caller}: request rejected with thinking disabled ({e}); "
                         f"retrying without that option")
             content = await self._complete(messages, temperature, max_tokens, False)
             # Latched only now the retry has actually worked, which is what
-            # identifies the option as the culprit. Latching on the failure
-            # instead would mean one bad minute re-enabled thinking for the
-            # whole process -- and thinking left on is what breaks these jobs.
+            # identifies the option as the culprit -- thinking left on is what
+            # breaks these jobs, so it must not be re-enabled on a guess.
             logger.info(f"{self.caller}: this backend rejects the thinking-disabled "
                         f"option; not sending it again")
             self.send_no_thinking = False
