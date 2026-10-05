@@ -38,6 +38,7 @@ data:
   IMAGE_WIDTH: {{ .Values.diffusion.width | toString | quote }}
   IMAGE_HEIGHT: {{ .Values.diffusion.height | toString | quote }}
   IMAGE_OFFLOAD: {{ .Values.diffusion.offload }}
+  IMAGE_QUANTIZE: {{ .Values.diffusion.quantize | default "none" | quote }}
   IMAGE_QUEUE_SIZE: {{ .Values.diffusion.queueSize | toString | quote }}
   IMAGE_LONG_PROMPT: {{ .Values.diffusion.longPrompt | quote }}
   IMAGE_NEGATIVE_PROMPT: {{ .Values.diffusion.negativePrompt | quote }}
@@ -57,6 +58,18 @@ data:
   {{- end }}
   {{- if .Values.diffusion.promptRewrite.llmHost }}
   IMAGE_PROMPT_LLM_HOST: {{ .Values.diffusion.promptRewrite.llmHost }}
+  {{- end }}
+  # Image check: a CORE-side vision call on each generated image before it is
+  # posted (what it shows; what is missing, which earns a retry). Unset
+  # model/host fall back to the bot's own; the key lives in secret.yaml.
+  IMAGE_REVIEW_ENABLED: {{ .Values.diffusion.review.enabled | quote }}
+  IMAGE_REVIEW_RETRIES: {{ .Values.diffusion.review.retries | toString | quote }}
+  IMAGE_REVIEW_TIMEOUT: {{ .Values.diffusion.review.timeout | toString | quote }}
+  {{- if .Values.diffusion.review.model }}
+  IMAGE_REVIEW_MODEL: {{ .Values.diffusion.review.model }}
+  {{- end }}
+  {{- if .Values.diffusion.review.llmHost }}
+  IMAGE_REVIEW_LLM_HOST: {{ .Values.diffusion.review.llmHost }}
   {{- end }}
   # Code sandbox: core registers the run_code_sandbox tool when SANDBOX_ENABLED
   # is true; tasks run in throwaway containers on the node via the Docker

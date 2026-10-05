@@ -7,10 +7,14 @@ negative-prompt rules can be checked without a GPU.
 import pytest
 
 from generation_params import (
+    component_dtypes,
+    env_choice,
     env_flag,
     env_optional_float,
     is_distilled,
     merge_negative_prompt,
+    pipeline_family,
+    prompt_style,
     resolve_guidance,
     sanitize_for_compel,
 )
@@ -67,6 +71,62 @@ def test_distilled_guidance_is_pinned_to_zero():
     to leave it at the pipeline's 7.5, which washes the image out."""
     assert resolve_guidance("stabilityai/sd-turbo") == 0.0
     assert resolve_guidance("stabilityai/sd-turbo", 7.5, "5.0") == 0.0
+
+
+def test_klein_guidance_is_pinned_to_one():
+    """The klein pipeline defaults to 4.0 and warns on every call when a
+    distilled model gets more than 1; 0.0 is the SD family's pin, not its."""
+    klein = "black-forest-labs/FLUX.2-klein-4B"
+    assert resolve_guidance(klein, None, None, family="flux2", distilled=True) == 1.0
+    assert resolve_guidance(klein, 4.0, "3.5", family="flux2", distilled=True) == 1.0
+
+
+def test_undistilled_klein_takes_the_configured_guidance():
+    base = "black-forest-labs/FLUX.2-klein-base-4B"
+    assert resolve_guidance(base, None, "4.0", family="flux2", distilled=False) == 4.0
+    assert resolve_guidance(base, None, None, family="flux2", distilled=False) is None
+
+
+# ---------------------- families ----------------------
+
+def test_klein_is_its_own_family():
+    assert pipeline_family("Flux2KleinPipeline") == "flux2"
+
+
+@pytest.mark.parametrize("class_name", [
+    "StableDiffusionXLPipeline", "StableDiffusionPipeline", "", None,
+])
+def test_everything_else_keeps_the_sd_behaviour(class_name):
+    """Unknown or unreadable model_index.json must load exactly as before."""
+    assert pipeline_family(class_name) == "sd"
+
+
+def test_prompt_style_follows_the_family():
+    assert prompt_style("flux2") == "natural"
+    assert prompt_style("sd") == "sdxl"
+
+
+def test_distilled_flag_from_model_index_counts():
+    """klein's id has none of the SD-family markers; its model_index.json says so instead."""
+    assert is_distilled("black-forest-labs/FLUX.2-klein-4B", flagged=True) is True
+    assert is_distilled("black-forest-labs/FLUX.2-klein-base-4B", flagged=False) is False
+
+
+# ---------------------- component_dtypes ----------------------
+
+def test_sd_family_dtypes_are_unchanged():
+    assert component_dtypes("sd", True) == {"default": "float16"}
+    assert component_dtypes("sd", False) == {"default": "float16"}
+
+
+def test_klein_uses_bf16_where_the_card_has_it():
+    assert component_dtypes("flux2", True) == {"default": "bfloat16"}
+
+
+def test_klein_text_encoder_computes_fp32_without_bf16():
+    """Turing (prod's RTX 2070): the Qwen3 encoder's activations sit at a
+    quarter of float16's range, so it gets float32 while the rest is float16."""
+    assert component_dtypes("flux2", False) == {"default": "float16", "text_encoder": "float32"}
 
 
 # ---------------------- merge_negative_prompt ----------------------
@@ -155,6 +215,16 @@ def test_env_optional_float_is_none_when_unusable(monkeypatch):
         assert env_optional_float("IMAGE_GUIDANCE") is None
     monkeypatch.delenv("IMAGE_GUIDANCE")
     assert env_optional_float("IMAGE_GUIDANCE") is None
+
+
+def test_env_choice_only_accepts_known_values(monkeypatch):
+    monkeypatch.setenv("IMAGE_QUANTIZE", " NF4 ")
+    assert env_choice("IMAGE_QUANTIZE", ("none", "nf4"), "none") == "nf4"
+    for bad in ("", "int8", "yes"):
+        monkeypatch.setenv("IMAGE_QUANTIZE", bad)
+        assert env_choice("IMAGE_QUANTIZE", ("none", "nf4"), "none") == "none"
+    monkeypatch.delenv("IMAGE_QUANTIZE")
+    assert env_choice("IMAGE_QUANTIZE", ("none", "nf4"), "none") == "none"
 
 
 def test_env_flag_matches_the_charts_true_false(monkeypatch):
