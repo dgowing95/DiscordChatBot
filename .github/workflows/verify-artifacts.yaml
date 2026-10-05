@@ -28,7 +28,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build Docker Image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           tags: core-test
           context: ./core
@@ -55,7 +55,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build Diffusion Docker Image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           tags: diffusion-test
           context: ./diffusionservice
