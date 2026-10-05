@@ -180,54 +180,94 @@ async def clear_memories(wrapper: RunContextWrapper[dict]) -> str:
         return "Error clearing user memories."
 
 
+def _bot_user_id(context):
+    return getattr(getattr(context.get("discord_client"), "user", None), "id", None)
+
+
 @function_tool
-async def generate_image(wrapper: RunContextWrapper[dict], prompt: str) -> str:
+async def generate_image(wrapper: RunContextWrapper[dict], prompt: str,
+                         edit_previous: bool = False) -> str:
     """Generates an image from a text description and sends it to the channel.
-    Use it when the user asks for art, illustrations, pictures or drawings.
+    Use it when the user asks for art, illustrations, pictures or drawings,
+    or wants a picture you made earlier changed.
     The image is sent automatically; never try to send it yourself.
     Args:
         prompt: A plain-language description of the picture you want, in
             ordinary sentences. Include everything that matters: the main
             subject and what it is doing, where it is, how it is positioned,
             what else is in shot, the lighting, the mood, and the style or
-            medium. Say what the user implied but did not spell out. A
-            separate step rewrites this into the image model's own prompt
-            format, so do NOT write comma-separated tag lists, quality
-            boilerplate like "high resolution", or weighting syntax - and do
-            not leave detail out to keep it short. Anything that must NOT
-            appear can simply be written as a normal sentence ("no people in
-            the shot"); it is moved to a negative prompt for you.
+            medium. Say what the user implied but did not spell out. Any
+            reformatting the image model needs is done for you, so do NOT
+            write comma-separated tag lists, quality boilerplate like "high
+            resolution", or weighting syntax - and do not leave detail out to
+            keep it short. Anything that must NOT appear can simply be
+            written as a normal sentence ("no people in the shot").
+        edit_previous: True to change a picture you already made instead of
+            starting a new one. Then prompt says only what changes and what
+            stays the same ("make her much fatter; keep the armour, pose and
+            street").
     """
-    from classes.image_generation import generate_image_from_api
-    from classes.image_prompt import build_image_prompt
+    from classes.image_generation import (
+        GENERATED_IMAGE_FILENAME,
+        create_image,
+        find_edit_source,
+        service_capabilities,
+        tool_result_text,
+    )
 
-    message = wrapper.context.get("original_message")
-    logger.info(f"Generating image for prompt: {prompt}")
+    context = wrapper.context
+    channel = context["channel"]
+    message = context.get("original_message")
+    logger.info(f"{'Editing' if edit_previous else 'Generating'} image for prompt: {prompt}")
     if message is not None:
         await add_emoji_to_message(message, "🎨")
-    # The rewritten prompt, not the requested one, is what the embed shows:
-    # what the image model was actually given is the thing worth seeing when
-    # the result does not match what was asked for.
-    image_prompt, negative_prompt = await build_image_prompt(prompt)
-    await Common.send_tool_discord_embed(
-        wrapper.context["channel"],
-        f"Generating image: {image_prompt}",
-    )
+
+    source = None
+    if edit_previous:
+        # Checked up front because an edit prompt only describes the CHANGE;
+        # drawn from scratch, "make her fatter" would be a picture of nobody.
+        if not (await service_capabilities()).edits:
+            return ("The current image model cannot edit pictures, so nothing was "
+                    "made. Call generate_image again with edit_previous false and a "
+                    "description of the whole picture, the change included.")
+        source = await find_edit_source(channel, message, _bot_user_id(context))
+        if source is None:
+            return ("There is no earlier picture of mine in this channel to edit, so "
+                    "nothing was made. Call generate_image again with edit_previous "
+                    "false and a description of the whole picture.")
+    verb = "Editing image" if source is not None else "Generating image"
+
+    # The prompt the image model is given, not the requested one, is what the
+    # embed shows: it is the thing worth seeing when the result does not match
+    # what was asked for.
+    embed = None
+
+    async def announce(first_prompt):
+        nonlocal embed
+        try:
+            embed = await Common.send_tool_discord_embed(channel, f"{verb}: {first_prompt}")
+        except Exception as e:
+            logger.warning(f"Could not post the image tool embed: {e}")
+
+    user_request = (getattr(message, "clean_content", None) or getattr(message, "content", None)
+                    or "") if message is not None else ""
     try:
-        image_bytes = await generate_image_from_api(image_prompt, negative_prompt)
+        result = await create_image(prompt, user_request, reference=source, on_first_prompt=announce)
     except Exception as e:
         logger.warning(f"Image generation failed: {e}")
         return ("Image generation failed. Tell the user the image service is "
                 "unavailable right now and do not retry.")
+    if embed is not None and result.attempts > 1:
+        # Only the final image is posted, so the embed must describe that one.
+        await Common.edit_tool_discord_embed(embed, f"{verb}: {result.prompt}")
     try:
-        await wrapper.context["channel"].send(
-            file=discord.File(io.BytesIO(image_bytes), filename="generated-image.png")
+        await channel.send(
+            file=discord.File(io.BytesIO(result.png), filename=GENERATED_IMAGE_FILENAME)
         )
     except Exception as e:
         logger.warning(f"Image generated but failed to send to Discord: {e}")
         return "The image was generated but could not be sent to the channel."
-    return ("Image generated and sent to the channel. The user can already see "
-            "it; do not send the image again or describe it as if pending.")
+    return tool_result_text(result)
 
 
 async def _send_sandbox_closing_note(

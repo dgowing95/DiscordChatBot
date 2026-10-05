@@ -76,11 +76,13 @@ services:
       # Baseline negative prompt, merged behind the per-request one. Same
       # default as the chart; dropped automatically on distilled models, which
       # includes the sd-turbo default above.
-      - IMAGE_NEGATIVE_PROMPT=${IMAGE_NEGATIVE_PROMPT:-blurry, lowres, jpeg artifacts, deformed, disfigured, bad anatomy, extra limbs, extra fingers, watermark, signature, cropped, out of frame}
+      - IMAGE_NEGATIVE_PROMPT=${IMAGE_NEGATIVE_PROMPT:-blurry, lowres, jpeg artifacts, extra limbs, extra fingers, watermark, signature, cropped, out of frame}
       # 1/0: encode prompts past CLIP's 77-token window rather than truncate
       - IMAGE_LONG_PROMPT=${IMAGE_LONG_PROMPT:-1}
       # model | sequential | none — see diffusionservice/main.py
       - IMAGE_OFFLOAD=${IMAGE_OFFLOAD:-model}
+      # none | nf4 (4-bit FLUX.2 klein; ignored for SD/SDXL)
+      - IMAGE_QUANTIZE=${IMAGE_QUANTIZE:-none}
       - IMAGE_QUEUE_SIZE=${IMAGE_QUEUE_SIZE:-16}
     runtime: nvidia
     deploy:

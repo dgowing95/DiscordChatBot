@@ -1,3 +1,5 @@
+import logging
+
 import discord
 
 # Discord's hard cap on an embed description's length. A tool call whose
@@ -12,25 +14,35 @@ class Common:
     """
 
     @staticmethod
+    def tool_embed(description, color=0x00b0f4, title="Tool Usage"):
+        if len(description) > EMBED_DESCRIPTION_MAX_CHARS:
+            description = description[: EMBED_DESCRIPTION_MAX_CHARS - 2] + "… "
+        return discord.Embed(title=title, description=description, color=color)
+
+    @staticmethod
     async def send_tool_discord_embed(channel, description, color=0x00b0f4,
                                       title="Tool Usage"):
         """
-        Sends a Discord embed with the given title, description, and color.
+        Sends a Discord embed with the given title, description, and color,
+        and returns the sent message (for edit_tool_discord_embed).
 
         title defaults to "Tool Usage" — every caller that announces a tool
         ABOUT to run leaves it alone. It is overridden only where "Tool
         Usage" would be actively wrong, e.g. the sandbox's closing note,
         which reports on a run that has already finished.
         """
-        if len(description) > EMBED_DESCRIPTION_MAX_CHARS:
-            description = description[: EMBED_DESCRIPTION_MAX_CHARS - 2] + "… "
+        return await channel.send(embed=Common.tool_embed(description, color, title))
 
-        embed = discord.Embed(
-                title=title,
-                description=description,
-                color=color
-        )
-        await channel.send(embed=embed)
+    @staticmethod
+    async def edit_tool_discord_embed(message, description, color=0x00b0f4,
+                                      title="Tool Usage"):
+        """Replaces the description of an embed sent above. Never raises: the
+        embed is a progress note, and failing to update it must not cost the
+        tool's result."""
+        try:
+            await message.edit(embed=Common.tool_embed(description, color, title))
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"Could not update a tool embed: {e}")
 
 
 

@@ -15,6 +15,9 @@ transformers==5.17.0
 # brings the Jupyter/notebook stack transitively; that trade-off is deliberate.
 compel==2.4.0
 accelerate==1.15.0
+# 4-bit (NF4) weights for FLUX.2 [klein] (IMAGE_QUANTIZE=nf4), which is what
+# fits it on an 8 GB card. Tested on prod's RTX 2070 with torch 2.11 + cu128.
+bitsandbytes==0.50.2
 huggingface-hub==1.31.0
 safetensors==0.8.0
 Pillow==12.3.0

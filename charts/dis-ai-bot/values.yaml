@@ -20,9 +20,10 @@ discordToken: ""
 # Name of a Secret you manage yourself (e.g. via External Secrets Operator or
 # sealed-secrets) holding the core credentials, instead of the one this chart
 # renders from discordToken / openaiApiKey / sandbox.apiKey /
-# diffusion.promptRewrite.apiKey (all ignored when this is set). Keys are the
-# env var names: DISCORD_TOKEN (required), OPENAI_API_KEY, SANDBOX_LLM_API_KEY,
-# IMAGE_PROMPT_LLM_API_KEY (each optional - omit rather than leave empty).
+# diffusion.promptRewrite.apiKey / diffusion.review.apiKey (all ignored when
+# this is set). Keys are the env var names: DISCORD_TOKEN (required),
+# OPENAI_API_KEY, SANDBOX_LLM_API_KEY, IMAGE_PROMPT_LLM_API_KEY,
+# IMAGE_REVIEW_LLM_API_KEY (each optional - omit rather than leave empty).
 existingSecret: ""
 redisHost: "dchatbot-redis-service.dchatbot.svc.cluster.local"
 # Base URL of the llama.cpp server (OpenAI-compat). core appends /v1 itself, so do not include it here
@@ -42,9 +43,12 @@ diffusion:
   # (default: the in-cluster {{ .Release.Name }}-diffusion-service)
   url: ""
   # HF repo id of the text-to-image model. sd-turbo is the smallest practical
-  # one (~500MB, made for 1-4 step generation).
+  # one (~500MB, made for 1-4 step generation). For prompt adherence and
+  # editing, black-forest-labs/FLUX.2-klein-4B (steps: 4, 1024x1024,
+  # quantize: nf4 on an 8GB card; ~15GB download): measured on an RTX 2070 at
+  # 12-14s per image, 3.9-5.1GB VRAM and ~9GB RAM.
   model: stabilityai/sd-turbo
-  # Sampler steps (sd-turbo: 1-4); lower = faster, slightly worse quality
+  # Sampler steps (sd-turbo: 1-4; FLUX.2 klein: 4); lower = faster, slightly worse quality
   steps: 4
   width: 512
   height: 512
@@ -52,6 +56,9 @@ diffusion:
   # (text encoder runs in CPU RAM — default); sequential = lowest VRAM,
   # slowest; none = everything on the GPU (needs ~4GB)
   offload: model
+  # none | nf4: load FLUX.2 [klein]'s transformer and text encoder in 4-bit,
+  # which is what fits it on an 8GB card. Ignored for SD/SDXL models.
+  quantize: none
   # Max queued image requests (images are always generated one at a time)
   queueSize: 16
   # Optional: fixed seed for reproducible images (empty = random)
@@ -71,8 +78,10 @@ diffusion:
   # distilled ones (sd-turbo, Lightning, LCM, Hyper), where diffusers skips the
   # unconditional branch and a negative prompt has no effect at all.
   #
-  # Keep text/words/letters OUT of it — users do ask for text in images.
-  negativePrompt: "blurry, lowres, jpeg artifacts, deformed, disfigured, bad anatomy, extra limbs, extra fingers, watermark, signature, cropped, out of frame"
+  # Keep text/words/letters OUT of it — users do ask for text in images. And
+  # keep anatomy words like "deformed, disfigured, bad anatomy" out: they pull
+  # deliberately exaggerated bodies (stick-thin arms, a giant) back to normal.
+  negativePrompt: "blurry, lowres, jpeg artifacts, extra limbs, extra fingers, watermark, signature, cropped, out of frame"
   # Encode prompts past CLIP's 77-token (~55 word) window instead of silently
   # truncating them. false falls back to the truncating path.
   longPrompt: true
@@ -84,6 +93,19 @@ diffusion:
     timeout: 60
     # Empty = reuse the bot's own model/host/key. Set them to run the rewrite
     # somewhere else, exactly as sandbox.model/llmHost/apiKey can.
+    model: ""
+    llmHost: ""
+    apiKey: ""
+  # A CORE-side vision call that looks at each generated image before it is
+  # posted: what it shows (so the bot's caption is true) and what was asked for
+  # but is missing, which earns `retries` more attempts with that stressed.
+  # Each retry is a whole extra generation plus another check. 0 = check only.
+  review:
+    enabled: true
+    retries: 1
+    timeout: 60
+    # Empty = the bot's own model/host/key, which must then be a vision model
+    # (llama.cpp with the model's mmproj loaded). Set them to check elsewhere.
     model: ""
     llmHost: ""
     apiKey: ""

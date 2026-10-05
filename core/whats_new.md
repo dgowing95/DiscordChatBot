@@ -12,10 +12,10 @@ first time someone triggers the bot after that release is deployed.
   (checked by core/tests/whats_new_tests.py).
 -->
 
-## Scheduled actions
-Ask me to do something once or on a recurring interval, day, or weekday. I run it in the channel where you create it and use the current time when it runs.
-How to use: ask "Every day at 9am, find today's Wordle answer" or use `/schedule create`.
+## Edit a picture I made
+I can change a picture I already made instead of drawing a new one, keeping the rest of it as close as I can.
+How to use: reply to one of my pictures with what to change, or ask me to "make her arms thinner" right after one.
 
-## Message rules
-Set a word, phrase, or substring that triggers an action when someone posts it in this channel. Matching rules answer together in one response.
-How to use: ask "When someone says wordle, find today's answer" or use `/rule create`.
+## Pictures are checked before posting
+I look at each picture before posting it. If something you asked for is missing, I try once more, and I tell you plainly if it still didn't come out.
+How to use: nothing to do, just ask for a picture as usual.
