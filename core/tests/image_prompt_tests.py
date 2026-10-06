@@ -1,6 +1,6 @@
 import httpx2
 import pytest
-from openai import APITimeoutError
+from openai import APITimeoutError, BadRequestError, UnprocessableEntityError
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Imported as `classes.X`, the same name the app uses (it runs with cwd=core/,
@@ -27,16 +27,14 @@ def _mock_client(content):
 
 @pytest.fixture(autouse=True)
 def _reset_module_state():
-    """image_prompt keeps two things for the life of the process: its
+    """image_prompt's SideLLM keeps two things for the life of the process: its
     AsyncOpenAI client (one connection pool) and whether the backend accepted
     the thinking-disabled option. Reset both, so an env change in one test is
     not read from a client another already built, and a test that trips the
     retry does not leave it tripped for the next."""
-    image_prompt._client = None
-    image_prompt._send_no_thinking = True
+    image_prompt._llm.reset()
     yield
-    image_prompt._client = None
-    image_prompt._send_no_thinking = True
+    image_prompt._llm.reset()
 
 
 # ---------------------- parse_rewrite ----------------------
@@ -77,13 +75,69 @@ def test_parse_rejects_unusable(content):
     assert image_prompt.parse_rewrite(content) is None
 
 
+def test_parse_cleans_the_negative_prompt():
+    content = '{"prompt": "a knight in a visored helmet", "negative_prompt": "helmet, knights, cartoon"}'
+    assert image_prompt.parse_rewrite(content) == ("a knight in a visored helmet", "cartoon")
+
+
+# ---------------------- clean_negative ----------------------
+# The inputs are what prod's rewriter actually produced (core logs, 2026-10-04/05).
+
+def test_clean_negative_drops_what_the_prompt_asks_for():
+    """A soldier in a narrow-visor helmet got "helmet, visor, face, arms" in
+    her negative prompt -- the image model was told to avoid its own subject."""
+    prompt = ("massive round female soldier, stern unamused face, narrow visor slit "
+              "helmet, full tactical military gear, heavy armored plate mail")
+    negative = "thin, skinny, helmet, visor, face, arms, wings, plate mail, gear"
+    assert image_prompt.clean_negative(negative, prompt) == "thin, skinny, arms, wings"
+
+
+def test_clean_negative_keeps_the_opposite_of_the_key_detail():
+    """The term that matters most for "stick arms" shares the noun with it."""
+    prompt = "extremely thin stick arms, obese woman at a kitchen table"
+    assert image_prompt.clean_negative("thick arms, muscular arms, chubby arms", prompt) == \
+        "thick arms, muscular arms, chubby arms"
+
+
+def test_clean_negative_drops_negated_terms():
+    """It restated the prompt as "no orange sphere body, no narrow visor slit helmet, ..."."""
+    prompt = "massive round soldier, giant orange sphere body"
+    negative = "no orange sphere body, not cinematic, without rim lighting, blurry"
+    assert image_prompt.clean_negative(negative, prompt) == "blurry"
+
+
+def test_clean_negative_ignores_plurals_and_case():
+    assert image_prompt.clean_negative("Helmets, BOOTS", "a soldier with a helmet") == "BOOTS"
+
+
+def test_clean_negative_dedupes_and_caps_a_runaway_list():
+    """Prod logged negatives of 262-624 CLIP tokens: the model looping through
+    "bad crust, bad cheese, bad pepperoni, ..."."""
+    negative = ", ".join(["blurry", "blurry"] + [f"term{i}" for i in range(40)])
+    kept = image_prompt.clean_negative(negative, "a red fox").split(", ")
+    assert kept[:2] == ["blurry", "term0"]
+    assert len(kept) == image_prompt.MAX_NEGATIVE_TERMS
+
+
+def test_clean_negative_handles_empty_input():
+    assert image_prompt.clean_negative("", "a red fox") == ""
+    assert image_prompt.clean_negative(" , ,, ", "a red fox") == ""
+
+
+def test_system_prompt_has_no_copyable_exclusion_list():
+    """The model pasted these example terms into nearly every negative prompt,
+    "people" included -- for pictures of people."""
+    for literal in ('"people"', "extra fingers", "bent walls"):
+        assert literal not in image_prompt.SYSTEM_PROMPT
+
+
 # ---------------------- build_image_prompt ----------------------
 
 @pytest.mark.asyncio
 async def test_build_returns_rewritten_pair(monkeypatch):
     monkeypatch.delenv("IMAGE_PROMPT_REWRITE_ENABLED", raising=False)
     client = _mock_client('{"prompt": "a red fox, sharp fur", "negative_prompt": "cartoon"}')
-    with patch.object(image_prompt, "_get_client", return_value=client):
+    with patch.object(image_prompt._llm, "_get_client", return_value=client):
         assert await image_prompt.build_image_prompt("draw me a fox") == (
             "a red fox, sharp fur", "cartoon")
 
@@ -96,7 +150,7 @@ async def test_build_returns_rewritten_pair(monkeypatch):
 async def test_build_skips_the_call_when_disabled(monkeypatch):
     monkeypatch.setenv("IMAGE_PROMPT_REWRITE_ENABLED", "0")
     client = _mock_client('{"prompt": "should not be used"}')
-    with patch.object(image_prompt, "_get_client", return_value=client):
+    with patch.object(image_prompt._llm, "_get_client", return_value=client):
         assert await image_prompt.build_image_prompt("draw me a fox") == ("draw me a fox", "")
     client.chat.completions.create.assert_not_awaited()
 
@@ -107,11 +161,18 @@ async def test_build_disables_thinking_on_the_first_try(monkeypatch):
     token budget before the JSON and the rewrite falls soft on every call."""
     monkeypatch.delenv("IMAGE_PROMPT_REWRITE_ENABLED", raising=False)
     client = _mock_client('{"prompt": "a red fox"}')
-    with patch.object(image_prompt, "_get_client", return_value=client):
+    with patch.object(image_prompt._llm, "_get_client", return_value=client):
         await image_prompt.build_image_prompt("draw me a fox")
 
     kwargs = client.chat.completions.create.await_args.kwargs
     assert kwargs["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+
+
+def _rejected(status=400):
+    """What a backend that refuses chat_template_kwargs raises."""
+    cls = BadRequestError if status == 400 else UnprocessableEntityError
+    response = httpx2.Response(status, request=httpx2.Request("POST", "http://llamacpp:8080/v1"))
+    return cls("unknown field chat_template_kwargs", response=response, body=None)
 
 
 @pytest.mark.asyncio
@@ -121,10 +182,9 @@ async def test_build_retries_once_without_the_thinking_option(monkeypatch):
     monkeypatch.delenv("IMAGE_PROMPT_REWRITE_ENABLED", raising=False)
     client = _mock_client('{"prompt": "a red fox"}')
     ok = client.chat.completions.create.return_value
-    client.chat.completions.create = AsyncMock(
-        side_effect=[Exception("unknown field chat_template_kwargs"), ok, ok])
+    client.chat.completions.create = AsyncMock(side_effect=[_rejected(), ok, ok])
 
-    with patch.object(image_prompt, "_get_client", return_value=client):
+    with patch.object(image_prompt._llm, "_get_client", return_value=client):
         assert await image_prompt.build_image_prompt("draw me a fox") == ("a red fox", "")
         # The second call goes straight through without the option.
         assert await image_prompt.build_image_prompt("draw me a fox") == ("a red fox", "")
@@ -134,7 +194,7 @@ async def test_build_retries_once_without_the_thinking_option(monkeypatch):
     assert "extra_body" in calls[0].kwargs
     assert "extra_body" not in calls[1].kwargs
     assert "extra_body" not in calls[2].kwargs
-    assert image_prompt._send_no_thinking is False
+    assert image_prompt._llm.send_no_thinking is False
 
 
 @pytest.mark.asyncio
@@ -145,13 +205,13 @@ async def test_build_falls_back_when_the_call_fails(monkeypatch):
     client = _mock_client("")
     timeout = APITimeoutError(request=httpx2.Request("POST", "http://llamacpp:8080/v1"))
     client.chat.completions.create = AsyncMock(side_effect=timeout)
-    with patch.object(image_prompt, "_get_client", return_value=client):
+    with patch.object(image_prompt._llm, "_get_client", return_value=client):
         assert await image_prompt.build_image_prompt("draw me a fox") == ("draw me a fox", "")
 
     # A slow backend is not a rejected option: no retry (which would just spend
     # the timeout twice) and, crucially, thinking stays disabled for next time.
     assert client.chat.completions.create.await_count == 1
-    assert image_prompt._send_no_thinking is True
+    assert image_prompt._llm.send_no_thinking is True
 
 
 @pytest.mark.asyncio
@@ -161,19 +221,58 @@ async def test_build_keeps_disabling_thinking_when_the_retry_also_fails(monkeypa
     thinking left on is what breaks this feature."""
     monkeypatch.delenv("IMAGE_PROMPT_REWRITE_ENABLED", raising=False)
     client = _mock_client("")
-    client.chat.completions.create = AsyncMock(side_effect=Exception("upstream 500"))
-    with patch.object(image_prompt, "_get_client", return_value=client):
+    client.chat.completions.create = AsyncMock(
+        side_effect=[_rejected(422), Exception("upstream 500")])
+    with patch.object(image_prompt._llm, "_get_client", return_value=client):
         assert await image_prompt.build_image_prompt("draw me a fox") == ("draw me a fox", "")
 
     assert client.chat.completions.create.await_count == 2
-    assert image_prompt._send_no_thinking is True
+    assert image_prompt._llm.send_no_thinking is True
+
+
+@pytest.mark.asyncio
+async def test_build_does_not_blame_the_option_for_a_server_error(monkeypatch):
+    """A 5xx or rate limit says nothing about chat_template_kwargs. Retrying
+    without it -- and latching when that retry happened to work -- would turn
+    thinking back on for the whole process over one bad minute."""
+    monkeypatch.delenv("IMAGE_PROMPT_REWRITE_ENABLED", raising=False)
+    client = _mock_client('{"prompt": "a red fox"}')
+    ok = client.chat.completions.create.return_value
+    client.chat.completions.create = AsyncMock(side_effect=[Exception("upstream 500"), ok])
+    with patch.object(image_prompt._llm, "_get_client", return_value=client):
+        assert await image_prompt.build_image_prompt("draw me a fox") == ("draw me a fox", "")
+
+    assert client.chat.completions.create.await_count == 1
+    assert image_prompt._llm.send_no_thinking is True
+
+
+@pytest.mark.asyncio
+async def test_a_call_judges_the_option_by_what_it_sent(monkeypatch):
+    """An edit is checked by two calls at once on one SideLLM. When the other
+    call latches the option off mid-flight, this call's rejection -- of a
+    request that DID carry the option -- must still get its retry."""
+    client = _mock_client('{"prompt": "a red fox"}')
+    ok = client.chat.completions.create.return_value
+    llm = image_prompt._llm
+
+    async def create(**kwargs):
+        if "extra_body" in kwargs:
+            llm.send_no_thinking = False  # the other call latched meanwhile
+            raise _rejected()
+        return ok
+
+    client.chat.completions.create = AsyncMock(side_effect=create)
+    with patch.object(llm, "_get_client", return_value=client):
+        assert await llm.complete([{"role": "user", "content": "x"}],
+                                  temperature=0.0, max_tokens=10) == '{"prompt": "a red fox"}'
+    assert client.chat.completions.create.await_count == 2
 
 
 @pytest.mark.asyncio
 async def test_build_falls_back_on_unusable_output(monkeypatch):
     monkeypatch.delenv("IMAGE_PROMPT_REWRITE_ENABLED", raising=False)
     client = _mock_client("I'd rather not answer in JSON.")
-    with patch.object(image_prompt, "_get_client", return_value=client):
+    with patch.object(image_prompt._llm, "_get_client", return_value=client):
         assert await image_prompt.build_image_prompt("draw me a fox") == ("draw me a fox", "")
 
 
@@ -181,7 +280,7 @@ async def test_build_falls_back_on_unusable_output(monkeypatch):
 async def test_build_ignores_an_empty_request(monkeypatch):
     monkeypatch.delenv("IMAGE_PROMPT_REWRITE_ENABLED", raising=False)
     client = _mock_client('{"prompt": "should not be used"}')
-    with patch.object(image_prompt, "_get_client", return_value=client):
+    with patch.object(image_prompt._llm, "_get_client", return_value=client):
         assert await image_prompt.build_image_prompt("   ") == ("", "")
     client.chat.completions.create.assert_not_awaited()
 
