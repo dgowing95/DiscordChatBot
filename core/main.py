@@ -10,8 +10,11 @@ from classes.message_handler import MessageHandler, close_http_session
 from classes.text_llm_handler import TextLLMHandler
 from classes.llm_config import llm_model
 from classes.config_manager import configManager
-from classes.image_generation import generate_image_from_api, image_generation_enabled
-from classes.image_prompt import build_image_prompt
+from classes.image_generation import (
+    GENERATED_IMAGE_FILENAME,
+    create_image,
+    image_generation_enabled,
+)
 from classes.sandbox_agent import sandbox_enabled
 from classes import attachment_cache, help_catalog, sandbox_thread_inbox, whats_new
 from classes.common import embed_from_data
@@ -176,9 +179,10 @@ async def register_commands():
             # Raw user text, never seen by the agent: this path is the reason
             # the SDXL prompt rules live in image_prompt.py rather than in the
             # generate_image tool's docstring, which only the agent reads.
-            image_prompt, negative_prompt = await build_image_prompt(prompt)
+            # The typed prompt is both the description and the request the
+            # result is checked against.
             try:
-                image_bytes = await generate_image_from_api(image_prompt, negative_prompt)
+                result = await create_image(prompt, prompt)
             except Exception as e:
                 logger.warning(f"Image generation failed: {e}")
                 await ctx.edit_original_response(
@@ -187,7 +191,7 @@ async def register_commands():
                 return
             await ctx.edit_original_response(
                 content="🎨",
-                attachments=[discord.File(io.BytesIO(image_bytes), filename="generated-image.png")],
+                attachments=[discord.File(io.BytesIO(result.png), filename=GENERATED_IMAGE_FILENAME)],
             )
 
     synced_commands = await command_tree.sync()

@@ -42,7 +42,8 @@ ASK_ENTRIES = (
               tools=("store_memory", "remove_memory", "clear_memories")),
     HelpEntry("🎭 Change personality", "Ask me to act differently, e.g. \"talk like a pirate\".",
               tools=("change_personality",)),
-    HelpEntry("🎨 Make images", "Ask me to draw or generate a picture.",
+    HelpEntry("🎨 Make images", "Ask me to draw a picture, or to change one I made "
+              "(reply to it, or just say what to change).",
               tools=("generate_image",), requires=IMAGE),
     HelpEntry("🐳 Run code", "Ask me to build, run or make something with code (scripts, "
               "charts, gifs...). I work in a thread you can reply in to steer me, and "

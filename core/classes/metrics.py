@@ -28,8 +28,12 @@ Metrics (scraped by Prometheus from the /metrics HTTP endpoint):
            additionally measures the raw diffusion-service call, including
            the /generate_image slash command that bypasses the LLM).
   Histogram discord_bot_image_generation_seconds{mode}
-           Duration of one diffusion-service call; mode is always
-           text_to_image.
+           Duration of one diffusion-service call; mode: text_to_image /
+           edit (a reference image was sent).
+  Counter  discord_bot_image_review_total{outcome}
+           Generated images checked before posting (classes/image_review.py).
+           outcome: match / mismatch (something asked for was missing, which
+           earns a retry) / error (not checked; posted unchecked).
   Gauge    discord_bot_message_queue_size
            Current number of messages waiting on the asyncio queue.
   Counter  discord_bot_message_queue_drops_total{guild_id}
@@ -67,8 +71,9 @@ Metrics (scraped by Prometheus from the /metrics HTTP endpoint):
            the channel lock), send (the chunked reply and reasoning sends).
   Histogram discord_bot_llm_call_seconds{caller,outcome}
            ONE model request (a reply makes one per turn). caller: main (the
-           reply agent) / image_prompt (the image-request rewrite, which uses
-           the same local server). outcome: ok / error / cancelled.
+           reply agent) / image_prompt (the image-request rewrite) /
+           image_review (the look at a generated image), the last two on the
+           same local server by default. outcome: ok / error / cancelled.
   Histogram discord_bot_llm_completion_tokens{caller}
            Generated tokens of one model request, when the server reported it
            (a missing figure is skipped, never recorded as 0).
@@ -212,6 +217,12 @@ image_generation_seconds = Histogram(
     "Duration of one diffusion-service image generation call",
     ["mode"],
     buckets=IMAGE_GEN_BUCKETS,
+)
+
+image_review_total = Counter(
+    "discord_bot_image_review_total",
+    "Generated images checked before posting, by outcome",
+    ["outcome"],
 )
 
 message_queue_size = Gauge(
@@ -425,6 +436,10 @@ def inc_tool_error(tool: str, guild_id) -> None:
 
 def observe_image_generation(mode: str, seconds: float) -> None:
     image_generation_seconds.labels(mode=str(mode)).observe(seconds)
+
+
+def inc_image_review(outcome: str) -> None:
+    image_review_total.labels(outcome=str(outcome)).inc()
 
 
 def set_message_queue_size(n: int) -> None:

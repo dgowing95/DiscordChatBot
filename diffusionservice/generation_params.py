@@ -22,6 +22,15 @@ import re
 #     negative prompt on such a model is silently inert and must not be sent.
 _DISTILLED_MARKERS = ("turbo", "lightning", "lcm", "hyper")
 
+# Pipeline families, told apart by the `_class_name` in the repo's
+# model_index.json (read before loading, so these choices can be made up front):
+#   sd     SD 1.5 / SDXL. CLIP-conditioned: tag-list prompts, negative prompts,
+#          compel for prompts past 77 tokens. Also the fallback for anything
+#          unrecognised, which is how every model loaded before this existed.
+#   flux2  FLUX.2 [klein]. A Qwen3 text encoder: plain sentences, no negative
+#          prompt, and the pipeline takes reference images, i.e. it can edit.
+_FLUX2_CLASS_PREFIX = "Flux2Klein"
+
 # Compel's prompt syntax. Parentheses/brackets group and weight, a trailing
 # run of + or - up/down-weights the preceding word, and .blend()/.and()/
 # .swap()/.pow() are method calls on a parenthesised group. None of that is
@@ -87,16 +96,65 @@ def env_flag(name: str, default: bool = True) -> bool:
     return raw.strip().lower() not in {"", "0", "false", "no", "off"}
 
 
-def is_distilled(model_id: str) -> bool:
-    """True when the model id names a distilled few-step model."""
-    return any(marker in (model_id or "").lower() for marker in _DISTILLED_MARKERS)
+def env_choice(name: str, choices, default: str) -> str:
+    """A lower-cased env var when it is one of `choices`, else `default`."""
+    raw = os.environ.get(name, "").strip().lower()
+    return raw if raw in choices else default
 
 
-def resolve_guidance(model_id: str, requested=None, env_default=None):
+def pipeline_family(class_name) -> str:
+    """"flux2" for FLUX.2 [klein], "sd" for everything else (see _FLUX2_CLASS_PREFIX)."""
+    return "flux2" if (class_name or "").startswith(_FLUX2_CLASS_PREFIX) else "sd"
+
+
+def prompt_style(family: str) -> str:
+    """What kind of prompt the family wants, as reported on /health so core
+    knows whether to run its SDXL prompt rewrite.
+
+    "natural": plain sentences, which is what the bot's model already writes.
+    "sdxl": comma-separated clauses plus a negative prompt, which needs the
+    rewrite."""
+    return "natural" if family == "flux2" else "sdxl"
+
+
+def component_dtypes(family: str, bf16_supported: bool) -> dict:
+    """Torch dtype names per pipeline component ("default" covers the rest).
+
+    SD/SDXL stay on float16, as they always have. FLUX.2 [klein] is published
+    in bfloat16, so it gets that wherever the card has it natively. Where it
+    does not (prod's RTX 2070 is Turing), the model runs in float16 and its
+    Qwen3 text encoder computes in float32. Measured on that card, the
+    encoder's hidden states reach ~17,000 -- a quarter of float16's 65,504
+    ceiling, too little headroom for a prompt nobody has tried yet, and an
+    overflow there is a black image. float32 costs ~1 GB more VRAM while the
+    encoder is loaded and no measurable time (a 4-step image took 12-14 s
+    either way).
+    """
+    if family != "flux2":
+        return {"default": "float16"}
+    if bf16_supported:
+        return {"default": "bfloat16"}
+    return {"default": "float16", "text_encoder": "float32"}
+
+
+def is_distilled(model_id: str, flagged: bool = False) -> bool:
+    """True when the model is a distilled few-step model.
+
+    `flagged` is the repo's own model_index.json `is_distilled` (FLUX.2
+    [klein] sets it); the name markers cover the SD-family models, which
+    have no such field."""
+    return bool(flagged) or any(marker in (model_id or "").lower() for marker in _DISTILLED_MARKERS)
+
+
+def resolve_guidance(model_id: str, requested=None, env_default=None,
+                     family: str = "sd", distilled=None):
     """The guidance_scale to use, or None to leave it to the pipeline.
 
-    Precedence: distilled models are pinned to 0.0 whatever was asked, then the
-    per-request value, then IMAGE_GUIDANCE, then None.
+    Precedence: distilled models are pinned whatever was asked, then the
+    per-request value, then IMAGE_GUIDANCE, then None. The pin is 0.0 for the
+    SD family (diffusers skips the unconditional branch below 1) and 1.0 for
+    FLUX.2 [klein], whose pipeline defaults to 4.0 and logs a warning on every
+    call when a distilled model is given more than 1.
 
     None means "omit guidance_scale from the pipeline kwargs entirely" rather
     than any particular number, so an unset IMAGE_GUIDANCE reproduces today's
@@ -105,8 +163,10 @@ def resolve_guidance(model_id: str, requested=None, env_default=None):
     isinstance(pipe, StableDiffusionXLPipeline) does, and that lives on the
     other side of the torch import this module exists to avoid.
     """
-    if is_distilled(model_id):
-        return 0.0
+    if distilled is None:
+        distilled = is_distilled(model_id)
+    if distilled:
+        return 1.0 if family == "flux2" else 0.0
     for value in (requested, env_default):
         if value is None:
             continue
