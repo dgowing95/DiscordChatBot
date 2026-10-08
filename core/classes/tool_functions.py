@@ -12,6 +12,9 @@ from bs4 import BeautifulSoup
 logger = logging.getLogger(__name__)
 
 async def add_emoji_to_message(message: discord.Message, emoji: str) -> None:
+    # No message to react to in a voice turn or an automatic run.
+    if message is None:
+        return
     try:
         await message.add_reaction(emoji)
         logger.info(f"Added emoji {emoji} to message {message.id}")
@@ -128,7 +131,7 @@ async def store_memory(wrapper: RunContextWrapper[dict], data: str) -> str:
         await user_memory.append(data)
         await add_emoji_to_message(wrapper.context.get("original_message"), "💾")
         await Common.send_tool_discord_embed(
-            wrapper.context.get("original_message").channel,
+            wrapper.context["channel"],
             f"Stored data: {data}",
         )
         
@@ -249,8 +252,10 @@ async def generate_image(wrapper: RunContextWrapper[dict], prompt: str,
         except Exception as e:
             logger.warning(f"Could not post the image tool embed: {e}")
 
-    user_request = (getattr(message, "clean_content", None) or getattr(message, "content", None)
-                    or "") if message is not None else ""
+    # What was asked, for the check of the finished picture: the message, or
+    # in a voice call (no message) what the speaker said.
+    user_request = ((getattr(message, "clean_content", None) or getattr(message, "content", None)
+                     or "") if message is not None else context.get("request_text") or "")
     try:
         result = await create_image(prompt, user_request, reference=source, on_first_prompt=announce)
     except Exception as e:
@@ -716,3 +721,40 @@ async def change_personality(wrapper: RunContextWrapper[dict], personality: str)
     except Exception as e:
         logger.warning(f"An error occurred while changing personality: {e}")
         return False
+
+
+@function_tool
+async def join_voice_channel(wrapper: RunContextWrapper[dict]) -> str:
+    """Joins the voice channel the person asking is in, so you can talk with
+    them out loud. Use it when someone asks you to join voice, come into the
+    call, or talk to them. While you are in the call you only answer there,
+    not in text."""
+    from classes import voice_session
+
+    message = wrapper.context.get("original_message")
+    member = getattr(message, "author", None)
+    voice_state = getattr(member, "voice", None)
+    channel = getattr(voice_state, "channel", None)
+    if channel is None:
+        return ("The person asking is not in a voice channel, so you could not join. Tell "
+                "them to join one first and ask again, or use /voice join.")
+    try:
+        session = await voice_session.start(wrapper.context["discord_client"], channel,
+                                            wrapper.context["channel"], member)
+    except voice_session.VoiceError as e:
+        return f"You could not join the voice channel: {e} Tell the user that."
+    return (f"You joined the voice channel {channel.name}. Say so in one short sentence and "
+            f"tell them to say \"{session.wake_phrase}\" to talk to you there.")
+
+
+@function_tool
+async def leave_voice_channel(wrapper: RunContextWrapper[dict]) -> str:
+    """Leaves the voice call. Use it only when someone asks you to leave,
+    hang up or go away."""
+    from classes import voice_gate
+
+    session = voice_gate.session(wrapper.context.get("guild_id"))
+    if session is None:
+        return "You are not in a voice call."
+    session.leave_after_turn = True
+    return "You will leave the call as soon as you finish speaking. Say a short goodbye."

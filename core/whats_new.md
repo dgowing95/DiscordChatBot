@@ -12,10 +12,14 @@ first time someone triggers the bot after that release is deployed.
   (checked by core/tests/whats_new_tests.py).
 -->
 
-## Edit a picture I made
-I can change a picture I already made instead of drawing a new one, keeping the rest of it as close as I can.
-How to use: reply to one of my pictures with what to change, or ask me to "make her arms thinner" right after one.
+## Talk to me in voice
+I can join a voice channel and talk out loud. I only answer when someone says "hey" and my name, and everything else I can do in chat works there too: pictures and code results appear in a thread for the call. While I'm in a call, I don't reply in text in this server.
+How to use: ask me to join voice, or use /voice join. Then say "hey <my name>" and your question. Say "hey <my name>, leave" or use /voice leave when you're done.
 
-## Pictures are checked before posting
-I look at each picture before posting it. If something you asked for is missing, I try once more, and I tell you plainly if it still didn't come out.
-How to use: nothing to do, just ask for a picture as usual.
+## Tell me to stop talking
+If I'm going on too long, say "hey <my name>, stop" (or "shut up", "be quiet", "that's enough") and I stop at once, so you can talk. Anything I was making, like a picture, still finishes in the thread. It uses your server's wake phrase if you've set your own.
+How to use: in a voice call, say "hey <my name>, stop".
+
+## Pick my voice and wake phrase
+Choose how I sound from dozens of voices (or blend two), how fast I talk, and what phrase gets my attention.
+How to use: /voice voice, /voice speed and /voice wake_word.

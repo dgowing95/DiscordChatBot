@@ -50,6 +50,43 @@ updates:
           - huggingface-hub
           - safetensors
 
+  - package-ecosystem: pip
+    directory: /speechservice
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Helsinki
+    cooldown:
+      default-days: 14
+    open-pull-requests-limit: 5
+    # One PR for the whole speech stack, majors included: faster-whisper,
+    # ctranslate2, kokoro-onnx and onnxruntime pin each other's ranges and
+    # numpy, and the image is only built in CI, never run, so a skew would
+    # first show up as a pod that cannot load its models.
+    groups:
+      speech:
+        patterns:
+          - "*"
+
+  - package-ecosystem: npm
+    directory: /voicesidecar
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Helsinki
+    cooldown:
+      default-days: 14
+    open-pull-requests-limit: 5
+    # One PR for the voice sidecar, majors included: @discordjs/voice peers
+    # prism-media, opusscript and @snazzah/davey (DAVE), and they are only
+    # known to work together as a set.
+    groups:
+      voice:
+        patterns:
+          - "*"
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -85,6 +122,35 @@ updates:
 
   - package-ecosystem: docker
     directory: /diffusionservice
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Helsinki
+    cooldown:
+      default-days: 14
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: docker
+    directory: /speechservice
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Helsinki
+    cooldown:
+      default-days: 14
+    open-pull-requests-limit: 5
+    # python:3.13 on purpose (kokoro-onnx does not support 3.14 yet): only
+    # take a newer Python when the speech requirements say they support it.
+    ignore:
+      - dependency-name: python
+        update-types:
+          - version-update:semver-minor
+          - version-update:semver-major
+
+  - package-ecosystem: docker
+    directory: /voicesidecar
     schedule:
       interval: weekly
       day: monday

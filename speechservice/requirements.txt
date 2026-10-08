@@ -1,0 +1,10 @@
+# Top-level deps only (pip resolves the rest). CPU only: no CUDA wheels here.
+fastapi==0.142.4
+uvicorn[standard]==0.54.0
+faster-whisper==1.2.1
+# kokoro-onnx 0.6 supports Python < 3.14 only, which is why this image is
+# python:3.13 while core's is 3.14.
+kokoro-onnx==0.6.1
+onnxruntime==1.30.0
+soxr==1.1.0
+numpy==2.5.3

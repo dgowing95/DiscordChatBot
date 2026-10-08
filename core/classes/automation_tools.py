@@ -13,6 +13,9 @@ def _scope(wrapper):
         raise AutomationError("Use automations in a server channel")
     channel = context["channel"]
     actor = getattr(context.get("original_message"), "author", None)
+    if actor is None and context.get("user_id") and getattr(channel, "guild", None):
+        # A voice turn has no message; the speaker is the actor.
+        actor = channel.guild.get_member(context["user_id"])
     if actor is None or not channel.permissions_for(actor).send_messages or not channel.permissions_for(actor).view_channel:
         raise AutomationError("You cannot manage automations in this channel")
     bot = getattr(channel.guild, "me", None)

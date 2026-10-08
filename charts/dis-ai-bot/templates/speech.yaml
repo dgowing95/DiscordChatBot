@@ -1,0 +1,73 @@
+{{- if .Values.voice.enabled }}
+# Speech service (speechservice/): Whisper speech-to-text and Kokoro
+# text-to-speech for voice calls. CPU only, by design: the GPUs belong to
+# llama.cpp and the image model.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-speech-deployment
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-speech
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-speech
+    spec:
+      volumes:
+        - name: speech-data
+          persistentVolumeClaim:
+            claimName: speech-pv-claim
+      containers:
+      - name: speech
+        image: "{{ .Values.voice.image }}:speech-{{ .Values.image.tag | default .Chart.AppVersion }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        ports:
+        - name: http
+          containerPort: {{ .Values.voice.speechPort }}
+        volumeMounts:
+          - name: speech-data
+            mountPath: /models
+        # STT_* / TTS_* / VOICE_DEFAULT_VOICE come from the shared configmap
+        envFrom:
+        - configMapRef:
+            name: {{ .Release.Name }}-configmap
+        env:
+        - name: HF_HOME
+          value: /models
+        # First boot downloads the models (~0.8 GB)
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          failureThreshold: 60
+        resources:
+          limits:
+            cpu: {{ .Values.speechResources.limits.cpu }}
+            memory: {{ .Values.speechResources.limits.memory }}
+          requests:
+            cpu: {{ .Values.speechResources.requests.cpu }}
+            memory: {{ .Values.speechResources.requests.memory }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-speech-service
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: {{ .Release.Name }}-speech
+  ports:
+    - port: {{ .Values.voice.speechPort }}
+      targetPort: {{ .Values.voice.speechPort }}
+      protocol: TCP
+      name: http
+  type: ClusterIP
+{{- end }}

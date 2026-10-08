@@ -91,8 +91,30 @@ jobs:
       - name: Run tests
         run: pytest
 
+  run_node_tests:
+    needs: validate_release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set up Node 22
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: voicesidecar/package-lock.json
+      - name: Install voice sidecar dependencies
+        working-directory: voicesidecar
+        run: npm ci --ignore-scripts
+      - name: Run voice sidecar tests
+        working-directory: voicesidecar
+        run: npm test
+
   build_images:
-    needs: [validate_release, run_tests]
+    needs: [validate_release, run_tests, run_node_tests]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -123,7 +145,7 @@ jobs:
           cache-to: type=registry,ref=ghcr.io/dgowing95/discordchatbot:core-buildcache,mode=max
 
   build_diffusion_image:
-    needs: run_tests
+    needs: [run_tests, run_node_tests]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -149,10 +171,66 @@ jobs:
           cache-from: type=registry,ref=ghcr.io/dgowing95/discordchatbot:diffusion-buildcache
           cache-to: type=registry,ref=ghcr.io/dgowing95/discordchatbot:diffusion-buildcache,mode=max
 
+  build_speech_image:
+    needs: [run_tests, run_node_tests]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Build and push Speech docker image
+        uses: docker/build-push-action@v7
+        with:
+          push: true
+          tags: ghcr.io/dgowing95/discordchatbot:speech-${{ env.VERSION }},ghcr.io/dgowing95/discordchatbot:speech-latest
+          context: ./speechservice
+          cache-from: type=registry,ref=ghcr.io/dgowing95/discordchatbot:speech-buildcache
+          cache-to: type=registry,ref=ghcr.io/dgowing95/discordchatbot:speech-buildcache,mode=max
+
+  build_voice_image:
+    needs: [run_tests, run_node_tests]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Build and push Voice sidecar docker image
+        uses: docker/build-push-action@v7
+        with:
+          push: true
+          tags: ghcr.io/dgowing95/discordchatbot:voice-${{ env.VERSION }},ghcr.io/dgowing95/discordchatbot:voice-latest
+          context: ./voicesidecar
+          cache-from: type=registry,ref=ghcr.io/dgowing95/discordchatbot:voice-buildcache
+          cache-to: type=registry,ref=ghcr.io/dgowing95/discordchatbot:voice-buildcache,mode=max
+
   build_chart:
     needs:
       - build_images
       - build_diffusion_image
+      - build_speech_image
+      - build_voice_image
     runs-on: ubuntu-latest
     permissions:
       contents: read

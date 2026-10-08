@@ -31,3 +31,23 @@ jobs:
       
       - name: Run tests
         run: pytest
+
+  # The voice sidecar (voicesidecar/) is Node; its tests are node:test.
+  run_node_tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set up Node 22
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: voicesidecar/package-lock.json
+      - name: Install voice sidecar dependencies
+        working-directory: voicesidecar
+        run: npm ci --ignore-scripts
+      - name: Run voice sidecar tests
+        working-directory: voicesidecar
+        run: npm test

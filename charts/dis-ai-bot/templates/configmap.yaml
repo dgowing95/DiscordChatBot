@@ -29,6 +29,28 @@ data:
   SCHEDULE_MAX_PER_GUILD: {{ .Values.schedules.maxPerGuild | toString | quote }}
   RULE_MAX_PER_GUILD: {{ .Values.rules.maxPerGuild | toString | quote }}
   RULE_COOLDOWN_SECONDS: {{ .Values.rules.cooldownSeconds | toString | quote }}
+  # Voice calls: core, the voice sidecar (same pod) and the speech pod all
+  # read these
+  VOICE_ENABLED: {{ .Values.voice.enabled | quote }}
+  {{- if .Values.voice.enabled }}
+  VOICE_BRIDGE_URL: {{ printf "ws://127.0.0.1:%v" .Values.voice.bridgePort | quote }}
+  VOICE_BRIDGE_PORT: {{ .Values.voice.bridgePort | toString | quote }}
+  SPEECH_URL: {{ if .Values.voice.speechUrl }}{{ .Values.voice.speechUrl }}{{ else }}http://{{ .Release.Name }}-speech-service.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.voice.speechPort }}{{ end }}
+  VOICE_IDLE_LEAVE_SECONDS: {{ .Values.voice.idleLeaveSeconds | toString | quote }}
+  VOICE_HISTORY_LIMIT: {{ .Values.voice.historyLimit | toString | quote }}
+  VOICE_HISTORY_REFRESH: {{ .Values.voice.historyRefresh | toString | quote }}
+  VOICE_FOLLOWUP_SECONDS: {{ .Values.voice.followupSeconds | toString | quote }}
+  VOICE_THINKING: {{ .Values.voice.thinking | quote }}
+  VOICE_DEFAULT_VOICE: {{ .Values.voice.defaultVoice | quote }}
+  VOICE_SILENCE_MS: {{ .Values.voice.silenceMs | toString | quote }}
+  VOICE_PREFILL_MIN_SECONDS: {{ .Values.voice.prefillMinSeconds | toString | quote }}
+  STT_MODEL: {{ .Values.voice.sttModel | quote }}
+  STT_THREADS: {{ .Values.voice.sttThreads | toString | quote }}
+  STT_CONCURRENCY: {{ .Values.voice.sttConcurrency | toString | quote }}
+  TTS_THREADS: {{ .Values.voice.ttsThreads | toString | quote }}
+  TTS_CONCURRENCY: {{ .Values.voice.ttsConcurrency | toString | quote }}
+  SPEECH_QUEUE_SIZE: {{ .Values.voice.queueSize | toString | quote }}
+  {{- end }}
   # Image generation (diffusion): core only registers the generate_image tool
   # when IMAGE_GEN_ENABLED is true; the diffusion pod reads the IMAGE_* settings
   DIFFUSION_URL: {{ if .Values.diffusion.url }}{{ .Values.diffusion.url }}{{ else }}http://{{ .Release.Name }}-diffusion-service.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.diffusion.port }}{{ end }}

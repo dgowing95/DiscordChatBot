@@ -19,8 +19,9 @@ from classes.sandbox_agent import sandbox_enabled
 from classes import attachment_cache, help_catalog, sandbox_thread_inbox, whats_new
 from classes.common import embed_from_data
 from classes.redis_client import text_client
-from classes import automation_runner
+from classes import automation_runner, voice_gate
 from classes.automation_policy import settings as automation_settings
+from classes.voice_policy import settings as voice_settings
 from classes.message_queue import (
     get_channel_lock, make_message_queue, mark_enqueued, pop_enqueued, worker_count,
 )
@@ -50,6 +51,10 @@ logging.basicConfig(
 # wanted, which is DEBUG on its own logger rather than on the root.
 if os.environ.get("CONTENT_GUARD_DEBUG", "1").strip().lower() not in ("0", "false", "no", "off"):
     logging.getLogger("classes.content_guard").setLevel(logging.DEBUG)
+# VOICE_DEBUG=1 logs what is heard and said in voice calls (every transcript,
+# so off by default); the voice sidecar reads the same switch.
+if os.environ.get("VOICE_DEBUG", "").strip().lower() in ("1", "true", "yes", "on"):
+    logging.getLogger("classes.voice_session").setLevel(logging.DEBUG)
 
 
 intents = discord.Intents.default()
@@ -71,6 +76,9 @@ class Bot(discord.Client):
         # The image-download session is shared by every prompt build, so it
         # outlives them all and is closed here, once.
         await close_http_session()
+        from classes.voice_bridge import get_bridge
+        if get_bridge() is not None:
+            await get_bridge().close()
         await super().close()
 
 
@@ -99,6 +107,9 @@ async def register_commands():
     if automation_settings()["enabled"]:
         from classes.automation_commands import register_automation_commands
         register_automation_commands(command_tree)
+    if voice_settings()["enabled"]:
+        from classes.voice_commands import register_voice_commands
+        register_voice_commands(command_tree, client)
 
     @command_tree.command(name="system", description="Change the behaviour/personality of the bot")
     async def change_system(ctx, system: str):
@@ -168,6 +179,11 @@ async def register_commands():
 
         @command_tree.command(name="generate_image", description="Generate an image from a text prompt using the image service")
         async def generate_image_cmd(ctx, prompt: str):
+            # Its prompt rewrite and image check use the LLM, which is the
+            # call's while the bot is in voice here.
+            if voice_gate.active(ctx.guild_id):
+                await ctx.response.send_message(VOICE_BUSY_REPLY, ephemeral=True)
+                return
             # Image generation is slow (queue + GPU): defer first (spinner) so
             # the command doesn't time out, then respond to the deferred
             # interaction via the webhook. ctx is a raw discord.Interaction
@@ -213,6 +229,10 @@ async def on_ready():
         client.background_tasks = [client.loop.create_task(refresh_slot_context_forever())]
         if automation_settings()["enabled"]:
             client.background_tasks.append(client.loop.create_task(schedule_forever()))
+        if voice_settings()["enabled"]:
+            from classes.voice_bridge import start_bridge
+            bridge = start_bridge(voice_settings()["bridge_url"], client, voice_settings()["bridge_token"])
+            client.background_tasks.append(client.loop.create_task(bridge.run_forever()))
     # Start the worker pool immediately so the bot still consumes messages
     # even if the model check or command sync fails (e.g. server not up yet
     # after a power cycle).
@@ -273,6 +293,14 @@ async def on_message(message):
     if (message.author != client.user and not message.author.bot
             and sandbox_thread_inbox.is_run_active(message.channel.id)):
         await route_to_sandbox(message)
+        return
+    if await voice_dev_inject(message):
+        return
+    # In a voice call in this guild: no text replies, rules or queueing
+    # (classes/voice_gate.py). Sandbox steering above still works, so a run
+    # started from the call can be steered in its thread.
+    if message.guild is not None and voice_gate.active(message.guild.id):
+        await voice_busy_notice(message)
         return
     if await automation_runner.match_message(message, message_queue):
         set_message_queue_size(message_queue.qsize())
@@ -369,6 +397,68 @@ async def route_to_sandbox(message) -> None:
         logger.warning(f"Sandbox inbox: could not reply to {message.id}: {e}")
 
 
+VOICE_BUSY_REPLY = "🎙️ I'm in a voice call right now — talk to me there, or use /voice leave."
+# How often the "in a call" notice may be posted per channel.
+VOICE_NOTICE_SECONDS = 60
+_voice_notice_at: dict[int, float] = {}
+
+
+async def voice_busy_notice(message) -> None:
+    """A fixed reply (no LLM) to a mention while the bot is in a call."""
+    if message.author == client.user or message.author.bot or client.user not in message.mentions:
+        return
+    now = time.monotonic()
+    if now - _voice_notice_at.get(message.channel.id, -VOICE_NOTICE_SECONDS) < VOICE_NOTICE_SECONDS:
+        return
+    _voice_notice_at[message.channel.id] = now
+    try:
+        await message.reply(VOICE_BUSY_REPLY, mention_author=False)
+    except Exception as e:
+        logger.warning(f"Could not send the in-a-call notice: {e}")
+
+
+async def voice_dev_inject(message) -> bool:
+    """VOICE_DEV_INJECT=1 only (local testing, never in the chart): drive a
+    call from text, so the wake -> LLM -> tools -> speech path can be tested
+    without anyone speaking. "!voice_join <channel id>" joins, "!voice_say
+    <text>" is heard as if the author had said it."""
+    content = message.content or ""
+    if not content.startswith(("!voice_join", "!voice_say")) or message.guild is None:
+        return False
+    if not voice_settings()["dev_inject"] or message.author == client.user:
+        return False
+    from classes import voice_session
+    command, _, argument = content.partition(" ")
+    try:
+        if command == "!voice_join":
+            channel = message.guild.get_channel(int(argument.strip()))
+            await voice_session.start(client, channel, message.channel, message.author)
+        elif command == "!voice_say":
+            session = voice_gate.session(message.guild.id)
+            if session is not None:
+                await session.heard(message.author.id, message.author.display_name, argument)
+    except Exception as e:
+        logger.warning(f"Voice dev inject failed: {e}")
+        await message.reply(f"❌ {e}", mention_author=False)
+    return True
+
+
+@client.event
+async def on_voice_state_update(member, before, after):
+    session = voice_gate.session(member.guild.id)
+    if session is None:
+        return
+    if member.id == client.user.id:
+        if after.channel is None:
+            await session.end("I was disconnected from the voice channel.")
+        else:
+            session.moved(after.channel)
+        return
+    channel_ids = {getattr(before.channel, "id", None), getattr(after.channel, "id", None)}
+    if session.voice_channel.id in channel_ids:
+        session.members_changed()
+
+
 async def should_handle_message(message) -> bool:
     # Decides whether the bot should reply to a message; called from
     # on_message before enqueueing, so no-reply messages never reach the
@@ -442,9 +532,20 @@ async def process_messages():
         set_message_queue_size(message_queue.qsize())
         if isinstance(message, automation_runner.AutomationJob):
             try:
-                await automation_runner.execute(message, client)
+                # Its guild went into a voice call while it waited.
+                if voice_gate.active(message.records[0]["guild_id"]):
+                    await automation_runner.discard(message)
+                else:
+                    await automation_runner.execute(message, client)
             finally:
                 message_queue.task_done()
+            continue
+        if message.guild is not None and voice_gate.active(message.guild.id):
+            # Queued before the bot joined a call here; dropped, not delayed:
+            # answered after the call it would be stale.
+            pop_enqueued(message.id)
+            message_queue.task_done()
+            logger.info("Dropping a queued message: the bot is in a voice call in that guild")
             continue
         handler = MessageHandler(message, client)
 

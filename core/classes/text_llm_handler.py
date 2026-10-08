@@ -14,10 +14,15 @@ from classes.metrics import (
     set_slot_context,
 )
 from agents import Agent, Runner, OpenAIChatCompletionsModel, AsyncOpenAI, FunctionTool, function_tool, RunContextWrapper, ModelSettings, RunHooks
+from agents.models.interface import ModelTracing
+from openai import BadRequestError, UnprocessableEntityError
+from openai.types.responses import ResponseCreatedEvent, ResponseTextDeltaEvent
 from classes.config_manager import configManager
 from classes.response_filter import extract_reasoning_items, extract_thinking
 from classes.llm_config import llm_api_key, llm_host, llm_model, parse_temperature
 from classes.reply_policy import INSTRUCTION as DOUBLE_REPLY_INSTRUCTION
+from classes.side_llm import NO_THINKING
+from classes import voice_policy
 
 # Max turns for ONE reply from the main agent (a turn = one model response,
 # however many tool calls it carries). The SDK's own default is 10, which a
@@ -255,9 +260,21 @@ class ToolMetricsHooks(RunHooks):
                 logger.warning(f"In-flight registry tool_end failed: {e}")
 
 
-def agent_tools(automatic: bool = False) -> list:
+# Whether a voice turn asks the server to skip thinking. Cleared for the
+# process once a backend has rejected the option (see generate_streamed).
+_voice_latch = {"send_no_thinking": True}
+
+
+def voice_thinking_off() -> bool:
+    return not voice_policy.settings()["thinking"] and _voice_latch["send_no_thinking"]
+
+
+def agent_tools(automatic: bool = False, voice: bool = False) -> list:
     """The function tools the main agent gets. A function of its own so the
-    /help sync test (core/tests/help_catalog_tests.py) can list them."""
+    /help sync test (core/tests/help_catalog_tests.py) can list them.
+
+    A voice turn gets the same tools as a chat reply, except that it can
+    leave the call instead of joining one."""
     tools = [
         web_search,
         fetch_url,
@@ -267,6 +284,9 @@ def agent_tools(automatic: bool = False) -> list:
         tools.extend((store_memory, remove_memory, clear_memories))
         from classes.automation_tools import automation_tools
         tools.extend(automation_tools())
+    if not automatic and voice_policy.settings()["enabled"]:
+        from classes.tool_functions import join_voice_channel, leave_voice_channel
+        tools.append(leave_voice_channel if voice else join_voice_channel)
     # The image tool only exists when the diffusion service is enabled
     # (IMAGE_GEN_ENABLED; set from the helm chart's diffusion.enabled).
     if image_generation_enabled():
@@ -284,7 +304,8 @@ class TextLLMHandler:
     allow_double_reply = False
 
     def __init__(self, messages, guild_id, original_message, client=None,
-                 actor_id=None, channel=None, automatic=False):
+                 actor_id=None, channel=None, automatic=False, voice=False, request_text=None,
+                 bot_name=None):
         self.original_message = original_message
         self.messages = messages
         self.guild_id = guild_id
@@ -298,6 +319,13 @@ class TextLLMHandler:
         self.actor_id = actor_id if actor_id is not None else original_message.author.id
         self.channel = channel if channel is not None else original_message.channel
         self.automatic = automatic
+        # A turn in a voice call: spoken instructions, thinking off, and no
+        # source message (original_message is None; request_text is what the
+        # speaker said, for tools that compare their result against it).
+        self.voice = voice
+        self.request_text = request_text
+        # The bot's display name, told to the model in a voice call.
+        self.bot_name = bot_name
         self.user_memory = None if automatic else UserMemory(self.actor_id, guild_id)
         # Filled in by generate(): the model's internal reasoning for this
         # run, which the caller sends to Discord behind a spoiler when
@@ -378,23 +406,46 @@ class TextLLMHandler:
 
     async def get_client(self):
         main_model_client = _get_main_model_client()
-        tools = agent_tools(getattr(self, "automatic", False))
+        voice = getattr(self, "voice", False)
+        tools = agent_tools(getattr(self, "automatic", False), voice)
+        instructions = self.system
+        if voice:
+            # After the personality, and the same for the whole call, so it
+            # stays inside the prompt prefix llama.cpp keeps cached.
+            instructions = f"{self.system}\n\n{voice_policy.voice_instructions(getattr(self, 'bot_name', None) or '')}"
 
         self.agent = Agent(
             name="Assistant",
-            instructions=self.system,
+            instructions=instructions,
             model=main_model_client,
             tools=tools,
-            model_settings=ModelSettings(
-                temperature=self.options["temperature"],
-                frequency_penalty=1.1,
-                top_p=1.0,
-                reasoning={"effort": os.environ.get("REASONING_EFFORT", "medium")},
-                timeout=llm_call_timeout(),
-            ),
+            model_settings=self._model_settings(),
         )
 
-    async def generate(self):
+    def _model_settings(self, no_thinking: bool | None = None) -> ModelSettings:
+        """`no_thinking` overrides the voice latch for one request (the
+        retry without the option, before it is known to work)."""
+        if no_thinking is None:
+            no_thinking = voice_thinking_off()
+        settings = dict(
+            temperature=self.options["temperature"],
+            frequency_penalty=1.1,
+            top_p=1.0,
+            timeout=llm_call_timeout(),
+        )
+        if getattr(self, "voice", False) and no_thinking:
+            # Off, not merely "low": a spoken reply waits for every reasoning
+            # token before its first word. Same switch the image side calls
+            # use (side_llm.NO_THINKING).
+            settings["extra_body"] = NO_THINKING
+        else:
+            settings["reasoning"] = {"effort": os.environ.get("REASONING_EFFORT", "medium")}
+        return ModelSettings(**settings)
+
+    async def _prepare(self) -> dict:
+      """Settings, agent and run context: everything generate(),
+      generate_streamed() and prefill() share. Built in exactly one place so
+      a voice prefill sends the same prompt prefix as the turn after it."""
       await self.get_settings()
       user_info = {
         "data": await self.user_memory.get() or [] if getattr(self, "user_memory", None) else [],
@@ -411,10 +462,16 @@ class TextLLMHandler:
         # run ends, since a tool call may have already mutated this dict
         # before a later turn raises (e.g. MaxTurnsExceeded).
         "sandbox_thread": None,
+        # What a voice speaker said (no source message to read it from).
+        "request_text": getattr(self, "request_text", None),
       }
-      datetime = await get_current_datetime()
       self.system = f"Answer as if you are {self.system}."
       await self.get_client()
+      return user_info
+
+    async def generate(self):
+      user_info = await self._prepare()
+      datetime = await get_current_datetime()
       # The datetime is appended as a trailing message rather than folded
       # into the system prompt: the system prompt + growing history stays
       # byte-identical across turns of the same conversation, so llama.cpp's
@@ -457,6 +514,111 @@ class TextLLMHandler:
          self._record_prompt_tokens(getattr(run_data, "raw_responses", None))
          inc_llm_error(self.guild_id)
          return "Error"
+
+    async def generate_streamed(self, on_text, on_model_start=None, on_tool=None, hooks=None):
+      """generate() for a voice turn: the answer is handed to `on_text` as it
+      is written, so the first sentence can be spoken while the model is
+      still writing the rest. Returns the final answer, or "Error".
+
+      on_model_start() fires as each model call starts (one per turn of a
+      tool-calling run), and on_tool(name, arguments) as the model calls a
+      tool. Between them the caller can tell whether the model said anything
+      before a tool call -- the spoken "hold on" line.
+
+      Thinking is off for voice (see _model_settings). A backend that rejects
+      that option gets one retry without it, and is not sent it again, the
+      side_llm latch rule: only a retry that WORKED identifies the option.
+      """
+      user_info = await self._prepare()
+      datetime = await get_current_datetime()
+      # Same trailing datetime as generate(): everything before it is the
+      # prompt prefix a voice prefill warmed (see prefill()).
+      messages_for_run = self.messages + [
+          {"role": "user", "content": f"(Current datetime: {datetime})"}
+      ]
+      hooks = hooks or ToolMetricsHooks(self.guild_id)
+      emitted = False
+      retried_without_option = False
+      for attempt in (1, 2):
+        sent_no_thinking = self.agent.model_settings.extra_body is not None
+        try:
+          result = Runner.run_streamed(self.agent, messages_for_run, context=user_info,
+                                       max_turns=llm_max_turns(), hooks=hooks)
+          async for event in result.stream_events():
+            if event.type == "raw_response_event":
+              if isinstance(event.data, ResponseTextDeltaEvent) and event.data.delta:
+                emitted = True
+                await on_text(event.data.delta)
+              elif isinstance(event.data, ResponseCreatedEvent) and on_model_start:
+                await on_model_start()
+            elif (event.type == "run_item_stream_event" and event.name == "tool_called"
+                  and on_tool is not None):
+              raw = getattr(event.item, "raw_item", None)
+              await on_tool(getattr(raw, "name", "") or "", getattr(raw, "arguments", "") or "")
+          final_output = result.final_output
+          self._capture_reasoning(result.new_items, final_output)
+          self._record_prompt_tokens(result.raw_responses)
+          self.sandbox_thread = user_info.get("sandbox_thread")
+          if retried_without_option:
+            # Only now is the option known to be what the server refused;
+            # a retry that failed too says nothing about it.
+            _voice_latch["send_no_thinking"] = False
+          return final_output if isinstance(final_output, str) else str(final_output or "")
+        except asyncio.CancelledError:
+          hooks.abandon_llm_call("cancelled")
+          raise
+        except (BadRequestError, UnprocessableEntityError) as e:
+          if attempt == 1 and sent_no_thinking and not emitted:
+            logger.info(f"Voice: request rejected with thinking disabled ({e}); "
+                        f"retrying without that option")
+            retried_without_option = True
+            self.agent = self.agent.clone(model_settings=self._model_settings(no_thinking=False))
+            continue
+          return self._streamed_failure(hooks, user_info, e)
+        except Exception as e:
+          return self._streamed_failure(hooks, user_info, e)
+
+    def _streamed_failure(self, hooks, user_info, e) -> str:
+      hooks.abandon_llm_call("error")
+      self.sandbox_thread = user_info.get("sandbox_thread")
+      logger.warning('Failed to get a streamed response from LLM: ' + str(e))
+      inc_llm_error(self.guild_id)
+      return "Error"
+
+    async def prefill(self) -> None:
+      """Warm llama.cpp's prompt cache with this conversation, so the next
+      voice turn only has to process its tail.
+
+      Sends exactly what generate_streamed() would send for these messages --
+      same instructions, tools and model settings, built by the same
+      _prepare() -- minus the trailing datetime message, and asks for one
+      token. llama.cpp keeps the processed prompt in its slot; the real turn
+      is that prompt plus a few tokens, so it is answered almost at once.
+      Measured on the dev stack: a 2.4k-token voice prompt went from 1.0s of
+      prompt processing to 0.3s, 52 tokens instead of 2427.
+      """
+      user_info = await self._prepare()
+      run_context = RunContextWrapper(context=user_info)
+      tools = await self.agent.get_all_tools(run_context)
+      settings = self.agent.model_settings.resolve(ModelSettings(max_tokens=1))
+      started = time.monotonic()
+      outcome = "error"
+      try:
+        await self.agent.model.get_response(
+            system_instructions=await self.agent.get_system_prompt(run_context),
+            input=self.messages,
+            model_settings=settings,
+            tools=tools,
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+        )
+        outcome = "ok"
+      except asyncio.CancelledError:
+        outcome = "cancelled"
+        raise
+      finally:
+        observe_llm_call("voice_prefill", outcome, time.monotonic() - started)
 
     def _record_prompt_tokens(self, raw_responses):
         """Record the prompt size of every model call in this run (never raises).
