@@ -54,7 +54,7 @@ HISTORY = [
 
 def _handler(**kwargs):
     return text_llm_handler.TextLLMHandler(list(HISTORY), 42, None, actor_id=7, channel=object(),
-                                           voice=True, **kwargs)
+                                           voice=True, bot_name="Sparky", **kwargs)
 
 
 @pytest.mark.asyncio
@@ -84,7 +84,7 @@ async def test_voice_turns_ask_for_no_thinking(captured):
     assert not isinstance(request.get("reasoning_effort"), str)
     system = request["messages"][0]["content"]
     assert system.startswith("Answer as if you are a pirate.")
-    assert "voice call" in system
+    assert "voice call, where people call you Sparky;" in system
 
 
 @pytest.mark.asyncio

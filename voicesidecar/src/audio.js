@@ -42,24 +42,24 @@ export function worthTranscribing(mono, minSeconds) {
 }
 
 /**
- * A short rising two-note chime (48 kHz stereo s16le): the "I heard you" cue,
+ * A soft rising two-note chime (48 kHz stereo s16le): the "I heard you" cue,
  * played when someone says the wake phrase and again when their request
  * starts being answered. Generated rather than synthesised so it plays at
- * once, with no TTS round trip. A fundamental plus a quieter octave, struck
- * and decaying like a bell, so it stands out from speech without being harsh.
+ * once, with no TTS round trip. Pure sine tones in the middle register (C5
+ * then E5), each eased in over 20 ms and fading away, so it is noticeable
+ * without being sharp.
  */
 const CHIME = (() => {
-  const notes = [[784, 0.13], [1175, 0.24]]; // G5 then D6
+  const notes = [[523.25, 0.16], [659.25, 0.3]];
   const parts = notes.map(([freq, seconds]) => {
     const frames = Math.floor(SAMPLE_RATE * seconds);
+    const attack = SAMPLE_RATE * 0.02;
     const buffer = Buffer.alloc(frames * 4);
     for (let i = 0; i < frames; i++) {
       const t = i / SAMPLE_RATE;
-      // Short fade in/out so the tone does not click, and a bell-like decay.
-      const edge = Math.min(1, i / 240, (frames - i) / 480);
-      const decay = Math.exp((-3 * t) / seconds);
-      const wave = Math.sin(2 * Math.PI * freq * t) + 0.35 * Math.sin(4 * Math.PI * freq * t);
-      const value = Math.round((wave / 1.35) * 14000 * decay * edge);
+      const edge = Math.min(1, i / attack, (frames - i) / 960);
+      const decay = Math.exp((-2.5 * t) / seconds);
+      const value = Math.round(Math.sin(2 * Math.PI * freq * t) * 7500 * decay * edge);
       buffer.writeInt16LE(value, i * 4);
       buffer.writeInt16LE(value, i * 4 + 2);
     }

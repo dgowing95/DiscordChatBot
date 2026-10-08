@@ -55,7 +55,7 @@ def _session(monkeypatch, members=None, **env):
     guild.get_member = lambda i: next((m for m in voice_channel.members if m.id == i), None)
     bridge = FakeBridge()
     session = voice_session.VoiceSession(MagicMock(), bridge, voice_channel, _member(7))
-    session.wake_phrase = "hey sparky"
+    session.custom_wake_phrase = "hey sparky"
     session.text_channel = MagicMock()
     session.text_channel.send = AsyncMock()
     voice_gate.enter(GUILD, session)
@@ -245,6 +245,22 @@ async def test_a_request_chimes_before_the_answer(monkeypatch, fake_llm):
     await session.heard(7, "Ana", "hey sparky what's the weather")
     await _settle(session)
     assert bridge.kinds() == ["chime", "speak"]
+    session._worker.cancel()
+
+
+@pytest.mark.asyncio
+async def test_renaming_the_bot_mid_call_changes_the_default_phrase(monkeypatch, fake_llm):
+    session, bridge = _session(monkeypatch)
+    session.custom_wake_phrase = ""
+    await _run(session)
+    await session.heard(7, "Ana", "hey sparky, hello")
+    await _settle(session)
+    session.guild.me.display_name = "Nugget"
+    await session.heard(7, "Ana", "hey sparky, hello again")
+    await session.heard(7, "Ana", "hey nugget, hello")
+    await _settle(session)
+    assert len(fake_llm.instances) == 2
+    assert [i.kwargs["bot_name"] for i in fake_llm.instances] == ["Sparky", "Nugget"]
     session._worker.cancel()
 
 

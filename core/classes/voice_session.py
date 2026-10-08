@@ -22,7 +22,7 @@ What happens to each utterance the voice sidecar transcribes (on_utterance):
      session's text thread.
 
 Before a tool runs the bot says a short line about what it is doing. The
-model is asked to write one itself (VOICE_INSTRUCTIONS); when it calls a tool
+model is asked to write one itself (voice_policy.VOICE_INSTRUCTIONS); when it calls a tool
 without saying anything, a small side call writes the line instead, so it is
 never canned and never silent. Lines and sentences are spoken strictly in
 order (_OrderedSpeech), so the answer never plays over its own "hold on".
@@ -197,7 +197,8 @@ class VoiceSession:
         self.requested_by_id = getattr(requested_by, "id", None)
         self.settings = voice_policy.settings()
         self.history = VoiceHistory(self.settings["history_limit"], self.settings["history_refresh"])
-        self.wake_phrase = ""
+        # A phrase set with /voice wake_word; empty means "hey <name>".
+        self.custom_wake_phrase = ""
         self.voice = None
         self.speed = 1.0
         self.ending = False
@@ -221,6 +222,16 @@ class VoiceSession:
     def guild_key(self) -> str:
         return str(self.guild.id)
 
+    @property
+    def bot_name(self) -> str:
+        return getattr(self.guild.me, "display_name", "") or ""
+
+    @property
+    def wake_phrase(self) -> str:
+        """Read on every utterance, so renaming the bot changes the default
+        phrase in a call already running (discord.py keeps guild.me current)."""
+        return self.custom_wake_phrase or default_wake_phrase(self.bot_name)
+
     # -- lifecycle ------------------------------------------------------------
 
     async def begin(self) -> None:
@@ -236,7 +247,7 @@ class VoiceSession:
     async def refresh_settings(self) -> None:
         """Re-read the per-guild voice settings."""
         config = configManager()
-        self.wake_phrase = await wake_phrase_for(self.guild)
+        self.custom_wake_phrase = await config.get_setting("voice_wake_word", self.guild.id) or ""
         self.voice = await config.get_setting("voice_name", self.guild.id) or self.settings["default_voice"]
         try:
             self.speed = float(await config.get_setting("voice_speed", self.guild.id) or 1.0)
@@ -453,7 +464,7 @@ class VoiceSession:
 
         handler = TextLLMHandler(self.history.messages(), self.guild.id, None, client=self.client,
                                  actor_id=user_id, channel=self.text_channel, voice=True,
-                                 request_text=text)
+                                 request_text=text, bot_name=self.bot_name)
         try:
             answer = await handler.generate_streamed(on_text, on_model_start, on_tool)
             for sentence in splitter.flush():
@@ -537,7 +548,7 @@ class VoiceSession:
         self._last_prefill = time.monotonic()
         handler = TextLLMHandler(self.history.messages(), self.guild.id, None, client=self.client,
                                  actor_id=self.requested_by_id or 0, channel=self.text_channel,
-                                 voice=True)
+                                 voice=True, bot_name=self.bot_name)
         try:
             await handler.prefill()
         except asyncio.CancelledError:

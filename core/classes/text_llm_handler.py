@@ -304,7 +304,8 @@ class TextLLMHandler:
     allow_double_reply = False
 
     def __init__(self, messages, guild_id, original_message, client=None,
-                 actor_id=None, channel=None, automatic=False, voice=False, request_text=None):
+                 actor_id=None, channel=None, automatic=False, voice=False, request_text=None,
+                 bot_name=None):
         self.original_message = original_message
         self.messages = messages
         self.guild_id = guild_id
@@ -323,6 +324,8 @@ class TextLLMHandler:
         # speaker said, for tools that compare their result against it).
         self.voice = voice
         self.request_text = request_text
+        # The bot's display name, told to the model in a voice call.
+        self.bot_name = bot_name
         self.user_memory = None if automatic else UserMemory(self.actor_id, guild_id)
         # Filled in by generate(): the model's internal reasoning for this
         # run, which the caller sends to Discord behind a spoiler when
@@ -409,7 +412,7 @@ class TextLLMHandler:
         if voice:
             # After the personality, and the same for the whole call, so it
             # stays inside the prompt prefix llama.cpp keeps cached.
-            instructions = f"{self.system}\n\n{voice_policy.VOICE_INSTRUCTIONS}"
+            instructions = f"{self.system}\n\n{voice_policy.voice_instructions(getattr(self, 'bot_name', None) or '')}"
 
         self.agent = Agent(
             name="Assistant",

@@ -87,6 +87,31 @@ def test_multi_word_names():
     assert vp.match_wake("did clever helper bot crash", phrase)[0] is False
 
 
+@pytest.mark.parametrize("heard", [
+    "Hey Taba, how are you?",       # a short name's vowel misheard
+    "hey tooba what time is it",
+    "Hey, Tuba.",
+])
+def test_a_short_name_survives_a_wrong_vowel(heard):
+    assert vp.match_wake(heard, "hey tubba")[0] is True
+
+
+@pytest.mark.parametrize("heard", [
+    "hey gubba",                    # a different consonant
+    "hey tab",
+    "hey tubby",
+    "hey tubbles",
+    "and Taba, what's up",          # one-word name with no greeting
+])
+def test_a_short_name_is_not_loose(heard):
+    assert vp.match_wake(heard, "hey tubba")[0] is False
+
+
+@pytest.mark.parametrize("heard", ["Hey Sparkydev, hi.", "Okay Sparkidev, say test.", "Hey, Sporky Dev, how are you?"])
+def test_name_words_split_or_joined(heard):
+    assert vp.match_wake(heard, "hey sparky dev")[0] is True
+
+
 def test_custom_phrase_without_a_greeting():
     assert vp.match_wake("Computer, lights on", "computer") == (True, "lights on")
 
@@ -228,4 +253,10 @@ def test_hold_on_messages_carry_the_tool_and_request():
 def test_voice_instructions_fit_in_one_home():
     # One place for what the voice model is told (AGENTS.md "Prompt
     # surface"); keep it short -- it is in every voice prompt.
-    assert len(vp.VOICE_INSTRUCTIONS) < 900
+    assert len(vp.voice_instructions("x" * 200)) < 1000
+
+
+def test_voice_instructions_name_the_bot():
+    assert "people call you Sparky the Bot;" in vp.voice_instructions("  Sparky  the Bot ")
+    assert "{name}" not in vp.voice_instructions("")
+    assert "voice call;" in vp.voice_instructions("")

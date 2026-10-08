@@ -20,7 +20,6 @@ The rules worth knowing before changing them:
     none of its cached prompt; this one keeps its start fixed and grows,
     then rebases (see VoiceHistory).
 """
-import difflib
 import os
 import re
 import unicodedata
@@ -73,7 +72,7 @@ def settings() -> dict:
 GREETINGS = frozenset({"hey", "hay", "hi", "hei", "heya", "hiya", "a", "eh", "ay", "ok", "okay", "yo", "hello"})
 # How far into an utterance the phrase may start ("um, okay so hey sparky").
 MAX_LEADING_WORDS = 3
-# Similarity of the phonetic keys of phrase and heard words.
+# Similarity of the phonetic keys of phrase and heard words (_ratio).
 WAKE_THRESHOLD = 0.8
 MAX_WAKE_PHRASE_CHARS = 60
 MAX_WAKE_PHRASE_WORDS = 5
@@ -122,9 +121,32 @@ def validate_wake_phrase(phrase: str) -> str:
 
 
 def _ratio(heard: list[str], target: list[str]) -> float:
-    a = " ".join(_key(w) for w in heard)
-    b = " ".join(_key(w) for w in target)
-    return difflib.SequenceMatcher(None, a, b).ratio()
+    """Spelling similarity of two word lists, 0..1: one minus the edit
+    distance between their phonetic keys, over the longer key's length.
+
+    Spaces are ignored, since Whisper splits and joins names as it likes
+    ("sparkydev" / "sparky dev"). Swapping one vowel for another costs a
+    quarter of an edit: the vowel is what Whisper gets wrong most in a short
+    name ("lulu" written "lala"), and at full cost a four-letter name could
+    not lose a single letter. A different consonant costs a whole edit, so
+    "hey barky" stays apart from "hey sparky".
+    """
+    a = "".join(_key(w) for w in heard)
+    b = "".join(_key(w) for w in target)
+    if not a or not b:
+        return 0.0
+    previous = [float(j) for j in range(len(b) + 1)]
+    for i, x in enumerate(a, 1):
+        current = [float(i)]
+        for j, y in enumerate(b, 1):
+            swap = 0.0 if x == y else VOWEL_SWAP_COST if x in _VOWELS and y in _VOWELS else 1.0
+            current.append(min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + swap))
+        previous = current
+    return 1 - previous[-1] / max(len(a), len(b))
+
+
+_VOWELS = frozenset("aeiou")
+VOWEL_SWAP_COST = 0.25
 
 
 # Greetings Whisper may glue onto the name ("heysparky"). Two letters or
@@ -357,15 +379,29 @@ class SentenceSplitter:
 # the same for the whole session (the cached prefix depends on that). One
 # home for every voice-specific instruction: add guidance here, not in a
 # second copy elsewhere (see AGENTS.md "Prompt surface").
+#
+# The bot's name is in it because a call is the one place the model hears it:
+# in chat the mention is stripped. Without it, told only that people address
+# it by name, the model answered "Hey <name>, how are you?" with "I don't see
+# anyone addressing me directly here". Only a transcript that starts with the
+# wake phrase becomes a turn, so the newest message is ALWAYS meant for it,
+# and saying so is what stops that second-guessing.
 VOICE_INSTRUCTIONS = (
-    "You are talking out loud in a Discord voice call; everything you write is spoken by a "
-    "text-to-speech voice. Reply in one to three short, natural spoken sentences. No markdown, "
-    "lists, emoji, code or links. Messages labelled [Name]: are transcripts of what people in the "
-    "call said, and may contain recognition mistakes; you are only being asked something when "
-    "someone addresses you by name. Before you call a tool, first say one short sentence about "
-    "what you are about to do, in your own words. Pictures and code results appear in the text "
-    "thread for this call, so say they are there rather than describing every detail."
+    "You are talking out loud in a Discord voice call{name}; everything you write is spoken by a "
+    "text-to-speech voice. Stay in character. Reply in one to three short, natural spoken "
+    "sentences. No markdown, lists, emoji, code or links. Messages labelled [Name]: are "
+    "transcripts of what people in the call said, and may contain recognition mistakes, your own "
+    "name included. The newest one is said to you; the earlier ones are the conversation around "
+    "it. Before you call a tool, first say one short sentence about what you are about to do, in "
+    "your own words. Pictures and code results appear in the text thread for this call, so say "
+    "they are there rather than describing every detail."
 )
+
+
+def voice_instructions(bot_name: str = "") -> str:
+    """VOICE_INSTRUCTIONS for a bot called `bot_name` (its display name)."""
+    name = " ".join((bot_name or "").split())[:80]
+    return VOICE_INSTRUCTIONS.format(name=f", where people call you {name}" if name else "")
 
 # Asked of the side model when the voice model called a tool without saying
 # anything first, so the call is never silent and the line is never canned.
