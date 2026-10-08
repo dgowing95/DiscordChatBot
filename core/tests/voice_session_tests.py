@@ -237,6 +237,18 @@ async def test_the_wake_phrase_alone_chimes_and_opens_a_follow_up(monkeypatch, f
 
 
 @pytest.mark.asyncio
+async def test_a_request_chimes_before_the_answer(monkeypatch, fake_llm):
+    session, bridge = _session(monkeypatch)
+    fake_llm.script = [("text", "It's sunny.")]
+    fake_llm.answer = "It's sunny."
+    await _run(session)
+    await session.heard(7, "Ana", "hey sparky what's the weather")
+    await _settle(session)
+    assert bridge.kinds() == ["chime", "speak"]
+    session._worker.cancel()
+
+
+@pytest.mark.asyncio
 async def test_the_follow_up_window_closes(monkeypatch, fake_llm):
     session, bridge = _session(monkeypatch)
     session.settings["followup_seconds"] = 0

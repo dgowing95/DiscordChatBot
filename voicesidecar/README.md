@@ -22,7 +22,8 @@ One JSON object per WebSocket text frame. Every message names its `guild_id`, an
 | | `gateway` | `t` (`VOICE_STATE_UPDATE` / `VOICE_SERVER_UPDATE`), `d` |
 | | `config` | `ignore_user_ids` (other bots in the call) |
 | | `speak` | `id` (the turn), `text` (one sentence), `voice`, `speed` |
-| | `chime` / `stop` / `leave` | |
+| | `chime` | queues the built-in "I heard you" tone behind any speech |
+| | `stop` / `leave` | |
 | sidecar → core | `hello` | `version` |
 | | `payload` | `d`: an op-4 voice state for core's gateway |
 | | `ready` / `disconnected` | `reason` |

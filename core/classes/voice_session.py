@@ -14,7 +14,9 @@ What happens to each utterance the voice sidecar transcribes (on_utterance):
   3. "leave" / "stop" after the wake phrase are handled here, at once, never
      by the LLM. The wake phrase on its own plays a chime and lets that
      speaker's next utterance count as the request (VOICE_FOLLOWUP_SECONDS).
-  4. A request becomes a TURN: the voice agent runs streamed, each finished
+  4. A request becomes a TURN. It opens with the same chime, so whoever
+     asked hears at once that they were heard while the model works on it.
+     The voice agent then runs streamed, each finished
      sentence is sent to the sidecar while the model writes the next, and
      tools run as in chat, posting their pictures and code results in the
      session's text thread.
@@ -341,7 +343,7 @@ class VoiceSession:
             inc_voice_utterance("wake_only")
             self._followup_user = user_id
             self._followup_until = now + self.settings["followup_seconds"]
-            await self.bridge.send({"type": "chime", "guild_id": self.guild_key})
+            await self._chime()
             self._schedule_prefill()
             return
         self._followup_user = None
@@ -412,6 +414,10 @@ class VoiceSession:
         turn_id = uuid.uuid4().hex[:12]
         self._current_turn = turn_id
         first_audio = []
+        # Played when the turn starts, not when the request is heard: the
+        # sidecar plays one FIFO, so a chime sent while the last answer is
+        # still being streamed would land in the middle of it.
+        await self._chime()
 
         async def send(sentence: str) -> None:
             if self.ending or turn_id in self._muted_turns:
@@ -493,6 +499,11 @@ class VoiceSession:
             await asyncio.wait_for(event.wait(), timeout)
         except asyncio.TimeoutError:
             pass
+
+    async def _chime(self) -> None:
+        """The "I heard you" cue, played by the sidecar with no TTS round trip."""
+        if not self.ending:
+            await self.bridge.send({"type": "chime", "guild_id": self.guild_key})
 
     async def _speak_line(self, text: str) -> None:
         """A one-off line outside any turn (greeting, busy notice)."""
