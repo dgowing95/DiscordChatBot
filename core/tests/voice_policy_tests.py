@@ -143,6 +143,8 @@ def test_validate_wake_phrase_refuses(phrase):
     ("stop.", vp.STOP),
     ("shut up", vp.STOP),
     ("be quiet please", vp.STOP),
+    ("stop it", vp.STOP),
+    ("OK, that's enough", vp.STOP),
     ("stop the music and tell me a joke", None),  # a real request
     ("what's the weather", None),
     ("", None),

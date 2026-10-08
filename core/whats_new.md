@@ -16,6 +16,10 @@ first time someone triggers the bot after that release is deployed.
 I can join a voice channel and talk out loud. I only answer when someone says "hey" and my name, and everything else I can do in chat works there too: pictures and code results appear in a thread for the call. While I'm in a call, I don't reply in text in this server.
 How to use: ask me to join voice, or use /voice join. Then say "hey <my name>" and your question. Say "hey <my name>, leave" or use /voice leave when you're done.
 
+## Tell me to stop talking
+If I'm going on too long, say "hey <my name>, stop" (or "shut up", "be quiet", "that's enough") and I stop at once, so you can talk. Anything I was making, like a picture, still finishes in the thread. It uses your server's wake phrase if you've set your own.
+How to use: in a voice call, say "hey <my name>, stop".
+
 ## Pick my voice and wake phrase
 Choose how I sound from dozens of voices (or blend two), how fast I talk, and what phrase gets my attention.
 How to use: /voice voice, /voice speed and /voice wake_word.

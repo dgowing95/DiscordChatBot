@@ -8,7 +8,7 @@ It only answers when addressed. Start with the wake phrase, which by default is 
 
 Before a tool runs (a web search, a picture, a code run) the bot says a short line about what it is doing, then gives the answer. Answers are spoken a sentence at a time while the rest is still being written.
 
-- "hey sparky, stop" (or "shut up", "be quiet") stops it talking. Work already started, such as a picture or a code run, still finishes and appears in the thread.
+- "hey sparky, stop" (or "shut up", "be quiet", "that's enough") stops it talking, with whatever wake phrase the server uses. Work already started, such as a picture or a code run, still finishes and appears in the thread.
 - "hey sparky, leave" (or "goodbye", "go away"), `/voice leave`, or asking it to leave in other words ends the call.
 - It leaves on its own 30 seconds after the last person does.
 

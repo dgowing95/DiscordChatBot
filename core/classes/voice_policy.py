@@ -225,7 +225,9 @@ _FILLER = frozenset({"please", "now", "can", "could", "would", "you", "will", "j
 _LEAVE_COMMANDS = frozenset({"leave", "go away", "go", "disconnect", "get out", "bye", "goodbye",
                              "bye bye", "hang up", "go home", "log off", "leave us"})
 _STOP_COMMANDS = frozenset({"stop", "shut up", "be quiet", "quiet", "stop talking", "silence",
-                            "enough", "cancel", "hush", "shush", "nevermind", "never mind"})
+                            "enough", "cancel", "hush", "shush", "nevermind", "never mind",
+                            "stop it", "stop stop", "that's enough", "thats enough", "pipe down",
+                            "zip it"})
 
 
 def parse_command(remainder: str) -> str | None:
