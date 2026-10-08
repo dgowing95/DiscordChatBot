@@ -13,7 +13,7 @@ Run from the repo root:
 """
 from unittest.mock import AsyncMock, patch
 
-import httpx
+import httpx2
 import pytest
 from openai import BadRequestError
 from agents import AsyncOpenAI, OpenAIChatCompletionsModel
@@ -112,8 +112,8 @@ async def test_a_failed_retry_leaves_thinking_off(captured, monkeypatch):
     # nothing shows the option was the problem, so later voice turns must
     # still be sent it (side_llm's latch rule).
     monkeypatch.setitem(text_llm_handler._voice_latch, "send_no_thinking", True)
-    request = httpx.Request("POST", "http://llm.invalid/v1/chat/completions")
-    refused = BadRequestError("refused", response=httpx.Response(400, request=request), body=None)
+    request = httpx2.Request("POST", "http://llm.invalid/v1/chat/completions")
+    refused = BadRequestError("refused", response=httpx2.Response(400, request=request), body=None)
     model = text_llm_handler._main_model_client
     sent = []
 
