@@ -4,7 +4,6 @@
 // and that is also what @discordjs/voice plays as StreamType.Raw.
 
 export const SAMPLE_RATE = 48000;
-const BYTES_PER_STEREO_SECOND = SAMPLE_RATE * 2 * 2;
 const BYTES_PER_MONO_SECOND = SAMPLE_RATE * 2;
 
 /** Seconds of audio in a mono 48 kHz s16le buffer. */
@@ -72,4 +71,3 @@ export function chime() {
   return CHIME;
 }
 
-export { BYTES_PER_STEREO_SECOND };

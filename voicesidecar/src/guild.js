@@ -15,7 +15,7 @@ import {
 } from "@discordjs/voice";
 import prism from "prism-media";
 
-import { chime, downmixToMono, stereoBytes, worthTranscribing } from "./audio.js";
+import { chime, downmixToMono, monoSeconds, stereoBytes, worthTranscribing } from "./audio.js";
 import { SpeechQueue } from "./playback.js";
 import { synthesize, transcribe } from "./speech.js";
 import { log } from "./log.js";
@@ -115,7 +115,7 @@ export class GuildVoice {
     this.speech.enqueue({ id, text, voice, speed });
   }
 
-  chime() {
+  playChime() {
     this.speech.enqueue({ id: "chime", pcm: chime() });
   }
 
@@ -180,9 +180,12 @@ export class GuildVoice {
       if (bytes >= maxBytes) finish();
     });
     // A corrupt packet (or one that failed DAVE decryption and slipped
-    // through) must cost that utterance at most, never the listener.
+    // through) must cost that utterance at most, never the listener: a
+    // decoder that errored emits no more data, so end the utterance here
+    // rather than wait for the speaker to fall silent.
     decoder.on("error", (error) => {
       log.debug(`guild ${this.guildId}: opus decode error for ${userId}: ${error.message}`);
+      finish();
     });
     stream.on("error", (error) => {
       log.debug(`guild ${this.guildId}: receive error for ${userId}: ${error.message}`);
@@ -207,7 +210,7 @@ export class GuildVoice {
         guild_id: this.guildId,
         user_id: userId,
         text,
-        duration_ms: Math.round((mono.length / 96000) * 1000),
+        duration_ms: Math.round(monoSeconds(mono) * 1000),
         ended_at: endedAt,
         stt_seconds: result.seconds,
       });

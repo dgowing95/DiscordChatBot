@@ -91,6 +91,20 @@ def _fold(text: str) -> str:
     return "".join(c for c in text if not unicodedata.combining(c)).lower()
 
 
+def _fold_with_offsets(text: str) -> tuple[str, list[int]]:
+    """_fold(text), plus for each folded character the offset in `text`
+    just past the character it came from. Folding changes lengths ("…" is
+    three dots, "ﬁ" two letters, an accent may be a separate character), so
+    a position in the folded text cannot be used on the original."""
+    folded: list[str] = []
+    ends: list[int] = []
+    for i, char in enumerate(text or ""):
+        part = _fold(char)
+        folded.append(part)
+        ends.extend([i + 1] * len(part))
+    return "".join(folded), ends
+
+
 def _key(word: str) -> str:
     """A rough phonetic key: doubled letters collapsed and the common
     spellings of a final "ee" sound unified, so sparky / sparkie / sparki match
@@ -197,7 +211,8 @@ def match_wake(transcript: str, phrase: str) -> tuple[bool, str]:
     target = words(phrase)
     if not target:
         return False, ""
-    spans = [(m.group(0), m.end()) for m in _WORD.finditer(_fold(transcript))]
+    folded, raw_ends = _fold_with_offsets(transcript)
+    spans = [(m.group(0), raw_ends[m.end() - 1]) for m in _WORD.finditer(folded)]
     heard = [w for w, _ in spans]
     best = (0.0, None)
     for start in range(0, min(MAX_LEADING_WORDS, len(heard)) + 1):
@@ -210,7 +225,10 @@ def match_wake(transcript: str, phrase: str) -> tuple[bool, str]:
     if best[0] < WAKE_THRESHOLD:
         return False, ""
     end = spans[best[1] - 1][1]
-    return True, transcript[end:].lstrip(" ,.!?;:-—").strip()
+    # A decomposed accent on the name's last letter belongs to the name.
+    while end < len(transcript) and unicodedata.combining(transcript[end]):
+        end += 1
+    return True, transcript[end:].lstrip(" ,.!?;:-—…").strip()
 
 
 # ---------------------------------------------------------------------------

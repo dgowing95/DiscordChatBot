@@ -422,14 +422,18 @@ class TextLLMHandler:
             model_settings=self._model_settings(),
         )
 
-    def _model_settings(self) -> ModelSettings:
+    def _model_settings(self, no_thinking: bool | None = None) -> ModelSettings:
+        """`no_thinking` overrides the voice latch for one request (the
+        retry without the option, before it is known to work)."""
+        if no_thinking is None:
+            no_thinking = voice_thinking_off()
         settings = dict(
             temperature=self.options["temperature"],
             frequency_penalty=1.1,
             top_p=1.0,
             timeout=llm_call_timeout(),
         )
-        if getattr(self, "voice", False) and voice_thinking_off():
+        if getattr(self, "voice", False) and no_thinking:
             # Off, not merely "low": a spoken reply waits for every reasoning
             # token before its first word. Same switch the image side calls
             # use (side_llm.NO_THINKING).
@@ -534,6 +538,7 @@ class TextLLMHandler:
       ]
       hooks = hooks or ToolMetricsHooks(self.guild_id)
       emitted = False
+      retried_without_option = False
       for attempt in (1, 2):
         sent_no_thinking = self.agent.model_settings.extra_body is not None
         try:
@@ -554,6 +559,10 @@ class TextLLMHandler:
           self._capture_reasoning(result.new_items, final_output)
           self._record_prompt_tokens(result.raw_responses)
           self.sandbox_thread = user_info.get("sandbox_thread")
+          if retried_without_option:
+            # Only now is the option known to be what the server refused;
+            # a retry that failed too says nothing about it.
+            _voice_latch["send_no_thinking"] = False
           return final_output if isinstance(final_output, str) else str(final_output or "")
         except asyncio.CancelledError:
           hooks.abandon_llm_call("cancelled")
@@ -562,8 +571,8 @@ class TextLLMHandler:
           if attempt == 1 and sent_no_thinking and not emitted:
             logger.info(f"Voice: request rejected with thinking disabled ({e}); "
                         f"retrying without that option")
-            _voice_latch["send_no_thinking"] = False
-            self.agent = self.agent.clone(model_settings=self._model_settings())
+            retried_without_option = True
+            self.agent = self.agent.clone(model_settings=self._model_settings(no_thinking=False))
             continue
           return self._streamed_failure(hooks, user_info, e)
         except Exception as e:

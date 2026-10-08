@@ -43,6 +43,10 @@ export class SpeechQueue {
     for (const item of dropped) {
       // Swallow the rejection of a prefetch nobody will await any more.
       item.audio?.catch(() => {});
+      // Core counts every sentence it sends and waits for each to end; one
+      // dropped here never plays, so it ends now. (The playing item is
+      // already off the list and gets its own "done" from #run.)
+      this.emit({ id: item.id, state: "failed", error: "stopped" });
     }
     this.interrupt();
   }

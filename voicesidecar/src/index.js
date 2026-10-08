@@ -12,6 +12,7 @@
 // is dropped: core's in-call state died with it.
 
 import http from "node:http";
+import { VoiceConnectionStatus } from "@discordjs/voice";
 import { WebSocketServer } from "ws";
 
 import { GuildVoice } from "./guild.js";
@@ -41,7 +42,7 @@ function handle(message) {
   if (message.type === "join") {
     if (guild && guild.channelId === message.channel_id && !guild.gone) {
       // Already there (a core that retried its join): say so again.
-      if (guild.connection?.state.status === "ready") send({ type: "ready", guild_id: guildId });
+      if (guild.connection?.state.status === VoiceConnectionStatus.Ready) send({ type: "ready", guild_id: guildId });
       return;
     }
     guild?.destroy("rejoin");
@@ -62,7 +63,7 @@ function handle(message) {
     case "gateway": guild.gateway(message.t, message.d); break;
     case "config": guild.configure(message); break;
     case "speak": guild.speak(message); break;
-    case "chime": guild.chime(); break;
+    case "chime": guild.playChime(); break;
     case "stop": guild.stop(); break;
     case "leave": guild.destroy("left"); break;
   }

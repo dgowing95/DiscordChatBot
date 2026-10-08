@@ -112,6 +112,15 @@ def test_name_words_split_or_joined(heard):
     assert vp.match_wake(heard, "hey sparky dev")[0] is True
 
 
+@pytest.mark.parametrize("heard, remainder", [
+    ("Hey Sparky… what's that?", "what's that?"),          # "…" folds to three characters
+    ("ﬁne, hey Sparky, hello", "hello"),                    # a ligature before the name
+    ("Hey Sparké, hi", "hi"),                        # an accent stored separately
+])
+def test_the_remainder_is_cut_from_the_original_text(heard, remainder):
+    assert vp.match_wake(heard, SPARKY) == (True, remainder)
+
+
 def test_custom_phrase_without_a_greeting():
     assert vp.match_wake("Computer, lights on", "computer") == (True, "lights on")
 

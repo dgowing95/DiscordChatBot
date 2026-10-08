@@ -13,7 +13,9 @@ Run from the repo root:
 """
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
+from openai import BadRequestError
 from agents import AsyncOpenAI, OpenAIChatCompletionsModel
 
 from classes import text_llm_handler
@@ -102,3 +104,27 @@ async def test_voice_tools_leave_rather_than_join(captured):
     names = {tool["function"]["name"] for tool in captured[0]["tools"]}
     assert "leave_voice_channel" in names and "join_voice_channel" not in names
     assert "web_search" in names and "store_memory" in names
+
+
+@pytest.mark.asyncio
+async def test_a_failed_retry_leaves_thinking_off(captured, monkeypatch):
+    # The first request is refused, and so is the retry without the option:
+    # nothing shows the option was the problem, so later voice turns must
+    # still be sent it (side_llm's latch rule).
+    monkeypatch.setitem(text_llm_handler._voice_latch, "send_no_thinking", True)
+    request = httpx.Request("POST", "http://llm.invalid/v1/chat/completions")
+    refused = BadRequestError("refused", response=httpx.Response(400, request=request), body=None)
+    model = text_llm_handler._main_model_client
+    sent = []
+
+    async def create(**kwargs):
+        sent.append(kwargs)
+        raise refused
+
+    with patch.object(model._client.chat.completions, "create", create):
+        assert await _handler(request_text="hi").generate_streamed(
+            AsyncMock(), AsyncMock(), AsyncMock()) == "Error"
+    assert len(sent) == 2
+    assert sent[0]["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+    assert not sent[1].get("extra_body")
+    assert text_llm_handler._voice_latch["send_no_thinking"] is True

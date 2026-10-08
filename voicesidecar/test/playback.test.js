@@ -76,6 +76,20 @@ test("stop drops queued speech and cuts off the current sentence", async () => {
   assert.ok(log.includes("play three"));
 });
 
+test("every sentence a stop drops still ends, exactly once", async () => {
+  const { queue, log, synth, tick, audio } = harness();
+  for (const text of ["one", "two", "three"]) queue.enqueue({ id: "a", text });
+  synth.get("one").resolve(audio("one"));
+  await tick();
+  queue.stop();
+  synth.get("two").resolve(audio("two"));
+  await tick();
+  // Core waits on one ending per sentence it sent: "one" was playing,
+  // "two" and "three" were dropped.
+  const endings = log.filter((l) => l === "done a" || l === "failed a");
+  assert.equal(endings.length, 3);
+});
+
 test("a failed synthesis is reported and the next sentence still plays", async () => {
   const { queue, log, synth, playing, tick, audio } = harness();
   queue.enqueue({ id: "t", text: "bad" });

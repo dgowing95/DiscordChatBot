@@ -44,6 +44,8 @@ def test_repeated_voice_adds_up():
 
 @pytest.mark.parametrize("spec, message", [
     ("", "No voice"),
+    (",,", "No voice"),
+    (" , ", "No voice"),
     ("zz_nobody", "Unknown voice"),
     ("af_heart:abc", "Bad weight"),
     ("af_heart:0", "Bad weight"),

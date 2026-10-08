@@ -164,9 +164,17 @@ def _default_voice() -> str:
     return DEFAULT_VOICE if DEFAULT_VOICE in voices else voices[0]
 
 
+def _report_load(task: asyncio.Task) -> None:
+    # Without this a failed load (a download error, out of memory) would
+    # only show as /health answering 503 forever.
+    if not task.cancelled() and task.exception() is not None:
+        logger.error("speech models failed to load", exc_info=task.exception())
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     task = asyncio.create_task(asyncio.to_thread(load_models))
+    task.add_done_callback(_report_load)
     yield
     task.cancel()
 
@@ -202,13 +210,27 @@ def _transcribe(pcm: bytes) -> dict:
     return {"text": join_segments(texts), "duration": round(info.duration, 2)}
 
 
+async def _read_capped(request: Request, limit: int) -> bytes:
+    """The request body, refused with 413 as soon as it passes `limit`
+    (request.body() would hold all of it in memory first)."""
+    try:
+        if int(request.headers.get("content-length") or 0) > limit:
+            raise HTTPException(413, "audio too long")
+    except ValueError:
+        raise HTTPException(400, "bad content-length") from None
+    body = bytearray()
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > limit:
+            raise HTTPException(413, "audio too long")
+    return bytes(body)
+
+
 @app.post("/transcribe")
 async def transcribe(request: Request):
     if not ready:
         raise HTTPException(503, "loading")
-    pcm = await request.body()
-    if len(pcm) > MAX_INPUT_BYTES:
-        raise HTTPException(413, "audio too long")
+    pcm = await _read_capped(request, MAX_INPUT_BYTES)
     if len(pcm) < 2:
         return {"text": "", "duration": 0.0, "seconds": 0.0}
     started = time.monotonic()

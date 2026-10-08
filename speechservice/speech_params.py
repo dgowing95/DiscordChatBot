@@ -62,6 +62,8 @@ def parse_voice_spec(spec: str, known) -> list[tuple[str, float]]:
     if not spec:
         raise ValueError("No voice given")
     parts = [p.strip() for p in spec.split(",") if p.strip()]
+    if not parts:
+        raise ValueError("No voice given")
     if len(parts) > MAX_BLEND_VOICES:
         raise ValueError(f"A blend can mix at most {MAX_BLEND_VOICES} voices")
     known = set(known)

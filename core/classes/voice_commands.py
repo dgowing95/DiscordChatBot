@@ -15,14 +15,20 @@ logger = logging.getLogger(__name__)
 MIN_SPEED = 0.5
 MAX_SPEED = 2.0
 _VOICES_TTL = 600
+# After a failed lookup: autocomplete calls this on every keystroke, and each
+# would otherwise wait out the timeout again.
+_VOICES_RETRY_SECONDS = 30
 _voices_cache: tuple[float, list[str]] = (0.0, [])
+_voices_failed_at = float("-inf")
 
 
 async def available_voices() -> list[str]:
     """The speech service's voice ids (cached; empty when unreachable)."""
-    global _voices_cache
+    global _voices_cache, _voices_failed_at
     fetched_at, voices = _voices_cache
     if voices and time.monotonic() - fetched_at < _VOICES_TTL:
+        return voices
+    if time.monotonic() - _voices_failed_at < _VOICES_RETRY_SECONDS:
         return voices
     url = settings()["speech_url"].rstrip("/") + "/voices"
     try:
@@ -31,8 +37,11 @@ async def available_voices() -> list[str]:
                 if response.status == 200:
                     voices = list((await response.json()).get("voices") or [])
                     _voices_cache = (time.monotonic(), voices)
+                    return voices
+                logger.info(f"Voice: could not list voices at {url}: HTTP {response.status}")
     except Exception as e:
         logger.info(f"Voice: could not list voices at {url}: {e}")
+    _voices_failed_at = time.monotonic()
     return voices
 
 
@@ -107,9 +116,10 @@ def register_voice_commands(tree, client) -> None:
         known = await available_voices()
         unknown = [n for n in names if known and n not in known]
         if not names or unknown or len(names) > 4:
-            await ctx.response.send_message(
-                f"❌ Unknown voice: {', '.join(unknown) or name}. Start typing to pick from the list.",
-                ephemeral=True)
+            reason = ("A blend can mix at most four voices." if len(names) > 4
+                      else f"Unknown voice: {', '.join(unknown) or name}.")
+            await ctx.response.send_message(f"❌ {reason} Start typing to pick from the list.",
+                                            ephemeral=True)
             return
         await configManager().update_setting("voice_name", name.strip().lower(), ctx.guild_id)
         await ctx.response.send_message(f"Voice is now: `{name.strip().lower()}`")

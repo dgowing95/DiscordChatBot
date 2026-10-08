@@ -221,6 +221,7 @@ class VoiceSession:
         self._idle_task = None
         self._prefill_task = None
         self._greeting_task = None
+        self._config_task = None
 
     @property
     def guild_key(self) -> str:
@@ -316,7 +317,8 @@ class VoiceSession:
         """Someone dragged the bot to another channel: the call goes with it."""
         if channel is not None and channel.id != self.voice_channel.id:
             self.voice_channel = channel
-            asyncio.create_task(self._configure_sidecar())
+            # Kept: the loop only holds a weak reference to a task.
+            self._config_task = asyncio.create_task(self._configure_sidecar())
         self.members_changed()
 
     def members_changed(self) -> None:
@@ -401,7 +403,7 @@ class VoiceSession:
         if state not in ("done", "failed"):
             return
         turn_id = message.get("id")
-        if state == "failed":
+        if state == "failed" and message.get("error") != "stopped":
             logger.warning(f"Voice: speech failed in guild {self.guild.id}: {message.get('error')}")
         if turn_id in self._pending_speech:
             self._pending_speech[turn_id] -= 1
