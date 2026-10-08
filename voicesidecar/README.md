@@ -33,7 +33,7 @@ One JSON object per WebSocket text frame. Every message names its `guild_id`, an
 ## Gotchas
 
 - `joinVoiceChannel` defaults to `selfDeaf: true` *and* `selfMute: true`. Deafened, no audio arrives. Muted, Discord drops what the bot plays.
-- The server binds `VOICE_BRIDGE_HOST` (default `127.0.0.1`) and has no auth. In k8s it runs in the core pod on localhost. In compose it binds `0.0.0.0` on the internal network with no published port.
+- The server binds `VOICE_BRIDGE_HOST` (default `127.0.0.1`). In k8s it runs in the core pod on localhost. In compose it binds `0.0.0.0` on the internal network with no published port, so any container there could connect: set `VOICE_BRIDGE_TOKEN` and core must send `Authorization: Bearer <token>`. A wrong or missing token is closed with 4001 before it can replace the connected core. `/health` needs no token.
 - Opus comes from `opusscript` (WebAssembly), not the native `@discordjs/opus`, so the image needs no compiler and runs no install scripts.
 
 ## Develop

@@ -20,7 +20,21 @@
 //   utterance    {guild_id, user_id, text, duration_ms, ended_at, stt_seconds}
 //   speech       {guild_id, id, state: started|done|failed, synth_seconds?}
 
+import { timingSafeEqual } from "node:crypto";
+
 export const PROTOCOL_VERSION = 1;
+
+/**
+ * Whether a connecting client may be core. With VOICE_BRIDGE_TOKEN set, core
+ * must send it as "Authorization: Bearer <token>"; unset, anyone who can reach
+ * the port may connect (in k8s that is only the core pod, on localhost).
+ */
+export function tokenAccepted(expected, authorization) {
+  if (!expected) return true;
+  const given = Buffer.from(String(authorization ?? ""));
+  const wanted = Buffer.from(`Bearer ${expected}`);
+  return given.length === wanted.length && timingSafeEqual(given, wanted);
+}
 
 const SNOWFLAKE = /^\d{5,25}$/;
 const GATEWAY_EVENTS = new Set(["VOICE_STATE_UPDATE", "VOICE_SERVER_UPDATE"]);

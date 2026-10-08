@@ -234,6 +234,12 @@ def test_sentences_are_released_as_they_finish():
     assert rest == ["Bring a coat"]
 
 
+def test_a_word_ending_like_an_abbreviation_still_ends_a_sentence():
+    # "first." ends in "st." (street), "(e.g." is still an abbreviation.
+    out, _ = _stream("I'll look that up first. Then the weather (e.g. rain) next. Bye")
+    assert out == ["I'll look that up first.", "Then the weather (e.g. rain) next."]
+
+
 def test_a_long_sentence_is_cut_at_a_clause():
     long = "This is a very long sentence that keeps going, with clauses, and more clauses, " \
            "and yet more words to pass the limit of characters; then it ends"

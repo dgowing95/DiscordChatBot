@@ -133,6 +133,8 @@ services:
     environment:
       - SPEECH_URL=http://speech:8000
       - VOICE_BRIDGE_HOST=0.0.0.0
+      # Optional: core (which reads .env) must then send the same token.
+      - VOICE_BRIDGE_TOKEN=${VOICE_BRIDGE_TOKEN:-}
       - VOICE_SILENCE_MS=${VOICE_SILENCE_MS:-800}
       - LOG_LEVEL=${LOG_LEVEL:-info}
     depends_on:

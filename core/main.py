@@ -231,7 +231,7 @@ async def on_ready():
             client.background_tasks.append(client.loop.create_task(schedule_forever()))
         if voice_settings()["enabled"]:
             from classes.voice_bridge import start_bridge
-            bridge = start_bridge(voice_settings()["bridge_url"], client)
+            bridge = start_bridge(voice_settings()["bridge_url"], client, voice_settings()["bridge_token"])
             client.background_tasks.append(client.loop.create_task(bridge.run_forever()))
     # Start the worker pool immediately so the bot still consumes messages
     # even if the model check or command sync fails (e.g. server not up yet

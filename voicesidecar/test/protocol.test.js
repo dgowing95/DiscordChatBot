@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { MAX_SPEAK_CHARS, parseCoreMessage } from "../src/protocol.js";
+import { MAX_SPEAK_CHARS, parseCoreMessage, tokenAccepted } from "../src/protocol.js";
 
 const G = "123456789012345678";
 const parse = (message) => parseCoreMessage(JSON.stringify(message));
@@ -30,3 +30,12 @@ for (const [name, message, error] of [
     assert.throws(() => parseCoreMessage(typeof message === "string" ? message : JSON.stringify(message)), error);
   });
 }
+
+test("the bridge token is checked only when one is set", () => {
+  assert.equal(tokenAccepted("", undefined), true);
+  assert.equal(tokenAccepted("", "Bearer anything"), true);
+  assert.equal(tokenAccepted("s3cret", "Bearer s3cret"), true);
+  assert.equal(tokenAccepted("s3cret", "Bearer wrong!"), false);
+  assert.equal(tokenAccepted("s3cret", "Bearer s3cre"), false);
+  assert.equal(tokenAccepted("s3cret", undefined), false);
+});

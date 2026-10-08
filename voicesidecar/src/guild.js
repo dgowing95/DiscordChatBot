@@ -155,10 +155,18 @@ export class GuildVoice {
 
   #listen(userId) {
     if (this.gone || this.ignored.has(userId) || this.listening.has(userId)) return;
+    let stream;
+    try {
+      stream = this.connection.receiver.subscribe(userId, {
+        end: { behavior: EndBehaviorType.AfterSilence, duration: SILENCE_MS },
+      });
+    } catch (error) {
+      // The connection went away since "speaking". Not marking the user as
+      // listened to keeps them heard on the next try.
+      log.debug(`guild ${this.guildId}: cannot listen to ${userId}: ${error.message}`);
+      return;
+    }
     this.listening.add(userId);
-    const stream = this.connection.receiver.subscribe(userId, {
-      end: { behavior: EndBehaviorType.AfterSilence, duration: SILENCE_MS },
-    });
     const decoder = new prism.opus.Decoder({ rate: 48000, channels: 2, frameSize: 960 });
     const chunks = [];
     let bytes = 0;

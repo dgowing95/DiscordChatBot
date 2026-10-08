@@ -17,10 +17,11 @@ import { WebSocketServer } from "ws";
 
 import { GuildVoice } from "./guild.js";
 import { log } from "./log.js";
-import { PROTOCOL_VERSION, parseCoreMessage } from "./protocol.js";
+import { PROTOCOL_VERSION, parseCoreMessage, tokenAccepted } from "./protocol.js";
 
 const HOST = process.env.VOICE_BRIDGE_HOST || "127.0.0.1";
 const PORT = Number(process.env.VOICE_BRIDGE_PORT) || 8765;
+const TOKEN = process.env.VOICE_BRIDGE_TOKEN || "";
 
 const guilds = new Map();
 let core = null;
@@ -80,7 +81,13 @@ const server = http.createServer((request, response) => {
 });
 
 const wss = new WebSocketServer({ server, maxPayload: 1024 * 1024 });
-wss.on("connection", (socket) => {
+wss.on("connection", (socket, request) => {
+  // Checked first: a refused client must not get to replace the real core.
+  if (!tokenAccepted(TOKEN, request.headers.authorization)) {
+    log.warn("refused a bridge connection without the right token");
+    socket.close(4001, "unauthorized");
+    return;
+  }
   if (core) {
     log.warn("a new core connection replaces the old one");
     dropAll("core reconnected");

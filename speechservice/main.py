@@ -41,6 +41,7 @@ Configuration (all env vars optional):
 import asyncio
 import logging
 import os
+import shutil
 import time
 import urllib.request
 from contextlib import asynccontextmanager
@@ -95,6 +96,9 @@ OUTPUT_RATE = 48000
 # this only stops an oversized body reaching the decoder.
 MAX_INPUT_BYTES = 60 * INPUT_RATE * 2
 MAX_TEXT_CHARS = 1000
+DOWNLOAD_TIMEOUT_SECONDS = 60
+LOAD_RETRY_FIRST_SECONDS = 10
+LOAD_RETRY_MAX_SECONDS = 300
 
 whisper: WhisperModel | None = None
 kokoro: Kokoro | None = None
@@ -131,7 +135,10 @@ def _download(url: str) -> str:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         logger.info(f"downloading {url}")
         partial = path + ".part"
-        urllib.request.urlretrieve(url, partial)
+        # A timeout so a stalled connection fails (and is retried) instead of
+        # hanging the load forever.
+        with urllib.request.urlopen(url, timeout=DOWNLOAD_TIMEOUT_SECONDS) as src,                 open(partial, "wb") as dst:
+            shutil.copyfileobj(src, dst)
         os.replace(partial, path)
     return path
 
@@ -164,17 +171,23 @@ def _default_voice() -> str:
     return DEFAULT_VOICE if DEFAULT_VOICE in voices else voices[0]
 
 
-def _report_load(task: asyncio.Task) -> None:
-    # Without this a failed load (a download error, out of memory) would
-    # only show as /health answering 503 forever.
-    if not task.cancelled() and task.exception() is not None:
-        logger.error("speech models failed to load", exc_info=task.exception())
+async def _load_until_ready() -> None:
+    # A failed load (a network blip, out of memory) is retried with backoff.
+    # Without this /health would answer 503 until someone restarted the pod.
+    delay = LOAD_RETRY_FIRST_SECONDS
+    while True:
+        try:
+            await asyncio.to_thread(load_models)
+            return
+        except Exception:
+            logger.exception(f"speech models failed to load; retrying in {delay}s")
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, LOAD_RETRY_MAX_SECONDS)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    task = asyncio.create_task(asyncio.to_thread(load_models))
-    task.add_done_callback(_report_load)
+    task = asyncio.create_task(_load_until_ready())
     yield
     task.cancel()
 

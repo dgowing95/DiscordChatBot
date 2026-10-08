@@ -51,6 +51,7 @@ def settings() -> dict:
     return {
         "enabled": _env_flag("VOICE_ENABLED", False),
         "bridge_url": (os.environ.get("VOICE_BRIDGE_URL") or "ws://voice:8765").strip(),
+        "bridge_token": (os.environ.get("VOICE_BRIDGE_TOKEN") or "").strip(),
         "speech_url": (os.environ.get("SPEECH_URL") or "http://speech:8000").strip(),
         "idle_leave_seconds": _env_number("VOICE_IDLE_LEAVE_SECONDS", 30, 1),
         "history_limit": _env_number("VOICE_HISTORY_LIMIT", 10, 1),
@@ -378,8 +379,9 @@ class SentenceSplitter:
     def _sentence_cut(self):
         for match in _SENTENCE_END.finditer(self.buffer):
             before = self.buffer[:match.start()].rstrip("\"')]")
-            last_word = before.rsplit(None, 1)[-1].lower() if before.split() else ""
-            if last_word.endswith(_ABBREVIATIONS) or re.fullmatch(r"[a-z]\.", last_word):
+            last_word = before.rsplit(None, 1)[-1].lower().lstrip("\"'([") if before.split() else ""
+            # Whole-word only: "first." ends in "st." but ends a sentence.
+            if last_word in _ABBREVIATIONS or re.fullmatch(r"[a-z]\.", last_word):
                 continue
             if self.buffer[:match.start()].strip() == "":
                 continue

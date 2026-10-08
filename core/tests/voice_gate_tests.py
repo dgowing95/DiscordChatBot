@@ -336,7 +336,11 @@ async def test_an_utterance_does_not_block_the_read_loop():
     # "hey sparky, leave" waits for the sidecar's `disconnected`, which comes
     # in through this same loop.
     gate_open = asyncio.Event()
-    session = SimpleNamespace(on_utterance=AsyncMock(side_effect=lambda m: gate_open.wait()))
+
+    async def _block(_message):
+        await gate_open.wait()
+
+    session = SimpleNamespace(on_utterance=AsyncMock(side_effect=_block))
     voice_gate.enter(GUILD, session)
     bridge = voice_bridge.VoiceBridge("ws://x", MagicMock())
     await asyncio.wait_for(bridge._dispatch(json.dumps(
@@ -344,3 +348,9 @@ async def test_an_utterance_does_not_block_the_read_loop():
     gate_open.set()
     await asyncio.sleep(0)
     session.on_utterance.assert_awaited_once()
+
+
+def test_the_bridge_sends_its_token_only_when_set():
+    assert voice_bridge.VoiceBridge("ws://x", MagicMock()).headers == {}
+    assert voice_bridge.VoiceBridge("ws://x", MagicMock(), "s3cret").headers == {
+        "Authorization": "Bearer s3cret"}

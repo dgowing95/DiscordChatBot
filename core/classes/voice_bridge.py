@@ -42,8 +42,10 @@ class VoiceUnavailable(Exception):
 
 
 class VoiceBridge:
-    def __init__(self, url: str, client: discord.Client):
+    def __init__(self, url: str, client: discord.Client, token: str = ""):
         self.url = url
+        # The sidecar's VOICE_BRIDGE_TOKEN, when it has one.
+        self.headers = {"Authorization": f"Bearer {token}"} if token else {}
         self.client = client
         self.ws = None
         self.protocols: dict[int, "SidecarVoiceProtocol"] = {}
@@ -70,7 +72,8 @@ class VoiceBridge:
             try:
                 if self._session is None or self._session.closed:
                     self._session = aiohttp.ClientSession()
-                async with self._session.ws_connect(self.url, heartbeat=20, max_msg_size=1024 * 1024) as ws:
+                async with self._session.ws_connect(self.url, heartbeat=20, max_msg_size=1024 * 1024,
+                                                   headers=self.headers) as ws:
                     self.ws = ws
                     attempt = 0
                     logger.info(f"Voice bridge connected to {self.url}")
@@ -177,10 +180,10 @@ def get_bridge() -> VoiceBridge | None:
     return _bridge
 
 
-def start_bridge(url: str, client: discord.Client) -> VoiceBridge:
+def start_bridge(url: str, client: discord.Client, token: str = "") -> VoiceBridge:
     global _bridge
     if _bridge is None:
-        _bridge = VoiceBridge(url, client)
+        _bridge = VoiceBridge(url, client, token)
     return _bridge
 
 
