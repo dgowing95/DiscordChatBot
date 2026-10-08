@@ -419,6 +419,24 @@ def hold_on_messages(persona: str, tool: str, detail: str, request: str) -> list
         persona=persona[:300], tool=tool, detail=detail, request=request[:300])}]
 
 
+# Asked of the side model as the bot joins a call: the hello, in character
+# and different each time. How to wake the bot is said after it, by code,
+# so it is always there and always right.
+GREETING_PROMPT = (
+    "You are {persona}{name}, joining a Discord voice call{people}. Write ONE short spoken "
+    "greeting (under 12 words) as you arrive, in character. Don't explain how to talk to you. "
+    "Plain text only."
+)
+
+
+def greeting_messages(persona: str, bot_name: str, people: list[str]) -> list[dict]:
+    """Chat messages for the side-LLM greeting when the bot joins a call."""
+    name = f", called {bot_name[:80]}" if bot_name else ""
+    people = f" with {', '.join(p[:40] for p in people[:8])}" if people else ""
+    return [{"role": "user", "content": GREETING_PROMPT.format(
+        persona=persona[:300], name=name, people=people)}]
+
+
 # Readable tool names for the hold-on prompt and its last-resort fallback.
 TOOL_ACTIONS = {
     "web_search": "searching the web",

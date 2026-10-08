@@ -208,6 +208,25 @@ async def test_a_failed_hold_on_line_falls_back_to_a_plain_one(monkeypatch, fake
 
 
 @pytest.mark.asyncio
+async def test_the_greeting_is_written_by_the_model_then_says_the_wake_phrase(monkeypatch):
+    session, bridge = _session(monkeypatch)
+    write = AsyncMock(return_value="Ahoy, **Ana**! Ready for adventure?")
+    with patch.object(voice_session._greeting_llm, "complete", write),          patch.object(voice_session.configManager, "get_setting", AsyncMock(return_value="a pirate")):
+        await session._greet()
+    assert bridge.spoken() == ["Ahoy, Ana! Ready for adventure?", "Say hey sparky when you need me."]
+    prompt = write.call_args.args[0][0]["content"]
+    assert "a pirate, called Sparky" in prompt and "with Ana" in prompt
+
+
+@pytest.mark.asyncio
+async def test_a_failed_greeting_still_says_hello(monkeypatch):
+    session, bridge = _session(monkeypatch)
+    with patch.object(voice_session._greeting_llm, "complete", AsyncMock(side_effect=RuntimeError("down"))),          patch.object(voice_session.configManager, "get_setting", AsyncMock(return_value=None)):
+        await session._greet()
+    assert bridge.spoken() == ["Hi everyone!", "Say hey sparky when you need me."]
+
+
+@pytest.mark.asyncio
 async def test_an_error_is_said_out_loud(monkeypatch, fake_llm):
     session, bridge = _session(monkeypatch)
     fake_llm.script = []

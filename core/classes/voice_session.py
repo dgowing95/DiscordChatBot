@@ -57,6 +57,7 @@ from classes.voice_policy import (
     SentenceSplitter,
     VoiceHistory,
     default_wake_phrase,
+    greeting_messages,
     hold_on_messages,
     match_wake,
     parse_command,
@@ -68,13 +69,15 @@ from classes.voice_policy import (
 logger = logging.getLogger(__name__)
 
 # How long a session waits for its last sentences to finish playing before
-# leaving (a spoken goodbye), and a hold-on line may take to be written.
+# leaving (a spoken goodbye), and a hold-on line or greeting may take to be
+# written.
 GOODBYE_WAIT_SECONDS = 15
 HOLD_ON_TIMEOUT_SECONDS = 8
 # A busy notice is spoken at most this often.
 BUSY_NOTICE_SECONDS = 10
 
 _hold_on_llm = SideLLM("voice_hold_on", llm_model, llm_host, llm_api_key, lambda: HOLD_ON_TIMEOUT_SECONDS)
+_greeting_llm = SideLLM("voice_greeting", llm_model, llm_host, llm_api_key, lambda: HOLD_ON_TIMEOUT_SECONDS)
 
 
 class VoiceError(Exception):
@@ -217,6 +220,7 @@ class VoiceSession:
         self._worker = None
         self._idle_task = None
         self._prefill_task = None
+        self._greeting_task = None
 
     @property
     def guild_key(self) -> str:
@@ -241,8 +245,28 @@ class VoiceSession:
             f"🎙️ I'm in {self.voice_channel.mention}. Say **\"{self.wake_phrase}\"** and then what "
             f"you'd like. Pictures and code results will appear here. Say "
             f"\"{self.wake_phrase}, leave\" or use `/voice leave` to end the call.")
-        await self._speak_line(f"Hi! Say {self.wake_phrase} when you need me.")
+        # Not awaited: /voice join's reply should not wait on the LLM.
+        self._greeting_task = asyncio.create_task(self._greet())
         self.members_changed()
+
+    async def _greet(self) -> None:
+        """An in-character hello written by the model, then how to wake the
+        bot, which is fixed so it is never left out or got wrong."""
+        await self._speak_line(await self._greeting_line())
+        await self._speak_line(f"Say {self.wake_phrase} when you need me.")
+
+    async def _greeting_line(self) -> str:
+        people = [m.display_name for m in self.voice_channel.members if not m.bot]
+        try:
+            persona = await configManager().get_setting("system", self.guild.id) or "An AI Story Teller"
+            line = await _greeting_llm.complete(greeting_messages(persona, self.bot_name, people),
+                                                temperature=1.0, max_tokens=40)
+            line = speakable(line or "")
+            if line:
+                return line
+        except Exception as e:
+            logger.info(f"Voice: greeting failed ({e}); using the plain one")
+        return "Hi everyone!"
 
     async def refresh_settings(self) -> None:
         """Re-read the per-guild voice settings."""

@@ -410,8 +410,9 @@ needs an entry there, gated with `requires` when it can be switched off;
    `f"Answer as if you are {redis['dcb:{guild}:system']}"`, user-owned via
    `/system` and the `change_personality` tool. The one exception is a voice
    turn, which appends `voice_policy.VOICE_INSTRUCTIONS` (how to talk in a
-   call); `voice_policy.HOLD_ON_PROMPT` is the side call that writes a
-   "hold on" line when the model calls a tool silently. Those two are the
+   call); `voice_policy.GREETING_PROMPT` writes its hello on joining and
+   `voice_policy.HOLD_ON_PROMPT` is the side call that writes a
+   "hold on" line when the model calls a tool silently. Those three are the
    voice prompts' one home.
 
    **One home per concept.** Both prompts grew by accretion — every observed
