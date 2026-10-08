@@ -29,12 +29,14 @@ def _all_on(monkeypatch):
     monkeypatch.setenv("IMAGE_GEN_ENABLED", "1")
     monkeypatch.setenv("SANDBOX_ENABLED", "1")
     monkeypatch.setenv("AUTOMATIONS_ENABLED", "1")
+    monkeypatch.setenv("VOICE_ENABLED", "1")
 
 
 def test_every_agent_tool_has_help(monkeypatch):
     from classes.text_llm_handler import agent_tools
     _all_on(monkeypatch)
-    names = {tool.name for tool in agent_tools()}
+    # A voice turn swaps join_voice_channel for leave_voice_channel.
+    names = {tool.name for tool in agent_tools()} | {tool.name for tool in agent_tools(voice=True)}
     assert names == help_catalog.documented_tools()
 
 
@@ -71,7 +73,10 @@ def test_every_slash_command_has_help(monkeypatch):
 
 
 @pytest.mark.parametrize("image, sandbox", [(True, True), (False, False), (True, False)])
-def test_help_fits_discord_limits(image, sandbox):
+def test_help_fits_discord_limits(image, sandbox, monkeypatch):
+    # Every optional entry on, so the longest listing is the one measured.
+    monkeypatch.setenv("AUTOMATIONS_ENABLED", "1")
+    monkeypatch.setenv("VOICE_ENABLED", "1")
     data = help_catalog.help_embed_data(image, sandbox)
     for field in data["fields"]:
         assert 0 < len(field["value"]) <= whats_new.MAX_FIELD_VALUE, field["name"]

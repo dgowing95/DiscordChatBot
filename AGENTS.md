@@ -65,6 +65,15 @@ core/                  # the main bot (the app that runs in production)
     automation_runner.py   # rule admission, 15s schedule poll, automatic run execution
     automation_commands.py # /schedule and /rule slash command groups
     automation_tools.py    # the matching chat tools (list/get/create/update/delete)
+    voice_policy.py        # PURE (stdlib-only) voice calls: VOICE_* settings, wake-phrase
+                           #   match, leave/stop commands, anchored history, sentence
+                           #   splitter + markdown stripping, VOICE_INSTRUCTIONS
+    voice_gate.py          # PURE (stdlib-only) which guilds are in a call (text work stops)
+    voice_bridge.py        # WebSocket client to the voice sidecar + SidecarVoiceProtocol
+                           #   (discord.py's side of the voice handshake)
+    voice_session.py       # one call: utterance -> wake -> streamed turn -> speech,
+                           #   hold-on lines, idle leave, cache prefill
+    voice_commands.py      # the /voice slash command group
   whats_new.md         # the NEXT release's user-facing features (see "What's New
                        #   notes" below) - rewritten by every feature PR
   tests/               # pytest suite (see Testing below)
@@ -76,11 +85,17 @@ diffusionservice/      # standalone image service (text->image; FastAPI + diffus
                        #   CPU-offloaded for low VRAM)
                        #   generation_params.py is the stdlib-only half (guidance /
                        #   negative-prompt policy), so it is unit-testable without torch
+speechservice/         # voice calls' speech-to-text (faster-whisper) and text-to-speech
+                       #   (Kokoro-82M), CPU only; speech_params.py is the stdlib-only half
+voicesidecar/          # Node: Discord voice I/O via @discordjs/voice (DAVE receive),
+                       #   bridged to core over a WebSocket; README.md has the protocol
 docs/automations.md    # user-facing guide to schedules and rules
+docs/voice.md          # user-facing guide to voice calls
 charts/dis-ai-bot/     # Helm chart (credentials render into templates/secret.yaml,
                        #   everything else into templates/configmap.yaml)
 pyproject.toml         # pytest configuration - why bare `pytest` works from the repo root
 docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusion (GPU) + core (mounts ./core)
+                       #   + speech + voice (CPU; used when VOICE_ENABLED=1)
 .env / .env.example    # environment configuration (never commit .env)
 ```
 
@@ -296,6 +311,66 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
    suspends the entry instead of failing every occurrence. Interval schedules
    store their anchor (`timing.start`) at creation, so the grid never drifts.
 
+10. Voice calls (`docs/voice.md`, off unless `VOICE_ENABLED`): `/voice join`
+   or the `join_voice_channel` tool start a `VoiceSession`
+   (`classes/voice_session.py`); `end()` is the only way out.
+
+   | Concern | Where it lives |
+   |---|---|
+   | Discord voice I/O (DAVE), per-speaker segmenting, playback queue | `voicesidecar/` (Node, `@discordjs/voice`) |
+   | Speech-to-text / text-to-speech, CPU only | `speechservice/` (faster-whisper, Kokoro-82M) |
+   | discord.py's half of the handshake, the bridge WebSocket | `classes/voice_bridge.py` |
+   | Wake phrase, commands, history window, sentence splitting (pure) | `classes/voice_policy.py` |
+   | Which guilds are in a call (pure) | `classes/voice_gate.py` |
+   | What a call does with each utterance; turns; prefill | `classes/voice_session.py` |
+
+   The behaviour worth knowing before you change anything:
+
+   - **Why a Node sidecar.** Discord made DAVE end-to-end encryption
+     mandatory in March 2026. discord.py can send DAVE audio but nothing
+     maintained for it can RECEIVE it; the one working option replaced
+     discord.py with a one-person fork. `@discordjs/voice` >= 0.19.2 decrypts
+     received audio, so the voice connections live there, and discord.py keeps
+     the gateway: `SidecarVoiceProtocol` forwards the bot's voice state/server
+     updates to the sidecar and sends the op-4 payloads it asks for (the
+     Lavalink/wavelink pattern). Audio never reaches Python; core gets
+     transcripts and sends sentences. One WebSocket carries every guild.
+   - **Text stops in a guild while it is in a call** (`voice_gate`):
+     `on_message` returns right after sandbox steering (so a run started from
+     the call can still be steered in its thread), mentions get a fixed
+     rate-limited notice, the worker drops queued messages and gives back
+     automation jobs (`automation_runner.discard`), `poll_schedules` leaves
+     due schedules due, and `/generate_image` refuses. Work already running
+     when the bot joins finishes. The gate is in-process only: a restart ends
+     every call (the sidecar leaves when core disconnects).
+   - **The wake phrase is matched in the transcript**, fuzzily
+     (`voice_policy.match_wake`), because it is per-guild and wake-word
+     engines need a model per phrase. Every utterance is transcribed. Whisper
+     is given NO prompt or hotwords: given the wake phrase as one, it tends to
+     leave exactly those words out of the transcript.
+   - **"leave" / "stop" never go to the LLM** (`parse_command`), so they work
+     at once even mid-turn. A stop mutes the turn; its tools still finish.
+   - **Turns are streamed** (`TextLLMHandler.generate_streamed`), sentence by
+     sentence, with thinking off (`side_llm.NO_THINKING`; `VOICE_THINKING=1`
+     turns it on). Text the model writes before a tool call is the spoken
+     "hold on" line; if it writes none, a small side call writes one, so it
+     is never canned. `_OrderedSpeech` keeps a slow hold-on line ahead of the
+     answer.
+   - **The llama.cpp cache is kept warm.** The history is anchored
+     (`VoiceHistory`: grows from `VOICE_HISTORY_LIMIT` by
+     `VOICE_HISTORY_REFRESH`, then rebases) and every transcript, wake phrase
+     or not, triggers a rate-limited `TextLLMHandler.prefill()`: the same
+     request a turn sends, minus the trailing datetime message, with
+     `max_tokens=1`. `voice_prefill_tests.py` pins the identical prefix;
+     measured on the dev stack a turn then processes ~50 prompt tokens
+     instead of ~2400. Other guilds still share the one slot; llama.cpp's
+     `--cache-ram` restores the voice prefix after them.
+   - **Output goes to a session thread** off the channel the join was asked
+     from (reused across calls; the voice channel's own chat when no thread
+     can be made), so pictures and sandbox runs (snapshots, steering) work as
+     in chat. `original_message` is None in a voice turn: tools read
+     `context["channel"]`, `user_id` and `request_text`.
+
 ### What's New notes (write these in every feature PR)
 
 `core/whats_new.md` holds the user-facing features of the NEXT release. Every
@@ -333,7 +408,11 @@ needs an entry there, gated with `requires` when it can be switched off;
    its bullets in `sandbox_agent.py` (what the nested sandbox model sees).
    The outer agent's *system* prompt is not a lever: it is entirely
    `f"Answer as if you are {redis['dcb:{guild}:system']}"`, user-owned via
-   `/system` and the `change_personality` tool.
+   `/system` and the `change_personality` tool. The one exception is a voice
+   turn, which appends `voice_policy.VOICE_INSTRUCTIONS` (how to talk in a
+   call); `voice_policy.HOLD_ON_PROMPT` is the side call that writes a
+   "hold on" line when the model calls a tool silently. Those two are the
+   voice prompts' one home.
 
    **One home per concept.** Both prompts grew by accretion — every observed
    bug fixed by adding text, none ever removed — until `SANDBOX_INSTRUCTIONS`
@@ -419,6 +498,20 @@ needs an entry there, gated with `requires` when it can be switched off;
 | `SANDBOX_MAX_RETRIES` | how many times that client retries a failed request (default 2; 0 disables). One model call is also wall-clock bounded (`ModelSettings.timeout`, see `sandbox_model_call_timeout()`) at (1 + this) x `SANDBOX_REQUEST_TIMEOUT_SECONDS` — the figure that was already the documented worst case for a silent server, now enforced for a padding one too. Chart: `sandbox.maxRetries` |
 | `SANDBOX_SNAPSHOT_MAX_BYTES` | max size of one thread's stored workspace snapshot in Redis (default 50MB). Chart: `sandbox.snapshotMaxBytes` |
 | `SANDBOX_SNAPSHOT_TTL_SECONDS` | how long an unused thread's workspace snapshot survives in Redis (default 604800 = 7 days). Chart: `sandbox.snapshotTtlSeconds` |
+| `VOICE_ENABLED` | `1`/`true` turns voice calls on: `/voice`, the join/leave tools and the bridge to the sidecar (default: off in code; the chart sets it from `voice.enabled`, default true, which also adds the sidecar container and the speech pod/PVC |
+| `VOICE_BRIDGE_URL` | the voice sidecar's WebSocket (default `ws://voice:8765`; the chart sets `ws://127.0.0.1:<voice.bridgePort>`, same pod). The sidecar reads `VOICE_BRIDGE_HOST`/`VOICE_BRIDGE_PORT` to bind it |
+| `SPEECH_URL` | the speech service, used by the sidecar and by `/voice voice`'s autocomplete (default `http://speech:8000`; in-cluster service in the chart, or `voice.speechUrl`) |
+| `VOICE_IDLE_LEAVE_SECONDS` | seconds the bot stays after the last person leaves a call (default 30). Chart: `voice.idleLeaveSeconds` |
+| `VOICE_HISTORY_LIMIT` / `VOICE_HISTORY_REFRESH` | transcribed clips kept in a call's prompt, and how many more it grows by before rebasing (defaults 10 / 10; an anchored window for llama.cpp's cache). Chart: `voice.historyLimit` / `voice.historyRefresh` |
+| `VOICE_FOLLOWUP_SECONDS` | after the wake phrase alone, how long that speaker's next words count as the request (default 8). Chart: `voice.followupSeconds` |
+| `VOICE_THINKING` | `1`/`true` lets the model think before a spoken reply (default off: a reply waits for every reasoning token). Chart: `voice.thinking` |
+| `VOICE_DEFAULT_VOICE` | Kokoro voice for servers that have not picked one (default `af_heart`); read by core and the speech service. Chart: `voice.defaultVoice` |
+| `VOICE_SILENCE_MS` | silence that ends an utterance, read by the sidecar (default 800). Chart: `voice.silenceMs` |
+| `VOICE_PREFILL_MIN_SECONDS` | minimum seconds between two cache-warming prefills of a call's prompt (default 5). Chart: `voice.prefillMinSeconds` |
+| `VOICE_DEBUG` | `1` logs every transcript and spoken sentence (core) and the voice connection's debug output (sidecar). Off by default: it is everything said in a call |
+| `VOICE_DEV_INJECT` | local testing only, never in the chart: `!voice_join <channel id>` / `!voice_say <text>` drive a call from text (with `TEST_WEBHOOK_URL`, no speaker needed) |
+| `STT_MODEL` / `STT_THREADS` / `STT_CONCURRENCY` | speech service: faster-whisper model (default `small.en`, int8), CPU threads per transcription (4) and transcriptions at once (2). Chart: `voice.stt*` |
+| `TTS_THREADS` / `TTS_CONCURRENCY` / `SPEECH_QUEUE_SIZE` | speech service: Kokoro CPU threads per sentence (4), sentences at once (2), requests allowed to wait per kind before a 503 (16). Chart: `voice.tts*`, `voice.queueSize` |
 
 ## Releasing
 
@@ -466,7 +559,11 @@ needs an entry there, gated with `requires` when it can be switched off;
   ```
 
   This is exactly what CI runs, so a new test file is picked up automatically;
-  there is no list to keep in step. ~650 tests, roughly 20 seconds.
+  there is no list to keep in step. ~1000 tests, roughly 20 seconds.
+
+  The voice sidecar is Node and has its own `node:test` suite (pure helpers:
+  audio, protocol validation, the playback queue): `cd voicesidecar && npm ci
+  && npm test`. CI runs it as a separate job.
 
 - Tests import production modules as `classes.X`, the same name the app uses
   (it runs with cwd `/app`), and `pyproject.toml` puts `core/` on the path to
@@ -523,6 +620,12 @@ curl -sS -X POST "$TEST_WEBHOOK_URL" \
 - Keeping a module **pure and importable without the discord/agents SDKs** (like
   `response_filter.py`) is the intended pattern for anything you want to unit test —
   `MessageHandler` itself drags in `discord`, `agents`, Redis, etc.
+- Voice calls can be tested end to end without anyone speaking: with
+  `VOICE_ENABLED=1 VOICE_DEV_INJECT=1` in `.env` (and `docker compose up -d
+  speech voice core`), POST `!voice_join <voice channel id>` and then
+  `!voice_say hey <name>, ...` through `TEST_WEBHOOK_URL`; `VOICE_DEBUG=1`
+  logs what is heard and said. Hearing itself (Discord -> sidecar -> Whisper)
+  needs real audio in the channel.
 - **CI:** `.github/workflows/tests.yaml` runs `pytest` on every push, and
   `release.yaml` runs it again as a gate the image/chart jobs depend on
   (releases are cut straight off a push to `main`, so this is the only place

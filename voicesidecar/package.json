@@ -1,0 +1,19 @@
+{
+  "name": "dcb-voice-sidecar",
+  "private": true,
+  "type": "module",
+  "description": "Discord voice I/O for the bot's core process (see README.md)",
+  "main": "src/index.js",
+  "engines": { "node": ">=22.12.0" },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "opusscript": "0.0.8",
+    "@discordjs/voice": "0.19.2",
+    "@snazzah/davey": "0.1.12",
+    "prism-media": "1.3.5",
+    "ws": "8.22.0"
+  }
+}

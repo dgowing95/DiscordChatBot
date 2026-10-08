@@ -145,6 +145,49 @@ rules:
   # Seconds before the same rule can fire again
   cooldownSeconds: 60
 
+# Voice calls (docs/voice.md): /voice join or "join voice", then
+# "hey <name>, ..." out loud. Two extra pieces, both CPU only:
+#   * a voice sidecar container in the core pod (voicesidecar/): Discord voice
+#     I/O with @discordjs/voice, which (unlike discord.py) can hear under
+#     Discord's DAVE encryption. core talks to it on localhost.
+#   * a speech pod (speechservice/): Whisper speech-to-text and Kokoro
+#     text-to-speech, with its models on the speech PVC.
+# enabled: false removes both and hides /voice and the voice tools.
+voice:
+  enabled: true
+  # Container images: built by the release workflow (voice-<tag>, speech-<tag>)
+  image: ghcr.io/dgowing95/discordchatbot
+  # Port of the core <-> sidecar WebSocket inside the core pod
+  bridgePort: 8765
+  speechPort: 8000
+  # Empty = the in-cluster speech service
+  speechUrl: ""
+  # Seconds the bot stays after the last person leaves the call
+  idleLeaveSeconds: 30
+  # Transcribed clips kept in a call's prompt, and how many more it grows by
+  # before rebasing (an anchored window, so llama.cpp can reuse its cache)
+  historyLimit: 10
+  historyRefresh: 10
+  # After someone says only the wake phrase, their next words within this
+  # many seconds count as the request
+  followupSeconds: 8
+  # true lets the model think before a spoken reply (slower first word)
+  thinking: false
+  # Kokoro voice for servers that have not picked one (/voice voice)
+  defaultVoice: af_heart
+  # Silence (ms) that ends someone's utterance
+  silenceMs: 800
+  # Minimum seconds between two cache-warming prefills of a call's prompt
+  prefillMinSeconds: 5
+  # Speech service: Whisper model, CPU threads per job and jobs at once,
+  # and how many requests may wait per kind before it answers 503
+  sttModel: small.en
+  sttThreads: 4
+  sttConcurrency: 2
+  ttsThreads: 4
+  ttsConcurrency: 2
+  queueSize: 16
+
 # Code sandbox (run_code_sandbox LLM tool): a nested SandboxAgent runs each
 # task in a throwaway Docker container ON THE NODE (agents.sandbox
 # DockerSandboxClient). Requires a Docker daemon on the node: its socket is
@@ -331,6 +374,8 @@ pvc:
   redisSize: 5Gi
   llamacppSize: 45Gi
   diffusersSize: 15Gi
+  # Whisper + Kokoro models (voice.enabled only)
+  speechSize: 3Gi
   hostPath: /data/kube/discordchatbot
 
 coreResources:
@@ -349,6 +394,24 @@ llamacppResources:
     cpu: 6000m
     memory: 8000Mi
   gpu: 16
+
+# Voice (voice.enabled only). Speech transcribes everything said in a call,
+# so it gets real CPU; the sidecar only moves audio.
+speechResources:
+  limits:
+    cpu: 8000m
+    memory: 4096Mi
+  requests:
+    cpu: 2000m
+    memory: 2048Mi
+
+voiceSidecarResources:
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+  requests:
+    cpu: 250m
+    memory: 256Mi
 
 diffusionResources:
   limits:

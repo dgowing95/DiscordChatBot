@@ -45,6 +45,36 @@ spec:
         - name: docker-socket
           mountPath: /var/run/docker.sock
         {{- end }}
+      {{- if .Values.voice.enabled }}
+      # Discord voice I/O for core (voicesidecar/). Same pod so the bridge
+      # stays on localhost: it is bound to 127.0.0.1 and has no auth of its
+      # own. A core restart drops every call either way.
+      - name: voice
+        image: "{{ .Values.voice.image }}:voice-{{ .Values.image.tag | default .Chart.AppVersion }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        envFrom:
+        - configMapRef:
+            name: {{ .Release.Name }}-configmap
+        env:
+        - name: VOICE_BRIDGE_HOST
+          value: "127.0.0.1"
+        - name: LOG_LEVEL
+          value: info
+        # exec, not httpGet: the server is bound to 127.0.0.1, which the
+        # kubelet (connecting to the pod IP) cannot reach.
+        readinessProbe:
+          exec:
+            command: ["node", "-e", "fetch('http://127.0.0.1:{{ .Values.voice.bridgePort }}/health').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+          periodSeconds: 15
+          timeoutSeconds: 5
+        resources:
+          limits:
+            cpu: {{ .Values.voiceSidecarResources.limits.cpu }}
+            memory: {{ .Values.voiceSidecarResources.limits.memory }}
+          requests:
+            cpu: {{ .Values.voiceSidecarResources.requests.cpu }}
+            memory: {{ .Values.voiceSidecarResources.requests.memory }}
+      {{- end }}
       {{- if .Values.sandbox.enabled }}
       volumes:
       - name: docker-socket

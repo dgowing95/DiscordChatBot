@@ -46,9 +46,15 @@ services:
       # To disable the sandbox: SANDBOX_ENABLED=0 in .env (the mount can stay).
       - /var/run/docker.sock:/var/run/docker.sock
     env_file: .env
+    environment:
+      # Voice calls (VOICE_ENABLED=1 in .env turns them on): the sidecar and
+      # speech services below, on the compose network.
+      - VOICE_BRIDGE_URL=${VOICE_BRIDGE_URL:-ws://voice:8765}
+      - SPEECH_URL=${SPEECH_URL:-http://speech:8000}
     depends_on:
       - redis
       - llamacpp
+      - voice
       
   diffusion:
     # Image generation (text -> image); see diffusionservice/. Queued (one
@@ -98,7 +104,41 @@ services:
       timeout: 5s
       retries: 40
       start_period: 5m
+  speech:
+    # Speech-to-text + text-to-speech for voice channels (see speechservice/).
+    # CPU only; models download into the volume on first boot.
+    build: ./speechservice
+    volumes:
+      - ./speechservice:/app
+      - speech_data:/models
+    ports:
+      - "8002:8000"
+    environment:
+      - HF_HOME=/models
+      - STT_MODEL=${STT_MODEL:-small.en}
+      - STT_THREADS=${STT_THREADS:-4}
+      - TTS_THREADS=${TTS_THREADS:-4}
+      - VOICE_DEFAULT_VOICE=${VOICE_DEFAULT_VOICE:-af_heart}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 40
+      start_period: 2m
+  voice:
+    # Discord voice I/O for core (see voicesidecar/): joins channels, hears
+    # people and plays speech. Core talks to it over a WebSocket on the
+    # compose network; no port is published.
+    build: ./voicesidecar
+    environment:
+      - SPEECH_URL=http://speech:8000
+      - VOICE_BRIDGE_HOST=0.0.0.0
+      - VOICE_SILENCE_MS=${VOICE_SILENCE_MS:-800}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    depends_on:
+      - speech
 volumes:
   data:
   ollama_data:
   diffusers_data:
+  speech_data:

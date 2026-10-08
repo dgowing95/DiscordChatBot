@@ -50,6 +50,37 @@ spec:
     path: {{ .Values.pvc.hostPath }}/diffusers
 ---
 {{- end }}
+# Speech models (Whisper + Kokoro). Only rendered when voice is enabled
+# (templates/speech.yaml mounts the claim).
+{{- if .Values.voice.enabled }}
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ include "helm.fullname" . }}-pvc-speech
+  labels:
+    type: local
+spec:
+  storageClassName: {{ include "helm.fullname" . }}-pvc-speech
+  capacity:
+    storage: {{ .Values.pvc.speechSize }}
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    path: {{ .Values.pvc.hostPath }}/speech
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: speech-pv-claim
+spec:
+  storageClassName: {{ include "helm.fullname" . }}-pvc-speech
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.pvc.speechSize }}
+---
+{{- end }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

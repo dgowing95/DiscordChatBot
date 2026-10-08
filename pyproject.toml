@@ -5,7 +5,7 @@
 # contributors to update it.
 [tool.pytest.ini_options]
 python_files = ["*_tests.py"]
-testpaths = ["core/tests", "diffusionservice/tests"]
+testpaths = ["core/tests", "diffusionservice/tests", "speechservice/tests"]
 # diffusionservice/tests holds generation_params_tests.py alone. The service's
 # main.py needs torch + diffusers, which core/requirements-dev.txt does not
 # install and CI therefore never has -- generation_params.py is stdlib-only

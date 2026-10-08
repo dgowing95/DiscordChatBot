@@ -17,6 +17,7 @@ from classes.whats_new import EMBED_COLOR
 IMAGE = "image"
 SANDBOX = "sandbox"
 AUTOMATIONS = "automations"
+VOICE = "voice"
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,9 @@ ASK_ENTRIES = (
               tools=("list_schedules", "get_schedule", "create_schedule", "update_schedule", "delete_schedule",
                      "list_rules", "get_rule", "create_rule", "update_rule", "delete_rule"),
               requires=AUTOMATIONS),
+    HelpEntry("🎙️ Talk in voice", "Ask me to join your voice channel, then say \"hey\" and my name "
+              "to talk to me out loud. Ask me to leave when you're done.",
+              tools=("join_voice_channel", "leave_voice_channel"), requires=VOICE),
 )
 
 COMMAND_ENTRIES = (
@@ -71,6 +75,8 @@ COMMAND_ENTRIES = (
               command="schedule", requires=AUTOMATIONS),
     HelpEntry("/rule", "Create, list, view, edit, delete, pause or resume message rules.",
               command="rule", requires=AUTOMATIONS),
+    HelpEntry("/voice", "Join or leave a voice call, and set my wake phrase, voice and speed.",
+              command="voice", requires=VOICE),
 )
 
 TIPS = (
@@ -89,6 +95,9 @@ def _shown(entry: HelpEntry, image_enabled: bool, sandbox_enabled: bool) -> bool
         return sandbox_enabled
     if entry.requires == AUTOMATIONS:
         from classes.automation_policy import settings
+        return settings()["enabled"]
+    if entry.requires == VOICE:
+        from classes.voice_policy import settings
         return settings()["enabled"]
     return True
 

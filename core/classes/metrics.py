@@ -245,6 +245,55 @@ automation_execution_seconds = Histogram(
 )
 
 
+# Voice calls (classes/voice_session.py). Speech timings come from the voice
+# sidecar, which measures them against the speech service.
+voice_sessions_active = Gauge(
+    "discord_bot_voice_sessions_active", "Guilds the bot is in a voice call in",
+)
+voice_utterances_total = Counter(
+    "discord_bot_voice_utterances_total",
+    "Transcribed utterances heard in voice calls, by what they led to",
+    ["outcome"],
+)
+voice_turns_total = Counter(
+    "discord_bot_voice_turns_total", "Voice turns (wake phrase + request), by outcome", ["outcome"],
+)
+voice_first_audio_seconds = Histogram(
+    "discord_bot_voice_first_audio_seconds",
+    "From a request being heard to its first spoken sentence being sent to the voice service",
+    buckets=(0.25, 0.5, 1, 1.5, 2, 3, 5, 10, 30),
+)
+voice_speech_seconds = Histogram(
+    "discord_bot_voice_speech_seconds",
+    "Speech service time per clip: stt = one transcription, tts = one sentence",
+    ["kind"],
+    buckets=(0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10),
+)
+
+
+def set_voice_sessions(n: int) -> None:
+    voice_sessions_active.set(n)
+
+
+def inc_voice_utterance(outcome: str) -> None:
+    voice_utterances_total.labels(outcome=str(outcome)).inc()
+
+
+def inc_voice_turn(outcome: str) -> None:
+    voice_turns_total.labels(outcome=str(outcome)).inc()
+
+
+def observe_voice_first_audio(seconds: float) -> None:
+    voice_first_audio_seconds.observe(max(0.0, seconds))
+
+
+def observe_voice_speech(kind: str, seconds) -> None:
+    try:
+        voice_speech_seconds.labels(kind=str(kind)).observe(max(0.0, float(seconds)))
+    except (TypeError, ValueError):
+        pass
+
+
 def inc_automation(kind, outcome):
     automation_runs_total.labels(kind=kind, outcome=outcome).inc()
 

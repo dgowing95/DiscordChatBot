@@ -15,6 +15,7 @@ from classes.message_queue import get_channel_lock
 from classes.response_filter import filter_response as clean_response, chunk_for_discord, format_thinking_for_discord
 from classes.text_llm_handler import TextLLMHandler
 from classes.metrics import inc_automation, observe_automation_wait, observe_automation_execution
+from classes import voice_gate
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,9 @@ async def poll_schedules(queue):
             inc_automation("schedule", "skipped")
             return
         guild, ident = member.split(":", 1)
+        if voice_gate.active(guild):
+            # In a voice call: left due, so it runs once the bot leaves.
+            continue
         row = await store.get(guild, ident)
         if not row or row["status"] != "enabled":
             await store.redis.zrem(f"{PREFIX}:due", member)
@@ -127,6 +131,22 @@ async def poll_schedules(queue):
             job.renewal_task = asyncio.create_task(_renew(job))
             inc_automation("schedule", "admitted")
             logger.info("Admitted schedule=%s occurrence=%s", row["id"], occurrence)
+
+
+async def discard(job) -> None:
+    """Gives back a job that will not run (its guild went into a voice call
+    while it waited): the same release as a job the full queue refused, so
+    a schedule stays due and a rule can match again."""
+    if job.renewal_task:
+        job.renewal_task.cancel()
+    store = AutomationStore()
+    rule = job.records[0]["kind"] == "rule"
+    for claim in job.claims:
+        try:
+            await store.cancel_claim(claim, rule=rule)
+        except Exception:
+            logger.exception("Could not release an automation claim")
+    inc_automation(job.records[0]["kind"], "skipped")
 
 
 async def execute(job, client):
