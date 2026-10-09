@@ -77,7 +77,9 @@ from classes.sandbox_agent import sandbox_enabled
 
 from classes.tool_functions import (
     change_personality,
+    check_polls,
     clear_memories,
+    create_poll,
     fetch_url,
     generate_image,
     get_current_datetime,
@@ -279,6 +281,8 @@ def agent_tools(automatic: bool = False, voice: bool = False) -> list:
         web_search,
         fetch_url,
         change_personality,
+        create_poll,
+        check_polls,
     ]
     if not automatic:
         tools.extend((store_memory, remove_memory, clear_memories))
@@ -457,6 +461,7 @@ class TextLLMHandler:
         "discord_client": self.client,
         "redis_save_tool_calls": 0,
         "personality_tool_calls": 0,
+        "poll_tool_calls": 0,
         # Set by run_code_sandbox (tool_functions.py) if/when it runs, to the
         # thread it resolved/created — read back below regardless of how the
         # run ends, since a tool call may have already mutated this dict

@@ -12,14 +12,6 @@ first time someone triggers the bot after that release is deployed.
   (checked by core/tests/whats_new_tests.py).
 -->
 
-## Talk to me in voice
-I can join a voice channel and talk out loud. I only answer when someone says "hey" and my name, and everything else I can do in chat works there too: pictures and code results appear in a thread for the call. While I'm in a call, I don't reply in text in this server.
-How to use: ask me to join voice, or use /voice join. Then say "hey <my name>" and your question. Say "hey <my name>, leave" or use /voice leave when you're done.
-
-## Tell me to stop talking
-If I'm going on too long, say "hey <my name>, stop" (or "shut up", "be quiet", "that's enough") and I stop at once, so you can talk. Anything I was making, like a picture, still finishes in the thread. It uses your server's wake phrase if you've set your own.
-How to use: in a voice call, say "hey <my name>, stop".
-
-## Pick my voice and wake phrase
-Choose how I sound from dozens of voices (or blend two), how fast I talk, and what phrase gets my attention.
-How to use: /voice voice, /voice speed and /voice wake_word.
+## Polls
+I can make a Discord poll for you: tell me what it's about and I'll write the question and the options. I can see the votes as they come in, and who voted for what, so you can ask me how it's going or who won, even days later.
+How to use: @mention me and ask for a poll, e.g. "make a poll for where we eat on Friday". Later, ask "who's winning the poll?"

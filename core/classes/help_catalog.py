@@ -43,6 +43,8 @@ ASK_ENTRIES = (
               tools=("store_memory", "remove_memory", "clear_memories")),
     HelpEntry("🎭 Change personality", "Ask me to act differently, e.g. \"talk like a pirate\".",
               tools=("change_personality",)),
+    HelpEntry("📊 Run polls", "Ask me for a poll on anything, then ask how it's going.",
+              tools=("create_poll", "check_polls")),
     HelpEntry("🎨 Make images", "Ask me to draw a picture, or to change one I made "
               "(reply to it, or just say what to change).",
               tools=("generate_image",), requires=IMAGE),

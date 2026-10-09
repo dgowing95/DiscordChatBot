@@ -37,7 +37,13 @@ core/                  # the main bot (the app that runs in production)
                            #   all metric definitions + /metrics HTTP server (METRICS_PORT)
     user_memory.py         # JSON lists in Redis per (guild, user)
     config_manager.py      # per-guild settings in Redis (system prompt, temperature, ...)
-    tool_functions.py      # agent function tools: web_search, fetch_url, memory tools, generate_image, run_code_sandbox
+    tool_functions.py      # agent function tools: web_search, fetch_url, memory tools, create_poll,
+                           #   check_polls, generate_image, run_code_sandbox
+    poll_format.py         # PURE (stdlib-only) create_poll's input checks + how a poll (and
+                           #   Discord's "poll ended" message) reads in a prompt
+    polls.py               # reading Discord polls: voter lookup, prompt text, recording
+                           #   each poll (on_message) for check_polls
+    poll_store.py          # which polls each channel has had (message ids), in Redis
     image_generation.py    # create_image (prompt, generate, check, retry), diffusion
                            #   client, /health capabilities, which image to edit
     image_prompt.py        # LLM rewrite of an image request -> SDXL prompt + negative prompt
@@ -142,6 +148,23 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
    through one shared aiohttp session, and Discord's raw delete/edit events in
    `main.py` drop a message's images; a history message deleted while images
    download is left out of the prompt.
+   **Polls** (the `create_poll` tool posts them) have no text or embeds, so
+   `_format_group` gives them their own entry from `classes/poll_format.py`:
+   question, each option's count and voter names, and the end as an ABSOLUTE
+   time (a relative "ends in 3h" would change on every build and cost
+   llama.cpp its cached prefix). Voter names cost one Discord request per
+   option with votes, so `prepare_messages` fetches them after the lock, all at
+   once, bounded at 5 seconds and fail-soft (counts only); an ended poll's are
+   kept in-process. Discord's "poll ended" system message is rendered from its
+   embed fields, which the generic embed path drops. New votes do change an
+   entry, so they cost the cached prefix from that message on.
+   A poll that has scrolled out of the window is found with the `check_polls`
+   tool instead of being kept in every prompt: `on_message` records every
+   poll's message id (`classes/poll_store.py`, a Redis sorted set per channel
+   scored by end time, kept a week after the poll ends), and the tool fetches
+   the newest few live from Discord. So nothing extra is in the prompt until
+   someone asks, and it is also how voice turns and automatic runs, which have
+   no channel history, can see results.
 3. `TextLLMHandler` uses the **OpenAI `agents` SDK** pointed at the llama.cpp
    server's OpenAI-compatible endpoint (`LLM_HOST/v1`) with function tools attached.
 4. The returned text is cleaned by `MessageHandler.filter_response()` (delegate:

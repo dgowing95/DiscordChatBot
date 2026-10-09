@@ -30,6 +30,14 @@ from classes.history_policy import (
     trim_count,
     window_decision,
 )
+from classes.polls import (
+    describe_poll,
+    describe_poll_result,
+    is_poll_result,
+    message_poll,
+    placeholder_voters,
+    poll_voters,
+)
 from classes.whats_new import ANNOUNCEMENT_FOOTER
 from classes.response_filter import (
     chunk_for_discord,
@@ -268,24 +276,35 @@ class MessageHandler:
         """
         history = self._history
         wanted = [m for m in [*history, self.message] if image_targets(m.attachments)]
+        polls = [m for m in [*history, self.message] if message_poll(m)]
         started = time.monotonic()
-        parts = await asyncio.gather(*(self.image_parts(m) for m in wanted))
-        if wanted:
-            observe_stage("attachments", self._guild_id(), time.monotonic() - started)
+
+        async def _images():
+            found = await asyncio.gather(*(self.image_parts(m) for m in wanted))
+            if wanted:
+                observe_stage("attachments", self._guild_id(), time.monotonic() - started)
+            return found
+
+        parts, voters = await asyncio.gather(
+            _images(), asyncio.gather(*(poll_voters(m) for m in polls)))
         parts = {m.id: p for m, p in zip(wanted, parts)}
+        voters = {m.id: v for m, v in zip(polls, voters)}
         deleted = attachment_cache.cache().deleted_since(
             self._generation, self.message.channel.id, [m.id for m in history])
         messages = []
         for m in history:
             if m.id not in deleted:
-                messages.extend(self._format_group(m, parts.get(m.id, [])))
+                messages.extend(self._format_group(
+                    m, parts.get(m.id, []), voters=voters.get(m.id)))
         messages.extend(self._format_group(
-            self.message, parts.get(self.message.id, []), role="user", always=True))
+            self.message, parts.get(self.message.id, []), role="user", always=True,
+            voters=voters.get(self.message.id)))
         self.messages = messages
 
     def _estimate(self, message, always=False):
         placeholders = [_PLACEHOLDER_IMAGE] * len(image_targets(message.attachments))
-        return estimate_tokens(self._format_group(message, placeholders, always=always))
+        return estimate_tokens(self._format_group(
+            message, placeholders, always=always, voters=placeholder_voters(message)))
 
     async def _anchored_groups(self, limit, budget, fixed):
         """(message, tokens) history pairs for anchored mode; commits the
@@ -351,12 +370,14 @@ class MessageHandler:
         self._observe_stage("history_fetch", started)
         return found
 
-    def _format_group(self, message, image_parts, role=None, always=False):
+    def _format_group(self, message, image_parts, role=None, always=False, voters=None):
         """One Discord message as prompt entries: its text (with any images)
-        first, then its embeds in order - how Discord shows it.
+        first, then its poll, then its embeds in order - how Discord shows it.
 
         Never mutates the message. `always` keeps an entry for a message with
         no text or images (the trigger must always be in the prompt).
+        `voters` is {answer id: names} from polls.poll_voters(); without it a
+        poll shows its counts only.
         """
         if role is None:
             role = "assistant" if message.author.id == self.client.user.id else "user"
@@ -369,6 +390,12 @@ class MessageHandler:
                 'role': role,
                 'content': [*image_parts, {"type": "text", "text": text}] if image_parts else text,
             })
+        if message_poll(message) is not None:
+            entries.append({'role': role, 'content': describe_poll(message, voters)})
+        if is_poll_result(message):
+            # Rendered from its fields, which the embed path below drops.
+            entries.append({'role': role, 'content': describe_poll_result(message)})
+            return entries
         for embed in message.embeds:
             if is_announcement(embed, message, self.client):
                 continue
