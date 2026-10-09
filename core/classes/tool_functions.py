@@ -724,6 +724,94 @@ async def change_personality(wrapper: RunContextWrapper[dict], personality: str)
 
 
 @function_tool
+async def create_poll(wrapper: RunContextWrapper[dict], question: str, answers: list[str],
+                      duration_hours: int = 24, allow_multiple: bool = False) -> str:
+    """Posts a Discord poll in the channel for people to vote on. Use it when
+    someone asks for a poll or a vote, or a group needs to pick between
+    options. You write the question and the options. The poll is posted
+    automatically, so do not list the options again in your reply; its votes
+    show up in the chat history as they come in.
+
+    Args:
+        question: The question to vote on, up to 300 characters.
+        answers: 2 to 10 short options, each 55 characters or fewer.
+        duration_hours: How long voting stays open, 1 to 768 hours.
+        allow_multiple: True to let people pick more than one option.
+    """
+    from datetime import timedelta
+    from classes.poll_format import validate
+
+    question, answers, hours, error = validate(question, answers, duration_hours)
+    if error:
+        return error
+
+    # As in store_memory: the model sometimes repeats a call within one reply.
+    context = wrapper.context
+    if context.get("poll_tool_calls", 0) > 0:
+        logger.warning("create_poll already called this run; skipping.")
+        return ("A poll was already posted for this request, so this duplicate call "
+                "was skipped. Nothing further is needed.")
+
+    poll = discord.Poll(question=question, duration=timedelta(hours=hours),
+                        multiple=allow_multiple)
+    for answer in answers:
+        poll.add_answer(text=answer)
+    logger.info(f"Posting poll: {question} {answers} ({hours}h)")
+    try:
+        await context["channel"].send(poll=poll)
+    except discord.Forbidden:
+        logger.warning("Not allowed to post a poll in this channel")
+        return ("No poll was posted: I'm not allowed to post polls in this channel "
+                "(it needs the Create Polls permission). Tell the user.")
+    except Exception as e:
+        logger.warning(f"Failed to post a poll: {e}")
+        return "No poll was posted: Discord rejected it. Tell the user and do not retry."
+    context["poll_tool_calls"] = context.get("poll_tool_calls", 0) + 1
+    await add_emoji_to_message(context.get("original_message"), "📊")
+    return (f"Poll posted: \"{question}\" with {len(answers)} options, open for {hours} "
+            "hours. It is already in the channel, so do not repeat the options. Votes "
+            "will appear in the chat history.")
+
+
+# Polls check_polls reports at most, newest first.
+CHECK_POLLS_LIMIT = 5
+
+
+@function_tool
+async def check_polls(wrapper: RunContextWrapper[dict]) -> str:
+    """Looks up the polls posted in this channel over the last week, with
+    their current votes and who voted. Use it when someone asks about a poll
+    that is not in the messages you can see."""
+    from classes import poll_store
+    from classes.polls import describe_poll, message_poll, poll_voters
+
+    channel = wrapper.context["channel"]
+    try:
+        ids = await poll_store.recent(channel.id, CHECK_POLLS_LIMIT)
+    except Exception as e:
+        logger.warning(f"Could not read this channel's polls: {e}")
+        return "Polls could not be looked up right now. Tell the user."
+
+    async def _one(message_id):
+        try:
+            message = await channel.fetch_message(message_id)
+        except discord.NotFound:
+            await poll_store.forget(channel.id, message_id)
+            return None
+        except Exception as e:
+            logger.warning(f"Could not fetch poll {message_id}: {e}")
+            return None
+        if message_poll(message) is None:
+            return None
+        return describe_poll(message, await poll_voters(message))
+
+    found = [text for text in await asyncio.gather(*(_one(i) for i in ids)) if text]
+    if not found:
+        return "There have been no polls in this channel in the last week."
+    return "Polls in this channel, newest first:\n\n" + "\n\n".join(found)
+
+
+@function_tool
 async def join_voice_channel(wrapper: RunContextWrapper[dict]) -> str:
     """Joins the voice channel the person asking is in, so you can talk with
     them out loud. Use it when someone asks you to join voice, come into the

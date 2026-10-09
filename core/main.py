@@ -20,6 +20,7 @@ from classes import attachment_cache, help_catalog, sandbox_thread_inbox, whats_
 from classes.common import embed_from_data
 from classes.redis_client import text_client
 from classes import automation_runner, voice_gate
+from classes.polls import remember_poll
 from classes.automation_policy import settings as automation_settings
 from classes.voice_policy import settings as voice_settings
 from classes.message_queue import (
@@ -283,6 +284,9 @@ async def on_raw_message_edit(payload):
 
 @client.event
 async def on_message(message):
+    # Every poll, the bot's own included, is recorded so check_polls can
+    # find it after it scrolls out of the history window (no-op otherwise).
+    await remember_poll(message)
     # A sandbox run in flight in this thread takes the message instead of
     # the outer LLM, so people can steer a run while it happens ("make it
     # blue instead") without an @mention. Returning here is also the
