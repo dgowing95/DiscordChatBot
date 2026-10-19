@@ -9,7 +9,7 @@ uvicorn[standard]==0.53.0
 # Juggernaut-XL (single-file) pipeline at startup on v2.31-v2.37 (2026-09-16).
 # CI cannot catch this because the image is only built, never run.
 diffusers==0.40.0
-transformers==5.17.0
+transformers==5.18.0
 # Encodes prompts past CLIP's 77-token window (see _build_compel in main.py).
 # Compel 2.4 supports Transformers 5 and preserves chunked long prompts. It
 # brings the Jupyter/notebook stack transitively; that trade-off is deliberate.
@@ -18,7 +18,7 @@ accelerate==1.15.0
 # 4-bit (NF4) weights for FLUX.2 [klein] (IMAGE_QUANTIZE=nf4), which is what
 # fits it on an 8 GB card. Tested on prod's RTX 2070 with torch 2.11 + cu128.
 bitsandbytes==0.50.2
-huggingface-hub==1.31.0
+huggingface-hub==2.1.1
 safetensors==0.8.0
 Pillow==12.3.0
 numpy==2.5.2
