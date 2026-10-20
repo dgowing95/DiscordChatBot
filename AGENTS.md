@@ -709,7 +709,10 @@ failure shows in the run's step summary, and the full logs are in its
   `speech` / `voice` groups, which allow majors. A new ecosystem, directory or
   group in `dependabot.yml` stays manual until it is added to that list.
   Only Dependabot's own pushes are approved: a commit a maintainer pushes onto
-  a Dependabot branch is left for them.
+  a Dependabot branch is left for them. For a single-package PR, Dependabot's
+  current commit metadata has no old version, so `fetch-metadata` reports no
+  update type; the job then reads it from the title ("from 3.14.3 to
+  3.14.4"), plain numeric versions only, and otherwise leaves the PR manual.
   - The approval and merge use `AUTOMERGE_TOKEN`, a fine-grained PAT of the
     code owner (Contents + Pull requests write), stored as a Dependabot secret.
     "Protect main" needs a code-owner approval, and only a user token's merge

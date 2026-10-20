@@ -38,8 +38,28 @@ jobs:
           ECOSYSTEM: ${{ steps.meta.outputs.package-ecosystem }}
           DIRECTORY: ${{ steps.meta.outputs.directory }}
           GROUP: ${{ steps.meta.outputs.dependency-group }}
+          NAMES: ${{ steps.meta.outputs.dependency-names }}
+          NEW_VERSION: ${{ steps.meta.outputs.new-version }}
+          TITLE: ${{ github.event.pull_request.title }}
         run: |
           set -euo pipefail
+          # Dependabot's newer commit metadata leaves out the old version, so
+          # fetch-metadata cannot compute update-type for a single-package PR
+          # ("null"). Work it out from the title, "Bump aiohttp from 3.14.3 to
+          # 3.14.4 in /core", for one package with plain numeric versions only;
+          # anything else stays unknown, which means manual.
+          if [ -z "$UPDATE_TYPE" ] || [ "$UPDATE_TYPE" = null ]; then
+            version='[0-9]+(\.[0-9]+)*'
+            if [[ "$NAMES" != *,* && "$TITLE" =~ ^Bump\ ([^ ]+)\ from\ ($version)\ to\ ($version)( |$) ]] \
+                && [ "${BASH_REMATCH[1]}" = "$NAMES" ] && [ "${BASH_REMATCH[4]}" = "$NEW_VERSION" ]; then
+              IFS=. read -r old_major old_minor _ <<< "${BASH_REMATCH[2]}.0.0"
+              IFS=. read -r new_major new_minor _ <<< "${BASH_REMATCH[4]}.0.0"
+              if [ "$old_major" != "$new_major" ]; then UPDATE_TYPE=version-update:semver-major
+              elif [ "$old_minor" != "$new_minor" ]; then UPDATE_TYPE=version-update:semver-minor
+              else UPDATE_TYPE=version-update:semver-patch; fi
+              echo "update-type worked out from the title: $UPDATE_TYPE"
+            fi
+          fi
           # Everything must be on the allowlist; the first miss says why not.
           reason=""
           case "$UPDATE_TYPE" in
