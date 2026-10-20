@@ -701,9 +701,15 @@ failure shows in the run's step summary, and the full logs are in its
   skipped, and GitHub counts a skipped job as passing.
 - **Auto-merge** (`dependabot-auto-merge.yaml`). A Dependabot patch/minor PR is
   approved and set to auto-merge, so it merges once the required checks,
-  `e2e` included, pass. Excluded, so they still wait for a person: majors,
-  `github_actions` bumps, `/diffusionservice`, and the `openai` /
-  `huggingface` / `speech` / `voice` groups, which allow majors.
+  `e2e` included, pass. It is an **allowlist**: patch/minor, ecosystem pip /
+  npm / docker, directory `/core`, `/speechservice` or `/voicesidecar`, and
+  ungrouped or the `core-minor` group. Everything else waits for a person:
+  majors, `github_actions` bumps, `/diffusionservice` (CPU-only in E2E), `/`
+  (docker-compose, not run by E2E), and the `openai` / `huggingface` /
+  `speech` / `voice` groups, which allow majors. A new ecosystem, directory or
+  group in `dependabot.yml` stays manual until it is added to that list.
+  Only Dependabot's own pushes are approved: a commit a maintainer pushes onto
+  a Dependabot branch is left for them.
   - The approval and merge use `AUTOMERGE_TOKEN`, a fine-grained PAT of the
     code owner (Contents + Pull requests write), stored as a Dependabot secret.
     "Protect main" needs a code-owner approval, and only a user token's merge
@@ -721,9 +727,11 @@ failure shows in the run's step summary, and the full logs are in its
   - Merging is deploying: every merge is a release, and prod follows releases.
 - **Rebase train** (`dependabot-rebase-train.yaml`). "Protect main" merges
   only PRs that are up to date, and Dependabot rebases only on conflicts. So
-  after each push to main this posts `@dependabot rebase` on the oldest
-  auto-merge PR that is behind. It uses the same PAT from the `automerge`
-  environment (main only). It never uses `gh pr update-branch`: that would
+  after each push to main (and every 3 hours, in case a nudged PR then failed
+  and nothing merged) this posts `@dependabot rebase` on the oldest auto-merge
+  PR that is behind. A PR already nudged since its last commit is skipped, so
+  one that cannot rebase does not hold up the rest. It uses the same PAT from
+  the `automerge` environment (main only). It never uses `gh pr update-branch`: that would
   make the PAT owner the last pusher and void their approval.
 - `review.yml` skips Dependabot's PRs: E2E is their check, and an open review
   thread would hold up auto-merge.

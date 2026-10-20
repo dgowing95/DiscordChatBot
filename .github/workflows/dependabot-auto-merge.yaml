@@ -1,9 +1,10 @@
 name: Dependabot auto-merge
 # Approves Dependabot's patch/minor PRs and turns on auto-merge. GitHub then
 # merges once every required check -- `e2e` included -- has passed, and the
-# merge releases and deploys like any other push to main. Everything else
-# (majors, grouped PRs that may carry majors, the image service, workflow
-# actions) still waits for a person. See "End-to-end CI" in AGENTS.md.
+# merge releases and deploys like any other push to main. It is an
+# allowlist: only update kinds that e2e.yaml actually exercises qualify, so a
+# new ecosystem, directory or group in dependabot.yml stays manual until it is
+# added here on purpose. See "End-to-end CI" in AGENTS.md.
 on:
   pull_request:
     types: [opened, synchronize, reopened]
@@ -15,7 +16,12 @@ jobs:
   # third-party action here never runs next to that token: a step can rewrite
   # PATH or GITHUB_ENV for every later step of its own job.
   metadata:
-    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    # Dependabot's PR AND Dependabot's push: a maintainer pushing a commit
+    # onto a Dependabot branch (to take a closer look) must not be approved
+    # over by this workflow.
+    if: >-
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.actor == 'dependabot[bot]'
     runs-on: ubuntu-latest
     permissions:
       pull-requests: read
@@ -34,19 +40,33 @@ jobs:
           GROUP: ${{ steps.meta.outputs.dependency-group }}
         run: |
           set -euo pipefail
-          eligible=true
+          # Everything must be on the allowlist; the first miss says why not.
           reason=""
           case "$UPDATE_TYPE" in
             version-update:semver-patch|version-update:semver-minor) ;;
-            *) eligible=false; reason="update type '$UPDATE_TYPE'" ;;
+            *) reason="update type '$UPDATE_TYPE'" ;;
           esac
-          # A bumped action would run in workflows that hold secrets before
-          # anyone has looked at it.
-          if [ "$ECOSYSTEM" = github_actions ]; then eligible=false; reason="workflow actions"; fi
-          # E2E only runs the image service on CPU, never the GPU paths.
-          case "$DIRECTORY" in /diffusionservice*) eligible=false; reason="image service" ;; esac
-          # These groups take majors too (.github/dependabot.yml).
-          case "$GROUP" in openai|huggingface|speech|voice) eligible=false; reason="group '$GROUP'" ;; esac
+          # Not github_actions: a bumped action would run in workflows that
+          # hold secrets before anyone has looked at it. (The name is the one
+          # in Dependabot's branch names: npm is npm_and_yarn.)
+          case "$ECOSYSTEM" in
+            pip|npm_and_yarn|docker) ;;
+            *) reason="${reason:-ecosystem '$ECOSYSTEM'}" ;;
+          esac
+          # The services e2e.yaml runs for real. Not /diffusionservice (only
+          # on CPU, never the GPU paths) and not / (docker-compose.yaml, which
+          # e2e does not run at all).
+          case "$DIRECTORY" in
+            /core|/speechservice|/voicesidecar) ;;
+            *) reason="${reason:-directory '$DIRECTORY'}" ;;
+          esac
+          # Ungrouped, or a group limited to minor/patch in dependabot.yml.
+          # openai, huggingface, speech and voice take majors too.
+          case "$GROUP" in
+            ""|core-minor) ;;
+            *) reason="${reason:-group '$GROUP'}" ;;
+          esac
+          if [ -z "$reason" ]; then eligible=true; else eligible=false; fi
           echo "eligible=$eligible" >> "$GITHUB_OUTPUT"
           echo "Auto-merge: $eligible ${reason:+(not: $reason)}"
 
@@ -71,4 +91,7 @@ jobs:
             exit 0
           fi
           gh pr review --approve "$PR_URL" --body "Patch/minor update: approved for auto-merge once the required checks, end-to-end included, pass."
-          gh pr merge --auto --squash "$PR_URL"
+          # A rebase re-runs this with auto-merge already on; don't ask twice.
+          if [ -z "$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest // empty')" ]; then
+            gh pr merge --auto --squash "$PR_URL"
+          fi
