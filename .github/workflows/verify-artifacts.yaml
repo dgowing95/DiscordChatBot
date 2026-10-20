@@ -1,4 +1,9 @@
 name: Verify Artifacts
+# Builds each image AND starts it. The end-to-end job (e2e.yaml) runs the
+# services from source on a full Ubuntu runner; prod runs these slim images,
+# so a dependency that needs a system library the image lacks only shows up
+# here. Each smoke test exercises the image's real code path without any
+# credentials.
 on:
   pull_request:
     branches:
@@ -9,6 +14,7 @@ permissions: {}
 jobs:
   verify_image:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: read
@@ -32,10 +38,18 @@ jobs:
         with:
           tags: core-test
           context: ./core
+          load: true
           cache-from: type=registry,ref=ghcr.io/dgowing95/discordchatbot:core-buildcache
+
+      # Importing main.py loads every module the bot uses (discord.py, the
+      # agents SDK, redis, aiohttp, prometheus...) without connecting to
+      # anything: client.run() is behind `if __name__ == "__main__"`.
+      - name: Smoke test the image
+        run: docker run --rm --entrypoint python3 core-test -W ignore -c "import main; print('core imports OK')"
 
   verify_diffusion_image:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: read
@@ -54,15 +68,42 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      # The CUDA torch image is large; loading it into Docker needs more disk
+      # than a hosted runner has free by default.
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+
       - name: Build Diffusion Docker Image
         uses: docker/build-push-action@v7
         with:
           tags: diffusion-test
           context: ./diffusionservice
+          load: true
           cache-from: type=registry,ref=ghcr.io/dgowing95/discordchatbot:diffusion-buildcache
+
+      # On the CPU (the CUDA wheels fall back to it) with a tiny SDXL test
+      # model: loads the pipeline the real way and generates one PNG.
+      - name: Smoke test the image
+        run: |
+          set -euo pipefail
+          docker run -d --name diffusion -p 8000:8000 \
+            -e IMAGE_MODEL=hf-internal-testing/tiny-stable-diffusion-xl-pipe \
+            -e IMAGE_STEPS=2 -e IMAGE_WIDTH=128 -e IMAGE_HEIGHT=128 diffusion-test
+          for _ in $(seq 1 120); do
+            curl -fsS -o /dev/null http://localhost:8000/health && break
+            if [ "$(docker inspect -f '{{.State.Running}}' diffusion)" != true ]; then break; fi
+            sleep 5
+          done
+          curl -fsS http://localhost:8000/health || { docker logs diffusion; exit 1; }
+          echo
+          curl -fsS --connect-timeout 10 --max-time 300 -o out.png -w "%{http_code} %{content_type} %{size_download} bytes\n" \
+            -X POST http://localhost:8000/generate -H 'content-type: application/json' \
+            -d '{"prompt": "a red apple on a wooden table"}' || { docker logs diffusion; exit 1; }
+          file out.png | grep -q PNG || { echo "not a PNG"; docker logs diffusion; exit 1; }
 
   verify_speech_image:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: read
@@ -86,10 +127,54 @@ jobs:
         with:
           tags: speech-test
           context: ./speechservice
+          load: true
           cache-from: type=registry,ref=ghcr.io/dgowing95/discordchatbot:speech-buildcache
+
+      # The models (~800 MB, from Hugging Face and GitHub) are cached, so the
+      # check fails on the image rather than on a throttled download.
+      - name: Restore speech models
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/speech-models
+          # main.py names the models (STT_MODEL, TTS_*_URL): a new one is a new key.
+          key: speech-models-v1-${{ hashFiles('speechservice/requirements.txt', 'speechservice/main.py') }}
+          restore-keys: speech-models-v1-
+
+      # Loads both models, then says a sentence and transcribes it back.
+      - name: Smoke test the image
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/speech-models"
+          docker run -d --name speech -p 8000:8000 -v "$RUNNER_TEMP/speech-models:/models" speech-test
+          # Up to 15 minutes, as in e2e/start_stack.sh (a cold download).
+          for _ in $(seq 1 180); do
+            curl -fsS -o /dev/null http://localhost:8000/health && break
+            if [ "$(docker inspect -f '{{.State.Running}}' speech)" != true ]; then break; fi
+            sleep 5
+          done
+          curl -fsS http://localhost:8000/health || { docker logs speech; exit 1; }
+          echo
+          python3 - <<'EOF' || { docker logs speech; exit 1; }
+          import array, json, re, urllib.request
+          speak = urllib.request.Request(
+              "http://localhost:8000/speak", method="POST",
+              data=json.dumps({"text": "The quick brown fox jumps over the lazy dog."}).encode(),
+              headers={"content-type": "application/json"})
+          stereo = array.array("h", urllib.request.urlopen(speak, timeout=120).read())
+          # /speak answers 48 kHz stereo; /transcribe takes 48 kHz mono.
+          mono = array.array("h", ((stereo[i] + stereo[i + 1]) // 2 for i in range(0, len(stereo) - 1, 2)))
+          heard = json.load(urllib.request.urlopen(urllib.request.Request(
+              "http://localhost:8000/transcribe", method="POST", data=mono.tobytes()), timeout=120))["text"]
+          print("heard:", heard)
+          assert {"fox", "dog"} & set(re.findall(r"[a-z]+", heard.lower())), heard
+          EOF
+          # The container wrote the cache as root; let the cache step read it.
+          docker rm -f speech > /dev/null
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/speech-models"
 
   verify_voice_image:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: read
@@ -113,10 +198,33 @@ jobs:
         with:
           tags: voice-test
           context: ./voicesidecar
+          load: true
           cache-from: type=registry,ref=ghcr.io/dgowing95/discordchatbot:voice-buildcache
+
+      # Starts the sidecar (which loads @discordjs/voice, DAVE and the Opus
+      # encoder) and asks its /health, served by the same HTTP server as the
+      # bridge. (A bare TCP connect could be answered by Docker's port proxy
+      # before Node is listening.)
+      - name: Smoke test the image
+        run: |
+          set -euo pipefail
+          docker run -d --name voice -p 8765:8765 -e VOICE_BRIDGE_HOST=0.0.0.0 voice-test
+          for _ in $(seq 1 30); do
+            if curl -fsS --max-time 5 http://localhost:8765/health; then
+              echo
+              docker logs voice
+              echo "voice sidecar is healthy"
+              exit 0
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' voice)" != true ]; then break; fi
+            sleep 2
+          done
+          docker logs voice
+          exit 1
 
   verify_chart:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
