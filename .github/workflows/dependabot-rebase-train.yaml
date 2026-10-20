@@ -1,0 +1,52 @@
+name: Dependabot rebase train
+# "Protect main" only merges a PR that is up to date with main, and
+# Dependabot rebases only on a conflict. So after one auto-merged update
+# lands, the rest would wait forever as "behind". After each push to main
+# this asks Dependabot to rebase the OLDEST behind PR that has auto-merge on;
+# its checks (e2e included) run again on the new main, it merges, and that
+# push moves the train on. One at a time, so every merge is tested against
+# exactly what it lands on.
+#
+# A comment, never `gh pr update-branch`: that would make the token's owner
+# the last pusher, which voids their own approval
+# (require_last_push_approval) and stops Dependabot managing the branch.
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: dependabot-rebase-train
+
+jobs:
+  nudge:
+    runs-on: ubuntu-latest
+    # The token is an environment secret, usable from main only.
+    environment: automerge
+    permissions: {}
+    env:
+      GH_TOKEN: ${{ secrets.AUTOMERGE_TOKEN }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Ask Dependabot to rebase the next queued update
+        run: |
+          set -euo pipefail
+          if [ -z "$GH_TOKEN" ]; then
+            echo "AUTOMERGE_TOKEN is not set in the automerge environment." >&2
+            exit 0
+          fi
+          # mergeStateStatus needs a moment after a push to settle.
+          sleep 30
+          next=$(gh pr list --repo "$REPO" --author app/dependabot --state open --limit 50 \
+            --json number,createdAt,mergeStateStatus,autoMergeRequest \
+            --jq '[.[] | select(.autoMergeRequest != null and .mergeStateStatus == "BEHIND")]
+                  | sort_by(.createdAt) | first | .number // empty')
+          if [ -z "$next" ]; then
+            echo "No auto-merge update is behind main."
+            exit 0
+          fi
+          echo "Asking Dependabot to rebase #$next"
+          gh pr comment "$next" --repo "$REPO" --body "@dependabot rebase"

@@ -11,8 +11,8 @@ jobs:
     # push while preserving a full pass for opened/ready/reopened PRs.
     #
     # Dependabot's PRs are skipped: their check is the end-to-end run (e2e.yaml), its runs
-    # cannot see OPENCODE_API_KEY anyway, and a review thread left open would hold up the
-    # merge ("Protect main" requires every thread resolved).
+    # cannot see OPENCODE_API_KEY anyway, and a review thread left open would hold up
+    # auto-merge ("Protect main" requires every thread resolved).
     if: github.event.pull_request.draft == false && github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: [ ubuntu-latest ]
     timeout-minutes: 45
