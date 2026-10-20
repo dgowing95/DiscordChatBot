@@ -136,7 +136,8 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/speech-models
-          key: speech-models-v1-${{ hashFiles('speechservice/requirements.txt') }}
+          # main.py names the models (STT_MODEL, TTS_*_URL): a new one is a new key.
+          key: speech-models-v1-${{ hashFiles('speechservice/requirements.txt', 'speechservice/main.py') }}
           restore-keys: speech-models-v1-
 
       # Loads both models, then says a sentence and transcribes it back.
@@ -201,19 +202,21 @@ jobs:
           cache-from: type=registry,ref=ghcr.io/dgowing95/discordchatbot:voice-buildcache
 
       # Starts the sidecar (which loads @discordjs/voice, DAVE and the Opus
-      # encoder) and checks its bridge accepts connections.
+      # encoder) and asks its /health, served by the same HTTP server as the
+      # bridge. (A bare TCP connect could be answered by Docker's port proxy
+      # before Node is listening.)
       - name: Smoke test the image
         run: |
           set -euo pipefail
           docker run -d --name voice -p 8765:8765 -e VOICE_BRIDGE_HOST=0.0.0.0 voice-test
           for _ in $(seq 1 30); do
-            if (exec 3<>/dev/tcp/127.0.0.1/8765) 2> /dev/null; then
-              sleep 2
-              [ "$(docker inspect -f '{{.State.Running}}' voice)" = true ] || break
+            if curl -fsS --max-time 5 http://localhost:8765/health; then
+              echo
               docker logs voice
-              echo "voice sidecar is listening"
+              echo "voice sidecar is healthy"
               exit 0
             fi
+            if [ "$(docker inspect -f '{{.State.Running}}' voice)" != true ]; then break; fi
             sleep 2
           done
           docker logs voice
