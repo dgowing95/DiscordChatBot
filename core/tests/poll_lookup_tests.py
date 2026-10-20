@@ -139,7 +139,9 @@ def _message(mid, poll, author="bot"):
 
 @pytest.mark.asyncio
 async def test_remember_poll_records_its_end(redis):
-    ends = datetime(2026, 10, 10, 14, 0, tzinfo=timezone.utc)
+    # Relative to now: a fixed date drops out of the store once it is more
+    # than KEEP_SECONDS in the past, and the test then fails on its own.
+    ends = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(hours=3)
     await polls.remember_poll(_message(42, _poll({"a": 0, "b": 0}, ends)))
     assert redis.sets["dcb:polls:7"] == {"42": ends.timestamp()}
 
