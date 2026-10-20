@@ -27,6 +27,12 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same PR replaces the run in progress: only the latest
+# commit's result matters, and runs queue for the one self-hosted runner.
+concurrency:
+  group: e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # Decided per job rather than with on.pull_request.paths: a workflow that
   # never starts reports no status, and `e2e` is a required check. Require
@@ -87,7 +93,9 @@ jobs:
     # the runner's E2E_LLM_HOST / E2E_DIFFUSION_URL / E2E_MODEL environment.
     # The runner must be unprivileged: this job runs the PR's dependencies.
     runs-on: discordchatbot-e2e
-    timeout-minutes: 45
+    # Above the worst case the scripts allow (cold caches, every wait in
+    # run_checks.py at its limit), so a slow run still reports.
+    timeout-minutes: 90
     env:
       E2E_DISCORD_TOKEN: ${{ secrets.E2E_DISCORD_TOKEN }}
       E2E_WEBHOOK_URL: ${{ secrets.E2E_WEBHOOK_URL }}

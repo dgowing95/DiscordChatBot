@@ -20,6 +20,9 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 LOGS="$ROOT/e2e/logs"
 WORK="$ROOT/.e2e"
 CACHE="${E2E_CACHE:-$HOME/.cache/e2e}"
+# Fresh venvs every run: a reused one would keep packages from an earlier
+# run, so a dependency a PR forgets to add (or removes) would go unnoticed.
+rm -rf "$WORK"
 mkdir -p "$LOGS" "$WORK" "$CACHE/hf"
 : > "$LOGS/pids"
 
@@ -29,6 +32,10 @@ done
 if [ "${E2E_LOCAL_DIFFUSION:-0}" != 1 ] && [ -z "${E2E_DIFFUSION_URL:-}" ]; then
   echo "E2E_DIFFUSION_URL is not set (or set E2E_LOCAL_DIFFUSION=1)" >&2; exit 1
 fi
+# The test bot's credentials go to core only. Kept in an unexported variable,
+# so nothing else started here (the other services, pip, npm) inherits them.
+DISCORD_TOKEN_VALUE="$E2E_DISCORD_TOKEN"
+unset E2E_DISCORD_TOKEN E2E_WEBHOOK_URL E2E_VOICE_CHANNEL_ID
 
 # start NAME DIR COMMAND...: run in the background, log to logs/NAME.log.
 start() {
@@ -100,8 +107,9 @@ if [ "${E2E_LOCAL_DIFFUSION:-0}" = 1 ]; then
 fi
 (
   # A subshell, so only core gets these settings, under core's own names.
-  export DISCORD_TOKEN="$E2E_DISCORD_TOKEN"
-  unset E2E_DISCORD_TOKEN E2E_WEBHOOK_URL
+  # Nobody is in the voice channel during a test, so the idle leave must
+  # outlast the whole voice case.
+  export DISCORD_TOKEN="$DISCORD_TOKEN_VALUE"
   export REDIS_HOST=127.0.0.1
   export LLM_HOST="$E2E_LLM_HOST" MODEL="$E2E_MODEL" DIFFUSION_URL="$DIFFUSION_URL"
   # A tiny model draws noise, so the vision check would rightly say the
@@ -110,7 +118,7 @@ fi
   if [ "${E2E_LOCAL_DIFFUSION:-0}" = 1 ]; then export IMAGE_REVIEW_ENABLED=0; fi
   export SANDBOX_ENABLED=0 CONTENT_GUARD_ENABLED=0 WHATS_NEW_ENABLED=0
   export DOUBLE_REPLY_CHANCE=0 REASONING_EFFORT=low METRICS_PORT=9464 LOG_LEVEL=INFO
-  export VOICE_ENABLED=1 VOICE_DEV_INJECT=1 VOICE_DEBUG=1 VOICE_IDLE_LEAVE_SECONDS=600
+  export VOICE_ENABLED=1 VOICE_DEV_INJECT=1 VOICE_DEBUG=1 VOICE_IDLE_LEAVE_SECONDS=1800
   export VOICE_BRIDGE_URL=ws://127.0.0.1:8765 VOICE_BRIDGE_TOKEN="$BRIDGE_TOKEN"
   export SPEECH_URL=http://127.0.0.1:8002
   start core "$ROOT/core" "$WORK/core/bin/python" -W ignore -u main.py
