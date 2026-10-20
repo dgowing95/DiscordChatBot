@@ -116,6 +116,20 @@ jobs:
         with:
           persist-credentials: false
 
+      # The job writes several GB (venvs, models, package caches). Keep all of
+      # it under the runner's work directory, which a runner can put on a
+      # roomy volume, rather than in $HOME and /tmp on the root filesystem.
+      - name: Keep caches and temp files in the work directory
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/tmp" "$RUNNER_TEMP/cache"
+          {
+            echo "TMPDIR=$RUNNER_TEMP/tmp"
+            echo "PIP_CACHE_DIR=$RUNNER_TEMP/cache/pip"
+            echo "npm_config_cache=$RUNNER_TEMP/cache/npm"
+            echo "E2E_CACHE=$RUNNER_TEMP/cache/e2e"
+          } >> "$GITHUB_ENV"
+
       # Each service is tested on the Python/Node its image uses, read from
       # its Dockerfile, so a base-image bump changes what is tested too.
       - name: Read runtime versions
@@ -148,10 +162,7 @@ jobs:
       - name: Restore caches
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            ~/.cache/pip
-            ~/.npm
-            ~/.cache/e2e
+          path: ${{ runner.temp }}/cache
           key: e2e-${{ runner.os }}-${{ hashFiles('core/requirements.txt', 'speechservice/requirements.txt', 'diffusionservice/requirements.txt', 'voicesidecar/package-lock.json', 'e2e/start_stack.sh') }}
           restore-keys: e2e-${{ runner.os }}-
 
