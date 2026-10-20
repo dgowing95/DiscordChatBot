@@ -1,0 +1,98 @@
+name: Dependabot auto-merge
+# Approves Dependabot's patch/minor PRs and turns on auto-merge. GitHub then
+# merges once every required check -- `e2e` included -- has passed, and the
+# merge releases and deploys like any other push to main. It is an
+# allowlist: only update kinds that e2e.yaml actually exercises qualify, so a
+# new ecosystem, directory or group in dependabot.yml stays manual until it is
+# added here on purpose. See "End-to-end CI" in AGENTS.md.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions: {}
+
+jobs:
+  # GITHUB_TOKEN only. Kept apart from the job holding AUTOMERGE_TOKEN so the
+  # third-party action here never runs next to that token: a step can rewrite
+  # PATH or GITHUB_ENV for every later step of its own job.
+  metadata:
+    # Dependabot's PR AND Dependabot's push: a maintainer pushing a commit
+    # onto a Dependabot branch (to take a closer look) must not be approved
+    # over by this workflow.
+    if: >-
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      eligible: ${{ steps.decide.outputs.eligible }}
+    steps:
+      - id: meta
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - id: decide
+        env:
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+          ECOSYSTEM: ${{ steps.meta.outputs.package-ecosystem }}
+          DIRECTORY: ${{ steps.meta.outputs.directory }}
+          GROUP: ${{ steps.meta.outputs.dependency-group }}
+        run: |
+          set -euo pipefail
+          # Everything must be on the allowlist; the first miss says why not.
+          reason=""
+          case "$UPDATE_TYPE" in
+            version-update:semver-patch|version-update:semver-minor) ;;
+            *) reason="update type '$UPDATE_TYPE'" ;;
+          esac
+          # Not github_actions: a bumped action would run in workflows that
+          # hold secrets before anyone has looked at it. Not npm either: its
+          # only directory (/voicesidecar) is the voice group, which takes
+          # majors. (Names as in Dependabot's branch names.)
+          case "$ECOSYSTEM" in
+            pip|docker) ;;
+            *) reason="${reason:-ecosystem '$ECOSYSTEM'}" ;;
+          esac
+          # The services e2e.yaml runs for real. Not /diffusionservice (only
+          # on CPU, never the GPU paths) and not / (docker-compose.yaml, which
+          # e2e does not run at all).
+          case "$DIRECTORY" in
+            /core|/speechservice|/voicesidecar) ;;
+            *) reason="${reason:-directory '$DIRECTORY'}" ;;
+          esac
+          # Ungrouped, or a group limited to minor/patch in dependabot.yml.
+          # openai, huggingface, speech and voice take majors too.
+          case "$GROUP" in
+            ""|core-minor) ;;
+            *) reason="${reason:-group '$GROUP'}" ;;
+          esac
+          if [ -z "$reason" ]; then eligible=true; else eligible=false; fi
+          echo "eligible=$eligible" >> "$GITHUB_OUTPUT"
+          echo "Auto-merge: $eligible ${reason:+(not: $reason)}"
+
+  # No `uses:` steps and no checkout: only the runner's own gh runs here.
+  approve:
+    needs: metadata
+    if: needs.metadata.outputs.eligible == 'true'
+    runs-on: ubuntu-latest
+    permissions: {}
+    env:
+      # A code owner's token: "Protect main" needs a code-owner approval, and
+      # unlike GITHUB_TOKEN its merge fires the push that cuts the release.
+      # A Dependabot secret, since Dependabot's runs see no Actions secrets.
+      GH_TOKEN: ${{ secrets.AUTOMERGE_TOKEN }}
+      PR_URL: ${{ github.event.pull_request.html_url }}
+    steps:
+      - name: Approve and enable auto-merge
+        run: |
+          set -euo pipefail
+          if [ -z "$GH_TOKEN" ]; then
+            echo "AUTOMERGE_TOKEN is not set in the Dependabot secrets; leaving this PR for a person." >&2
+            exit 0
+          fi
+          gh pr review --approve "$PR_URL" --body "Patch/minor update: approved for auto-merge once the required checks, end-to-end included, pass."
+          # A rebase re-runs this with auto-merge already on; don't ask twice.
+          if [ -z "$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest // empty')" ]; then
+            gh pr merge --auto --squash "$PR_URL"
+          fi

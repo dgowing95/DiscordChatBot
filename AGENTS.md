@@ -542,6 +542,8 @@ needs an entry there, gated with `requires` when it can be switched off;
 
 ## Releasing
 
+- Dependabot's patch/minor PRs merge themselves once E2E passes (see "End-to-end
+  CI" below), and each merge is a release like any other.
 - Every push to `main` runs `auto-tag.yaml`, which bumps the highest `vMAJOR.MINOR`
   tag by one minor and pushes it. That tag push is what starts `release.yaml`
   (tests -> two images -> chart -> GitHub release). Nothing dispatches
@@ -661,7 +663,7 @@ curl -sS -X POST "$TEST_WEBHOOK_URL" \
 - Conventions seen in existing tests: `pytest` fixtures + `unittest.mock` to stub
   Redis; docstring-style comments at the top of test files documenting how to run them.
 
-### End-to-end CI
+### End-to-end CI (and Dependabot auto-merge)
 
 `.github/workflows/e2e.yaml` runs on every PR that touches `core/`,
 `speechservice/`, `voicesidecar/`, `diffusionservice/` or `e2e/`. It starts
@@ -679,7 +681,7 @@ failure shows in the run's step summary, and the full logs are in its
   variables, so no deployment detail lives in this public repository. A
   `diffusionservice/` PR runs its own image service on CPU with a tiny model
   instead (`E2E_LOCAL_DIFFUSION`). That covers imports and library skew, never
-  the CUDA/nf4 paths, so those PRs still need trying by hand.
+  the CUDA/nf4 paths, so those PRs are never auto-merged.
 - **Secrets** `E2E_DISCORD_TOKEN`, `E2E_WEBHOOK_URL` and `E2E_VOICE_CHANNEL_ID`
   belong to a bot and a server made only for testing. Each one goes in **both**
   the Actions secrets and the Dependabot secrets: a run started by Dependabot
@@ -694,11 +696,45 @@ failure shows in the run's step summary, and the full logs are in its
   - Never switch this to `pull_request_target` to reach secrets.
   - Only one run at a time (the runner pool has one runner): two bots on one
     token would both answer.
-- **Required checks.** Both `e2e` and `e2e-changes` should be required in
-  "Protect main". `e2e` alone is not enough: if `e2e-changes` fails, `e2e` is
+- **Required checks.** Both `e2e` and `e2e-changes` are required in
+  "Protect main". `e2e` alone would not be enough: if `e2e-changes` fails, `e2e` is
   skipped, and GitHub counts a skipped job as passing.
-- `review.yml` skips Dependabot's PRs: E2E is their check, their runs cannot
-  see the review's API key, and an open review thread would hold up a merge.
+- **Auto-merge** (`dependabot-auto-merge.yaml`). A Dependabot patch/minor PR is
+  approved and set to auto-merge, so it merges once the required checks,
+  `e2e` included, pass. It is an **allowlist**: patch/minor, ecosystem pip or
+  docker, directory `/core`, `/speechservice` or `/voicesidecar`, and
+  ungrouped or the `core-minor` group. Everything else waits for a person:
+  majors, `github_actions` and npm (the `voice` group) bumps, `/diffusionservice` (CPU-only in E2E), `/`
+  (docker-compose, not run by E2E), and the `openai` / `huggingface` /
+  `speech` / `voice` groups, which allow majors. A new ecosystem, directory or
+  group in `dependabot.yml` stays manual until it is added to that list.
+  Only Dependabot's own pushes are approved: a commit a maintainer pushes onto
+  a Dependabot branch is left for them.
+  - The approval and merge use `AUTOMERGE_TOKEN`, a fine-grained PAT of the
+    code owner (Contents + Pull requests write), stored as a Dependabot secret.
+    "Protect main" needs a code-owner approval, and only a user token's merge
+    fires the push that releases. It expires: mint a new one the same way as
+    `TAG_PUSH_TOKEN` (see Releasing), with **Pull requests: Read and write**
+    added. If it is missing, the job leaves the PR for a person and does not
+    fail.
+  - **That token can also create release tags**: its owner is an admin and a
+    bypass actor on "Restrict Tagging". That is why the job holding it runs
+    no third-party action and no repository code, and why bumped actions are
+    never auto-merged.
+  - Auto-merge still waits for the required checks when the token's owner is
+    an admin: checked on a scratch PR (#149) before this went live. The admin
+    bypass on "Protect main" is not used by auto-merge.
+  - Merging is deploying: every merge is a release, and prod follows releases.
+- **Rebase train** (`dependabot-rebase-train.yaml`). "Protect main" merges
+  only PRs that are up to date, and Dependabot rebases only on conflicts. So
+  after each push to main (and every 3 hours, in case a nudged PR then failed
+  and nothing merged) this posts `@dependabot rebase` on the oldest auto-merge
+  PR that is behind. A PR already nudged since its last commit is skipped, so
+  one that cannot rebase does not hold up the rest. It uses the same PAT from
+  the `automerge` environment (main only). It never uses `gh pr update-branch`: that would
+  make the PAT owner the last pusher and void their approval.
+- `review.yml` skips Dependabot's PRs: E2E is their check, and an open review
+  thread would hold up auto-merge.
 
 ## Conventions & gotchas
 
