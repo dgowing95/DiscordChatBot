@@ -60,5 +60,5 @@ export CORE_PYTHON=python3.14 SPEECH_PYTHON=python3.13
 e2e/start_stack.sh && .e2e/core/bin/python e2e/run_checks.py; e2e/stop_stack.sh
 ```
 
-Use a test bot and a test server, never the real ones. While it runs, the bot
+Use a test bot and a test server, never the real ones. While it runs, the test bot
 answers every mention in that server.
