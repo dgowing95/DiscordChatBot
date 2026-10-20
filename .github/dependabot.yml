@@ -62,8 +62,8 @@ updates:
     open-pull-requests-limit: 5
     # One PR for the whole speech stack, majors included: faster-whisper,
     # ctranslate2, kokoro-onnx and onnxruntime pin each other's ranges and
-    # numpy, and the image is only built in CI, never run, so a skew would
-    # first show up as a pod that cannot load its models.
+    # numpy, and a skew only shows up once the models load (E2E loads them:
+    # e2e.yaml's "speech service" check).
     groups:
       speech:
         patterns:

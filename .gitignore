@@ -5,3 +5,7 @@ config.yaml
 node_modules
 .venv
 .pytest_cache
+
+# End-to-end CI (e2e/start_stack.sh)
+.e2e/
+e2e/logs/
