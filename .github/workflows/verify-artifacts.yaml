@@ -14,6 +14,7 @@ permissions: {}
 jobs:
   verify_image:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: read
@@ -48,6 +49,7 @@ jobs:
 
   verify_diffusion_image:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: read
@@ -94,13 +96,14 @@ jobs:
           done
           curl -fsS http://localhost:8000/health || { docker logs diffusion; exit 1; }
           echo
-          curl -fsS -o out.png -w "%{http_code} %{content_type} %{size_download} bytes\n" \
+          curl -fsS --connect-timeout 10 --max-time 300 -o out.png -w "%{http_code} %{content_type} %{size_download} bytes\n" \
             -X POST http://localhost:8000/generate -H 'content-type: application/json' \
             -d '{"prompt": "a red apple on a wooden table"}' || { docker logs diffusion; exit 1; }
           file out.png | grep -q PNG || { echo "not a PNG"; docker logs diffusion; exit 1; }
 
   verify_speech_image:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: read
@@ -127,13 +130,23 @@ jobs:
           load: true
           cache-from: type=registry,ref=ghcr.io/dgowing95/discordchatbot:speech-buildcache
 
-      # Loads both models (they download on first boot), then says a sentence
-      # and transcribes it back.
+      # The models (~800 MB, from Hugging Face and GitHub) are cached, so the
+      # check fails on the image rather than on a throttled download.
+      - name: Restore speech models
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/speech-models
+          key: speech-models-v1-${{ hashFiles('speechservice/requirements.txt') }}
+          restore-keys: speech-models-v1-
+
+      # Loads both models, then says a sentence and transcribes it back.
       - name: Smoke test the image
         run: |
           set -euo pipefail
-          docker run -d --name speech -p 8000:8000 speech-test
-          for _ in $(seq 1 120); do
+          mkdir -p "$RUNNER_TEMP/speech-models"
+          docker run -d --name speech -p 8000:8000 -v "$RUNNER_TEMP/speech-models:/models" speech-test
+          # Up to 15 minutes, as in e2e/start_stack.sh (a cold download).
+          for _ in $(seq 1 180); do
             curl -fsS -o /dev/null http://localhost:8000/health && break
             if [ "$(docker inspect -f '{{.State.Running}}' speech)" != true ]; then break; fi
             sleep 5
@@ -154,9 +167,13 @@ jobs:
           print("heard:", heard)
           assert {"fox", "dog"} & set(re.findall(r"[a-z]+", heard.lower())), heard
           EOF
+          # The container wrote the cache as root; let the cache step read it.
+          docker rm -f speech > /dev/null
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/speech-models"
 
   verify_voice_image:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: read
@@ -204,6 +221,7 @@ jobs:
 
   verify_chart:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
