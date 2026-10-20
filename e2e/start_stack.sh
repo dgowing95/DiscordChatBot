@@ -104,8 +104,10 @@ fi
   unset E2E_DISCORD_TOKEN E2E_WEBHOOK_URL
   export REDIS_HOST=127.0.0.1
   export LLM_HOST="$E2E_LLM_HOST" MODEL="$E2E_MODEL" DIFFUSION_URL="$DIFFUSION_URL"
-  # A tiny model's picture never passes the vision check: check, don't retry.
-  if [ "${E2E_LOCAL_DIFFUSION:-0}" = 1 ]; then export IMAGE_REVIEW_RETRIES=0; fi
+  # A tiny model draws noise, so the vision check would rightly say the
+  # picture is missing everything, and the model would then call the tool
+  # again. Off on this path only; core PRs test it against the real service.
+  if [ "${E2E_LOCAL_DIFFUSION:-0}" = 1 ]; then export IMAGE_REVIEW_ENABLED=0; fi
   export SANDBOX_ENABLED=0 CONTENT_GUARD_ENABLED=0 WHATS_NEW_ENABLED=0
   export DOUBLE_REPLY_CHANCE=0 REASONING_EFFORT=low METRICS_PORT=9464 LOG_LEVEL=INFO
   export VOICE_ENABLED=1 VOICE_DEV_INJECT=1 VOICE_DEBUG=1 VOICE_IDLE_LEAVE_SECONDS=600
