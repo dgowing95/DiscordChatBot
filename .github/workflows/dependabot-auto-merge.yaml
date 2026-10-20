@@ -38,8 +38,43 @@ jobs:
           ECOSYSTEM: ${{ steps.meta.outputs.package-ecosystem }}
           DIRECTORY: ${{ steps.meta.outputs.directory }}
           GROUP: ${{ steps.meta.outputs.dependency-group }}
+          NAMES: ${{ steps.meta.outputs.dependency-names }}
+          NEW_VERSION: ${{ steps.meta.outputs.new-version }}
+          TITLE: ${{ github.event.pull_request.title }}
         run: |
           set -euo pipefail
+          # Dependabot's newer commit metadata leaves out the old version, so
+          # fetch-metadata cannot compute update-type for a single-package PR
+          # ("null"). Work it out from the title, "Bump aiohttp from 3.14.3 to
+          # 3.14.4 in /core", for one package with plain numeric versions only;
+          # anything else stays unknown, which means manual.
+          if [ -z "$UPDATE_TYPE" ] || [ "$UPDATE_TYPE" = null ]; then
+            version='[0-9]+(\.[0-9]+)*'
+            if [[ "$NAMES" != *,* && "$TITLE" =~ ^Bump\ ([^ ]+)\ from\ ($version)\ to\ ($version)( |$) ]] \
+                && [ "${BASH_REMATCH[1]}" = "$NAMES" ] && [ "${BASH_REMATCH[4]}" = "$NEW_VERSION" ]; then
+              IFS=. read -ra old <<< "${BASH_REMATCH[2]}"
+              IFS=. read -ra new <<< "${BASH_REMATCH[4]}"
+              # Only the new version is confirmed (new-version above); the old
+              # one is the title's word for it. Require a strict increase, so
+              # an edited title ("from 2.0.0 to 2.0.0") cannot pass a major
+              # off as a patch: for that, the old version would have to share
+              # the new one's major.minor while being lower than it.
+              first=-1
+              for i in 0 1 2 3 4 5; do
+                if [ $((10#${old[i]:-0})) -ne $((10#${new[i]:-0})) ]; then
+                  [ $((10#${old[i]:-0})) -lt $((10#${new[i]:-0})) ] && first=$i
+                  break
+                fi
+              done
+              case "$first" in
+                0) UPDATE_TYPE=version-update:semver-major ;;
+                1) UPDATE_TYPE=version-update:semver-minor ;;
+                -1) ;;  # equal or lower: not a bump we can classify
+                *) UPDATE_TYPE=version-update:semver-patch ;;
+              esac
+              echo "update-type worked out from the title: ${UPDATE_TYPE:-none}"
+            fi
+          fi
           # Everything must be on the allowlist; the first miss says why not.
           reason=""
           case "$UPDATE_TYPE" in
