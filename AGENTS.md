@@ -97,6 +97,8 @@ voicesidecar/          # Node: Discord voice I/O via @discordjs/voice (DAVE rece
                        #   bridged to core over a WebSocket; README.md has the protocol
 docs/automations.md    # user-facing guide to schedules and rules
 docs/voice.md          # user-facing guide to voice calls
+e2e/                   # end-to-end CI: start the PR's bot, talk to it through
+                       #   Discord, check the replies (README.md there)
 charts/dis-ai-bot/     # Helm chart (credentials render into templates/secret.yaml,
                        #   everything else into templates/configmap.yaml)
 pyproject.toml         # pytest configuration - why bare `pytest` works from the repo root
@@ -654,9 +656,49 @@ curl -sS -X POST "$TEST_WEBHOOK_URL" \
 - **CI:** `.github/workflows/tests.yaml` runs `pytest` on every push, and
   `release.yaml` runs it again as a gate the image/chart jobs depend on
   (releases are cut straight off a push to `main`, so this is the only place
-  the shipped commit is tested). New test files need no CI change.
+  the shipped commit is tested). New test files need no CI change. The bot
+  itself is run and talked to by the end-to-end job below.
 - Conventions seen in existing tests: `pytest` fixtures + `unittest.mock` to stub
   Redis; docstring-style comments at the top of test files documenting how to run them.
+
+### End-to-end CI
+
+`.github/workflows/e2e.yaml` runs on every PR that touches `core/`,
+`speechservice/`, `voicesidecar/`, `diffusionservice/` or `e2e/`. It starts
+the PR's bot from source (`e2e/start_stack.sh`) against a real LLM and image
+service and talks to it through a webhook in a private test server
+(`e2e/run_checks.py`): chat, the memory tool, an image, a poll, slash command
+sync, the speech service, and a voice call driven by `VOICE_DEV_INJECT`. It
+checks structure (a reply arrived, a fact is in Redis, a PNG was attached),
+never wording. `e2e/README.md` lists every check and its configuration. A
+failure shows in the run's step summary, and the full logs are in its
+`e2e-logs` artifact.
+
+- **Runner.** `runs-on: discordchatbot-e2e` is a self-hosted runner that
+  provides `E2E_LLM_HOST`, `E2E_DIFFUSION_URL` and `E2E_MODEL` as environment
+  variables, so no deployment detail lives in this public repository. A
+  `diffusionservice/` PR runs its own image service on CPU with a tiny model
+  instead (`E2E_LOCAL_DIFFUSION`). That covers imports and library skew, never
+  the CUDA/nf4 paths, so those PRs still need trying by hand.
+- **Secrets** `E2E_DISCORD_TOKEN`, `E2E_WEBHOOK_URL` and `E2E_VOICE_CHANNEL_ID`
+  belong to a bot and a server made only for testing. Each one goes in **both**
+  the Actions secrets and the Dependabot secrets: a run started by Dependabot
+  sees only the latter.
+- **Security rules.** This repo is public and the job runs a PR's new
+  dependencies before anyone has reviewed them.
+  - Keep "Require approval for all external contributors" on (Settings →
+    Actions). A fork edits its own copy of the workflow, so `runs-on:` and
+    `if:` are not a boundary.
+  - The runner must stay unprivileged: no Docker socket, no dind, no cluster
+    credentials. That is also why the code sandbox is off in E2E.
+  - Never switch this to `pull_request_target` to reach secrets.
+  - Only one run at a time (the runner pool has one runner): two bots on one
+    token would both answer.
+- **Required checks.** Both `e2e` and `e2e-changes` should be required in
+  "Protect main". `e2e` alone is not enough: if `e2e-changes` fails, `e2e` is
+  skipped, and GitHub counts a skipped job as passing.
+- `review.yml` skips Dependabot's PRs: E2E is their check, their runs cannot
+  see the review's API key, and an open review thread would hold up a merge.
 
 ## Conventions & gotchas
 

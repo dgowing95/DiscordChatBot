@@ -7,7 +7,8 @@ uvicorn[standard]==0.53.0
 # CLIPTextModel (no `.text_model`), and only diffusers >= 0.40 knows that in
 # its single-file CLIP loader. diffusers 0.38 + transformers 5 crashed the
 # Juggernaut-XL (single-file) pipeline at startup on v2.31-v2.37 (2026-09-16).
-# CI cannot catch this because the image is only built, never run.
+# E2E (e2e.yaml) now loads an SDXL-family pipeline on CPU with a tiny model,
+# which catches import-level skew, but not the single-file or CUDA paths.
 diffusers==0.40.0
 transformers==5.17.0
 # Encodes prompts past CLIP's 77-token window (see _build_compel in main.py).
