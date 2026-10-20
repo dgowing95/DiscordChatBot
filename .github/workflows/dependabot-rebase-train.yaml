@@ -58,14 +58,20 @@ jobs:
                 --jq '(.commits | last | .committedDate) as $pushed
                       | [.comments[] | select(.body == "@dependabot rebase" and .createdAt > $pushed)]
                       | length')
-              [ "$nudged" = 0 ] && echo "$number"
+              if [ "$nudged" = 0 ]; then
+                echo "$number"
+              fi
             done
+            return 0
           }
           # mergeStateStatus is computed lazily after a push to main and reads
           # UNKNOWN for a while: look again for up to three minutes.
           next=""
           for _ in 1 2 3 4 5 6; do
-            next=$(candidates | head -n 1)
+            # The whole list, then its first line: piping into `head` would
+            # SIGPIPE the loop and fail the step under pipefail.
+            list=$(candidates)
+            next=${list%%$'\n'*}
             [ -n "$next" ] && break
             sleep 30
           done

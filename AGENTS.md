@@ -701,10 +701,10 @@ failure shows in the run's step summary, and the full logs are in its
   skipped, and GitHub counts a skipped job as passing.
 - **Auto-merge** (`dependabot-auto-merge.yaml`). A Dependabot patch/minor PR is
   approved and set to auto-merge, so it merges once the required checks,
-  `e2e` included, pass. It is an **allowlist**: patch/minor, ecosystem pip /
-  npm / docker, directory `/core`, `/speechservice` or `/voicesidecar`, and
+  `e2e` included, pass. It is an **allowlist**: patch/minor, ecosystem pip or
+  docker, directory `/core`, `/speechservice` or `/voicesidecar`, and
   ungrouped or the `core-minor` group. Everything else waits for a person:
-  majors, `github_actions` bumps, `/diffusionservice` (CPU-only in E2E), `/`
+  majors, `github_actions` and npm (the `voice` group) bumps, `/diffusionservice` (CPU-only in E2E), `/`
   (docker-compose, not run by E2E), and the `openai` / `huggingface` /
   `speech` / `voice` groups, which allow majors. A new ecosystem, directory or
   group in `dependabot.yml` stays manual until it is added to that list.

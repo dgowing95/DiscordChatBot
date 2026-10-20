@@ -47,10 +47,11 @@ jobs:
             *) reason="update type '$UPDATE_TYPE'" ;;
           esac
           # Not github_actions: a bumped action would run in workflows that
-          # hold secrets before anyone has looked at it. (The name is the one
-          # in Dependabot's branch names: npm is npm_and_yarn.)
+          # hold secrets before anyone has looked at it. Not npm either: its
+          # only directory (/voicesidecar) is the voice group, which takes
+          # majors. (Names as in Dependabot's branch names.)
           case "$ECOSYSTEM" in
-            pip|npm_and_yarn|docker) ;;
+            pip|docker) ;;
             *) reason="${reason:-ecosystem '$ECOSYSTEM'}" ;;
           esac
           # The services e2e.yaml runs for real. Not /diffusionservice (only
