@@ -1,8 +1,24 @@
 """Conversational management tools; slash commands use the same store."""
 import json
 from agents import function_tool, RunContextWrapper
+from agents.tool import default_tool_error_function
 from classes.automation_policy import describe, settings
 from classes.automation_store import AutomationStore, AutomationError
+
+
+def _tool_error(ctx, error):
+    """What the model is told when a tool raises. These tools report a
+    problem by raising AutomationError or the policy's ValueError, with text
+    written for the model (a full quota, the 4 hour gap, a timezone typo), so
+    that text is passed on. Since openai-agents 0.23 the default hides every
+    exception behind "An error occurred... Please try again", which left the
+    model retrying blind; anything else still gets that."""
+    if isinstance(error, ValueError):
+        return f"Not done: {error}"
+    return default_tool_error_function(ctx, error)
+
+
+automation_tool = function_tool(failure_error_function=_tool_error)
 
 
 def _scope(wrapper):
@@ -42,7 +58,7 @@ async def _get(wrapper, kind, ident):
     return row
 
 
-@function_tool
+@automation_tool
 async def list_schedules(wrapper: RunContextWrapper[dict]) -> str:
     """List schedules and follow-ups in this server that you can access."""
     c = _scope(wrapper)
@@ -57,13 +73,13 @@ async def list_schedules(wrapper: RunContextWrapper[dict]) -> str:
     return json.dumps([describe(row) for row in visible])
 
 
-@function_tool
+@automation_tool
 async def get_schedule(wrapper: RunContextWrapper[dict], schedule_id: str) -> str:
     """Inspect a schedule by its ID."""
     return json.dumps(describe(await _get(wrapper, "schedule", schedule_id)))
 
 
-@function_tool
+@automation_tool
 async def create_schedule(wrapper: RunContextWrapper[dict], action: str, timing_type: str,
                           at: str = "", every: int = 0, unit: str = "hours", start: str = "",
                           local_time: str = "", weekday: str = "", timezone: str = "") -> str:
@@ -78,7 +94,7 @@ async def create_schedule(wrapper: RunContextWrapper[dict], action: str, timing_
     return json.dumps(describe(row))
 
 
-@function_tool
+@automation_tool
 async def schedule_followup(wrapper: RunContextWrapper[dict], action: str, after_hours: float = 0,
                             at: str = "") -> str:
     """Come back to this channel once, later, and do something - e.g. when a poll ends, read its result and create the event. Give either after_hours (from now; use it for "in 3 minutes" or "in 2 hours", e.g. after_hours=0.05) or at (ISO date/time like 2026-10-24T19:00, read in the server's timezone unless it has an offset). Each person's follow-ups must be at least 4 hours apart. The run sees no chat history, so the action must say everything: what to check, what to do with it, and any names or poll question involved. Example: action="Check the poll 'When is game night?' and create an event at the winning time in the Games voice channel." Afterwards tell the user the next_run_local from the result."""
@@ -96,7 +112,7 @@ async def schedule_followup(wrapper: RunContextWrapper[dict], action: str, after
     return json.dumps(describe(row))
 
 
-@function_tool
+@automation_tool
 async def update_schedule(wrapper: RunContextWrapper[dict], schedule_id: str, revision: int,
                           action: str = "", status: str = "", timing_json: str = "", timezone: str = "") -> str:
     """Edit, pause, or resume a schedule. First inspect it to get its current revision. timing_json is a JSON object with the same explicit timing fields as create_schedule."""
@@ -108,14 +124,14 @@ async def update_schedule(wrapper: RunContextWrapper[dict], schedule_id: str, re
     return json.dumps(describe(await AutomationStore().update(row["guild_id"], schedule_id, wrapper.context["user_id"], revision, **changes)))
 
 
-@function_tool
+@automation_tool
 async def delete_schedule(wrapper: RunContextWrapper[dict], schedule_id: str, revision: int) -> str:
     """Delete a schedule or follow-up after inspecting its current revision."""
     row = await _get(wrapper, "schedule", schedule_id)
     return json.dumps(describe(await AutomationStore().update(row["guild_id"], schedule_id, wrapper.context["user_id"], revision, status="deleted")))
 
 
-@function_tool
+@automation_tool
 async def list_rules(wrapper: RunContextWrapper[dict]) -> str:
     """List message rules in accessible server channels."""
     c = _scope(wrapper)
@@ -130,13 +146,13 @@ async def list_rules(wrapper: RunContextWrapper[dict]) -> str:
     return json.dumps([describe(row) for row in visible])
 
 
-@function_tool
+@automation_tool
 async def get_rule(wrapper: RunContextWrapper[dict], rule_id: str) -> str:
     """Inspect a rule by its ID."""
     return json.dumps(describe(await _get(wrapper, "rule", rule_id)))
 
 
-@function_tool
+@automation_tool
 async def create_rule(wrapper: RunContextWrapper[dict], pattern: str, action: str, match_mode: str = "word") -> str:
     """Create a rule in this channel. match_mode is word (whole words/phrases) or substring (literal text)."""
     c = _scope(wrapper)
@@ -144,7 +160,7 @@ async def create_rule(wrapper: RunContextWrapper[dict], pattern: str, action: st
                                                               pattern=pattern, match_mode=match_mode)))
 
 
-@function_tool
+@automation_tool
 async def update_rule(wrapper: RunContextWrapper[dict], rule_id: str, revision: int,
                       pattern: str = "", action: str = "", match_mode: str = "", status: str = "") -> str:
     """Edit, pause, or resume a rule after inspecting its current revision."""
@@ -153,7 +169,7 @@ async def update_rule(wrapper: RunContextWrapper[dict], rule_id: str, revision: 
     return json.dumps(describe(await AutomationStore().update(row["guild_id"], rule_id, wrapper.context["user_id"], revision, **changes)))
 
 
-@function_tool
+@automation_tool
 async def delete_rule(wrapper: RunContextWrapper[dict], rule_id: str, revision: int) -> str:
     """Delete a rule after inspecting its current revision."""
     row = await _get(wrapper, "rule", rule_id)

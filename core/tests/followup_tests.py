@@ -232,3 +232,17 @@ async def test_the_current_time_carries_its_offset_and_zone(monkeypatch):
     text = await get_current_datetime()
     assert text.endswith("+05:30 (Asia/Kolkata)")
     assert datetime.fromisoformat(text.split(" ")[0]).utcoffset() == timedelta(hours=5, minutes=30)
+
+
+@pytest.mark.asyncio
+async def test_only_errors_written_for_the_model_reach_it(store, monkeypatch):
+    """openai-agents 0.23 hides every tool exception by default; the
+    automation tools pass their own ValueErrors on and keep the rest hidden."""
+    from classes import automation_tools
+
+    class Broken:
+        async def create(self, *args, **kwargs):
+            raise RuntimeError("redis://secret-host:6379 refused")
+    monkeypatch.setattr(automation_tools, "AutomationStore", lambda: Broken())
+    result = await _call_tool(_wrapper(), action="x", after_hours=5)
+    assert "secret-host" not in result and "An error occurred" in result
