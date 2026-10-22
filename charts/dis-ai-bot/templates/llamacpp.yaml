@@ -22,6 +22,13 @@ spec:
           # Intentionally the pre-existing claim: keeps old data mounted.
           persistentVolumeClaim:
             claimName: ollama-pv-claim
+        {{- if .Values.llamacpp.shmSize }}
+        # NCCL shared memory for tensor split mode; see llamacpp.shmSize
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.llamacpp.shmSize }}
+        {{- end }}
       containers:
       - name: llamacpp
         image: "{{ .Values.llamacpp.image }}"
@@ -32,6 +39,10 @@ spec:
         volumeMounts:
           - name: llamacpp-data
             mountPath: /models
+          {{- if .Values.llamacpp.shmSize }}
+          - name: dshm
+            mountPath: /dev/shm
+          {{- end }}
         # LLAMA_CACHE = model cache on the preserved volume; other settings are
         # llama.cpp's LLAMA_ARG_* env vars (== CLI flags)
         env:
