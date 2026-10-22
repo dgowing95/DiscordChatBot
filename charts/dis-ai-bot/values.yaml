@@ -286,6 +286,15 @@ llamacpp:
   # llama.cpp splits the model across EVERY device it is given, so on a mixed
   # node it will happily consume a card another workload needs.
   visibleDevices: ""
+  # Size of an in-memory /dev/shm for the llamacpp pod (e.g. "2Gi"); empty =
+  # the container runtime's 64MB default. Needed for multi-GPU tensor
+  # parallelism (extraEnv LLAMA_ARG_SPLIT_MODE: tensor): llama.cpp syncs the
+  # cards with NCCL, which goes through shared memory when the GPUs cannot
+  # reach each other directly (GeForce cards have no P2P), and on 64MB it dies
+  # at the first request with `CUDA error: unhandled system error` in
+  # ncclGroupEnd(). A memory-backed emptyDir: pages written count against
+  # llamacppResources.limits.memory (NCCL itself uses a few MB).
+  shmSize: ""
 # Prompt context window (server --ctx-size)
 llamacppContextLength: 40000
 # Model — single value for the whole chart: core requests it (MODEL) and llama.cpp
