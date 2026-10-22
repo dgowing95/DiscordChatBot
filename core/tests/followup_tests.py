@@ -89,6 +89,7 @@ def store(monkeypatch):
     monkeypatch.setenv("SCHEDULE_MIN_INTERVAL_HOURS", "4")
     monkeypatch.setenv("SCHEDULE_MAX_PER_GUILD", "1")
     monkeypatch.setenv("FOLLOWUP_MAX_PER_GUILD", "3")
+    monkeypatch.setenv("AUTOMATIONS_TIMEZONE", "Europe/London")
     return AutomationStore(FakeRedis())
 
 

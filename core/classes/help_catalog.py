@@ -39,14 +39,14 @@ ASK_ENTRIES = (
               tools=("web_search",)),
     HelpEntry("🔗 Read a link", "Paste a URL and ask me to summarise or explain it.",
               tools=("fetch_url",)),
-    HelpEntry("🧠 Remember things", "Tell me something to remember about you, ask me to forget "
-              "it, or to forget everything. Memories are per server.",
+    HelpEntry("🧠 Remember things", "Tell me things to remember about you, or ask me to forget "
+              "them. Memories are per server.",
               tools=("store_memory", "remove_memory", "clear_memories")),
     HelpEntry("🎭 Change personality", "Ask me to act differently, e.g. \"talk like a pirate\".",
               tools=("change_personality",)),
     HelpEntry("📊 Run polls", "Ask me for a poll on anything, then ask how it's going.",
               tools=("create_poll", "check_polls")),
-    HelpEntry("📅 Events", "Ask me to make, move or cancel events.",
+    HelpEntry("📅 Events", "Ask me to make, move or cancel events, or what's coming up.",
               tools=("create_event", "list_events", "update_event"), requires=EVENTS),
     HelpEntry("🎨 Make images", "Ask me to draw a picture, or to change one I made "
               "(reply to it, or just say what to change).",

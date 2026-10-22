@@ -11,7 +11,6 @@ and the bot's own are the ones it can vouch for.
 """
 import asyncio
 import logging
-import os
 import re
 from datetime import datetime, timezone
 
