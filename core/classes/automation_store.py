@@ -3,6 +3,7 @@ import json
 import secrets
 import time
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from redis.exceptions import WatchError
 from classes.redis_client import text_client
@@ -142,10 +143,16 @@ class AutomationStore:
                             others.append(float(last))
                         clash = followup_conflict(record["next_run"], others, cfg["min_hours"])
                         if clash is not None:
-                            nearest = datetime.fromtimestamp(clash, timezone.utc).isoformat(timespec="minutes")
+                            # Local times, and the earliest one allowed: given only a UTC
+                            # time, the model converted and added wrongly (seen live).
+                            zone = ZoneInfo(record["timezone"])
+                            def local(ts):
+                                return datetime.fromtimestamp(ts, zone).strftime("%Y-%m-%d %H:%M")
                             raise AutomationError(
-                                f"Your follow-ups in this server must be at least {cfg['min_hours']} hours apart; "
-                                f"your nearest other one is at {nearest}. Pick a time at least that far from it.")
+                                f"Your follow-ups in this server must be at least {cfg['min_hours']} hours apart. "
+                                f"Your nearest other one is at {local(clash)} ({record['timezone']}), so the "
+                                f"earliest after it is {local(clash + cfg['min_hours'] * 3600)}. Tell the user "
+                                "these times as written.")
                     pipe.multi()
                     pipe.set(_key(guild, record["id"]), json.dumps(record))
                     pipe.zadd(index, {record["id"]: now.timestamp()})

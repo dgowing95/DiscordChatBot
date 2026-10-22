@@ -124,9 +124,12 @@ async def test_a_followup_can_be_soon_and_stores_its_context(store):
 
 @pytest.mark.asyncio
 async def test_each_persons_followups_must_be_spaced_apart(store):
-    await _followup(store, 1)
-    with pytest.raises(AutomationError, match="at least 4 hours apart"):
+    from zoneinfo import ZoneInfo
+    first = await _followup(store, 1)
+    with pytest.raises(AutomationError, match="at least 4 hours apart") as refused:
         await _followup(store, 3)
+    earliest = datetime.fromtimestamp(first["next_run"] + 4 * HOUR, ZoneInfo("Europe/London"))
+    assert f"earliest after it is {earliest:%Y-%m-%d %H:%M}" in str(refused.value)
     with pytest.raises(AutomationError, match="at least 4 hours apart"):
         await _followup(store, 0.2)
     await _followup(store, 5.1)
