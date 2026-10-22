@@ -30,6 +30,7 @@ def _all_on(monkeypatch):
     monkeypatch.setenv("SANDBOX_ENABLED", "1")
     monkeypatch.setenv("AUTOMATIONS_ENABLED", "1")
     monkeypatch.setenv("VOICE_ENABLED", "1")
+    monkeypatch.setenv("EVENTS_ENABLED", "1")
 
 
 def test_every_agent_tool_has_help(monkeypatch):

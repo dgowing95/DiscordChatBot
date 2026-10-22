@@ -29,6 +29,8 @@ data:
   SCHEDULE_MAX_PER_GUILD: {{ .Values.schedules.maxPerGuild | toString | quote }}
   RULE_MAX_PER_GUILD: {{ .Values.rules.maxPerGuild | toString | quote }}
   RULE_COOLDOWN_SECONDS: {{ .Values.rules.cooldownSeconds | toString | quote }}
+  FOLLOWUP_MAX_PER_GUILD: {{ .Values.followups.maxPerGuild | toString | quote }}
+  EVENTS_ENABLED: {{ .Values.events.enabled | quote }}
   # Voice calls: core, the voice sidecar (same pod) and the speech pod all
   # read these
   VOICE_ENABLED: {{ .Values.voice.enabled | quote }}

@@ -70,7 +70,11 @@ core/                  # the main bot (the app that runs in production)
     automation_store.py    # versioned Redis records, quotas, revisions, atomic claims
     automation_runner.py   # rule admission, 15s schedule poll, automatic run execution
     automation_commands.py # /schedule and /rule slash command groups
-    automation_tools.py    # the matching chat tools (list/get/create/update/delete)
+    automation_tools.py    # the matching chat tools (list/get/create/update/delete,
+                           #   schedule_followup)
+    event_format.py        # PURE (stdlib-only) Discord events: input checks, time
+                           #   parsing, how an event reads in a prompt, EVENTS_ENABLED
+    event_tools.py         # create_event / list_events / update_event agent tools
     voice_policy.py        # PURE (stdlib-only) voice calls: VOICE_* settings, wake-phrase
                            #   match, leave/stop commands, anchored history, sentence
                            #   splitter + markdown stripping, VOICE_INSTRUCTIONS
@@ -95,7 +99,8 @@ speechservice/         # voice calls' speech-to-text (faster-whisper) and text-t
                        #   (Kokoro-82M), CPU only; speech_params.py is the stdlib-only half
 voicesidecar/          # Node: Discord voice I/O via @discordjs/voice (DAVE receive),
                        #   bridged to core over a WebSocket; README.md has the protocol
-docs/automations.md    # user-facing guide to schedules and rules
+docs/automations.md    # user-facing guide to schedules, follow-ups and rules
+docs/events.md         # user-facing guide to server events
 docs/voice.md          # user-facing guide to voice calls
 e2e/                   # end-to-end CI: start the PR's bot, talk to it through
                        #   Discord, check the replies (README.md there)
@@ -336,6 +341,18 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
    suspends the entry instead of failing every occurrence. Interval schedules
    store their anchor (`timing.start`) at creation, so the grid never drifts.
 
+   **Follow-ups** are one-off schedules the bot sets itself
+   (`schedule_followup`, record flag `followup: true`): their own quota
+   (`FOLLOWUP_MAX_PER_GUILD`), and any two by the same person in a server at
+   least `SCHEDULE_MIN_INTERVAL_HOURS` apart (`automation_policy.followup_conflict`,
+   checked inside `create`'s transaction, counting ones that ran in the last
+   week, even deleted: `followup-last:{guild}:{person}`). Without the spacing
+   a one-off, exempt from the minimum gap, would be a faster repeating
+   schedule. It is per person so one member's follow-up never blocks
+   another's; the quota bounds the server's total. The run's prompt names the requester and their message
+   (`automation_runner.followup_prompt`), since it sees no history. A
+   follow-up cannot set another one: automatic runs get no automation tools.
+
 10. Voice calls (`docs/voice.md`, off unless `VOICE_ENABLED`): `/voice join`
    or the `join_voice_channel` tool start a `VoiceSession`
    (`classes/voice_session.py`); `end()` is the only way out.
@@ -395,6 +412,21 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
      can be made), so pictures and sandbox runs (snapshots, steering) work as
      in chat. `original_message` is None in a voice turn: tools read
      `context["channel"]`, `user_id` and `request_text`.
+
+11. Server events (`docs/events.md`, `classes/event_tools.py`): the agent can
+   create, list (with who is interested) and move/cancel Discord scheduled
+   events. **The person asking must hold Create Events or Manage Events**,
+   not just the bot: otherwise any member could make events through the bot
+   that the server does not let them make. The actor is resolved like
+   `automation_tools._scope` (message author, else `user_id`), so the check
+   also runs in voice turns and in automatic runs, as the entry's editor.
+   Event tools stay in the AUTOMATIC tool set on purpose: the usual
+   follow-up is "read the poll, make the event". Only events the bot made
+   (`creator_id`) can be changed. Naive times are read in
+   `AUTOMATIONS_TIMEZONE`; results give `<t:unix:F>` so readers see their
+   own timezone. The flow for finding a time across people is a poll
+   (`create_poll`'s result gives its absolute end) plus a follow-up at its
+   end; there is no separate availability system.
 
 ### What's New notes (write these in every feature PR)
 
@@ -468,7 +500,7 @@ needs an entry there, gated with `requires` when it can be switched off;
 | `LLM_HOST` | llama.cpp server base URL (OpenAI-compat; core appends `/v1`). Points at the `llamacpp` service on :8081 in docker-compose (dev) and :8080 in the helm chart; the in-code fallback is `http://llamacpp:8080` |
 | `LLM_PASS` | placeholder key — llama.cpp does not authenticate, but the OpenAI client requires a non-empty key |
 | `MODEL` | the model, single source of truth: the bot requests this name AND the compose `llamacpp` service serves it (as `LLAMA_ARG_HF_REPO`); in the Helm chart the one `model` value feeds both. In-code default `qwen3:4b` |
-| `OPENAI_API_KEY` | API key for the free OpenAI Moderations endpoint (web-tool guard); fail-open if unset |
+| `OPENAI_API_KEY` | API key for the free OpenAI Moderations endpoint (web-tool guard); fail-open if unset. The agents SDK would also upload every run to OpenAI's trace dashboard with it; that is switched off in code (`set_tracing_disabled(True)` in `text_llm_handler.py` and `sandbox_agent.py`), with no setting to turn it back on |
 | `OPENAI_BASE_URL` | moderation API base (default `https://api.openai.com/v1`); any OpenAI-compatible `/v1/moderations` endpoint works. Chart: `openaiBaseUrl` |
 | `MODERATION_MODEL` | moderation model name, e.g. `text-moderation-latest`; unset omits the parameter and uses the server default. Chart: `moderationModel` |
 | `CONTENT_GUARD_ENABLED` | `0`/`false` disables the content guard on web tools (default: on) |
@@ -493,6 +525,8 @@ needs an entry there, gated with `requires` when it can be switched off;
 | `SCHEDULE_MIN_INTERVAL_HOURS` | minimum hours between runs of a recurring schedule, catch-ups included (default 4, min 1). One-offs are exempt. Chart: `schedules.minIntervalHours` |
 | `SCHEDULE_MAX_PER_GUILD` / `RULE_MAX_PER_GUILD` | active entries per server (defaults 1 / 4; 0 blocks new ones). Lowering a limit keeps existing entries. Chart: `schedules.maxPerGuild` / `rules.maxPerGuild` |
 | `RULE_COOLDOWN_SECONDS` | seconds before the same rule can fire again (default 60). Chart: `rules.cooldownSeconds` |
+| `FOLLOWUP_MAX_PER_GUILD` | follow-ups waiting at once per server (default 3; 0 turns them off), apart from `SCHEDULE_MAX_PER_GUILD`. Any two by the same person are at least `SCHEDULE_MIN_INTERVAL_HOURS` apart. Chart: `followups.maxPerGuild` |
+| `EVENTS_ENABLED` | `0`/`false` removes the event tools (default: on). The bot's role needs Create Events. Chart: `events.enabled` |
 | `WORKER_COUNT` | queue worker tasks (default 2, min 1); each handles one message at a time, a per-channel lock keeps same-channel order. Chart: `worker_count` |
 | `QUEUE_MAX_SIZE` | max messages waiting on the bounded queue (default 10, min 1); when full new messages are dropped (a mention gets a short "busy" reply). Chart: `queue_max_size` |
 | `LLAMA_ARG_CACHE_TYPE_K`, `LLAMA_ARG_CACHE_TYPE_V` | optional; compose `llamacpp` service only: KV cache quantization type (llama.cpp `-ctk`/`-ctv`), default `q4_0`; in the Helm chart set via `llamacpp.cacheTypeK`/`cacheTypeV` |

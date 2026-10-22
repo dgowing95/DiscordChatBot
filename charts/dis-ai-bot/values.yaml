@@ -144,6 +144,15 @@ rules:
   maxPerGuild: 4
   # Seconds before the same rule can fire again
   cooldownSeconds: 60
+# Follow-ups: one-off schedules the bot sets itself ("check the poll when it
+# ends"). Their own quota; any two in a server are at least
+# schedules.minIntervalHours apart.
+followups:
+  maxPerGuild: 3
+# Discord server events (create / list / move / cancel). The bot's role needs
+# the Create Events permission, and so does the person asking.
+events:
+  enabled: true
 
 # Voice calls (docs/voice.md): /voice join or "join voice", then
 # "hey <name>, ..." out loud. Two extra pieces, both CPU only:

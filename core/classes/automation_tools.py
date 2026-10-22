@@ -44,7 +44,7 @@ async def _get(wrapper, kind, ident):
 
 @function_tool
 async def list_schedules(wrapper: RunContextWrapper[dict]) -> str:
-    """List schedules in this server that you can access."""
+    """List schedules and follow-ups in this server that you can access."""
     c = _scope(wrapper)
     rows = await AutomationStore().list(c["guild_id"], "schedule")
     visible = []
@@ -79,6 +79,24 @@ async def create_schedule(wrapper: RunContextWrapper[dict], action: str, timing_
 
 
 @function_tool
+async def schedule_followup(wrapper: RunContextWrapper[dict], action: str, after_hours: float = 0,
+                            at: str = "") -> str:
+    """Come back to this channel once, later, and do something - e.g. when a poll ends, read its result and create the event. Give either after_hours (from now; use it for "in 3 minutes" or "in 2 hours", e.g. after_hours=0.05) or at (ISO date/time like 2026-10-24T19:00, read in the server's timezone unless it has an offset). Each person's follow-ups must be at least 4 hours apart. The run sees no chat history, so the action must say everything: what to check, what to do with it, and any names or poll question involved. Example: action="Check the poll 'When is game night?' and create an event at the winning time in the Games voice channel." Afterwards tell the user the next_run_local from the result."""
+    from datetime import datetime, timedelta, timezone
+    c = _scope(wrapper)
+    if bool(after_hours) == bool(at.strip()):
+        raise AutomationError("Give exactly one of after_hours or at")
+    if after_hours:
+        if not 0 < after_hours <= 24 * 30:
+            raise AutomationError("after_hours must be between 0 and 720 (30 days)")
+        at = (datetime.now(timezone.utc) + timedelta(hours=after_hours)).isoformat()
+    request = getattr(c.get("original_message"), "content", None) or c.get("request_text") or ""
+    row = await AutomationStore().create(c["guild_id"], c["channel"].id, c["user_id"], "schedule", action,
+                                         timing={"type": "once", "at": at}, followup=True, context=request)
+    return json.dumps(describe(row))
+
+
+@function_tool
 async def update_schedule(wrapper: RunContextWrapper[dict], schedule_id: str, revision: int,
                           action: str = "", status: str = "", timing_json: str = "", timezone: str = "") -> str:
     """Edit, pause, or resume a schedule. First inspect it to get its current revision. timing_json is a JSON object with the same explicit timing fields as create_schedule."""
@@ -92,7 +110,7 @@ async def update_schedule(wrapper: RunContextWrapper[dict], schedule_id: str, re
 
 @function_tool
 async def delete_schedule(wrapper: RunContextWrapper[dict], schedule_id: str, revision: int) -> str:
-    """Delete a schedule after inspecting its current revision."""
+    """Delete a schedule or follow-up after inspecting its current revision."""
     row = await _get(wrapper, "schedule", schedule_id)
     return json.dumps(describe(await AutomationStore().update(row["guild_id"], schedule_id, wrapper.context["user_id"], revision, status="deleted")))
 
@@ -145,5 +163,5 @@ async def delete_rule(wrapper: RunContextWrapper[dict], rule_id: str, revision: 
 def automation_tools():
     if not settings()["enabled"]:
         return []
-    return [list_schedules, get_schedule, create_schedule, update_schedule, delete_schedule,
+    return [list_schedules, get_schedule, create_schedule, schedule_followup, update_schedule, delete_schedule,
             list_rules, get_rule, create_rule, update_rule, delete_rule]

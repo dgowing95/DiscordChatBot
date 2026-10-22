@@ -91,11 +91,17 @@ def _extract_page_text(html: str) -> str:
     return '\n'.join(chunk for chunk in chunks if chunk)
 
 async def get_current_datetime() -> str:
-    """Returns the current date and time."""
+    """Returns the current date and time, with its offset, in the server
+    timezone (AUTOMATIONS_TIMEZONE) the time tools read naive times in.
+    Without the offset the model guessed one: a follow-up meant for "3
+    minutes from now" was saved as London time marked +00:00, an hour late."""
     from datetime import datetime
     from zoneinfo import ZoneInfo
-    now = datetime.now(ZoneInfo("Europe/London"))
-    now_formatted = now.strftime("%Y-%m-%d %H:%M:%S")
+    import os
+    from classes.automation_policy import resolve_timezone
+    zone = resolve_timezone(os.getenv("AUTOMATIONS_TIMEZONE", "Europe/London"))
+    now = datetime.now(ZoneInfo(zone))
+    now_formatted = f"{now.isoformat(timespec='seconds')} ({zone})"
     logger.info(f"Current date and time: {now_formatted}")
     return now_formatted
 
@@ -738,7 +744,7 @@ async def create_poll(wrapper: RunContextWrapper[dict], question: str, answers: 
         duration_hours: How long voting stays open, 1 to 768 hours.
         allow_multiple: True to let people pick more than one option.
     """
-    from datetime import timedelta
+    from datetime import datetime, timedelta, timezone
     from classes.poll_format import validate
 
     question, answers, hours, error = validate(question, answers, duration_hours)
@@ -768,8 +774,10 @@ async def create_poll(wrapper: RunContextWrapper[dict], question: str, answers: 
         return "No poll was posted: Discord rejected it. Tell the user and do not retry."
     context["poll_tool_calls"] = context.get("poll_tool_calls", 0) + 1
     await add_emoji_to_message(context.get("original_message"), "📊")
+    ends = datetime.now(timezone.utc) + timedelta(hours=hours)
     return (f"Poll posted: \"{question}\" with {len(answers)} options, open for {hours} "
-            "hours. It is already in the channel, so do not repeat the options. Votes "
+            f"hours (voting ends {ends.strftime('%Y-%m-%d %H:%M')} UTC, <t:{int(ends.timestamp())}:R>). "
+            "It is already in the channel, so do not repeat the options. Votes "
             "will appear in the chat history.")
 
 

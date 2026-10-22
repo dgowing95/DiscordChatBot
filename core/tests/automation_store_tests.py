@@ -143,3 +143,28 @@ async def test_full_or_disabled_server_gets_quota_error_before_timing_checks(sto
     monkeypatch.setenv("SCHEDULE_MAX_PER_GUILD", "0")
     with pytest.raises(QuotaError, match="turned off"):
         await store.create(109, 210, 311, "schedule", "x", timing={"type": "daily", "time": "nonsense"})
+
+
+@pytest.mark.asyncio
+async def test_followups_are_spaced_and_keep_the_schedule_slot_free(store, monkeypatch):
+    """The same rules followup_tests.py checks against an in-memory Redis."""
+    from datetime import datetime, timedelta, timezone
+    from classes.automation_store import QuotaError
+    monkeypatch.setenv("SCHEDULE_MAX_PER_GUILD", "1")
+    monkeypatch.setenv("SCHEDULE_MIN_INTERVAL_HOURS", "4")
+
+    def soon(hours):
+        return {"type": "once", "at": (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat()}
+
+    first = await store.create(110, 210, 312, "schedule", "check the poll", timing=soon(1), followup=True)
+    with pytest.raises(AutomationError, match="at least 4 hours apart"):
+        await store.create(110, 210, 312, "schedule", "again", timing=soon(3), followup=True)
+    await store.create(110, 210, 313, "schedule", "someone else", timing=soon(1), followup=True)
+    await store.create(110, 210, 312, "schedule", "daily", timing={"type": "daily", "time": "09:00"})
+    with pytest.raises(QuotaError, match="allowed schedules"):
+        await store.create(110, 210, 312, "schedule", "daily 2", timing={"type": "daily", "time": "10:00"})
+    await store.finish(first, "completed")
+    current = await store.get(110, first["id"])
+    await store.update(110, first["id"], 312, current["revision"], status="deleted")
+    with pytest.raises(AutomationError, match="at least 4 hours apart"):
+        await store.create(110, 210, 312, "schedule", "sneaky", timing=soon(2), followup=True)

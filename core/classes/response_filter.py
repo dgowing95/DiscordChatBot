@@ -183,7 +183,11 @@ def filter_response(text: str, mention: str = "") -> str:
     """
     if mention:
         text = text.replace("<@" + str(mention) + ">", "")
-        text = re.sub(r"^<@.*:", "", text, flags=re.DOTALL)
+        # A leading "<@id>:" or "<@id> Name:" (one word). This was "^<@.*:"
+        # with DOTALL, which cut a reply that opens by addressing someone up
+        # to its LAST colon: a follow-up's "<@20> ... at 21:16 ... 0 votes"
+        # was posted as "0".
+        text = re.sub(r"^\s*<@!?\d+>\s*(?:[\w.'-]{1,32}\s*)?:", "", text)
     text = re.sub(r"\n\s*\n", "\n\n", text, flags=re.DOTALL)
     text = re.sub(r"Message from.*?:", "", text, flags=re.DOTALL)
     text = strip_thinking(text)

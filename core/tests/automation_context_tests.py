@@ -15,6 +15,23 @@ def test_automatic_tool_set_excludes_memory_and_management(monkeypatch):
     assert not any("schedule" in name or "rule" in name for name in names)
 
 
+def test_automatic_runs_keep_event_tools_but_cannot_make_followups(monkeypatch):
+    """A follow-up's job is usually to read a poll and make the event, but
+    it must not be able to schedule another follow-up."""
+    monkeypatch.setenv("AUTOMATIONS_ENABLED", "1")
+    monkeypatch.setenv("EVENTS_ENABLED", "1")
+    automatic = {tool.name for tool in agent_tools(automatic=True)}
+    assert {"create_event", "list_events", "update_event", "check_polls"} <= automatic
+    assert "schedule_followup" not in automatic
+    assert "schedule_followup" in {tool.name for tool in agent_tools()}
+
+
+def test_disabled_events_hide_event_tools(monkeypatch):
+    monkeypatch.setenv("EVENTS_ENABLED", "0")
+    names = {tool.name for tool in agent_tools()} | {tool.name for tool in agent_tools(automatic=True)}
+    assert not any("event" in name for name in names)
+
+
 def test_automatic_handler_needs_no_source_message():
     channel = SimpleNamespace(id=10)
     handler = TextLLMHandler([], 20, None, actor_id=30, channel=channel, automatic=True)
