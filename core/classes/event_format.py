@@ -141,7 +141,8 @@ def validate(*, name: str = "", start: str = "", end: str = "", description: str
             fields["end"] = end_at
         return fields, ""
     except ValueError as e:
-        return {}, f"Nothing was changed: {e} Fix it and call again."
+        lead = "No event was made" if current is None else "Nothing was changed"
+        return {}, f"{lead}: {e} Fix it and call again."
 
 
 def format_event(event: dict) -> str:

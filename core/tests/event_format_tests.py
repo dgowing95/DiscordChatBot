@@ -47,7 +47,7 @@ def test_past_start_far_future_and_bad_end_are_errors():
     for kwargs in (dict(start="2026-10-21T19:00"), dict(start="2028-10-24T19:00"),
                    dict(end="2026-10-24T18:00"), dict(start="next friday")):
         fields, error = _new(**kwargs)
-        assert fields == {} and error.startswith("Nothing was changed:") and "call again" in error
+        assert fields == {} and error.startswith("No event was made:") and "call again" in error
 
 
 def test_a_skipped_wall_time_is_an_error():

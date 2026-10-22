@@ -52,7 +52,7 @@ def _env(actor=None, bot=None, voice=(), message=True):
         original.author = actor
         original.add_reaction = AsyncMock()
     context = {"channel": SimpleNamespace(guild=guild), "original_message": original,
-               "user_id": actor.id, "event_tool_calls": 0}
+               "user_id": actor.id}
     return guild, context
 
 
@@ -75,7 +75,7 @@ async def test_creates_a_voice_channel_event_and_reacts():
     assert "https://discord.com/events/1/2" in result
     assert f"<t:{int(start.timestamp())}:F>" in result
     context["original_message"].add_reaction.assert_awaited_once_with("📅")
-    assert context["event_tool_calls"] == 1
+    assert len(context["events_made"]) == 1
 
 
 @pytest.mark.asyncio
@@ -144,7 +144,7 @@ async def test_forbidden_is_reported_and_does_not_count():
     result = await _invoke("create_event", context, name="x", start=_soon().isoformat(),
                            location="here")
     assert "not allowed" in result
-    assert context["event_tool_calls"] == 0
+    assert not context.get("events_made")
 
 
 @pytest.mark.asyncio
@@ -155,17 +155,24 @@ async def test_bad_input_sends_nothing_and_a_second_call_is_skipped():
     assert "in the past" in result
     guild.create_scheduled_event.assert_not_awaited()
     await _invoke("create_event", context, name="x", start=_soon().isoformat(), location="here")
-    result = await _invoke("create_event", context, name="y", start=_soon().isoformat(),
+    result = await _invoke("create_event", context, name="X", start=_soon().isoformat(),
                            location="here")
-    assert "duplicate call" in result
+    assert "repeat was skipped" in result
     assert guild.create_scheduled_event.await_count == 1
+    # A different event in the same reply is made ("Monday and Wednesday").
+    await _invoke("create_event", context, name="x", start=_soon(days=4).isoformat(), location="here")
+    assert guild.create_scheduled_event.await_count == 2
+    # Repeats never count towards the stop-calling limit.
+    for _ in range(3):
+        result = await _invoke("create_event", context, name="x", start=_soon().isoformat(),
+                               location="here")
+    assert "Stop calling" not in result
 
 
 @pytest.mark.asyncio
 async def test_works_without_a_message_as_the_user_id():
     """A voice turn or a follow-up: no message, the actor is user_id."""
     guild, context = _env(message=False)
-    context.pop("event_tool_calls")
     await _invoke("create_event", context, name="x", start=_soon().isoformat(), location="here")
     guild.create_scheduled_event.assert_awaited_once()
     # Someone who has left the server cannot be checked, so is refused.
@@ -330,3 +337,25 @@ async def test_garbled_arguments_change_nothing():
                            voice_channel='General" (the one here) "start">')
     assert "ran into each other" in result
     guild.create_scheduled_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_member_is_not_shown_the_channel_list():
+    """The "no such channel" answer lists every voice channel, hidden ones
+    included, so the permission is checked first."""
+    guild, context = _env(actor=_member(create=False), voice=[_voice("Secret staff room")])
+    result = await _invoke("create_event", context, name="x", start=_soon().isoformat(),
+                           voice_channel="Cinema")
+    assert "needs the Create Events permission" in result and "Secret" not in result
+
+
+def test_a_failed_create_says_no_event_was_made():
+    from classes.event_format import validate
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    _, error = validate(name="", start="2026-10-24T19:00", tz_name="Europe/London", now=now,
+                        needs_end=False)
+    assert error.startswith("No event was made:")
+    _, error = validate(start="nonsense", tz_name="Europe/London", now=now, needs_end=False,
+                        current={"start": now, "end": None})
+    assert error.startswith("Nothing was changed:")

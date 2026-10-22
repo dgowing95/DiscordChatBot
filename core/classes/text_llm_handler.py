@@ -477,7 +477,7 @@ class TextLLMHandler:
         "redis_save_tool_calls": 0,
         "personality_tool_calls": 0,
         "poll_tool_calls": 0,
-        "event_tool_calls": 0,
+        "events_made": [],
         "event_tool_failures": 0,
         # Set by run_code_sandbox (tool_functions.py) if/when it runs, to the
         # thread it resolved/created — read back below regardless of how the

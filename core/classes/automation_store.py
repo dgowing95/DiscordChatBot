@@ -148,11 +148,14 @@ class AutomationStore:
                             zone = ZoneInfo(record["timezone"])
                             def local(ts):
                                 return datetime.fromtimestamp(ts, zone).strftime("%Y-%m-%d %H:%M")
+                            gap = cfg["min_hours"] * 3600
+                            before = (f"no later than {local(clash - gap)} or "
+                                      if clash - gap > now.timestamp() else "")
                             raise AutomationError(
                                 f"Your follow-ups in this server must be at least {cfg['min_hours']} hours apart. "
-                                f"Your nearest other one is at {local(clash)} ({record['timezone']}), so the "
-                                f"earliest after it is {local(clash + cfg['min_hours'] * 3600)}. Tell the user "
-                                "these times as written.")
+                                f"Your nearest other one is at {local(clash)} ({record['timezone']}), so pick "
+                                f"{before}no earlier than {local(clash + gap)}. Tell the user these times as "
+                                "written.")
                     pipe.multi()
                     pipe.set(_key(guild, record["id"]), json.dumps(record))
                     pipe.zadd(index, {record["id"]: now.timestamp()})

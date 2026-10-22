@@ -97,9 +97,8 @@ async def get_current_datetime() -> str:
     minutes from now" was saved as London time marked +00:00, an hour late."""
     from datetime import datetime
     from zoneinfo import ZoneInfo
-    import os
-    from classes.automation_policy import resolve_timezone
-    zone = resolve_timezone(os.getenv("AUTOMATIONS_TIMEZONE", "Europe/London"))
+    from classes.automation_policy import server_timezone
+    zone = server_timezone()
     now = datetime.now(ZoneInfo(zone))
     now_formatted = f"{now.isoformat(timespec='seconds')} ({zone})"
     logger.info(f"Current date and time: {now_formatted}")

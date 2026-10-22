@@ -78,6 +78,7 @@ def test_help_fits_discord_limits(image, sandbox, monkeypatch):
     # Every optional entry on, so the longest listing is the one measured.
     monkeypatch.setenv("AUTOMATIONS_ENABLED", "1")
     monkeypatch.setenv("VOICE_ENABLED", "1")
+    monkeypatch.setenv("EVENTS_ENABLED", "1")
     data = help_catalog.help_embed_data(image, sandbox)
     for field in data["fields"]:
         assert 0 < len(field["value"]) <= whats_new.MAX_FIELD_VALUE, field["name"]

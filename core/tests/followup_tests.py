@@ -129,13 +129,27 @@ async def test_each_persons_followups_must_be_spaced_apart(store):
     with pytest.raises(AutomationError, match="at least 4 hours apart") as refused:
         await _followup(store, 3)
     earliest = datetime.fromtimestamp(first["next_run"] + 4 * HOUR, ZoneInfo("Europe/London"))
-    assert f"earliest after it is {earliest:%Y-%m-%d %H:%M}" in str(refused.value)
+    assert f"no earlier than {earliest:%Y-%m-%d %H:%M}" in str(refused.value)
+    assert "no later than" not in str(refused.value)  # 1h - 4h is already past
     with pytest.raises(AutomationError, match="at least 4 hours apart"):
         await _followup(store, 0.2)
     await _followup(store, 5.1)
     # Someone else in the same server, or another server, is not blocked.
     await _followup(store, 1, person=21)
     await _followup(store, 1, guild=2)
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_offers_the_time_before_a_later_followup_too(store):
+    from zoneinfo import ZoneInfo
+    later = await _followup(store, 20)
+    with pytest.raises(AutomationError) as refused:
+        await _followup(store, 18)
+    zone = ZoneInfo("Europe/London")
+    latest = datetime.fromtimestamp(later["next_run"] - 4 * HOUR, zone)
+    earliest = datetime.fromtimestamp(later["next_run"] + 4 * HOUR, zone)
+    assert (f"pick no later than {latest:%Y-%m-%d %H:%M} or no earlier than "
+            f"{earliest:%Y-%m-%d %H:%M}") in str(refused.value)
 
 
 @pytest.mark.asyncio

@@ -38,8 +38,8 @@ LIVE = (discord.EventStatus.scheduled, discord.EventStatus.active)
 
 
 def _timezone() -> str:
-    from classes.automation_policy import resolve_timezone
-    return resolve_timezone(os.getenv("AUTOMATIONS_TIMEZONE", "Europe/London"))
+    from classes.automation_policy import server_timezone
+    return server_timezone()
 
 
 def _guild_and_actor(context):
@@ -129,6 +129,12 @@ def _check_create(context, guild, actor, name, start, end, description, location
     junk = garbled(name, start, end, description, location, voice_channel)
     if junk:
         return None, {}, junk
+    # Before the channel lookup: its "no such channel" answer lists every
+    # voice channel, hidden ones included. The permission is server-wide;
+    # the channel-specific check follows once the channel is known.
+    refusal = _refusal(guild, actor)
+    if refusal:
+        return None, {}, refusal
     place = None
     if guild is not None and voice_channel.strip():
         place = _find_voice_channel(guild, voice_channel)
@@ -140,7 +146,7 @@ def _check_create(context, guild, actor, name, start, end, description, location
     elif guild is not None and not location.strip():
         return None, {}, ("No event was made: it needs a place. Ask the user which voice channel it "
                           "is in, or where it happens, then call again.")
-    refusal = _refusal(guild, actor, place)
+    refusal = _refusal(guild, actor, place) if place is not None else ""
     if refusal:
         return place, {}, refusal
     fields, error = validate(name=name, start=start, end=end, description=description,
@@ -148,10 +154,6 @@ def _check_create(context, guild, actor, name, start, end, description, location
                              now=datetime.now(timezone.utc), needs_end=place is None)
     if error:
         return place, {}, error
-    # As in create_poll: the model sometimes repeats a call within one reply.
-    if context.get("event_tool_calls", 0) > 0:
-        return place, {}, ("An event was already made for this request, so this duplicate call "
-                           "was skipped. Nothing further is needed.")
     return place, fields, ""
 
 
@@ -178,6 +180,14 @@ async def create_event(wrapper: RunContextWrapper[dict], name: str, start: str, 
                                            location, voice_channel)
     if problem:
         return _failed(context, "create_event", problem)
+    # As in create_poll: the model sometimes repeats a call within one reply.
+    # Only the same name and start count, so "Monday and Wednesday" makes two;
+    # a skipped repeat is not a failed call (the event exists).
+    made = context.setdefault("events_made", [])
+    key = (fields["name"].casefold(), fields["start"])
+    if key in made:
+        return ("That event was already made earlier in this reply, so this repeat was skipped. "
+                "Nothing further is needed.")
 
     kwargs = {"name": fields["name"], "start_time": fields["start"],
               "privacy_level": discord.PrivacyLevel.guild_only,
@@ -201,7 +211,7 @@ async def create_event(wrapper: RunContextWrapper[dict], name: str, start: str, 
     except Exception as e:
         logger.warning(f"Failed to create an event: {e}")
         return _failed(context, "create_event", _rejected(e))
-    context["event_tool_calls"] = context.get("event_tool_calls", 0) + 1
+    made.append(key)
     await add_emoji_to_message(context.get("original_message"), "📅")
     ends = (" It ends 2 hours after it starts, since no end was given."
             if fields.get("default_end") else "")

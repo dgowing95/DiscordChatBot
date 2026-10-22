@@ -39,13 +39,20 @@ def resolve_timezone(text):
     raise ValueError(f"Unknown timezone {str(text).strip()!r}; use an IANA name like Europe/London or America/New_York.{hint}")
 
 
+def server_timezone():
+    """AUTOMATIONS_TIMEZONE (default Europe/London), validated: the zone
+    schedules default to, naive event times are read in, and the model's
+    "Current datetime" is given in. They must agree, so all read it here."""
+    return resolve_timezone(os.getenv("AUTOMATIONS_TIMEZONE", "Europe/London"))
+
+
 def settings():
     def number(name, default, minimum=0):
         value = int(os.getenv(name, str(default)))
         if value < minimum:
             raise ValueError(f"{name} must be at least {minimum}")
         return value
-    tz = resolve_timezone(os.getenv("AUTOMATIONS_TIMEZONE", "Europe/London"))
+    tz = server_timezone()
     return {
         "enabled": os.getenv("AUTOMATIONS_ENABLED", "1").lower() not in ("0", "false", "off"),
         "timezone": tz,

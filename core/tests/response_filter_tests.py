@@ -130,6 +130,8 @@ def test_filter_response_keeps_a_reply_that_addresses_someone():
     assert filter_response(text, mention="123456") == text
     assert filter_response("<@999>: hello", mention="123456") == "hello"
     assert filter_response("<@999> Alice: hello", mention="123456") == "hello"
+    for text in ("<@20> https://example.com", "<@20> 21:16 works for me"):
+        assert filter_response(text, mention="123456") == text
 
 
 def test_filter_response_whitespace_normalised_and_trimmed():
