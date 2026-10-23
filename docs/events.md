@@ -21,4 +21,5 @@ Ask the bot to find a time, e.g. "find a time for game night this week". It post
 - Times without a timezone are read in `AUTOMATIONS_TIMEZONE` (default Europe/London). The bot writes times back as Discord timestamps, so everyone sees them in their own timezone.
 - An event is held in a voice or stage channel, or somewhere else with a location. One with a location ends 2 hours after it starts unless you give an end time (Discord requires one).
 - Events are visible to server members only.
+- Events do not repeat. Asked for a daily or weekly event, the bot makes the next one and says so.
 - `EVENTS_ENABLED=0` (Helm: `events.enabled: false`) removes the event tools.
