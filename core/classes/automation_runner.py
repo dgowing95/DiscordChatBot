@@ -149,6 +149,18 @@ async def discard(job) -> None:
     inc_automation(job.records[0]["kind"], "skipped")
 
 
+def followup_prompt(row, prompt):
+    """A follow-up's run sees no chat history, so it is told who asked for
+    it, when, and what they said, and to address them: without the mention
+    the answer lands hours later with nobody it is obviously for."""
+    asked = datetime.fromisoformat(row["created_at"]).astimezone(ZoneInfo(row["timezone"]))
+    lead = (f"This is a follow-up <@{row['creator_id']}> asked for on "
+            f"{asked.isoformat(timespec='minutes')}. Mention them as <@{row['creator_id']}> in your reply.")
+    if row.get("context"):
+        lead += f" Their original message: {row['context']}"
+    return lead + "\n" + prompt
+
+
 async def execute(job, client):
     store = AutomationStore()
     kind = job.records[0]["kind"]
@@ -203,6 +215,8 @@ async def execute(job, client):
             local = now.astimezone(ZoneInfo(rows[0]["timezone"]))
             prompt = "Execute this scheduled action now. Current local date and time: " + local.isoformat()
             prompt += f" ({rows[0]['timezone']}). Current UTC time: {now.isoformat()}. Action: {rows[0]['action']}"
+            if rows[0].get("followup"):
+                prompt = followup_prompt(rows[0], prompt)
         else:
             prompt = "A message matched these rules. Execute their actions together in order and send one response. "
             prompt += f"Current UTC time: {now.isoformat()}. Message by {job.message.author.display_name}: {job.message.content}\n"

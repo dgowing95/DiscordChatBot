@@ -30,6 +30,7 @@ def _all_on(monkeypatch):
     monkeypatch.setenv("SANDBOX_ENABLED", "1")
     monkeypatch.setenv("AUTOMATIONS_ENABLED", "1")
     monkeypatch.setenv("VOICE_ENABLED", "1")
+    monkeypatch.setenv("EVENTS_ENABLED", "1")
 
 
 def test_every_agent_tool_has_help(monkeypatch):
@@ -77,6 +78,7 @@ def test_help_fits_discord_limits(image, sandbox, monkeypatch):
     # Every optional entry on, so the longest listing is the one measured.
     monkeypatch.setenv("AUTOMATIONS_ENABLED", "1")
     monkeypatch.setenv("VOICE_ENABLED", "1")
+    monkeypatch.setenv("EVENTS_ENABLED", "1")
     data = help_catalog.help_embed_data(image, sandbox)
     for field in data["fields"]:
         assert 0 < len(field["value"]) <= whats_new.MAX_FIELD_VALUE, field["name"]
@@ -85,12 +87,15 @@ def test_help_fits_discord_limits(image, sandbox, monkeypatch):
     embed_from_data(data)  # builds without error
 
 
-def test_disabled_features_are_hidden():
+def test_disabled_features_are_hidden(monkeypatch):
+    monkeypatch.setenv("EVENTS_ENABLED", "0")
     text = str(help_catalog.help_embed_data(False, False))
+    assert "Events" not in text
     assert "/generate_image" not in text and "Make images" not in text
     assert "/sandbox_progress_updates" not in text and "Run code" not in text
+    monkeypatch.setenv("EVENTS_ENABLED", "1")
     text = str(help_catalog.help_embed_data(True, True))
-    assert "/generate_image" in text and "Run code" in text
+    assert "/generate_image" in text and "Run code" in text and "Events" in text
 
 
 def test_help_and_whats_new_replies_are_ephemeral(monkeypatch):

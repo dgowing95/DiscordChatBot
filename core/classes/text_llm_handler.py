@@ -13,7 +13,7 @@ from classes.metrics import (
     observe_tool_duration,
     set_slot_context,
 )
-from agents import Agent, Runner, OpenAIChatCompletionsModel, AsyncOpenAI, FunctionTool, function_tool, RunContextWrapper, ModelSettings, RunHooks
+from agents import Agent, Runner, OpenAIChatCompletionsModel, AsyncOpenAI, FunctionTool, function_tool, RunContextWrapper, ModelSettings, RunHooks, set_tracing_disabled
 from agents.models.interface import ModelTracing
 from openai import BadRequestError, UnprocessableEntityError
 from openai.types.responses import ResponseCreatedEvent, ResponseTextDeltaEvent
@@ -23,6 +23,14 @@ from classes.llm_config import llm_api_key, llm_host, llm_model, parse_temperatu
 from classes.reply_policy import INSTRUCTION as DOUBLE_REPLY_INSTRUCTION
 from classes.side_llm import NO_THINKING
 from classes import voice_policy
+
+# The agents SDK uploads every run (prompt, replies, tool calls - so
+# Discord users' messages) to OpenAI's trace dashboard by default, whenever
+# OPENAI_API_KEY is set, and that key is set for the moderation check. Off
+# for good, in code: the SDK lets this call win over its
+# OPENAI_AGENTS_DISABLE_TRACING env var and a run's own RunConfig.
+# sandbox_agent.py does the same for the nested agent.
+set_tracing_disabled(True)
 
 # Max turns for ONE reply from the main agent (a turn = one model response,
 # however many tool calls it carries). The SDK's own default is 10, which a
@@ -284,6 +292,10 @@ def agent_tools(automatic: bool = False, voice: bool = False) -> list:
         create_poll,
         check_polls,
     ]
+    # Automatic runs keep the event tools: a follow-up's usual job is to
+    # read a poll and make the event. They re-check the editor's permission.
+    from classes.event_tools import event_tools
+    tools.extend(event_tools())
     if not automatic:
         tools.extend((store_memory, remove_memory, clear_memories))
         from classes.automation_tools import automation_tools
@@ -433,7 +445,10 @@ class TextLLMHandler:
             no_thinking = voice_thinking_off()
         settings = dict(
             temperature=self.options["temperature"],
-            frequency_penalty=1.1,
+            # No frequency_penalty: at 1.1 it pushed the model off tokens it
+            # had just read, so tool arguments that repeat them (a date from
+            # list_events, an id, a name) came out mangled - "2026-10-23T21:00
+            # +08:35 UTC+8?" - in about a third of calls.
             top_p=1.0,
             timeout=llm_call_timeout(),
         )
@@ -462,6 +477,8 @@ class TextLLMHandler:
         "redis_save_tool_calls": 0,
         "personality_tool_calls": 0,
         "poll_tool_calls": 0,
+        "events_made": [],
+        "event_tool_failures": 0,
         # Set by run_code_sandbox (tool_functions.py) if/when it runs, to the
         # thread it resolved/created — read back below regardless of how the
         # run ends, since a tool call may have already mutated this dict

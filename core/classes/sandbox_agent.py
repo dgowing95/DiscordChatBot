@@ -51,6 +51,7 @@ from agents import (
     RunConfig,
     RunContextWrapper,
     function_tool,
+    set_tracing_disabled,
 )
 from agents.sandbox.config import DEFAULT_PYTHON_SANDBOX_IMAGE
 
@@ -62,6 +63,9 @@ from classes.sandbox_conversation import (
     make_agent_hooks,
 )
 from classes.llm_config import DEFAULT_LLM_API_KEY, DEFAULT_LLM_HOST, DEFAULT_MODEL, env_or
+
+# No run is ever uploaded to OpenAI's trace dashboard (why: text_llm_handler.py).
+set_tracing_disabled(True)
 
 logger = logging.getLogger(__name__)
 

@@ -7,7 +7,7 @@ going stale, core/tests/help_catalog_tests.py fails when an agent tool
 has no entry here. Adding a tool or command therefore means adding a line.
 
 Entries with `requires` are hidden when that feature is switched off for the
-deployment (IMAGE_GEN_ENABLED / SANDBOX_ENABLED), so /help never offers
+deployment (IMAGE_GEN_ENABLED / SANDBOX_ENABLED / EVENTS_ENABLED ...), so /help never offers
 something the bot cannot do.
 """
 from dataclasses import dataclass
@@ -18,6 +18,7 @@ IMAGE = "image"
 SANDBOX = "sandbox"
 AUTOMATIONS = "automations"
 VOICE = "voice"
+EVENTS = "events"
 
 
 @dataclass(frozen=True)
@@ -38,22 +39,25 @@ ASK_ENTRIES = (
               tools=("web_search",)),
     HelpEntry("🔗 Read a link", "Paste a URL and ask me to summarise or explain it.",
               tools=("fetch_url",)),
-    HelpEntry("🧠 Remember things", "Tell me something to remember about you, ask me to forget "
-              "it, or to forget everything. Memories are per server.",
+    HelpEntry("🧠 Remember things", "Tell me things to remember about you, or ask me to forget "
+              "them. Memories are per server.",
               tools=("store_memory", "remove_memory", "clear_memories")),
     HelpEntry("🎭 Change personality", "Ask me to act differently, e.g. \"talk like a pirate\".",
               tools=("change_personality",)),
     HelpEntry("📊 Run polls", "Ask me for a poll on anything, then ask how it's going.",
               tools=("create_poll", "check_polls")),
+    HelpEntry("📅 Events", "Ask me to make, move or cancel events, or what's coming up.",
+              tools=("create_event", "list_events", "update_event"), requires=EVENTS),
     HelpEntry("🎨 Make images", "Ask me to draw a picture, or to change one I made "
               "(reply to it, or just say what to change).",
               tools=("generate_image",), requires=IMAGE),
-    HelpEntry("🐳 Run code", "Ask me to build, run or make something with code (scripts, "
-              "charts, gifs...). I work in a thread you can reply in to steer me, and "
-              "pick up where I left off when you @mention me there again.",
+    HelpEntry("🐳 Run code", "Ask me to build or run something with code (scripts, charts, "
+              "gifs...). I work in a thread: reply there to steer me, or @mention me there "
+              "later to carry on.",
               tools=("run_code_sandbox",), requires=SANDBOX),
-    HelpEntry("⏰ Schedules and rules", "Ask me to schedule an action or react to a word in this channel.",
-              tools=("list_schedules", "get_schedule", "create_schedule", "update_schedule", "delete_schedule",
+    HelpEntry("⏰ Schedules and rules", "Ask me to schedule or follow up on something, or react to a word.",
+              tools=("list_schedules", "get_schedule", "create_schedule", "schedule_followup",
+                     "update_schedule", "delete_schedule",
                      "list_rules", "get_rule", "create_rule", "update_rule", "delete_rule"),
               requires=AUTOMATIONS),
     HelpEntry("🎙️ Talk in voice", "Ask me to join your voice channel, then say \"hey\" and my name "
@@ -98,6 +102,9 @@ def _shown(entry: HelpEntry, image_enabled: bool, sandbox_enabled: bool) -> bool
     if entry.requires == AUTOMATIONS:
         from classes.automation_policy import settings
         return settings()["enabled"]
+    if entry.requires == EVENTS:
+        from classes.event_format import events_enabled
+        return events_enabled()
     if entry.requires == VOICE:
         from classes.voice_policy import settings
         return settings()["enabled"]

@@ -125,6 +125,15 @@ def test_filter_response_strips_mention_and_history_artifacts():
 
 
 
+def test_filter_response_keeps_a_reply_that_addresses_someone():
+    text = "<@20> here's the update: it fires at 21:16 and has 0 votes."
+    assert filter_response(text, mention="123456") == text
+    assert filter_response("<@999>: hello", mention="123456") == "hello"
+    assert filter_response("<@999> Alice: hello", mention="123456") == "hello"
+    for text in ("<@20> https://example.com", "<@20> 21:16 works for me"):
+        assert filter_response(text, mention="123456") == text
+
+
 def test_filter_response_whitespace_normalised_and_trimmed():
     assert filter_response("  a\n\n\nb  ") == "a\n\nb"
 

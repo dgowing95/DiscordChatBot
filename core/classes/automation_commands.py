@@ -11,7 +11,7 @@ import discord
 from discord import app_commands
 
 from classes.automation_policy import (
-    WEEKDAYS, form_values, settings, timing_from_form, timing_text,
+    WEEKDAYS, form_values, schedule_text, settings, timing_from_form, timing_text,
 )
 from classes.automation_store import AutomationError, AutomationStore, QuotaError
 
@@ -49,7 +49,7 @@ async def _show(ctx, kind, ident):
 def _display(row):
     lines = [f"**{row['kind'].capitalize()} `{row['id']}`** in <#{row['channel_id']}> — {row['status']}"]
     if row["kind"] == "schedule":
-        lines.append(f"Timing: {timing_text(row['timing'], row['timezone'])}")
+        lines.append(f"Timing: {schedule_text(row)}")
         if row["status"] == "enabled" and row.get("next_run"):
             lines.append(f"Next run: <t:{int(row['next_run'])}:f> (<t:{int(row['next_run'])}:R>)")
     else:
@@ -67,7 +67,7 @@ def _display(row):
 
 
 def _summary(row):
-    detail = (timing_text(row["timing"], row["timezone"]) if row["kind"] == "schedule"
+    detail = (schedule_text(row) if row["kind"] == "schedule"
               else f"\"{row['pattern']}\"")
     return f"{row['id']} — {row['status']}, {detail}: {row['action']}"[:100]
 
@@ -291,7 +291,8 @@ def register_automation_commands(tree):
                         outcome = (row.get("last_result") or {}).get("status", "never run")
                         next_at = (f" next <t:{int(row['next_run'])}:f>" if row["kind"] == "schedule"
                                    and row["status"] == "enabled" else "")
-                        visible.append(f"`{row['id']}` <#{row['channel_id']}> {row['status']} ({outcome}){next_at}"
+                        label = " follow-up" if row.get("followup") else ""
+                        visible.append(f"`{row['id']}`{label} <#{row['channel_id']}> {row['status']} ({outcome}){next_at}"
                                        f" — {row['action'][:60]}")
                     return "\n".join(visible)[:1900] or "No entries you can access."
                 await _respond(ctx, op)
@@ -308,6 +309,11 @@ def register_automation_commands(tree):
                 channel = ctx.guild.get_channel_or_thread(row["channel_id"])
                 if kind == "rule":
                     await ctx.response.send_modal(RuleForm(channel, row))
+                    return
+                if row.get("followup"):
+                    await ctx.response.send_message(
+                        f"Follow-up `{row['id']}` can't be edited. Delete it with `/schedule delete` and ask me "
+                        "for a new one.", ephemeral=True)
                     return
                 await ctx.response.send_message(
                     f"Editing schedule `{row['id']}` ({timing_text(row['timing'], row['timezone'])}).\n"

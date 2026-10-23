@@ -39,18 +39,26 @@ def resolve_timezone(text):
     raise ValueError(f"Unknown timezone {str(text).strip()!r}; use an IANA name like Europe/London or America/New_York.{hint}")
 
 
+def server_timezone():
+    """AUTOMATIONS_TIMEZONE (default Europe/London), validated: the zone
+    schedules default to, naive event times are read in, and the model's
+    "Current datetime" is given in. They must agree, so all read it here."""
+    return resolve_timezone(os.getenv("AUTOMATIONS_TIMEZONE", "Europe/London"))
+
+
 def settings():
     def number(name, default, minimum=0):
         value = int(os.getenv(name, str(default)))
         if value < minimum:
             raise ValueError(f"{name} must be at least {minimum}")
         return value
-    tz = resolve_timezone(os.getenv("AUTOMATIONS_TIMEZONE", "Europe/London"))
+    tz = server_timezone()
     return {
         "enabled": os.getenv("AUTOMATIONS_ENABLED", "1").lower() not in ("0", "false", "off"),
         "timezone": tz,
         "min_hours": number("SCHEDULE_MIN_INTERVAL_HOURS", 4, 1),
         "schedule_limit": number("SCHEDULE_MAX_PER_GUILD", 1),
+        "followup_limit": number("FOLLOWUP_MAX_PER_GUILD", 3),
         "rule_limit": number("RULE_MAX_PER_GUILD", 4),
         "cooldown": number("RULE_COOLDOWN_SECONDS", 60),
     }
@@ -175,6 +183,25 @@ def validate_schedule(timing, tz_name, min_hours, now):
     return value
 
 
+def followup_conflict(at_ts, others_ts, min_hours):
+    """The run time (epoch seconds) of another follow-up by the same person
+    in the server that is closer than `min_hours` to `at_ts`, or None. Follow-ups are one-offs,
+    so they skip validate_schedule's gap check; without this, one request
+    could stack follow-ups minutes apart and get a repeating schedule
+    under the minimum interval. `others_ts` includes follow-ups that have
+    already run (they stay in the index a week), so a new one cannot land
+    straight after the last."""
+    gap = min_hours * 3600
+    close = [other for other in others_ts if abs(other - at_ts) < gap]
+    return min(close, key=lambda other: abs(other - at_ts)) if close else None
+
+
+def schedule_text(row):
+    """timing_text for a schedule record, marking follow-ups."""
+    text = timing_text(row["timing"], row["timezone"])
+    return f"follow-up {text}" if row.get("followup") else text
+
+
 def matches(pattern, text, mode="word"):
     needle = " ".join(pattern.casefold().split())
     haystack = " ".join(text.casefold().split())
@@ -207,7 +234,7 @@ def describe(row):
     person or the model can report them without converting epoch seconds."""
     out = dict(row)
     if row.get("kind") == "schedule":
-        out["timing_summary"] = timing_text(row["timing"], row["timezone"])
+        out["timing_summary"] = schedule_text(row)
         if row.get("status") == "enabled" and row.get("next_run"):
             local = datetime.fromtimestamp(row["next_run"], UTC).astimezone(ZoneInfo(row["timezone"]))
             out["next_run_local"] = f"{local.isoformat(timespec='minutes')} ({row['timezone']})"
@@ -269,6 +296,11 @@ def form_values(row, kind):
 
 def quota_message(kind, count, limit):
     """What someone is told when a server has no room for another entry."""
+    if kind == "followup":
+        if limit == 0:
+            return "Follow-ups are turned off on this server."
+        return (f"This server already has {count} of {limit} allowed follow-ups waiting. "
+                "One frees its slot once it has run, or delete one with `/schedule delete`.")
     if limit == 0:
         return f"{kind.capitalize()}s are turned off on this server."
     freed = " A one-off schedule frees its slot once it has run." if kind == "schedule" else ""

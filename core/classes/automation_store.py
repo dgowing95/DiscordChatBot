@@ -3,10 +3,14 @@ import json
 import secrets
 import time
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from redis.exceptions import WatchError
 from classes.redis_client import text_client
-from classes.automation_policy import anchor_timing, following_run, matches, quota_message, resolve_timezone, settings, validate_schedule
+from classes.automation_policy import (
+    anchor_timing, followup_conflict, following_run, matches, quota_message, resolve_timezone, settings,
+    validate_schedule,
+)
 
 PREFIX = "dcb:automations:v1"
 
@@ -36,6 +40,12 @@ def _terminal():
     return f"{PREFIX}:terminal"
 
 
+def _followup_last(guild, person):
+    """When this person's last follow-up in the server ran: still counted for
+    spacing after that follow-up is deleted from the index."""
+    return f"{PREFIX}:followup-last:{guild}:{person}"
+
+
 def _active(record):
     return record["status"] not in ("completed", "failed", "deleted")
 
@@ -54,28 +64,45 @@ class AutomationStore:
         rows = [await self.get(guild, ident) for ident in ids]
         return [row for row in rows if row]
 
-    async def _active_count(self, guild, kind, ids=None):
+    async def _rows(self, guild, kind, ids=None):
         if ids is None:
             ids = await self.redis.zrange(_index(guild, kind), 0, -1)
         rows = [await self.get(guild, ident) for ident in ids]
-        return sum(1 for row in rows if row and _active(row))
+        return [row for row in rows if row]
 
-    async def check_quota(self, guild, kind, count=None):
+    @staticmethod
+    def _active_count(rows, kind):
+        """Active entries counted against `kind`'s limit. A follow-up is a
+        schedule record but has its own limit ("followup"), so it neither
+        uses up nor is blocked by the server's ordinary schedule slot."""
+        followup = kind == "followup"
+        return sum(1 for row in rows if _active(row) and bool(row.get("followup")) == followup)
+
+    async def check_quota(self, guild, kind, rows=None):
         """Raise QuotaError when the server is full. Called up front so a
         form is never filled in for nothing; create() checks again inside
         its transaction, which is what actually enforces the limit."""
-        limit = settings()["schedule_limit" if kind == "schedule" else "rule_limit"]
-        if count is None:
-            count = await self._active_count(guild, kind)
+        limit = settings()[{"schedule": "schedule_limit", "followup": "followup_limit"}.get(kind, "rule_limit")]
+        if rows is None:
+            rows = await self._rows(guild, "rule" if kind == "rule" else "schedule")
+        count = self._active_count(rows, kind)
         if count >= limit:
             raise QuotaError(quota_message(kind, count, limit))
 
     async def create(self, guild, channel, actor, kind, action, **fields):
+        """`followup=True` (with kind "schedule" and a one-off timing) makes a
+        follow-up: its own quota, at least the minimum interval from the
+        same person's other follow-ups in the server, and `context` (the request it came from)
+        kept for the run's prompt."""
         cfg = settings()
         if not cfg["enabled"]:
             raise AutomationError("Automations are disabled")
+        followup = kind == "schedule" and bool(fields.get("followup"))
+        quota_kind = "followup" if followup else kind
+        if followup and fields["timing"].get("type") != "once":
+            raise AutomationError("A follow-up runs once")
         if kind in ("schedule", "rule"):
-            await self.check_quota(guild, kind)
+            await self.check_quota(guild, quota_kind)
         if kind not in ("schedule", "rule") or not action.strip():
             raise AutomationError("A schedule or rule needs an action")
         if len(action) > 1500:
@@ -89,6 +116,9 @@ class AutomationStore:
             record["timezone"] = resolve_timezone(fields.get("timezone") or cfg["timezone"])
             record["timing"] = anchor_timing(fields["timing"], now)
             record["next_run"] = validate_schedule(record["timing"], record["timezone"], cfg["min_hours"], now).timestamp()
+            if followup:
+                record["followup"] = True
+                record["context"] = str(fields.get("context") or "").strip()[:500]
         else:
             record["pattern"] = fields["pattern"].strip()
             if len(record["pattern"]) > 200:
@@ -101,7 +131,31 @@ class AutomationStore:
                 try:
                     await pipe.watch(index)
                     ids = await pipe.zrange(index, 0, -1)
-                    await self.check_quota(guild, kind, await self._active_count(guild, kind, ids))
+                    rows = await self._rows(guild, kind, ids)
+                    await self.check_quota(guild, quota_kind, rows)
+                    if followup:
+                        # Per person, so one member's follow-up never blocks another's;
+                        # the server-wide quota still bounds the total.
+                        others = [row["next_run"] for row in rows if row.get("followup") and row.get("next_run")
+                                  and row.get("creator_id") == int(actor)]
+                        last = await self.redis.get(_followup_last(guild, actor))
+                        if last:
+                            others.append(float(last))
+                        clash = followup_conflict(record["next_run"], others, cfg["min_hours"])
+                        if clash is not None:
+                            # Local times, and the earliest one allowed: given only a UTC
+                            # time, the model converted and added wrongly (seen live).
+                            zone = ZoneInfo(record["timezone"])
+                            def local(ts):
+                                return datetime.fromtimestamp(ts, zone).strftime("%Y-%m-%d %H:%M")
+                            gap = cfg["min_hours"] * 3600
+                            before = (f"no later than {local(clash - gap)} or "
+                                      if clash - gap > now.timestamp() else "")
+                            raise AutomationError(
+                                f"Your follow-ups in this server must be at least {cfg['min_hours']} hours apart. "
+                                f"Your nearest other one is at {local(clash)} ({record['timezone']}), so pick "
+                                f"{before}no earlier than {local(clash + gap)}. Tell the user these times as "
+                                "written.")
                     pipe.multi()
                     pipe.set(_key(guild, record["id"]), json.dumps(record))
                     pipe.zadd(index, {record["id"]: now.timestamp()})
@@ -130,6 +184,8 @@ class AutomationStore:
                     # A finished one-off can still be deleted, just not changed.
                     if row["status"] in ("completed", "failed") and changes != {"status": "deleted"}:
                         raise AutomationError("This entry has finished; create a new one")
+                    if row.get("followup") and changes.keys() & {"timing", "timezone"}:
+                        raise AutomationError("A follow-up's time cannot be changed; delete it and make a new one")
                     allowed = {"action", "status", "timing", "timezone"} if row["kind"] == "schedule" else {"action", "status", "pattern", "match_mode"}
                     if changes.keys() - allowed:
                         raise AutomationError("Unsupported edit")
@@ -255,6 +311,8 @@ return 1"""
                         if terminal:
                             pipe.zrem(_due(), member)
                             pipe.zadd(_terminal(), {member: now.timestamp() + 604800})
+                            if row.get("followup"):
+                                pipe.set(_followup_last(row["guild_id"], row["creator_id"]), row["next_run"], ex=604800)
                         else:
                             pipe.zadd(_due(), {member: current["next_run"]})
                     await pipe.execute()
