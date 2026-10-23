@@ -83,7 +83,7 @@ async def get_schedule(wrapper: RunContextWrapper[dict], schedule_id: str) -> st
 async def create_schedule(wrapper: RunContextWrapper[dict], action: str, timing_type: str,
                           at: str = "", every: int = 0, unit: str = "hours", start: str = "",
                           local_time: str = "", weekday: str = "", timezone: str = "") -> str:
-    """Create a schedule in this channel. Use explicit timing: once needs at (ISO date/time with offset); interval needs every and unit (hours/days/weeks); daily needs local_time (HH:MM); weekly also needs weekday. Ask the user when timing is ambiguous. Defaults to Europe/London. Afterwards tell the user the timing_summary and next_run_local from the result."""
+    """Create a schedule in this channel. Use explicit timing: once needs at (ISO date/time with offset); interval needs every and unit (hours/days/weeks); daily needs local_time (HH:MM); weekly also needs weekday. Ask the user when timing is ambiguous. Defaults to Europe/London. Afterwards tell the user the timing_summary and next_run_local from the result. Not for Discord events: create_event makes those, one at a time."""
     c = _scope(wrapper)
     timing = {"type": timing_type}
     if timing_type == "once": timing["at"] = at

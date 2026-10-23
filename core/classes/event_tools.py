@@ -163,7 +163,8 @@ async def create_event(wrapper: RunContextWrapper[dict], name: str, start: str, 
     when someone asks to make or schedule an event. To find a time that suits several
     people, post a poll of times first and schedule a follow-up for when it ends. The event
     is held in a voice channel (voice_channel) or somewhere else (location); if the user
-    has not said where, ask them.
+    has not said where, ask them. Events cannot repeat: for "every day" or "weekly", make
+    the next one only and tell the user it will not repeat.
 
     Args:
         name: The event's title, up to 100 characters.
