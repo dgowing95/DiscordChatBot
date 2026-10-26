@@ -6,7 +6,10 @@ metadata:
 data:
   # Credentials are NOT here - see secret.yaml (same values.yaml keys).
   REDIS_HOST: {{ .Values.redisHost | toString | quote }}
-  LLM_HOST: {{ .Values.llm_host }}
+  # llm_host, else the selected engine's in-cluster service (see _helpers.tpl)
+  LLM_HOST: {{ include "dcb.llmHost" . }}
+  # A placeholder for llama.cpp; with llmEngine=strata core.yaml overrides it
+  # with the real key from the Strata secret.
   LLM_PASS: {{ .Values.llm_pass }}
   MODEL: {{ .Values.model }}
   REASONING_EFFORT: {{ .Values.reasoningEffort | quote }}
@@ -108,6 +111,9 @@ data:
   SANDBOX_MAX_RETRIES: {{ .Values.sandbox.maxRetries | toString | quote }}
   SANDBOX_SNAPSHOT_MAX_BYTES: {{ .Values.sandbox.snapshotMaxBytes | toString | quote }}
   SANDBOX_SNAPSHOT_TTL_SECONDS: {{ .Values.sandbox.snapshotTtlSeconds | toString | quote }}
+  {{- if .Values.sandbox.memoryLimit }}
+  SANDBOX_MEMORY_LIMIT: {{ .Values.sandbox.memoryLimit | toString | quote }}
+  {{- end }}
   {{- if .Values.sandbox.model }}
   SANDBOX_MODEL: {{ .Values.sandbox.model }}
   {{- end }}
@@ -126,9 +132,10 @@ data:
   # Prometheus metrics: core serves /metrics on METRICS_PORT; empty disables
   # the metrics server (helm: metrics.enabled)
   METRICS_PORT: {{ if .Values.metrics.enabled }}{{ .Values.metrics.port | toString | quote }}{{ else }}""{{ end }}
-  # The llama.cpp context window, which only the llamacpp pod knew about
-  # (LLAMA_ARG_CTX_SIZE). core exports it as a gauge so a dashboard can show
+  # The LLM server's total context window, which only its own pod knew about
+  # (llama.cpp: LLAMA_ARG_CTX_SIZE; Strata: per-slot CONTEXT x PARALLEL, see
+  # _helpers.tpl). core exports it as a gauge so a dashboard can show
   # prompt sizes as a fraction of it. llama.cpp rounds this up to a block
   # boundary (80000 -> 80128), so the fraction reads ~0.2% high — not worth
   # modelling.
-  LLM_CONTEXT_LENGTH: {{ .Values.llamacppContextLength | toString | quote }}
+  LLM_CONTEXT_LENGTH: {{ include "dcb.llmContextLength" . | quote }}

@@ -13,7 +13,8 @@
 # unless E2E_LOCAL_DIFFUSION=1.
 # Optional: CORE_PYTHON / SPEECH_PYTHON / DIFFUSION_PYTHON (interpreters for
 # each service's venv; default python3), E2E_CACHE (model + package caches),
-# E2E_TINY_IMAGE_MODEL.
+# E2E_TINY_IMAGE_MODEL, E2E_LLM_API_KEY (for an LLM server that checks a key,
+# such as Strata; empty = core's placeholder).
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -35,7 +36,8 @@ fi
 # The test bot's credentials go to core only. Kept in an unexported variable,
 # so nothing else started here (the other services, pip, npm) inherits them.
 DISCORD_TOKEN_VALUE="$E2E_DISCORD_TOKEN"
-unset E2E_DISCORD_TOKEN E2E_WEBHOOK_URL E2E_VOICE_CHANNEL_ID
+LLM_API_KEY_VALUE="${E2E_LLM_API_KEY:-}"
+unset E2E_DISCORD_TOKEN E2E_WEBHOOK_URL E2E_VOICE_CHANNEL_ID E2E_LLM_API_KEY
 
 # start NAME DIR COMMAND...: run in the background, log to logs/NAME.log.
 start() {
@@ -112,6 +114,7 @@ fi
   export DISCORD_TOKEN="$DISCORD_TOKEN_VALUE"
   export REDIS_HOST=127.0.0.1
   export LLM_HOST="$E2E_LLM_HOST" MODEL="$E2E_MODEL" DIFFUSION_URL="$DIFFUSION_URL"
+  if [ -n "$LLM_API_KEY_VALUE" ]; then export LLM_PASS="$LLM_API_KEY_VALUE"; fi
   # A tiny model draws noise, so the vision check would rightly say the
   # picture is missing everything, and the model would then call the tool
   # again. Off on this path only; core PRs test it against the real service.

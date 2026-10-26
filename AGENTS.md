@@ -4,7 +4,8 @@ Overview of this repository and how to work with it (for humans and AI coding ag
 
 ## What this is
 
-A Python Discord bot that answers messages using a local LLM (llama.cpp server serving a GGUF model, e.g. `ggml-org/Qwen3.8-27B-GGUF:Q4_K_M`).
+A Python Discord bot that answers messages using a local LLM (llama.cpp server serving a GGUF model, e.g. `ggml-org/Qwen3.8-27B-GGUF:Q4_K_M`;
+or, with the chart's `llmEngine: strata`, a [Strata](https://github.com/Niko1221/Strata) server for large mixture-of-experts models).
 It is primarily deployed on **Kubernetes** via the Helm chart in `charts/dis-ai-bot`
 (releases are cut by `.github/workflows/auto-tag.yaml`, which bumps a `vMAJOR.MINOR` tag on every
 push to `main`, and the tag push starts `release.yaml`; a prebuilt chart is downloadable from GitHub
@@ -25,7 +26,8 @@ core/                  # the main bot (the app that runs in production)
     message_queue.py       # PURE (stdlib-only) queue sizing (WORKER_COUNT / QUEUE_MAX_SIZE),
                            #   bounded queue factory + per-channel locks (scoped to build+send)
                            #   + in-flight task registry (prompt hint for still-running slow tools)
-    text_llm_handler.py    # builds an `agents` Agent against the LLM server's (llama.cpp) OpenAI-compat API
+    text_llm_handler.py    # builds an `agents` Agent against the LLM server's (llama.cpp or Strata)
+                           #   OpenAI-compat API
     response_filter.py     # PURE (stdlib-only) response cleaning / thinking-block stripping
     content_guard.py       # OpenAI Moderations-based safety guard for web_search / fetch_url /
                            #   run_code_sandbox
@@ -105,9 +107,11 @@ docs/voice.md          # user-facing guide to voice calls
 e2e/                   # end-to-end CI: start the PR's bot, talk to it through
                        #   Discord, check the replies (README.md there)
 charts/dis-ai-bot/     # Helm chart (credentials render into templates/secret.yaml,
-                       #   everything else into templates/configmap.yaml)
+                       #   everything else into templates/configmap.yaml); llmEngine
+                       #   picks templates/llamacpp.yaml (default) or templates/strata.yaml
 pyproject.toml         # pytest configuration - why bare `pytest` works from the repo root
-docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusion (GPU) + core (mounts ./core)
+docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PROFILES in .env picks
+                       #   one) + diffusion (GPU) + core (mounts ./core)
                        #   + speech + voice (CPU; used when VOICE_ENABLED=1)
 .env / .env.example    # environment configuration (never commit .env)
 ```
@@ -172,8 +176,14 @@ docker-compose.yaml    # local dev: redis + llamacpp (GPU, llama.cpp) + diffusio
    the newest few live from Discord. So nothing extra is in the prompt until
    someone asks, and it is also how voice turns and automatic runs, which have
    no channel history, can see results.
-3. `TextLLMHandler` uses the **OpenAI `agents` SDK** pointed at the llama.cpp
+3. `TextLLMHandler` uses the **OpenAI `agents` SDK** pointed at the LLM
    server's OpenAI-compatible endpoint (`LLM_HOST/v1`) with function tools attached.
+   That server is llama.cpp by default, or Strata (chart `llmEngine: strata`, compose
+   profile `strata`). Strata copies llama.cpp's API closely enough (`/props`,
+   `reasoning_content`, `timings`, prefix reuse) that core treats both the same: the
+   only differences are that Strata checks `LLM_PASS` (so core's own `/props` and
+   `/v1/models` calls send it, `llm_config.llm_auth_headers`), lists its one model
+   only in the OpenAI `data` shape, and answers whatever model name is asked for.
 4. The returned text is cleaned by `MessageHandler.filter_response()` (delegate:
    `core/classes/response_filter.py`, a pure module) and sent in **2000-char chunks**
    (`textwrap.wrap`, one `asyncio.sleep(1)` between sends). The model's reasoning
@@ -497,16 +507,16 @@ needs an entry there, gated with `requires` when it can be switched off;
 |---|---|
 | `DISCORD_TOKEN` | required; bot token. Chart: `discordToken`, or bring your own Secret via `existingSecret` (keys = these env var names: `DISCORD_TOKEN`, `OPENAI_API_KEY`, `SANDBOX_LLM_API_KEY`, `IMAGE_PROMPT_LLM_API_KEY`); `llamacpp.existingSecret` does the same for the llamacpp pod's `HF_TOKEN` |
 | `REDIS_HOST` | required; Redis host |
-| `LLM_HOST` | llama.cpp server base URL (OpenAI-compat; core appends `/v1`). Points at the `llamacpp` service on :8081 in docker-compose (dev) and :8080 in the helm chart; the in-code fallback is `http://llamacpp:8080` |
-| `LLM_PASS` | placeholder key — llama.cpp does not authenticate, but the OpenAI client requires a non-empty key |
-| `MODEL` | the model, single source of truth: the bot requests this name AND the compose `llamacpp` service serves it (as `LLAMA_ARG_HF_REPO`); in the Helm chart the one `model` value feeds both. In-code default `qwen3:4b` |
+| `LLM_HOST` | LLM server base URL (OpenAI-compat; core appends `/v1`). docker-compose (dev): the `llamacpp` service on :8081, or `http://strata:8080`. Helm chart: `llm_host`, empty by default = the in-cluster service of `llmEngine`; the in-code fallback is `http://llamacpp:8080` |
+| `LLM_PASS` | the LLM server's API key. A placeholder for llama.cpp, which does not authenticate (the OpenAI client requires a non-empty key); the real key for Strata, which checks it (the chart takes it from `strata.apiKey` / `strata.existingSecret`, key `STRATA_API_KEY`; compose gives the same `.env` value to the `strata` service) |
+| `MODEL` | the model, single source of truth: the bot requests this name AND the compose `llamacpp` service serves it (as `LLAMA_ARG_HF_REPO`); in the Helm chart the one `model` value feeds both. With Strata it is only the requested name (Strata picks its model from `strata.model`, `STRATA_MODEL` in compose, and answers any name). In-code default `qwen3:4b` |
 | `OPENAI_API_KEY` | API key for the free OpenAI Moderations endpoint (web-tool guard); fail-open if unset. The agents SDK would also upload every run to OpenAI's trace dashboard with it; that is switched off in code (`set_tracing_disabled(True)` in `text_llm_handler.py` and `sandbox_agent.py`), with no setting to turn it back on |
 | `OPENAI_BASE_URL` | moderation API base (default `https://api.openai.com/v1`); any OpenAI-compatible `/v1/moderations` endpoint works. Chart: `openaiBaseUrl` |
 | `MODERATION_MODEL` | moderation model name, e.g. `text-moderation-latest`; unset omits the parameter and uses the server default. Chart: `moderationModel` |
 | `CONTENT_GUARD_ENABLED` | `0`/`false` disables the content guard on web tools (default: on) |
 | `CONTENT_GUARD_DEBUG` | `0`/`false` silences content-guard debug logging (default: on) |
-| `METRICS_PORT` | port to serve the Prometheus `/metrics` endpoint on (default 9464); empty/`0` disables. Chart: `metrics.enabled`/`metrics.port` also add a ClusterIP Service, the pod port, and a kube-prometheus-stack ServiceMonitor (labelled `release: kube-prometheus-stack` — the operator only imports ServiceMonitors with that label). The same `metrics.enabled` switch turns on **llama.cpp's own** `/metrics` (`LLAMA_ARG_ENDPOINT_METRICS`, off upstream by default) plus a second ServiceMonitor for it |
-| `LLM_CONTEXT_LENGTH` | the context window the LLM server was started with (chart: `llamacppContextLength`, which also sets the server's `LLAMA_ARG_CTX_SIZE`), exported as the `discord_bot_llm_context_window_tokens` gauge so a dashboard can express prompt sizes as a fraction of it. Unset leaves the gauge at 0 |
+| `METRICS_PORT` | port to serve the Prometheus `/metrics` endpoint on (default 9464); empty/`0` disables. Chart: `metrics.enabled`/`metrics.port` also add a ClusterIP Service, the pod port, and a kube-prometheus-stack ServiceMonitor (labelled `release: kube-prometheus-stack` — the operator only imports ServiceMonitors with that label). The same `metrics.enabled` switch turns on **llama.cpp's own** `/metrics` (`LLAMA_ARG_ENDPOINT_METRICS`, off upstream by default) plus a second ServiceMonitor for it; with `llmEngine: strata` that second one scrapes Strata's `/metrics` instead (`vllm:*` / `strata:*` names), sending the Strata key |
+| `LLM_CONTEXT_LENGTH` | the TOTAL context window the LLM server was started with (chart: `llamacppContextLength`, which also sets the server's `LLAMA_ARG_CTX_SIZE`; with Strata, whose `strata.context` is per slot, that times `strata.parallel`), exported as the `discord_bot_llm_context_window_tokens` gauge so a dashboard can express prompt sizes as a fraction of it. Unset leaves the gauge at 0 |
 | `LOG_LEVEL` | root log level (default `INFO`); `DEBUG` also dumps the raw agent run result. Logging replaced bare `print()` calls, which had no level to tune |
 | `MSG_HISTORY_LIMIT` | messages in a (refreshed) history window, the trigger included, default 5. Chart: `message_history` |
 | `MSG_HISTORY_MODE` | `sliding` (default: always the newest window) or `anchored` (the window's start stays fixed and grows, so the LLM server can reuse its cached prefix, until a refresh). Chart: `history.mode` |
@@ -558,6 +568,7 @@ needs an entry there, gated with `requires` when it can be switched off;
 | `SANDBOX_MAX_RETRIES` | how many times that client retries a failed request (default 2; 0 disables). One model call is also wall-clock bounded (`ModelSettings.timeout`, see `sandbox_model_call_timeout()`) at (1 + this) x `SANDBOX_REQUEST_TIMEOUT_SECONDS` — the figure that was already the documented worst case for a silent server, now enforced for a padding one too. Chart: `sandbox.maxRetries` |
 | `SANDBOX_SNAPSHOT_MAX_BYTES` | max size of one thread's stored workspace snapshot in Redis (default 50MB). Chart: `sandbox.snapshotMaxBytes` |
 | `SANDBOX_SNAPSHOT_TTL_SECONDS` | how long an unused thread's workspace snapshot survives in Redis (default 604800 = 7 days). Chart: `sandbox.snapshotTtlSeconds` |
+| `SANDBOX_MEMORY_LIMIT` | memory cap for each sandbox container, Docker notation (`4g`, `512m`; swap capped at the same figure); empty (default) = no cap. The containers run on the node's Docker daemon, outside Kubernetes accounting. The SDK has no option for it, so `build_sandbox_client` wraps the docker client's `containers.create`. Chart: `sandbox.memoryLimit` |
 | `VOICE_ENABLED` | `1`/`true` turns voice calls on: `/voice`, the join/leave tools and the bridge to the sidecar (default: off in code; the chart sets it from `voice.enabled`, default true, which also adds the sidecar container and the speech pod/PVC |
 | `VOICE_BRIDGE_URL` | the voice sidecar's WebSocket (default `ws://voice:8765`; the chart sets `ws://127.0.0.1:<voice.bridgePort>`, same pod). The sidecar reads `VOICE_BRIDGE_HOST`/`VOICE_BRIDGE_PORT` to bind it |
 | `VOICE_BRIDGE_TOKEN` | optional shared secret: when set, the sidecar refuses a bridge connection that does not send it (core sends it as a Bearer header). For compose, where the bridge listens on the whole compose network; the chart binds it to localhost in the core pod and leaves it unset |
@@ -711,7 +722,8 @@ failure shows in the run's step summary, and the full logs are in its
 `e2e-logs` artifact.
 
 - **Runner.** `runs-on: discordchatbot-e2e` is a self-hosted runner that
-  provides `E2E_LLM_HOST`, `E2E_DIFFUSION_URL` and `E2E_MODEL` as environment
+  provides `E2E_LLM_HOST`, `E2E_DIFFUSION_URL` and `E2E_MODEL` (plus
+  `E2E_LLM_API_KEY` when that LLM server checks a key) as environment
   variables, so no deployment detail lives in this public repository. A
   `diffusionservice/` PR runs its own image service on CPU with a tiny model
   instead (`E2E_LOCAL_DIFFUSION`). That covers imports and library skew, never
@@ -850,6 +862,16 @@ failure shows in the run's step summary, and the full logs are in its
   (hostPath `…/ollama`) on purpose, so data survives the Ollama → llama.cpp switch and keeps
   matching on upgrade — do not rename; the llamacpp pod mounts it at `/models`, which is also
   its `LLAMA_CACHE`, so the GGUF model (downloaded once via `--hf-repo`) persists across redeploys.
+  It is rendered whatever `llmEngine` is, so switching to Strata and back keeps that model.
+- Strata (`templates/strata.yaml`) needs three things llama.cpp does not, each verified
+  against the real image: unlimited locked memory, because it page-locks the RAM holding
+  the experts. Kubernetes has no per-pod ulimit, so the pod gets `SYS_RESOURCE` and starts
+  under `prlimit` (`strata.raiseLimits`). An API key, because it never serves without one;
+  the render fails without `strata.apiKey`/`existingSecret` rather than let it make its own,
+  which core would never see. And a clean slate on every start: it saves each start's
+  settings as the preset `docker` and reuses saved ones for anything not given, so the
+  wrapper deletes that preset first (models and tuning are kept). Its `/data` must be on an
+  SSD. In `args`, Kubernetes turns `$$` into `$`, so the wrapper avoids `$$`.
 - The diffusion pod, its PVC and the `generate_image` tool are all gated by one switch:
   `diffusion.enabled` in the chart (→ `IMAGE_GEN_ENABLED` in the configmap). The service
   downloads its model into the `diffusers` volume on first boot, so first start is slow

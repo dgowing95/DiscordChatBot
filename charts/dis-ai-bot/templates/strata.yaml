@@ -1,0 +1,147 @@
+{{- if eq (include "dcb.llmEngine" .) "strata" }}
+# Strata server (llmEngine: strata), the alternative to llamacpp.yaml. Same
+# OpenAI-compatible API, so core only needs the address (configmap LLM_HOST)
+# and the key (core.yaml LLM_PASS).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-strata-deployment
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-strata
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-strata
+    spec:
+      runtimeClassName: nvidia
+      # Draining requests and unloading the model takes up to ~2 minutes
+      terminationGracePeriodSeconds: 120
+      volumes:
+        - name: strata-data
+          persistentVolumeClaim:
+            claimName: strata-pv-claim
+        {{- if .Values.strata.modelHostPath }}
+        - name: strata-models
+          hostPath:
+            path: {{ .Values.strata.modelHostPath }}
+            type: Directory
+        {{- end }}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.strata.shmSize }}
+      containers:
+      - name: strata
+        image: "{{ .Values.strata.image }}"
+        imagePullPolicy: IfNotPresent
+        # The image's own entrypoint, behind a wrapper that makes each start
+        # match these values. Strata saves the settings of every start as the
+        # preset "docker" and reuses saved ones for anything not given, so a
+        # value removed from the chart (an old strata.set, say) would stay in
+        # force. Deleting the preset first leaves models and tuning alone.
+        command: ["sh", "-c"]
+        args:
+          - |
+            strata launch --delete-preset "${PRESET:-docker}" >/dev/null 2>&1 || true
+            {{- if .Values.strata.raiseLimits }}
+            # See strata.raiseLimits: prlimit raises both limits (the hard one
+            # needs SYS_RESOURCE) and runs the server under them; if it cannot,
+            # the pod fails here instead of running without pinned memory.
+            exec prlimit --memlock=unlimited:unlimited --as=unlimited:unlimited /usr/bin/tini -- /opt/strata/entrypoint.sh run
+            {{- else }}
+            exec /usr/bin/tini -- /opt/strata/entrypoint.sh run
+            {{- end }}
+        {{- if .Values.strata.raiseLimits }}
+        securityContext:
+          capabilities:
+            add: ["SYS_RESOURCE"]
+        {{- end }}
+        ports:
+        - name: http
+          containerPort: {{ .Values.strata.port }}
+        volumeMounts:
+          - name: strata-data
+            mountPath: /data
+          {{- if .Values.strata.modelHostPath }}
+          - name: strata-models
+            mountPath: {{ required "strata.modelHostPath needs strata.modelPath (where to mount it)" .Values.strata.modelPath }}
+            readOnly: true
+          {{- end }}
+          - name: dshm
+            mountPath: /dev/shm
+        env:
+        # See diffusion.yaml: empty = "all" (device plugin decides), or
+        # CDI-qualified device names to pin this pod to specific physical cards.
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: {{ .Values.strata.visibleDevices | default "all" | quote }}
+        - name: NVIDIA_DRIVER_CAPABILITIES
+          value: compute,utility
+        - name: PORT
+          value: {{ .Values.strata.port | quote }}
+        - name: API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "dcb.strataSecretName" . }}
+              key: STRATA_API_KEY
+        {{- range $name, $key := dict "FAMILY" "family" "MODEL" "model" "MODEL_PATH" "modelPath" "CONTEXT" "context" "PARALLEL" "parallel" "VISION" "vision" "KV" "kv" "GPUS" "gpus" "GPU_ROLES" "gpuRoles" "STRATA_SET" "set" }}
+        {{- $value := index $.Values.strata $key }}
+        {{- if $value }}
+        - name: {{ $name }}
+          value: {{ $value | toString | quote }}
+        {{- end }}
+        {{- end }}
+        {{- range $name, $value := .Values.strata.extraEnv }}
+        # strata.extraEnv — rendered last so a repeated name wins (the
+        # kubelet takes the final occurrence).
+        - name: {{ $name }}
+          value: {{ $value | quote }}
+        {{- end }}
+        # The image's own health check: /v1/models with the key, healthy once
+        # a model is loaded. Readiness only, no liveness: the first start can
+        # take hours (model download, one-time preparation) and must not be
+        # killed for it.
+        readinessProbe:
+          exec:
+            command: ["/opt/strata/healthcheck.sh"]
+          periodSeconds: 15
+          timeoutSeconds: 10
+        resources:
+          limits:
+            cpu: {{ .Values.strataResources.limits.cpu }}
+            memory: {{ .Values.strataResources.limits.memory }}
+            # Mutually exclusive with strata.visibleDevices — see diffusion.yaml
+            {{- if not .Values.strata.visibleDevices }}
+            nvidia.com/gpu: {{ .Values.strataResources.gpu }}
+            {{- end }}
+          requests:
+            cpu: {{ .Values.strataResources.requests.cpu }}
+            memory: {{ .Values.strataResources.requests.memory }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-strata-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    # The ServiceMonitor selects Services by label; see llamacpp.yaml.
+    app: {{ .Release.Name }}-strata
+spec:
+  # See strata.nodePort
+  type: {{ if .Values.strata.nodePort }}NodePort{{ else }}ClusterIP{{ end }}
+  selector:
+    app: {{ .Release.Name }}-strata
+  ports:
+    - port: {{ .Values.strata.port }}
+      targetPort: {{ .Values.strata.port }}
+      {{- if .Values.strata.nodePort }}
+      nodePort: {{ .Values.strata.nodePort }}
+      {{- end }}
+      protocol: TCP
+      name: http
+{{- end }}

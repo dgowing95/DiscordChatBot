@@ -21,6 +21,7 @@ docker-compose stack for local development.
 |---|---|
 | `core/` | the bot itself: Discord client, message queue, agent + tools, Prometheus metrics |
 | `llamacpp` | the LLM server (OpenAI-compatible API), serving the GGUF named by `model` |
+| `strata` | optional instead of `llamacpp` (`llmEngine: strata`): [Strata](https://github.com/Niko1221/Strata), for large mixture-of-experts models on consumer GPUs |
 | `redis` | per-guild settings, per-user memories, and sandbox workspace snapshots |
 | `diffusionservice/` | optional image generation (text-to-image); disable with `diffusion.enabled=false` |
 

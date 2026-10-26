@@ -15,7 +15,9 @@ spec:
 ---
 # llama.cpp (ex-Ollama) volume: PV/PVC names and hostPath are INTENTIONALLY still
 # "ollama" so the pre-existing PV keeps matching and the data on the node is
-# preserved on upgrade (renaming would create a new empty volume).
+# preserved on upgrade (renaming would create a new empty volume). Rendered
+# whatever llmEngine is, so switching to Strata and back neither deletes nor
+# re-binds it.
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -31,6 +33,37 @@ spec:
   hostPath:
     path: {{ .Values.pvc.hostPath }}/ollama
 ---
+{{- if eq (include "dcb.llmEngine" .) "strata" }}
+# Strata's /data (templates/strata.yaml). Must be on an SSD/NVMe: see
+# strata.hostPath.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ include "helm.fullname" . }}-pvc-strata
+  labels:
+    type: local
+spec:
+  storageClassName: {{ include "helm.fullname" . }}-pvc-strata
+  capacity:
+    storage: {{ .Values.pvc.strataSize }}
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    path: {{ .Values.strata.hostPath | default (printf "%s/strata" .Values.pvc.hostPath) }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: strata-pv-claim
+spec:
+  storageClassName: {{ include "helm.fullname" . }}-pvc-strata
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.pvc.strataSize }}
+---
+{{- end }}
 # Image generation model cache (HF_HOME). Only rendered when diffusion is
 # enabled (templates/diffusion.yaml mounts the claim).
 {{- if .Values.diffusion.enabled }}

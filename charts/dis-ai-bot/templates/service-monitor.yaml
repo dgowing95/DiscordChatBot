@@ -28,6 +28,7 @@ spec:
     - port: metrics
       path: /metrics
       interval: {{ .Values.metrics.scrapeInterval }}
+{{- if eq (include "dcb.llmEngine" .) "llamacpp" }}
 ---
 # llama.cpp's OWN metrics (llamacpp:* series), enabled by
 # LLAMA_ARG_ENDPOINT_METRICS in llamacpp.yaml under this same switch. It answers
@@ -56,4 +57,36 @@ spec:
     - port: http
       path: /metrics
       interval: {{ .Values.metrics.scrapeInterval }}
+{{- else }}
+---
+# Strata's own metrics (llmEngine: strata), on its API port like llama.cpp's.
+# vLLM-style names (vllm:num_requests_running, vllm:prompt_tokens_total,
+# vllm:prefix_cache_hits_total, latency histograms, ...) plus strata:*
+# gauges (live tok/s, RAM and GPU use). /metrics needs the API key, so the
+# scrape sends it from the Strata secret; Prometheus' default Accept header
+# gets the text format.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ .Release.Name }}-strata
+  namespace: {{ .Release.Namespace }}
+  labels:
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-strata
+  namespaceSelector:
+    matchNames:
+    - {{ .Release.Namespace }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.metrics.scrapeInterval }}
+      authorization:
+        type: Bearer
+        credentials:
+          name: {{ include "dcb.strataSecretName" . }}
+          key: STRATA_API_KEY
+{{- end }}
 {{- end }}

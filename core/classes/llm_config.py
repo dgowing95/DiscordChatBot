@@ -47,9 +47,18 @@ def llm_host() -> str:
 
 
 def llm_api_key() -> str:
-    """Placeholder key (LLM_PASS): llama.cpp does not authenticate, but the
-    OpenAI client refuses to start without a non-empty one."""
+    """The LLM server's API key (LLM_PASS). For llama.cpp, which does not
+    authenticate, it is only a placeholder: the OpenAI client refuses to
+    start without a non-empty one. Strata does check it."""
     return os.environ.get("LLM_PASS") or DEFAULT_LLM_API_KEY
+
+
+def llm_auth_headers() -> dict:
+    """Headers for core's own HTTP calls to the LLM server (/props,
+    /v1/models), which go around the OpenAI client and so would otherwise
+    send no key. A server that checks the key answers them 401 without it;
+    llama.cpp ignores it."""
+    return {"Authorization": f"Bearer {llm_api_key()}"}
 
 
 def parse_temperature(raw) -> float:

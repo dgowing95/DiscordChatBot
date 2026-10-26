@@ -9,6 +9,9 @@ services:
   llamacpp:
     # Official llama.cpp server (OpenAI-compatible API); configured via LLAMA_ARG_* env vars:
     # https://github.com/ggml-org/llama.cpp/blob/master/tools/cli/README.md#common-params
+    # One of the two LLM servers; COMPOSE_PROFILES in .env picks which runs
+    # (llamacpp or strata), so the two never fight over the GPU.
+    profiles: [llamacpp]
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
     ports:
       - "8081:8081"  # dev uses 8081 (8080 is taken locally); the helm chart uses 8080
@@ -37,6 +40,50 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+  strata:
+    # Strata (COMPOSE_PROFILES=strata): the alternative LLM server for large
+    # mixture-of-experts models; settings are its image's env vars (Strata's
+    # docs/DOCKER.md). It always checks a key, so LLM_PASS in .env is the key
+    # for both sides. Point core at it with LLM_HOST=http://strata:8080.
+    profiles: [strata]
+    image: ghcr.io/niko1221/strata:${STRATA_IMAGE_TAG:-0.2.3-cuda13}
+    # Strata saves each start's settings and reuses them for anything not
+    # given, so a setting removed from .env would stay in force; deleting the
+    # saved preset first makes every start match .env (models are kept).
+    entrypoint: ["sh", "-c", "strata launch --delete-preset docker >/dev/null 2>&1 || true; exec /usr/bin/tini -- /opt/strata/entrypoint.sh run"]
+    ports:
+      - "127.0.0.1:8083:8080"
+    environment:
+      - API_KEY=${LLM_PASS:-}
+      - FAMILY=${STRATA_FAMILY:-qwen}
+      - MODEL=${STRATA_MODEL:-IQ3_XXS}
+      # GGUF files you already have, inside the container (the strata_models
+      # volume below is mounted at /models); empty = download into strata_data
+      - MODEL_PATH=${STRATA_MODEL_PATH:-}
+      # Per slot, unlike llama.cpp's LLAMA_ARG_CTX_SIZE
+      - CONTEXT=${STRATA_CONTEXT:-32k}
+      - PARALLEL=${STRATA_PARALLEL:-2}
+      - VISION=${STRATA_VISION:-on}
+      - KV=${STRATA_KV:-int8}
+      - STRATA_SET=${STRATA_SET:-}
+    volumes:
+      # Must be on an SSD; on Docker Desktop keep it a named volume, not a
+      # Windows bind mount
+      - strata_data:/data
+      - strata_models:/models:ro
+    # Pins the experts in RAM; needs unlimited locked memory and room to stop
+    ulimits:
+      memlock: -1
+    shm_size: 2g
+    stop_grace_period: 2m
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
   core:
     build: ./core
     volumes:
@@ -52,9 +99,18 @@ services:
       - VOICE_BRIDGE_URL=${VOICE_BRIDGE_URL:-ws://voice:8765}
       - SPEECH_URL=${SPEECH_URL:-http://speech:8000}
     depends_on:
-      - redis
-      - llamacpp
-      - voice
+      redis:
+        condition: service_started
+      # Only the engine whose profile is on exists; required: false lets
+      # core start with either one.
+      llamacpp:
+        condition: service_started
+        required: false
+      strata:
+        condition: service_started
+        required: false
+      voice:
+        condition: service_started
       
   diffusion:
     # Image generation (text -> image); see diffusionservice/. Queued (one
@@ -144,3 +200,8 @@ volumes:
   ollama_data:
   diffusers_data:
   speech_data:
+  strata_data:
+  # An existing volume of GGUF files, by name (STRATA_MODELS_VOLUME); created
+  # empty if there is none
+  strata_models:
+    name: ${STRATA_MODELS_VOLUME:-strata-models}
