@@ -21,13 +21,16 @@ jobs:
       OCR_NO_UPDATE: '1'
     concurrency:
       group: review-${{ github.event.pull_request.number }}
-      cancel-in-progress: true
+      # A cancelled review records no checkpoint, so the run that replaced it reviewed the whole
+      # PR again. Letting it finish means the next push reviews only <checkpoint>..<new head>;
+      # GitHub keeps at most one run waiting, so a burst of pushes still ends in one catch-up.
+      cancel-in-progress: false
     permissions:
       contents: read
       pull-requests: write
     steps:
       - name: Run OpenCodeReview
-        uses: alibaba/open-code-review@182898cf522da3d04157b422752d028417974e19 # v1.12.12
+        uses: alibaba/open-code-review@375f64cd6f67a48a135da83cfcf59c52669a09cb # v1.13.3
         with:
           llm_url: https://opencode.ai/zen/go/v1/chat/completions
           llm_auth_token: ${{ secrets.OPENCODE_API_KEY }}
@@ -38,7 +41,8 @@ jobs:
           review_concurrency: '2'
           # Pin the installed CLI as well as the action commit. The action otherwise installs
           # `latest`, which can change review behaviour without a repository diff.
-          ocr_version: 1.11.9
+          # Dependabot bumps the action commit above but never this string: keep the two in step.
+          ocr_version: 1.13.3
           # The action's default extra_body is {"thinking": {"type": "disabled"}}.
           # Some of the upstreams OpenCode Go balances models across
           # reject that field with a 400 (seen with glm-5.3-flash: unknown field / Z.ai 1210).
@@ -51,12 +55,17 @@ jobs:
           llm_extra_headers: x-opencode-session=${{ github.repository }}-pr-${{ github.event.pull_request.number }}
           # Minutes (1-120), validated by the action's own input check; the default is 15.
           review_task_timeout: 40
-          # A synchronization is a narrow regression pass over the new fix range. Full reviews
-          # retain the default two internal rounds for recall.
-          effort: ${{ github.event.action == 'synchronize' && 'low' || 'medium' }}
+          # The same effort for every event: effort is part of the checkpoint fingerprint, so
+          # 'medium' on open and 'low' on push made the first push after opening a full review.
+          # Checkpoint runs cover only the new commits, so 'medium' costs little there.
+          effort: medium
           sticky_summary: 'true'
           checkpoint_range: 'true'
           incremental: 'true'
+          # Logs which of the bot's outdated threads it would resolve, and changes nothing.
+          # Switch to 'true' once those look right; that needs `contents: write` above, since
+          # GitHub gates resolving a thread on repository write access.
+          resolve_outdated: report
           # Low-severity findings remain visible in the sticky summary without creating a thread
           # that agents feel obliged to fix. Style and documentation are likewise advisory.
           route_severity_below: low

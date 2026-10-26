@@ -1,0 +1,8 @@
+{
+  "rules": [],
+  "exclude": [
+    "core/tests/**",
+    "diffusionservice/tests/**",
+    "speechservice/tests/**"
+  ]
+}
