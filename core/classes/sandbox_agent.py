@@ -285,34 +285,40 @@ def sandbox_llm_api_key() -> str:
     return env_or("SANDBOX_LLM_API_KEY", "LLM_PASS", DEFAULT_LLM_API_KEY)
 
 
-_MEMORY_LIMIT_RE = re.compile(r"^\d+[bkmg]?$")
-
-
-def sandbox_memory_limit() -> str | None:
-    """Memory cap for each sandbox container (SANDBOX_MEMORY_LIMIT, in
-    Docker's own notation: bytes, or a number with b/k/m/g, e.g. "4g").
+def sandbox_memory_limit() -> int | None:
+    """Memory cap in bytes for each sandbox container (SANDBOX_MEMORY_LIMIT,
+    in Docker's own notation: "4g", "4gb", "512m", "1.5g" or plain bytes).
     Unset or empty = no cap, which was the only behaviour before this.
+    Parsed by docker's own parse_bytes, so it accepts exactly what Docker
+    does; a pattern of our own once refused "4gb", which Docker takes.
 
     Why a cap is needed at all: the containers run on the node's Docker
     daemon, beside Kubernetes rather than inside it, so no pod limit or
     scheduler accounting covers them. One heavy task can then take the RAM
     an LLM server on the same node was planned around (an engine that keeps
     its experts in system RAM has no slack to give). An unparseable value is
-    logged and ignored rather than failing every sandbox run over a typo.
+    logged and ignored rather than failing every sandbox run over a typo;
+    the chart refuses one at render time, so this is the compose/.env path.
     """
-    raw = os.environ.get("SANDBOX_MEMORY_LIMIT", "").strip().lower()
+    from docker.utils import parse_bytes
+
+    raw = os.environ.get("SANDBOX_MEMORY_LIMIT", "").strip()
     if not raw:
         return None
-    if not _MEMORY_LIMIT_RE.match(raw) or int(raw.rstrip("bkmg")) <= 0:
-        logger.warning("SANDBOX_MEMORY_LIMIT=%r is not a size like 4g or 512m; sandboxes run without a cap", raw)
+    try:
+        limit = int(parse_bytes(raw))
+    except Exception:
+        limit = 0
+    if limit <= 0:
+        logger.error("SANDBOX_MEMORY_LIMIT=%r is not a size like 4g or 512m; sandboxes run WITHOUT a memory cap", raw)
         return None
-    return raw
+    return limit
 
 
 class _MemoryLimitedContainers:
     """`docker_client.containers`, with the memory cap added to create()."""
 
-    def __init__(self, containers, limit: str):
+    def __init__(self, containers, limit: int):
         self._containers = containers
         self._limit = limit
 
@@ -337,7 +343,7 @@ class _MemoryLimitedDockerClient:
     other attribute passes straight through.
     """
 
-    def __init__(self, client, limit: str):
+    def __init__(self, client, limit: int):
         self._client = client
         self.containers = _MemoryLimitedContainers(client.containers, limit)
 

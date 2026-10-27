@@ -94,3 +94,18 @@ async def test_check_model_ready_logs(caplog, model, body, level, text):
         await tlh.TextLLMHandler.check_model_ready(model)
     record = caplog.records[-1]
     assert record.levelno == level and text in record.getMessage()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 403])
+async def test_a_rejected_key_is_named_not_mistaken_for_a_slow_start(caplog, monkeypatch, status):
+    monkeypatch.setattr(tlh, "_slot_context", None)
+    for call in (tlh.TextLLMHandler.refresh_slot_context,
+                 lambda: tlh.TextLLMHandler.check_model_ready("any")):
+        caplog.clear()
+        with patch.object(tlh.aiohttp, "ClientSession", return_value=_session(status=status)), \
+             caplog.at_level(logging.INFO, logger=tlh.logger.name):
+            await call()
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("rejected the API key" in w for w in warnings)
+        assert not any("still be downloading" in r.getMessage() for r in caplog.records)

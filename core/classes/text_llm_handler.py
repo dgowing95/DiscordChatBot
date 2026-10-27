@@ -392,6 +392,9 @@ class TextLLMHandler:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, headers=llm_auth_headers()) as response:
+                    if response.status in (401, 403):
+                        logger.warning(f"LLM server rejected the API key ({response.status}); LLM_PASS must be the server's key")
+                        return
                     if response.status != 200:
                         logger.warning(f"LLM server not ready yet ({response.status}); model may still be downloading")
                         return
@@ -423,6 +426,10 @@ class TextLLMHandler:
                                        timeout=aiohttp.ClientTimeout(total=10)) as response:
                     if response.status == 200:
                         value = parse_slot_context(await response.json())
+                    elif response.status in (401, 403):
+                        # Not a slow start: the key is wrong, and the history
+                        # budget stops trimming until it is fixed.
+                        logger.warning(f"LLM server /props rejected the API key ({response.status}); LLM_PASS must be the server's key")
                     else:
                         logger.info(f"LLM server /props returned {response.status}")
         except Exception as e:

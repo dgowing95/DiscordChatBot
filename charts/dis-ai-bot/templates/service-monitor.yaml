@@ -64,7 +64,9 @@ spec:
 # vllm:prefix_cache_hits_total, latency histograms, ...) plus strata:*
 # gauges (live tok/s, RAM and GPU use). /metrics needs the API key, so the
 # scrape sends it from the Strata secret; Prometheus' default Accept header
-# gets the text format.
+# gets the text format. The operator reads that Secret from this namespace
+# itself (it needs read access to Secrets here), so nothing has to be listed
+# in the Prometheus object's spec.secrets.
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:

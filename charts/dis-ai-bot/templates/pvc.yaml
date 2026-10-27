@@ -35,13 +35,18 @@ spec:
 ---
 {{- if eq (include "dcb.llmEngine" .) "strata" }}
 # Strata's /data (templates/strata.yaml). Must be on an SSD/NVMe: see
-# strata.hostPath.
+# strata.hostPath. Kept when switching back to llama.cpp (Helm's keep policy,
+# ArgoCD's Prune=false): the files on the node survive either way, but a
+# quick switch back would race the deleted PV's finalizer.
 apiVersion: v1
 kind: PersistentVolume
 metadata:
   name: {{ include "helm.fullname" . }}-pvc-strata
   labels:
     type: local
+  annotations:
+    helm.sh/resource-policy: keep
+    argocd.argoproj.io/sync-options: Prune=false
 spec:
   storageClassName: {{ include "helm.fullname" . }}-pvc-strata
   capacity:
@@ -55,6 +60,9 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: strata-pv-claim
+  annotations:
+    helm.sh/resource-policy: keep
+    argocd.argoproj.io/sync-options: Prune=false
 spec:
   storageClassName: {{ include "helm.fullname" . }}-pvc-strata
   accessModes:

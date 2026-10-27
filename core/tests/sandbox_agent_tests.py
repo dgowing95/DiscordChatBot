@@ -2279,8 +2279,9 @@ async def test_build_sandbox_client_binds_snapshot_store_dependency(monkeypatch)
 # ---------------------- SANDBOX_MEMORY_LIMIT ----------------------
 
 @pytest.mark.parametrize("raw, expected", [
-    ("", None), ("   ", None), ("4g", "4g"), (" 512M ", "512m"), ("1073741824", "1073741824"),
-    ("lots", None), ("4gb", None), ("-1g", None), ("0", None), ("1.5g", None),
+    ("", None), ("   ", None), ("4g", 4 * 1024**3), (" 512M ", 512 * 1024**2),
+    ("1073741824", 1073741824), ("4gb", 4 * 1024**3), ("512mb", 512 * 1024**2),
+    ("1.5g", int(1.5 * 1024**3)), ("lots", None), ("4t", None), ("-1g", None), ("0", None),
 ])
 def test_sandbox_memory_limit_parsing(monkeypatch, raw, expected):
     monkeypatch.setenv("SANDBOX_MEMORY_LIMIT", raw)
@@ -2294,11 +2295,11 @@ def test_sandbox_memory_limit_unset(monkeypatch):
 
 def test_memory_limited_client_caps_created_containers_and_passes_the_rest_through():
     inner = MagicMock()
-    client = prod_sandbox_agent._MemoryLimitedDockerClient(inner, "4g")
+    client = prod_sandbox_agent._MemoryLimitedDockerClient(inner, 4 * 1024**3)
 
     client.containers.create(image="python:3.14-slim", detach=True)
     inner.containers.create.assert_called_once_with(
-        image="python:3.14-slim", detach=True, mem_limit="4g", memswap_limit="4g")
+        image="python:3.14-slim", detach=True, mem_limit=4 * 1024**3, memswap_limit=4 * 1024**3)
     # Everything else is the real client's, untouched.
     client.containers.get("abc")
     inner.containers.get.assert_called_once_with("abc")
@@ -2330,7 +2331,8 @@ def test_build_sandbox_client_wraps_docker_only_when_capped(monkeypatch):
     raw, handed = _client_docker(monkeypatch, "2g")
     assert isinstance(handed, prod_sandbox_agent._MemoryLimitedDockerClient)
     handed.containers.create(image="x")
-    raw.containers.create.assert_called_once_with(image="x", mem_limit="2g", memswap_limit="2g")
+    raw.containers.create.assert_called_once_with(
+        image="x", mem_limit=2 * 1024**3, memswap_limit=2 * 1024**3)
 
 
 # ---------------------- run_sandbox_task: persist-before-delete ordering ----------------------

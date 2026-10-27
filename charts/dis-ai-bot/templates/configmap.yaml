@@ -111,8 +111,12 @@ data:
   SANDBOX_MAX_RETRIES: {{ .Values.sandbox.maxRetries | toString | quote }}
   SANDBOX_SNAPSHOT_MAX_BYTES: {{ .Values.sandbox.snapshotMaxBytes | toString | quote }}
   SANDBOX_SNAPSHOT_TTL_SECONDS: {{ .Values.sandbox.snapshotTtlSeconds | toString | quote }}
-  {{- if .Values.sandbox.memoryLimit }}
-  SANDBOX_MEMORY_LIMIT: {{ .Values.sandbox.memoryLimit | toString | quote }}
+  {{- with .Values.sandbox.memoryLimit }}
+  {{- /* Refused here: core would otherwise run every sandbox uncapped over a typo */}}
+  {{- if not (regexMatch "^[0-9]+([.][0-9]+)?([bkmgBKMG][bB]?)?$" (toString .)) }}
+  {{- fail (printf "sandbox.memoryLimit must be a size like 4g, 4gb or 512m, not %q" (toString .)) }}
+  {{- end }}
+  SANDBOX_MEMORY_LIMIT: {{ . | toString | quote }}
   {{- end }}
   {{- if .Values.sandbox.model }}
   SANDBOX_MODEL: {{ .Values.sandbox.model }}

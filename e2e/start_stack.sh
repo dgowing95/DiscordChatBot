@@ -114,7 +114,9 @@ fi
   export DISCORD_TOKEN="$DISCORD_TOKEN_VALUE"
   export REDIS_HOST=127.0.0.1
   export LLM_HOST="$E2E_LLM_HOST" MODEL="$E2E_MODEL" DIFFUSION_URL="$DIFFUSION_URL"
-  if [ -n "$LLM_API_KEY_VALUE" ]; then export LLM_PASS="$LLM_API_KEY_VALUE"; fi
+  # Always set, so a LLM_PASS in the caller's environment never reaches the
+  # E2E server; empty means core's placeholder.
+  export LLM_PASS="$LLM_API_KEY_VALUE"
   # A tiny model draws noise, so the vision check would rightly say the
   # picture is missing everything, and the model would then call the tool
   # again. Off on this path only; core PRs test it against the real service.
