@@ -113,7 +113,7 @@ data:
   SANDBOX_SNAPSHOT_TTL_SECONDS: {{ .Values.sandbox.snapshotTtlSeconds | toString | quote }}
   {{- with .Values.sandbox.memoryLimit }}
   {{- /* Refused here: core would otherwise run every sandbox uncapped over a typo */}}
-  {{- if not (regexMatch "^[0-9]+([.][0-9]+)?([bkmgBKMG][bB]?)?$" (toString .)) }}
+  {{- if or (not (regexMatch "^[0-9]+([.][0-9]+)?([bkmgBKMG][bB]?)?$" (toString .))) (regexMatch "^[0.]+[a-zA-Z]*$" (toString .)) }}
   {{- fail (printf "sandbox.memoryLimit must be a size like 4g, 4gb or 512m, not %q" (toString .)) }}
   {{- end }}
   SANDBOX_MEMORY_LIMIT: {{ . | toString | quote }}

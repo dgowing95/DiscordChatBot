@@ -485,7 +485,12 @@ pvc:
   llamacppSize: 45Gi
   diffusersSize: 15Gi
   # Strata's /data (llmEngine: strata only); a downloaded model lands here
-  # too unless strata.modelHostPath is used
+  # too unless strata.modelHostPath is used. Its PV/PVC are kept by Helm and
+  # ArgoCD once created, so switching back to llama.cpp leaves them bound,
+  # and so does `helm uninstall`: delete them by hand (kubectl delete pvc
+  # strata-pv-claim, then the <release>-pvc-strata PV) to free the space or
+  # before installing under another release name in the same namespace. The
+  # files on the node are never deleted by either.
   strataSize: 120Gi
   # Whisper + Kokoro models (voice.enabled only)
   speechSize: 3Gi

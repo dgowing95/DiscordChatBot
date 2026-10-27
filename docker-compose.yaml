@@ -50,9 +50,10 @@ services:
     # Strata saves each start's settings and reuses them for anything not
     # given, so a setting removed from .env would stay in force; deleting the
     # saved preset first makes every start match .env (models are kept).
-    # It also stops at once without a key: Strata would make its own, which
-    # core never sees, and every request would then fail with 401.
-    entrypoint: ["sh", "-c", "[ -n \"$${API_KEY:-}\" ] || { echo '[X] Set LLM_PASS in .env: it is the Strata API key' >&2; exit 2; }; strata launch --delete-preset docker >/dev/null 2>&1 || true; exec /usr/bin/tini -- /opt/strata/entrypoint.sh run"]
+    # It also stops at once without a real key (empty, or still the llama.cpp
+    # placeholder): Strata would make or use one core does not expect, and
+    # every request would then fail with 401.
+    entrypoint: ["sh", "-c", "case \"$${API_KEY:-}\" in ''|llamacpp) echo '[X] Set LLM_PASS in .env to the Strata API key (16+ characters, e.g. openssl rand -hex 24)' >&2; exit 2;; esac; strata launch --delete-preset docker >/dev/null 2>&1 || true; exec /usr/bin/tini -- /opt/strata/entrypoint.sh run"]
     ports:
       - "127.0.0.1:8083:8080"
     environment:

@@ -58,6 +58,10 @@ docker compose up -d
 docker compose logs core -f
 ```
 
+`COMPOSE_PROFILES` in `.env` picks the LLM server: `llamacpp` (as in `.env.example`) or
+`strata`. An `.env` made before that line existed needs `COMPOSE_PROFILES=llamacpp`
+added, or no LLM server starts. The Strata settings are commented in `.env.example`.
+
 `./core` is bind-mounted into the container, so `docker compose restart core` picks up
 code edits without a rebuild. Changing `MODEL` needs `docker compose up -d` (a plain
 `restart` does not re-read `.env`).

@@ -37,7 +37,8 @@ spec:
 # Strata's /data (templates/strata.yaml). Must be on an SSD/NVMe: see
 # strata.hostPath. Kept when switching back to llama.cpp (Helm's keep policy,
 # ArgoCD's Prune=false): the files on the node survive either way, but a
-# quick switch back would race the deleted PV's finalizer.
+# quick switch back would race the deleted PV's finalizer. The cost: they
+# also outlive `helm uninstall`; see pvc.strataSize for removing them.
 apiVersion: v1
 kind: PersistentVolume
 metadata:
