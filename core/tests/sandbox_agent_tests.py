@@ -2276,6 +2276,65 @@ async def test_build_sandbox_client_binds_snapshot_store_dependency(monkeypatch)
     assert isinstance(resolved, SandboxSnapshotStore)
 
 
+# ---------------------- SANDBOX_MEMORY_LIMIT ----------------------
+
+@pytest.mark.parametrize("raw, expected", [
+    ("", None), ("   ", None), ("4g", 4 * 1024**3), (" 512M ", 512 * 1024**2),
+    ("1073741824", 1073741824), ("4gb", 4 * 1024**3), ("512mb", 512 * 1024**2),
+    ("1.5g", int(1.5 * 1024**3)), ("lots", None), ("4t", None), ("-1g", None), ("0", None),
+])
+def test_sandbox_memory_limit_parsing(monkeypatch, raw, expected):
+    monkeypatch.setenv("SANDBOX_MEMORY_LIMIT", raw)
+    assert prod_sandbox_agent.sandbox_memory_limit() == expected
+
+
+def test_sandbox_memory_limit_unset(monkeypatch):
+    monkeypatch.delenv("SANDBOX_MEMORY_LIMIT", raising=False)
+    assert prod_sandbox_agent.sandbox_memory_limit() is None
+
+
+def test_memory_limited_client_caps_created_containers_and_passes_the_rest_through():
+    inner = MagicMock()
+    client = prod_sandbox_agent._MemoryLimitedDockerClient(inner, 4 * 1024**3)
+
+    client.containers.create(image="python:3.14-slim", detach=True)
+    inner.containers.create.assert_called_once_with(
+        image="python:3.14-slim", detach=True, mem_limit=4 * 1024**3, memswap_limit=4 * 1024**3)
+    # Everything else is the real client's, untouched.
+    client.containers.get("abc")
+    inner.containers.get.assert_called_once_with("abc")
+    client.images.pull("python", tag="3.14-slim")
+    inner.images.pull.assert_called_once_with("python", tag="3.14-slim")
+    assert client.volumes is inner.volumes
+
+
+def _client_docker(monkeypatch, limit):
+    from agents.sandbox.sandboxes.docker import DockerSandboxClient
+
+    if limit is None:
+        monkeypatch.delenv("SANDBOX_MEMORY_LIMIT", raising=False)
+    else:
+        monkeypatch.setenv("SANDBOX_MEMORY_LIMIT", limit)
+    monkeypatch.setenv("REDIS_HOST", "localhost")
+    monkeypatch.setattr("redis.asyncio.Redis", MagicMock())
+    raw = MagicMock()
+    with patch("docker.from_env", return_value=raw), \
+         patch.object(DockerSandboxClient, "__init__", return_value=None) as init:
+        prod_sandbox_agent.build_sandbox_client()
+    return raw, init.call_args.args[0]
+
+
+def test_build_sandbox_client_wraps_docker_only_when_capped(monkeypatch):
+    raw, handed = _client_docker(monkeypatch, None)
+    assert handed is raw
+
+    raw, handed = _client_docker(monkeypatch, "2g")
+    assert isinstance(handed, prod_sandbox_agent._MemoryLimitedDockerClient)
+    handed.containers.create(image="x")
+    raw.containers.create.assert_called_once_with(
+        image="x", mem_limit=2 * 1024**3, memswap_limit=2 * 1024**3)
+
+
 # ---------------------- run_sandbox_task: persist-before-delete ordering ----------------------
 
 @pytest.mark.asyncio

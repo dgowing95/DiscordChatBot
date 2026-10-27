@@ -19,7 +19,7 @@ from openai import BadRequestError, UnprocessableEntityError
 from openai.types.responses import ResponseCreatedEvent, ResponseTextDeltaEvent
 from classes.config_manager import configManager
 from classes.response_filter import extract_reasoning_items, extract_thinking
-from classes.llm_config import llm_api_key, llm_host, llm_model, parse_temperature
+from classes.llm_config import llm_api_key, llm_auth_headers, llm_host, llm_model, parse_temperature
 from classes.reply_policy import INSTRUCTION as DOUBLE_REPLY_INSTRUCTION
 from classes.side_llm import NO_THINKING
 from classes import voice_policy
@@ -121,7 +121,7 @@ def _get_main_model_client() -> OpenAIChatCompletionsModel:
     return _main_model_client
 
 
-# Per-slot context of the LLM server (llama.cpp /props), refreshed by main.py.
+# Per-slot context of the LLM server (its /props), refreshed by main.py.
 # None until the first successful read: the history token budget then does
 # not trim at all rather than guessing a capacity.
 _slot_context: int | None = None
@@ -133,7 +133,8 @@ def slot_context_tokens() -> int | None:
 
 
 def parse_slot_context(props) -> int | None:
-    """Per-slot context from a llama.cpp /props body, or None.
+    """Per-slot context from a /props body (llama.cpp's, which Strata
+    copies), or None.
 
     default_generation_settings.n_ctx is the SLOT context (the server's
     --ctx-size divided across --parallel slots, rounded up to its padding), not
@@ -144,6 +145,28 @@ def parse_slot_context(props) -> int | None:
     except (KeyError, TypeError, ValueError):
         return None
     return value if value > 0 else None
+
+
+def served_model_names(body) -> list[str]:
+    """Model names in a /v1/models body, in either shape a server returns.
+
+    llama.cpp sends both its own `models` list (name) and the OpenAI `data`
+    list (id); Strata sends only `data`. Reading only `models`, as this did,
+    made a Strata server look as if it had nothing loaded.
+    """
+    if not isinstance(body, dict):
+        return []
+    names = []
+    for key in ("models", "data"):
+        entries = body.get(key)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, dict):
+                name = entry.get("name") or entry.get("id")
+                if name and name not in names:
+                    names.append(name)
+    return names
 
 
 class ToolMetricsHooks(RunHooks):
@@ -368,14 +391,20 @@ class TextLLMHandler:
         logger.info(f"Checking model {model} on LLM host ({url})")
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(url) as response:
+                async with session.get(url, headers=llm_auth_headers()) as response:
+                    if response.status in (401, 403):
+                        logger.warning(f"LLM server rejected the API key ({response.status}); LLM_PASS must be the server's key")
+                        return
                     if response.status != 200:
                         logger.warning(f"LLM server not ready yet ({response.status}); model may still be downloading")
                         return
-                    data = await response.json()
-                    available = [m.get("name") or m.get("id") for m in data.get("models", [])]
+                    available = served_model_names(await response.json())
                     if model in available:
                         logger.info(f"Model {model} is available")
+                    elif len(available) == 1:
+                        # A one-model server (Strata) answers whatever name
+                        # is requested, so this is not a failure to wait on.
+                        logger.info(f"LLM server serves one model, {available[0]}; requests for {model} go to it")
                     else:
                         logger.warning(f"Model {model} not loaded yet (server has: {available})")
         except Exception as e:
@@ -393,9 +422,14 @@ class TextLLMHandler:
         value = None
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                async with session.get(url, headers=llm_auth_headers(),
+                                       timeout=aiohttp.ClientTimeout(total=10)) as response:
                     if response.status == 200:
                         value = parse_slot_context(await response.json())
+                    elif response.status in (401, 403):
+                        # Not a slow start: the key is wrong, and the history
+                        # budget stops trimming until it is fixed.
+                        logger.warning(f"LLM server /props rejected the API key ({response.status}); LLM_PASS must be the server's key")
                     else:
                         logger.info(f"LLM server /props returned {response.status}")
         except Exception as e:

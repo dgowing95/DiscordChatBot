@@ -15,7 +15,9 @@ spec:
 ---
 # llama.cpp (ex-Ollama) volume: PV/PVC names and hostPath are INTENTIONALLY still
 # "ollama" so the pre-existing PV keeps matching and the data on the node is
-# preserved on upgrade (renaming would create a new empty volume).
+# preserved on upgrade (renaming would create a new empty volume). Rendered
+# whatever llmEngine is, so switching to Strata and back neither deletes nor
+# re-binds it.
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -31,6 +33,46 @@ spec:
   hostPath:
     path: {{ .Values.pvc.hostPath }}/ollama
 ---
+{{- if eq (include "dcb.llmEngine" .) "strata" }}
+# Strata's /data (templates/strata.yaml). Must be on an SSD/NVMe: see
+# strata.hostPath. Kept when switching back to llama.cpp (Helm's keep policy,
+# ArgoCD's Prune=false): the files on the node survive either way, but a
+# quick switch back would race the deleted PV's finalizer. The cost: they
+# also outlive `helm uninstall`; see pvc.strataSize for removing them.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ include "helm.fullname" . }}-pvc-strata
+  labels:
+    type: local
+  annotations:
+    helm.sh/resource-policy: keep
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  storageClassName: {{ include "helm.fullname" . }}-pvc-strata
+  capacity:
+    storage: {{ .Values.pvc.strataSize }}
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    path: {{ .Values.strata.hostPath | default (printf "%s/strata" .Values.pvc.hostPath) }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: strata-pv-claim
+  annotations:
+    helm.sh/resource-policy: keep
+    argocd.argoproj.io/sync-options: Prune=false
+spec:
+  storageClassName: {{ include "helm.fullname" . }}-pvc-strata
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.pvc.strataSize }}
+---
+{{- end }}
 # Image generation model cache (HF_HOME). Only rendered when diffusion is
 # enabled (templates/diffusion.yaml mounts the claim).
 {{- if .Values.diffusion.enabled }}

@@ -26,9 +26,22 @@ discordToken: ""
 # IMAGE_REVIEW_LLM_API_KEY (each optional - omit rather than leave empty).
 existingSecret: ""
 redisHost: "dchatbot-redis-service.dchatbot.svc.cluster.local"
-# Base URL of the llama.cpp server (OpenAI-compat). core appends /v1 itself, so do not include it here
-llm_host: "http://dchatbot-llamacpp-service.dchatbot.svc.cluster.local:8080"
-# llama.cpp does not authenticate; this is a non-empty placeholder for the OpenAI client
+# Which local LLM server the chart runs: llamacpp (default) or strata.
+#   llamacpp: llama.cpp (llamacpp.* below); any GGUF model, dense or MoE.
+#   strata:   Strata (strata.* below), made for large mixture-of-experts
+#             models on consumer GPUs: every expert sits in system RAM, the
+#             most used ones are cached in VRAM, the rest run on the CPU. It
+#             only helps MoE models; a dense model stays on llama.cpp.
+# Switching back is this one value. The llama.cpp volume is kept either way,
+# so its downloaded model is still there on the way back.
+llmEngine: llamacpp
+# Base URL of the LLM server (OpenAI-compat). core appends /v1 itself, so do
+# not include it here. Empty = the selected engine's in-cluster service. Set it
+# only for a server outside this chart, and then change it yourself when
+# switching llmEngine.
+llm_host: ""
+# llama.cpp does not authenticate; this is a non-empty placeholder for the
+# OpenAI client. With llmEngine=strata core uses the Strata key instead.
 llm_pass: "llamacpp"
 
 # Image generation (diffusion): separate pod (see diffusionservice/) + the
@@ -234,6 +247,12 @@ sandbox:
   snapshotTtlSeconds: 604800
   # Node path of the Docker socket to mount into the core pod
   dockerSocketPath: /var/run/docker.sock
+  # Memory cap for each sandbox container, in Docker's notation (e.g. 4g,
+  # 512m); swap is capped at the same figure. Empty = no cap. The containers
+  # run on the node's Docker daemon, outside Kubernetes, so no pod limit or
+  # scheduler accounting covers them: without a cap one heavy task can take
+  # RAM that a pod on the node (Strata's experts, say) was planned around.
+  memoryLimit: ""
   # LLM for the nested sandbox agent. Empty (default) = the main bot's LLM
   # (model / llm_host / llm_pass, i.e. the local llama.cpp server). To use a
   # hosted OpenAI-compatible API instead (e.g. OpenRouter), set all three:
@@ -304,6 +323,79 @@ llamacpp:
   # ncclGroupEnd(). A memory-backed emptyDir: pages written count against
   # llamacppResources.limits.memory (NCCL itself uses a few MB).
   shmSize: ""
+# Strata server (llmEngine: strata). Settings are the image's own env vars
+# (Strata's docs/DOCKER.md), named in brackets. Every start makes the running
+# settings equal these: Strata otherwise keeps settings saved by an earlier
+# start, so a value removed here would stay in force.
+strata:
+  # Pick the flavour for the node's GPUs: -cuda13 (NVIDIA driver 580+),
+  # -cuda12 (575+); ROCm and SYCL builds exist too. Pin a version.
+  image: ghcr.io/niko1221/strata:0.2.3-cuda13
+  port: 8080
+  # Optional: also open the API on this port on every node (a NodePort, e.g.
+  # 31434, the port llama.cpp's Service uses), for clients outside the
+  # cluster; they need strata.apiKey too. Empty = in-cluster only.
+  #
+  # To keep 31434 when switching from llama.cpp, do it in two upgrades
+  # (engine first, then this port). Helm and ArgoCD create the new Service
+  # before deleting the old one, and Kubernetes refuses a port that the
+  # llama.cpp Service still holds ("provided port is already allocated").
+  nodePort: ""
+  # Model family (FAMILY) and size (MODEL), e.g. qwen + IQ3_XXS. RAM for the
+  # experts per Strata's docs/MODELS.md: Q2_0 34 GB, IQ2_XS 35.5, IQ3_XXS 43,
+  # IQ3_S 50, plus ~6 GB for the rest; see strataResources.
+  family: qwen
+  model: IQ3_XXS
+  # GGUF files you already have (MODEL_PATH): a folder of one model's shards,
+  # as seen INSIDE the container. With modelHostPath set it is mounted there
+  # read-only. Empty = Strata downloads the model into its volume (tens of GB;
+  # an mmproj-*.gguf next to the shards also saves the vision download).
+  modelPath: ""
+  modelHostPath: ""
+  # Context PER SLOT (CONTEXT): a number of tokens, or 32k / 64k / 128k /
+  # 256k. Unlike llamacppContextLength this is not split across slots.
+  context: 32k
+  # Requests answered at the same time, 1-8 (PARALLEL). Match worker_count.
+  parallel: 2
+  # Picture input (VISION): off | on | cpu | gpu. on = the CPU reader below
+  # 24 GB of VRAM. The image check (diffusion.review) needs it on.
+  vision: cpu
+  # KV cache format (KV): int8 (default), q4_0, k8v4, fp16
+  kv: int8
+  # Card numbers inside the container (GPUS, e.g. "0,1"), or a role per card
+  # (GPU_ROLES, e.g. "1=main,0=helper"; not with gpus). Empty = Strata's
+  # choice. Several cards are a layer split and need no P2P/NVLink.
+  gpus: ""
+  gpuRoles: ""
+  # Advanced engine settings (STRATA_SET), space separated KEY=VALUE, e.g.
+  # "resident-budget-gib=20" to keep fewer experts in RAM (much slower prompts)
+  set: ""
+  # The API key core and Strata share. Strata never serves without one, so
+  # set this or existingSecret (key STRATA_API_KEY); the render fails
+  # otherwise. 16+ characters, e.g. `openssl rand -hex 24`.
+  apiKey: ""
+  existingSecret: ""
+  # Pin to physical GPUs by CDI device name: same mechanism and trade-off as
+  # diffusion.visibleDevices (see there). Empty = request strataResources.gpu
+  # slots from the device plugin.
+  visibleDevices: ""
+  # In-memory /dev/shm; counts against strataResources.limits.memory
+  shmSize: 2Gi
+  # Node folder for Strata's /data (prepared model data, the draft layer,
+  # settings, logs). MUST be an SSD/NVMe: the engine reads a large table at
+  # random on every token, and a spinning disk stalls it. Empty =
+  # <pvc.hostPath>/strata.
+  hostPath: ""
+  # Raise the pod's locked-memory and address-space limits at start. Strata
+  # page-locks the RAM that holds the experts and CUDA needs an unlimited
+  # address space, but Kubernetes has no per-pod ulimit and pods often get
+  # an 8 MiB locked-memory limit. true adds the SYS_RESOURCE capability and
+  # raises both limits (prlimit) before the server starts. false = the node
+  # must already give pods unlimited locked memory.
+  raiseLimits: true
+  # Any other env var for the image, as name: value. Rendered last, so
+  # repeating a name above overrides it.
+  extraEnv: {}
 # Prompt context window (server --ctx-size)
 llamacppContextLength: 40000
 # Model — single value for the whole chart: core requests it (MODEL) and llama.cpp
@@ -392,6 +484,14 @@ pvc:
   redisSize: 5Gi
   llamacppSize: 45Gi
   diffusersSize: 15Gi
+  # Strata's /data (llmEngine: strata only); a downloaded model lands here
+  # too unless strata.modelHostPath is used. Its PV/PVC are kept by Helm and
+  # ArgoCD once created, so switching back to llama.cpp leaves them bound,
+  # and so does `helm uninstall`: delete them by hand (kubectl delete pvc
+  # strata-pv-claim, then the <release>-pvc-strata PV) to free the space or
+  # before installing under another release name in the same namespace. The
+  # files on the node are never deleted by either.
+  strataSize: 120Gi
   # Whisper + Kokoro models (voice.enabled only)
   speechSize: 3Gi
   hostPath: /data/kube/discordchatbot
@@ -412,6 +512,20 @@ llamacppResources:
     cpu: 6000m
     memory: 8000Mi
   gpu: 16
+
+# Strata (llmEngine: strata only). Requests == limits (Guaranteed QoS), so the
+# RAM the experts need is reserved. Size memory from the model: its experts
+# + ~6 GB (strata.model) + strata.shmSize + some headroom. The CPU limit also
+# caps the CPU workers that compute the experts not held on the GPU (one per
+# physical core by default), so a low limit slows every answer.
+strataResources:
+  limits:
+    cpu: 16000m
+    memory: 56Gi
+  requests:
+    cpu: 16000m
+    memory: 56Gi
+  gpu: 1
 
 # Voice (voice.enabled only). Speech transcribes everything said in a call,
 # so it gets real CPU; the sidecar only moves audio.

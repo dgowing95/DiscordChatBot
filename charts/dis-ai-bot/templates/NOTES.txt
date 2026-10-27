@@ -1,9 +1,19 @@
 1. Get the application URL by running these commands:
 
+{{ if eq (include "dcb.llmEngine" .) "strata" -}}
+2. LLM service (Strata, OpenAI-compatible API, llmEngine=strata),
+{{- if .Values.strata.nodePort }} also on every node at port {{ .Values.strata.nodePort }} (send the API key):
+   curl -H "Authorization: Bearer <strata.apiKey>" http://<node>:{{ .Values.strata.nodePort }}/v1/models
+{{- else }} in-cluster only (strata.nodePort opens a node port).
+{{- end }}
+   The first start downloads/prepares the model and can take a long time:
+   kubectl logs deploy/<release>-strata-deployment -f
+   kubectl exec deploy/<release>-strata-deployment -- strata monitor
+{{ else -}}
 2. LLM service (llama.cpp, OpenAI-compatible API):
    kubectl get svc <release>-llamacpp-service
    curl http://<node>:31434/v1/models   # the model name the bot must use (MODEL value)
-
+{{ end }}
 3. Image generation (when diffusion.enabled=true): separate pod + service,
    called in-cluster by the bot's generate_image tool. /health returns 200
    once the model is downloaded/loaded (first boot can take a few minutes):

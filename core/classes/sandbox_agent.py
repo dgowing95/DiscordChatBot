@@ -285,6 +285,72 @@ def sandbox_llm_api_key() -> str:
     return env_or("SANDBOX_LLM_API_KEY", "LLM_PASS", DEFAULT_LLM_API_KEY)
 
 
+def sandbox_memory_limit() -> int | None:
+    """Memory cap in bytes for each sandbox container (SANDBOX_MEMORY_LIMIT,
+    in Docker's own notation: "4g", "4gb", "512m", "1.5g" or plain bytes).
+    Unset or empty = no cap, which was the only behaviour before this.
+    Parsed by docker's own parse_bytes, so it accepts exactly what Docker
+    does; a pattern of our own once refused "4gb", which Docker takes.
+
+    Why a cap is needed at all: the containers run on the node's Docker
+    daemon, beside Kubernetes rather than inside it, so no pod limit or
+    scheduler accounting covers them. One heavy task can then take the RAM
+    an LLM server on the same node was planned around (an engine that keeps
+    its experts in system RAM has no slack to give). An unparseable value is
+    logged and ignored rather than failing every sandbox run over a typo;
+    the chart refuses one at render time, so this is the compose/.env path.
+    """
+    from docker.utils import parse_bytes
+
+    raw = os.environ.get("SANDBOX_MEMORY_LIMIT", "").strip()
+    if not raw:
+        return None
+    try:
+        limit = int(parse_bytes(raw))
+    except Exception:
+        limit = 0
+    if limit <= 0:
+        logger.error("SANDBOX_MEMORY_LIMIT=%r is not a size like 4g or 512m; sandboxes run WITHOUT a memory cap", raw)
+        return None
+    return limit
+
+
+class _MemoryLimitedContainers:
+    """`docker_client.containers`, with the memory cap added to create()."""
+
+    def __init__(self, containers, limit: int):
+        self._containers = containers
+        self._limit = limit
+
+    def create(self, *args, **kwargs):
+        kwargs.setdefault("mem_limit", self._limit)
+        # The same figure for memory + swap, so the cap cannot be dodged by
+        # swapping past it.
+        kwargs.setdefault("memswap_limit", self._limit)
+        return self._containers.create(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._containers, name)
+
+
+class _MemoryLimitedDockerClient:
+    """A docker client that caps the memory of every container it creates.
+
+    The SDK has no option for this: DockerSandboxClientOptions carries only
+    image, ports, network mode and labels, and DockerSandboxClient builds
+    the create() arguments inside a private method. Wrapping the client it
+    is handed is the one seam that does not depend on SDK internals; every
+    other attribute passes straight through.
+    """
+
+    def __init__(self, client, limit: int):
+        self._client = client
+        self.containers = _MemoryLimitedContainers(client.containers, limit)
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+
 def _positive_int(raw: str | None, default: int) -> int:
     try:
         value = int(str(raw).strip())
@@ -1220,7 +1286,8 @@ def build_sandbox_client() -> "object":
     persist/restore per-thread workspace snapshots through Redis
     (classes.sandbox_snapshot_store.SandboxSnapshotStore) under
     SANDBOX_SNAPSHOT_DEP_KEY — see _create_sandbox_session for how a
-    snapshot id ties a client.create() call to one Discord thread."""
+    snapshot id ties a client.create() call to one Discord thread.
+    SANDBOX_MEMORY_LIMIT, when set, caps each container (sandbox_memory_limit)."""
     from docker import from_env as docker_from_env
     from agents.sandbox.sandboxes.docker import DockerSandboxClient
     from agents.sandbox.session import Dependencies
@@ -1228,7 +1295,11 @@ def build_sandbox_client() -> "object":
     from classes.sandbox_snapshot_store import SandboxSnapshotStore
 
     dependencies = Dependencies().bind_value(SANDBOX_SNAPSHOT_DEP_KEY, SandboxSnapshotStore())
-    return DockerSandboxClient(docker_from_env(), dependencies=dependencies)
+    docker_client = docker_from_env()
+    limit = sandbox_memory_limit()
+    if limit:
+        docker_client = _MemoryLimitedDockerClient(docker_client, limit)
+    return DockerSandboxClient(docker_client, dependencies=dependencies)
 
 
 async def _create_sandbox_session(sandbox_client, snapshot_id: str | None,

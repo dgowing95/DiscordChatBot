@@ -25,6 +25,16 @@ spec:
         # the chart's own Secret unless existingSecret names one
         - secretRef:
             name: {{ .Values.existingSecret | default (printf "%s-secret" .Release.Name) }}
+        {{- if eq (include "dcb.llmEngine" .) "strata" }}
+        # Strata checks the key, so core's LLM_PASS is the real one from the
+        # Strata secret (an explicit env entry beats the configmap's).
+        env:
+        - name: LLM_PASS
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "dcb.strataSecretName" . }}
+              key: STRATA_API_KEY
+        {{- end }}
         {{- if .Values.metrics.enabled }}
         ports:
         - name: metrics

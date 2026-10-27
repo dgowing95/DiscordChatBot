@@ -45,7 +45,8 @@ variables, so the endpoints never appear in this repository:
 
 | Variable | What |
 |---|---|
-| `E2E_LLM_HOST` | llama.cpp server (OpenAI-compatible) the bot uses, without `/v1` |
+| `E2E_LLM_HOST` | LLM server (OpenAI-compatible: llama.cpp or Strata) the bot uses, without `/v1` |
+| `E2E_LLM_API_KEY` | Optional: that server's API key (Strata needs one), passed to core only as `LLM_PASS`. Empty = core's placeholder |
 | `E2E_DIFFUSION_URL` | Image service the bot uses (unused when the PR's own runs) |
 | `E2E_MODEL` | Model name to request |
 
