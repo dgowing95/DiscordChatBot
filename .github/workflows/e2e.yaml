@@ -89,8 +89,9 @@ jobs:
       needs.e2e-changes.outputs.run == 'true' &&
       (github.event_name != 'pull_request' ||
        github.event.pull_request.head.repo.full_name == github.repository)
-    # Self-hosted: it needs a real LLM and image service, provided through
-    # the runner's E2E_LLM_HOST / E2E_DIFFUSION_URL / E2E_MODEL environment.
+    # Self-hosted: it needs a real LLM (and image service, unless the local
+    # CPU one is used), provided through the runner's E2E_LLM_HOST /
+    # E2E_LLM_API_KEY / E2E_DIFFUSION_URL / E2E_MODEL environment.
     # The runner must be unprivileged: this job runs the PR's dependencies.
     runs-on: discordchatbot-e2e
     # Above the worst case the scripts allow (cold caches, every wait in
@@ -110,8 +111,13 @@ jobs:
           for var in E2E_DISCORD_TOKEN E2E_WEBHOOK_URL E2E_LLM_HOST E2E_MODEL; do
             [ -n "${!var:-}" ] || missing+=("$var")
           done
+          # A runner without an image service of its own (a deployment that
+          # runs the bot with image generation off) leaves E2E_DIFFUSION_URL
+          # unset: every run then uses the local CPU image service, the same
+          # one image-service PRs get. Later steps see this through env.
           if [ "$E2E_LOCAL_DIFFUSION" != 1 ] && [ -z "${E2E_DIFFUSION_URL:-}" ]; then
-            missing+=(E2E_DIFFUSION_URL)
+            echo "E2E_DIFFUSION_URL is not set: using the local CPU image service"
+            echo "E2E_LOCAL_DIFFUSION=1" >> "$GITHUB_ENV"
           fi
           if [ ${#missing[@]} -gt 0 ]; then
             # Secrets for Dependabot's PRs live in the separate Dependabot
