@@ -116,6 +116,28 @@ async def test_names_are_resolved_by_the_proxy_and_connected_by_address():
 
 
 @pytest.mark.asyncio
+async def test_a_request_with_no_headers_left_still_closes_its_header_block():
+    seen = []
+
+    async def handler(reader, writer):
+        seen.append(await reader.readuntil(b"\r\n\r\n"))
+        try:  # nothing may follow the header block
+            seen.append(await asyncio.wait_for(reader.read(100), 0.3))
+        except asyncio.TimeoutError:
+            seen.append(b"")
+        writer.close()
+    server, upstream_port = await _upstream(handler)
+    proxy = EgressProxy(_allowed)
+    port = await proxy.start()
+    await _ask(port, f"GET http://127.0.0.1:{upstream_port}/ HTTP/1.0\r\n"
+                     "Proxy-Connection: keep-alive\r\n\r\n".encode())
+    assert seen[0] == b"GET / HTTP/1.0\r\nConnection: close\r\n\r\n"
+    assert seen[1] == b""
+    await proxy.close()
+    server.close()
+
+
+@pytest.mark.asyncio
 async def test_garbage_gets_a_502():
     proxy = EgressProxy(_allowed)
     port = await proxy.start()

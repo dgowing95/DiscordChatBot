@@ -47,6 +47,8 @@ logger = logging.getLogger(__name__)
 Page = namedtuple("Page", "text title source url")
 
 _REDIRECTS = {301, 302, 303, 307, 308}
+# Statuses bot checks answer with (Cloudflare's challenge is a 403 or 503).
+_BOT_CHECK_STATUSES = {401, 403, 429, 503}
 MAX_REDIRECTS = 5
 _HTML_TYPES = ("text/html", "application/xhtml+xml")
 _TEXT_TYPES = ("text/plain", "text/markdown", "text/csv", "application/json", "text/xml",
@@ -206,7 +208,8 @@ def _page(title: str, url: str, text: str, source: str) -> Page:
 
 async def _render(url: str):
     """(title, text, final url) from the browser service, or None when it is
-    off or the render failed (the caller keeps what it already had)."""
+    off, the render failed, or the page it got was itself an error (the
+    caller keeps what it already had)."""
     config = settings()
     if not config["browser_url"]:
         return None
@@ -220,6 +223,9 @@ async def _render(url: str):
             data = await response.json()
     except Exception as e:
         logger.warning(f"browser render of {url} failed: {e}")
+        return None
+    if int(data.get("status") or 0) >= 400:
+        logger.info(f"browser render of {url} got HTTP {data.get('status')}")
         return None
     title, text = await asyncio.to_thread(_extract_html, data.get("html") or "", data.get("url") or url)
     return (title or data.get("title") or "").strip(), text, data.get("url") or url
@@ -245,7 +251,9 @@ async def _read_page(url: str) -> Page:
         raise FetchError("unsupported", f"That link is {what}, which can't be read as text.")
     title, text = await asyncio.to_thread(_extract_html, response.body, response.url)
     thin = needs_browser(text, config["browser_min_chars"])
-    if thin or response.status >= 400:
+    # An error page is only worth rendering when the error may be a bot check
+    # that a real browser passes; a 404 or a 500 renders as the same error.
+    if thin and (response.status < 400 or response.status in _BOT_CHECK_STATUSES):
         rendered = await _render(response.url)
         if rendered and len(rendered[1]) > len(text):
             return _page(rendered[0], rendered[2], rendered[1], "browser")
@@ -354,8 +362,9 @@ async def _read_reddit(kind: str, ident: str, url: str) -> Page:
                  else site_format.format_reddit_listing)
     try:
         title, text = await asyncio.to_thread(formatter, feed)
-    except Exception:
-        raise FetchError("not_found", "That Reddit page has nothing to read.") from None
+    except Exception as e:
+        logger.warning(f"could not format the Reddit feed for {ident}: {e!r}")
+        raise FetchError("not_found", "That Reddit page has nothing to read.") from e
     return Page(f"{text}\n\n{url}", title, "reddit", url)
 
 

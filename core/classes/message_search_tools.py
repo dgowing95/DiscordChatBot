@@ -61,7 +61,9 @@ async def _find_author(guild, text: str):
             found = []
         exact = [m for m in found if wanted in {m.name.casefold(), m.display_name.casefold(),
                                                 (m.global_name or "").casefold()}]
-        member = (exact or found or [None])[0]
+        # Only an exact name: Discord's lookup matches prefixes, and searching
+        # "Samuel" when asked for "Sam" would report the wrong person's words.
+        member = exact[0] if exact else None
     return member.id if member is not None else None
 
 
@@ -84,10 +86,12 @@ async def search_messages(wrapper: RunContextWrapper[dict], query: str, channel:
     client = context.get("discord_client")
     if guild is None or client is None:
         return "Message search only works in a server. Tell the user."
+    # The model can send null for an optional argument.
+    query, channel, author = query or "", channel or "", author or ""
     context["message_search_calls"] = context.get("message_search_calls", 0) + 1
     if context["message_search_calls"] > MAX_CALLS:
         return TOO_MANY_TEXT
-    if not (query or "").strip() and not channel.strip() and not author.strip():
+    if not query.strip() and not channel.strip() and not author.strip():
         return "Give some words to search for, a channel, or an author."
 
     where, channel_id = "this server", None

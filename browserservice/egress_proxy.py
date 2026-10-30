@@ -123,8 +123,8 @@ class EgressProxy:
                 path = (url.path or "/") + (f"?{url.query}" if url.query else "")
                 headers = [h for h in header_lines
                            if h and h.split(":", 1)[0].strip().lower() not in _HOP_HEADERS]
-                upstream[1].write((f"{method} {path} {version}\r\n" + "\r\n".join(headers)
-                                   + "\r\nConnection: close\r\n\r\n").encode("latin-1"))
+                lines = [f"{method} {path} {version}", *headers, "Connection: close", "", ""]
+                upstream[1].write("\r\n".join(lines).encode("latin-1"))
             await asyncio.gather(self._pipe(reader, upstream[1]), self._pipe(upstream[0], writer))
         except Refused as e:
             logger.info(f"refused: {e}")

@@ -181,9 +181,8 @@ browser:
   # A NetworkPolicy: only core may call the browser, and the browser may only
   # reach the public internet (and cluster DNS). It does nothing unless the
   # cluster's network plugin enforces NetworkPolicy; the service's own check
-  # on every request a page makes is the main guard either way. If the pod
-  # never becomes ready with it on, the plugin may be blocking kubelet's
-  # probes: set this false.
+  # on every request a page makes is the main guard either way. The pod's
+  # probes run inside it (exec), so the policy does not block them.
   networkPolicy: true
   # Labels of the cluster DNS pods the policy lets the browser query
   dnsPodLabels:

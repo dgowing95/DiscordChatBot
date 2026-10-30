@@ -47,18 +47,21 @@ spec:
           allowPrivilegeEscalation: false
           capabilities:
             drop: ["ALL"]
+        # exec, not httpGet: the kubelet's probes come from the node, which
+        # the NetworkPolicy below does not let in. /health also relaunches a
+        # browser that has exited, so readiness recovers on its own.
         readinessProbe:
-          httpGet:
-            path: /health
-            port: http
+          exec:
+            command: ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"]
           initialDelaySeconds: 5
           periodSeconds: 10
+          timeoutSeconds: 5
         livenessProbe:
-          httpGet:
-            path: /health
-            port: http
+          exec:
+            command: ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=8)"]
           initialDelaySeconds: 30
           periodSeconds: 30
+          timeoutSeconds: 10
           failureThreshold: 4
         resources:
           limits:

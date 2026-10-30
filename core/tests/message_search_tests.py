@@ -168,6 +168,14 @@ async def test_author_by_name_mention_or_id():
 
 
 @pytest.mark.asyncio
+async def test_a_prefix_match_is_not_taken_for_the_person_asked_for():
+    samuel = SimpleNamespace(id=ALICE_ID, name="samuel", display_name="Samuel", global_name="Samuel")
+    context, http = _env(members=[samuel])
+    assert "No one called" in (await _search(context, query="x", author="Sam"))
+    http.request.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_nsfw_follows_the_channel_asked_in():
     context, http = _env(nsfw=True)
     await _search(context, query="x")

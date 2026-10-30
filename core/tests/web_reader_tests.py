@@ -260,6 +260,54 @@ async def test_unreachable_sites_try_the_browser(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_error_pages_skip_the_browser_unless_they_may_be_a_bot_check(monkeypatch):
+    monkeypatch.setenv("BROWSER_URL", "http://browser:8000")
+    thin_page = b"<html><body>Nope</body></html>"
+    _fake_get(monkeypatch, {
+        "https://example.com/missing": _response(thin_page, status=404, url="https://example.com/missing"),
+        "https://example.com/guarded": _response(thin_page, status=403, url="https://example.com/guarded"),
+    })
+    rendered = []
+
+    async def render(url):
+        rendered.append(url)
+        return "Guarded", "Real content " * 50, url
+    monkeypatch.setattr(wr, "_render", render)
+    with pytest.raises(wr.FetchError) as caught:
+        await wr.read("https://example.com/missing")
+    assert "HTTP 404" in caught.value.message
+    assert (await wr.read("https://example.com/guarded")).source == "browser"
+    assert rendered == ["https://example.com/guarded"]
+
+
+class _BrowserAnswer:
+    def __init__(self, data):
+        self.status, self._data = 200, data
+
+    async def json(self):
+        return self._data
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+@pytest.mark.asyncio
+async def test_a_render_that_is_itself_an_error_page_is_not_used(monkeypatch):
+    monkeypatch.setenv("BROWSER_URL", "http://browser:8000")
+    answer = {"status": 403, "url": "https://example.com/", "title": "Blocked",
+              "html": "<html><body>" + "Access denied. " * 100 + "</body></html>"}
+    session = SimpleNamespace(post=lambda *a, **k: _BrowserAnswer(answer))
+    monkeypatch.setattr(wr, "_get_internal_session", lambda: session)
+    assert await wr._render("https://example.com/") is None
+    answer["status"] = 200
+    title, text, url = await wr._render("https://example.com/")
+    assert "Access denied." in text
+
+
+@pytest.mark.asyncio
 async def test_error_pages_and_files(monkeypatch):
     _fake_get(monkeypatch, {
         "https://example.com/missing": _response(b"<html><body>Not found</body></html>", status=404),
