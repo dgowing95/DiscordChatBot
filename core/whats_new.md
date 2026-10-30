@@ -13,7 +13,7 @@ first time someone triggers the bot after that release is deployed.
 -->
 
 ## Better link reading
-I read links much better now: YouTube videos (from their captions), Reddit threads, Steam store pages, and sites that only show their content once their scripts run. Long pages come in parts, and a link I've already read is remembered for a while, so asking about it again is quick.
+I read links much better now: Like YouTube videos (from their captions) and Reddit threads, and sites that only show their content once their scripts run. I also cache the content to speed up replies.
 How to use: paste a link and @mention me, e.g. "what is said in this video?" or "what are people saying in this thread?"
 
 ## Find old messages
