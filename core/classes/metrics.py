@@ -99,6 +99,17 @@ Metrics (scraped by Prometheus from the /metrics HTTP endpoint):
            timeout) / undecodable (not an image). Never cached, so the next
            build tries again.
 
+  Links (classes/web_reader.py):
+  Counter  discord_bot_web_fetch_total{source,cache}
+           fetch_url reads. source: plain / browser / youtube /
+           youtube_nocaptions / reddit / steam ("none" for a coalesced or
+           failed lookup); cache: hit / miss (fetched now) / coalesced (joined
+           a fetch already running) / failure_hit (a recent failure, cached).
+  Counter  discord_bot_web_fetch_failures_total{reason}
+           Links that could not be read, by reason (network / timeout /
+           blocked / http / unsupported / rate_limited / blocked_by_site /
+           unavailable / ...). Cached briefly, so each is counted once.
+
   Sandbox conversation (classes/sandbox_conversation.py; labels are bounded
   outcome names — never message ids, thread ids or user text):
   Counter  discord_bot_sandbox_thread_messages_total{outcome}
@@ -402,6 +413,18 @@ attachment_download_failures_total = Counter(
     ["reason"],
 )
 
+web_fetch_total = Counter(
+    "discord_bot_web_fetch_total",
+    "fetch_url reads, by where the text came from and the cache result",
+    ["source", "cache"],
+)
+
+web_fetch_failures_total = Counter(
+    "discord_bot_web_fetch_failures_total",
+    "Links fetch_url could not read, by reason",
+    ["reason"],
+)
+
 # Receipt -> presentation is bounded by one model call plus any running
 # command's checkpoint; receipt -> response adds the model's own turn.
 SANDBOX_INPUT_BUCKETS = (1, 2.5, 5, 10, 20, 30, 60, 120, 300, 600)
@@ -583,6 +606,14 @@ def set_attachment_cache_bytes(n: int) -> None:
 
 def inc_attachment_download_failure(reason: str) -> None:
     attachment_download_failures_total.labels(reason=str(reason)).inc()
+
+
+def inc_web_fetch(source: str, cache: str) -> None:
+    web_fetch_total.labels(source=str(source), cache=str(cache)).inc()
+
+
+def inc_web_fetch_failure(reason: str) -> None:
+    web_fetch_failures_total.labels(reason=str(reason)).inc()
 
 
 def set_context_window_from_env() -> None:

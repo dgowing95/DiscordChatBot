@@ -12,10 +12,10 @@ first time someone triggers the bot after that release is deployed.
   (checked by core/tests/whats_new_tests.py).
 -->
 
-## Server events
-I can make Discord server events for you, in a voice channel or anywhere else, show what's coming up and who's interested, and move or cancel the events I made. You need the Create Events permission to ask.
-How to use: @mention me, e.g. "make an event called Game night on Saturday at 8pm in the Games voice channel" or "what events are coming up?"
+## Better link reading
+I read links much better now: YouTube videos (from their captions), Reddit threads, Steam store pages, and sites that only show their content once their scripts run. Long pages come in parts, and a link I've already read is remembered for a while, so asking about it again is quick.
+How to use: paste a link and @mention me, e.g. "what is said in this video?" or "what are people saying in this thread?"
 
-## Follow-ups
-I can come back to something later on my own, for example to read a poll once it ends and make the event at the winning time. So "find a time for game night" now goes from poll to event without anyone having to remind me.
-How to use: @mention me, e.g. "find a time for game night this week" or "check the poll when it ends and tell us who won".
+## Find old messages
+I can search the server's past messages to find something said long ago, and link you straight to it. I search the whole server, or just one channel if you say which.
+How to use: @mention me, e.g. "find the message where Sam posted the trip link" or "what did Alex say about the patch in #general?"

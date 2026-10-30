@@ -69,6 +69,19 @@ updates:
         patterns:
           - "*"
 
+  # Not in the auto-merge allowlist: E2E does not run the browser, so a
+  # playwright bump is only checked by verify-artifacts' smoke test.
+  - package-ecosystem: pip
+    directory: /browserservice
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Helsinki
+    cooldown:
+      default-days: 14
+    open-pull-requests-limit: 5
+
   - package-ecosystem: npm
     directory: /voicesidecar
     schedule:
@@ -151,6 +164,17 @@ updates:
 
   - package-ecosystem: docker
     directory: /voicesidecar
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Helsinki
+    cooldown:
+      default-days: 14
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: docker
+    directory: /browserservice
     schedule:
       interval: weekly
       day: monday

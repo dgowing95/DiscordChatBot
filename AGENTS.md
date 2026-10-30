@@ -77,6 +77,16 @@ core/                  # the main bot (the app that runs in production)
     event_format.py        # PURE (stdlib-only) Discord events: input checks, time
                            #   parsing, how an event reads in a prompt, EVENTS_ENABLED
     event_tools.py         # create_event / list_events / update_event agent tools
+    web_policy.py          # PURE (stdlib-only) reading links: WEB_* / BROWSER_* settings,
+                           #   URL clean-up + routing (YouTube/Reddit/Steam/page), cache
+                           #   key, public-address check, browser trigger, paging
+    site_format.py         # PURE (stdlib-only) how a Reddit feed, a Steam app or a YouTube
+                           #   transcript reads in a prompt
+    web_reader.py          # fetch_url's reader: Redis cache, one load per URL, site
+                           #   readers, plain fetch + trafilatura, browser fallback
+    message_search_format.py  # PURE (stdlib-only) Discord message search: query params,
+                           #   how results read, the endpoint's quirks
+    message_search_tools.py   # the search_messages agent tool
     voice_policy.py        # PURE (stdlib-only) voice calls: VOICE_* settings, wake-phrase
                            #   match, leave/stop commands, anchored history, sentence
                            #   splitter + markdown stripping, VOICE_INSTRUCTIONS
@@ -97,6 +107,10 @@ diffusionservice/      # standalone image service (text->image; FastAPI + diffus
                        #   CPU-offloaded for low VRAM)
                        #   generation_params.py is the stdlib-only half (guidance /
                        #   negative-prompt policy), so it is unit-testable without torch
+browserservice/        # headless Chromium (FastAPI + Playwright) that renders pages
+                       #   needing their scripts run, for fetch_url; egress_proxy.py
+                       #   (Chromium's only way out: public addresses only) and
+                       #   render_policy.py are the stdlib-only, tested halves
 speechservice/         # voice calls' speech-to-text (faster-whisper) and text-to-speech
                        #   (Kokoro-82M), CPU only; speech_params.py is the stdlib-only half
 voicesidecar/          # Node: Discord voice I/O via @discordjs/voice (DAVE receive),
@@ -438,6 +452,46 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
    (`create_poll`'s result gives its absolute end) plus a follow-up at its
    end; there is no separate availability system.
 
+12. Reading links and searching messages. **`fetch_url(url, part)`**
+   (`classes/web_reader.py`) routes a URL (`web_policy.route`) to a reader:
+   YouTube captions (`youtube-transcript-api`, plus oEmbed for the title;
+   no captions = says so, no transcription), Reddit through its RSS feeds,
+   Steam through `appdetails` plus the store page's review lines, else a
+   plain GET whose text trafilatura extracts. When that text is too thin to
+   be the page (`web_policy.needs_browser`), it asks the browser service
+   (`BROWSER_URL`, `browserservice/`) to render it. `site_format.py`'s
+   docstring records why each site is read the way it is (in 2026 Reddit
+   refuses unauthenticated `.json` and old.reddit, and shows a headless
+   browser a "prove your humanity" page; its feeds allow ~1 request a minute
+   per address, which `_reddit_feed` respects from the `x-ratelimit` headers).
+
+   - **Cached in Redis** (`dcb:webcache:v1:<sha256 of the canonical URL>`):
+     tool results are not kept between replies, so without it a link still
+     in the channel was fetched again on every reply. Pages 6h, YouTube
+     transcripts 30 days, failures 5 minutes (Reddit's: until its reset). One
+     load per URL at a time, shared through `asyncio.shield`.
+   - **Never reaches private addresses**: one aiohttp session whose resolver
+     drops non-public addresses, plus a check of every redirect hop for a
+     private IP literal (aiohttp skips the resolver for those). Chromium's
+     only way out is the browser service's own egress proxy
+     (`browserservice/egress_proxy.py`), which connects to public addresses
+     only. Playwright's route handlers are not enough: they never see a
+     redirect's later hops, so a public link redirecting to a private address
+     was followed unchecked (reproduced before the proxy existed). The chart
+     adds a NetworkPolicy as well.
+   - **Long pages come in parts** (`WEB_FETCH_PART_CHARS`); the result's last
+     line tells the model which `part` to ask for next.
+
+   **`search_messages(query, channel, author, limit)`**
+   (`classes/message_search_tools.py`) calls Discord's Search Guild Messages
+   endpoint (`GET /guilds/{id}/messages/search`, open to bots since
+   2026-03-19; needs Read Message History and the Message Content intent),
+   which discord.py does not wrap. Whole server by default; results come only
+   from channels the bot can read. A server Discord has not indexed yet
+   answers 202 (code 110000), which discord.py returns as a normal body.
+   At most `MAX_CALLS` searches per reply. Read-only, so automatic runs and
+   voice turns get it too.
+
 ### What's New notes (write these in every feature PR)
 
 `core/whats_new.md` holds the user-facing features of the NEXT release. Every
@@ -515,6 +569,13 @@ needs an entry there, gated with `requires` when it can be switched off;
 | `MODERATION_MODEL` | moderation model name, e.g. `text-moderation-latest`; unset omits the parameter and uses the server default. Chart: `moderationModel` |
 | `CONTENT_GUARD_ENABLED` | `0`/`false` disables the content guard on web tools (default: on) |
 | `CONTENT_GUARD_DEBUG` | `0`/`false` silences content-guard debug logging (default: on) |
+| `WEB_FETCH_PART_CHARS` / `WEB_FETCH_MAX_CHARS` | characters of a page the model gets per `fetch_url` call, and most kept per page across all parts (defaults 10000 / 200000). Chart: `webFetch.partChars` / `maxChars` |
+| `WEB_FETCH_MAX_BYTES` / `WEB_FETCH_TIMEOUT` | most bytes downloaded for one page, and seconds to wait (defaults 5000000 / 15). Chart: `webFetch.maxBytes` / `timeout` |
+| `WEB_CACHE_TTL_SECONDS` / `WEB_CACHE_VIDEO_TTL_SECONDS` / `WEB_CACHE_FAILURE_TTL_SECONDS` | how long a read page / a YouTube transcript / a failure stays cached in Redis (defaults 21600 / 2592000 / 300). Chart: `webFetch.*TtlSeconds` |
+| `BROWSER_URL` | the browser service core asks to render thin pages; empty = no fallback. Compose: `http://browser:8000`; chart: `browser.url`, else the in-cluster service when `browser.enabled` |
+| `BROWSER_MIN_CHARS` | a plain fetch with less text than this goes to the browser (default 400). Chart: `webFetch.browserMinChars` |
+| `BROWSER_CONCURRENCY` / `BROWSER_QUEUE_SIZE` | browser service: pages rendered at once, and renders allowed to wait before a 503 (defaults 2 / 8). Chart: `browser.concurrency` / `queueSize` |
+| `BROWSER_TIMEOUT` / `BROWSER_SETTLE_SECONDS` | browser service: seconds for one render, and seconds to let a page's scripts settle (defaults 30 / 5); core reads both to know how long to wait. Chart: `browser.timeout` / `settleSeconds` |
 | `METRICS_PORT` | port to serve the Prometheus `/metrics` endpoint on (default 9464); empty/`0` disables. Chart: `metrics.enabled`/`metrics.port` also add a ClusterIP Service, the pod port, and a kube-prometheus-stack ServiceMonitor (labelled `release: kube-prometheus-stack` — the operator only imports ServiceMonitors with that label). The same `metrics.enabled` switch turns on **llama.cpp's own** `/metrics` (`LLAMA_ARG_ENDPOINT_METRICS`, off upstream by default) plus a second ServiceMonitor for it; with `llmEngine: strata` that second one scrapes Strata's `/metrics` instead (`vllm:*` / `strata:*` names), sending the Strata key |
 | `LLM_CONTEXT_LENGTH` | the TOTAL context window the LLM server was started with (chart: `llamacppContextLength`, which also sets the server's `LLAMA_ARG_CTX_SIZE`; with Strata, whose `strata.context` is per slot, that times `strata.parallel`), exported as the `discord_bot_llm_context_window_tokens` gauge so a dashboard can express prompt sizes as a fraction of it. Unset leaves the gauge at 0 |
 | `LOG_LEVEL` | root log level (default `INFO`); `DEBUG` also dumps the raw agent run result. Logging replaced bare `print()` calls, which had no level to tune |
@@ -591,7 +652,7 @@ needs an entry there, gated with `requires` when it can be switched off;
   CI" below), and each merge is a release like any other.
 - Every push to `main` runs `auto-tag.yaml`, which bumps the highest `vMAJOR.MINOR`
   tag by one minor and pushes it. That tag push is what starts `release.yaml`
-  (tests -> two images -> chart -> GitHub release). Nothing dispatches
+  (tests -> five images -> chart -> GitHub release). Nothing dispatches
   `release.yaml`; its `workflow_dispatch` trigger is a manual escape hatch for
   re-running a release against an existing tag.
 - The packaged chart is published twice from that one `.tgz`: as a GitHub

@@ -56,6 +56,22 @@ data:
   TTS_CONCURRENCY: {{ .Values.voice.ttsConcurrency | toString | quote }}
   SPEECH_QUEUE_SIZE: {{ .Values.voice.queueSize | toString | quote }}
   {{- end }}
+  # Reading links (fetch_url, in core). BROWSER_URL is the browser service:
+  # browser.url, else the in-cluster one when browser.enabled, else none (no
+  # fallback). The browser pod and core both read BROWSER_TIMEOUT/SETTLE.
+  WEB_FETCH_PART_CHARS: {{ .Values.webFetch.partChars | int64 | toString | quote }}
+  WEB_FETCH_MAX_CHARS: {{ .Values.webFetch.maxChars | int64 | toString | quote }}
+  WEB_FETCH_MAX_BYTES: {{ .Values.webFetch.maxBytes | int64 | toString | quote }}
+  WEB_FETCH_TIMEOUT: {{ .Values.webFetch.timeout | int64 | toString | quote }}
+  WEB_CACHE_TTL_SECONDS: {{ .Values.webFetch.cacheTtlSeconds | int64 | toString | quote }}
+  WEB_CACHE_VIDEO_TTL_SECONDS: {{ .Values.webFetch.videoCacheTtlSeconds | int64 | toString | quote }}
+  WEB_CACHE_FAILURE_TTL_SECONDS: {{ .Values.webFetch.failureCacheTtlSeconds | int64 | toString | quote }}
+  BROWSER_MIN_CHARS: {{ .Values.webFetch.browserMinChars | int64 | toString | quote }}
+  BROWSER_URL: {{ if .Values.browser.url }}{{ .Values.browser.url | quote }}{{ else if .Values.browser.enabled }}{{ printf "http://%s-browser-service.%s.svc.cluster.local:%v" .Release.Name .Release.Namespace .Values.browser.port | quote }}{{ else }}""{{ end }}
+  BROWSER_CONCURRENCY: {{ .Values.browser.concurrency | toString | quote }}
+  BROWSER_QUEUE_SIZE: {{ .Values.browser.queueSize | toString | quote }}
+  BROWSER_TIMEOUT: {{ .Values.browser.timeout | toString | quote }}
+  BROWSER_SETTLE_SECONDS: {{ .Values.browser.settleSeconds | toString | quote }}
   # Image generation (diffusion): core only registers the generate_image tool
   # when IMAGE_GEN_ENABLED is true; the diffusion pod reads the IMAGE_* settings
   DIFFUSION_URL: {{ if .Values.diffusion.url }}{{ .Values.diffusion.url }}{{ else }}http://{{ .Release.Name }}-diffusion-service.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.diffusion.port }}{{ end }}
