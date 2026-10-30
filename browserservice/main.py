@@ -79,7 +79,7 @@ MAX_TIMEOUTS_IN_A_ROW = 3
 
 async def _get_browser():
     """The running browser, launched again if it has crashed or exited."""
-    global _browser
+    global _browser, _timeouts_in_a_row
     async with _launch_lock:
         if _browser is None or not _browser.is_connected():
             # "<-loopback>" sends loopback through the proxy too; Chromium
@@ -87,6 +87,7 @@ async def _get_browser():
             _browser = await _playwright.chromium.launch(
                 args=["--disable-gpu"],
                 proxy={"server": f"http://127.0.0.1:{_proxy_port}", "bypass": "<-loopback>"})
+            _timeouts_in_a_row = 0  # a new browser starts with a clean record
             logger.info(f"browser started: Chromium {_browser.version}")
         return _browser
 
@@ -221,9 +222,10 @@ async def render(body: RenderRequest):
         return result
     except (asyncio.TimeoutError, PlaywrightTimeout):
         _timeouts_in_a_row += 1
-        if _timeouts_in_a_row >= MAX_TIMEOUTS_IN_A_ROW and _browser is not None:
+        if _timeouts_in_a_row >= MAX_TIMEOUTS_IN_A_ROW:
             _timeouts_in_a_row = 0
-            await _discard(_browser)
+            if _browser is not None:
+                await _discard(_browser)
         raise HTTPException(504, "the page took too long to load") from None
     except PlaywrightError as e:
         logger.warning(f"render failed for {body.url}: {e}")
