@@ -1,0 +1,54 @@
+{
+ "620": {
+  "success": true,
+  "data": {
+   "type": "game",
+   "name": "Portal 2",
+   "steam_appid": 620,
+   "required_age": 0,
+   "is_free": false,
+   "short_description": "The &quot;Perpetual Testing Initiative&quot; has been expanded to allow you to design co-op puzzles for you and your friends!",
+   "about_the_game": "Portal 2 draws from the award-winning formula of innovative gameplay, story, and music that earned the original Portal over 70 industry accolades and created a cult following.<br><br>\t\t\t\t\t\t\t\t\t\tThe single-player portion of Portal 2 introduces a cast of dynamic new characters, a host of fresh puzzle elements, and a much larger set of devious test chambers. Players will explore never-before-seen areas of the Aperture Science Labs and be reunited with GLaDOS, the occasionally murderous computer companion who guided them through the original game.<br>\t\t\t\t\t\t\t\t\t\t<br>\t\t\t\t\t\t\t\t\t\tThe game’s two-player cooperative mode features its own entirely separate campaign with a unique story, test chambers, and two new player characters. This new mode forces players to reconsider everything they thought they knew about portals. Success will require them to not just act cooperatively, but to think cooperatively.<br>\t\t\t\t\t\t\t\t\t\t<br>\t\t\t\t\t\t\t\t\t\t<strong>Product Features</strong><br>\t\t\t\t\t\t\t\t\t\t<ul class=\"bb_ul\"><li><strong>Extensive single player:</strong> Featuring next generation gameplay and a wildly-engrossing story.<br>\t\t\t\t\t\t\t\t\t\t</li><li><strong>Complete two-person co-op:</strong> Multiplayer game featuring its own dedicated story, characters, and gameplay.<br>\t\t\t\t\t\t\t\t\t\t</li><li><strong>Advanced physics:</strong> Allows for the creation of a whole new range of interesting challenges, producing a much larger but not harder game.<br>\t\t\t\t\t\t\t\t\t\t</li><li><strong>Original music.</strong><br>\t\t\t\t\t\t\t\t\t\t</li><l",
+   "developers": [
+    "Valve"
+   ],
+   "publishers": [
+    "Valve"
+   ],
+   "price_overview": {
+    "currency": "EUR",
+    "initial": 969,
+    "final": 969,
+    "discount_percent": 0,
+    "initial_formatted": "",
+    "final_formatted": "9,69€"
+   },
+   "platforms": {
+    "windows": true,
+    "mac": false,
+    "linux": true
+   },
+   "metacritic": {
+    "score": 95,
+    "url": "https://www.metacritic.com/game/pc/portal-2?ftag=MCD-06-10aaa1f"
+   },
+   "genres": [
+    {
+     "id": "1",
+     "description": "Action"
+    },
+    {
+     "id": "25",
+     "description": "Adventure"
+    }
+   ],
+   "recommendations": {
+    "total": 392550
+   },
+   "release_date": {
+    "coming_soon": false,
+    "date": "18 Apr, 2011"
+   }
+  }
+ }
+}

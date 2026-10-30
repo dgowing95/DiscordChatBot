@@ -12,7 +12,7 @@ something the bot cannot do.
 """
 from dataclasses import dataclass
 
-from classes.whats_new import EMBED_COLOR
+from classes.whats_new import EMBED_COLOR, MAX_FIELD_VALUE
 
 IMAGE = "image"
 SANDBOX = "sandbox"
@@ -37,8 +37,12 @@ class HelpEntry:
 ASK_ENTRIES = (
     HelpEntry("🔎 Search the web", "Ask about news or anything recent and I'll look it up.",
               tools=("web_search",)),
-    HelpEntry("🔗 Read a link", "Paste a URL and ask me to summarise or explain it.",
+    HelpEntry("🔗 Read a link", "Paste a link (a page, a YouTube video, a Reddit thread...) and "
+              "ask me to summarise or explain it.",
               tools=("fetch_url",)),
+    HelpEntry("🗂️ Find old messages", "Ask me to find something said earlier in the server or a "
+              "channel.",
+              tools=("search_messages",)),
     HelpEntry("🧠 Remember things", "Tell me things to remember about you, or ask me to forget "
               "them. Memories are per server.",
               tools=("store_memory", "remove_memory", "clear_memories")),
@@ -111,21 +115,33 @@ def _shown(entry: HelpEntry, image_enabled: bool, sandbox_enabled: bool) -> bool
     return True
 
 
+def _fields(name: str, lines: list) -> list:
+    """`lines` as one field, or as several ("name (more)") when they would
+    pass Discord's 1024-character field limit."""
+    groups, current = [], []
+    for line in lines:
+        if current and len("\n".join(current + [line])) > MAX_FIELD_VALUE:
+            groups.append(current)
+            current = []
+        current.append(line)
+    if current:
+        groups.append(current)
+    return [{"name": name if i == 0 else f"{name} (more)", "value": "\n".join(group)}
+            for i, group in enumerate(groups)]
+
+
 def help_embed_data(image_enabled: bool, sandbox_enabled: bool) -> dict:
     """The /help embed as plain data (see classes.common.embed_from_data).
-    One field per group keeps it compact on mobile."""
+    One field per group keeps it compact on mobile; a group past Discord's
+    field limit carries on in a second field."""
     ask = [e for e in ASK_ENTRIES if _shown(e, image_enabled, sandbox_enabled)]
     commands = [e for e in COMMAND_ENTRIES if _shown(e, image_enabled, sandbox_enabled)]
     return {
         "title": HELP_TITLE,
         "color": EMBED_COLOR,
-        "fields": [
-            {"name": "Just ask me",
-             "value": "\n".join(f"**{e.name}** — {e.description}" for e in ask)},
-            {"name": "Slash commands",
-             "value": "\n".join(f"`{e.name}` — {e.description}" for e in commands)},
-            {"name": "Tips", "value": TIPS},
-        ],
+        "fields": (_fields("Just ask me", [f"**{e.name}** — {e.description}" for e in ask])
+                   + _fields("Slash commands", [f"`{e.name}` — {e.description}" for e in commands])
+                   + [{"name": "Tips", "value": TIPS}]),
         "footer": "",
     }
 

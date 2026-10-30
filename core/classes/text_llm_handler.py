@@ -319,6 +319,9 @@ def agent_tools(automatic: bool = False, voice: bool = False) -> list:
     # read a poll and make the event. They re-check the editor's permission.
     from classes.event_tools import event_tools
     tools.extend(event_tools())
+    # Read-only, so automatic runs keep it too.
+    from classes.message_search_tools import message_search_tools
+    tools.extend(message_search_tools())
     if not automatic:
         tools.extend((store_memory, remove_memory, clear_memories))
         from classes.automation_tools import automation_tools

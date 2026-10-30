@@ -5,9 +5,8 @@ import io
 from agents import FunctionTool, function_tool,RunContextWrapper
 from classes.common import Common
 from classes.content_guard import check_web_request
-import discord, aiohttp
+import discord
 from ddgs import DDGS
-from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
@@ -48,13 +47,18 @@ async def web_search(wrapper: RunContextWrapper[dict], search_request: str) -> s
     return results
     
 @function_tool
-async def fetch_url(wrapper: RunContextWrapper[dict], url: str) -> str:
-    """Fetches the content of a URL. Returns the text content of the page.
+async def fetch_url(wrapper: RunContextWrapper[dict], url: str, part: int = 1) -> str:
+    """Reads a web page and returns its text. Also reads Reddit threads,
+    Steam store pages and YouTube videos (from the video's captions). A long
+    page comes in parts; the result says how to read the next one.
 
     Args:
-        url: The URL to fetch.
+        url: The URL to read.
+        part: Which part of a long page to read, starting at 1.
     """
-    logger.info(f"Fetching content from URL: {url}")
+    from classes import web_reader
+    from classes.web_policy import paginate, settings
+    logger.info(f"Fetching content from URL: {url} (part {part})")
 
     allowed, reason = await check_web_request(url)
     if not allowed:
@@ -64,31 +68,19 @@ async def fetch_url(wrapper: RunContextWrapper[dict], url: str) -> str:
 
     await Common.send_tool_discord_embed(
         wrapper.context["channel"],
-        f"Visiting URL: {url}",
+        f"Visiting URL: {url}" + (f" (part {part})" if part > 1 else ""),
     )
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers={"User-Agent": "dis-ai-bot"}) as response:
-                html = await response.text()
-    except Exception as e:
-        logger.warning(f"An error occurred while fetching the URL: {e}")
+        page = await web_reader.read(url)
+    except web_reader.FetchError as e:
+        logger.info(f"Could not read {url}: {e.reason}")
+        return e.message
+    except Exception:
+        logger.exception(f"An error occurred while fetching {url}")
         return "Error fetching URL content."
 
-    text = await asyncio.to_thread(_extract_page_text, html)
-    logger.info(f"Fetched content from {url} successfully.")
-    return text
-
-
-def _extract_page_text(html: str) -> str:
-    """CPU-bound HTML->text extraction, run off the event loop via asyncio.to_thread."""
-    soup = BeautifulSoup(html, features='html.parser')
-    for script in soup(["script", "style"]):
-        script.extract()  # remove all javascript and stylesheet code
-
-    text = soup.body.get_text()
-    lines = (line.strip() for line in text.splitlines())
-    chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-    return '\n'.join(chunk for chunk in chunks if chunk)
+    logger.info(f"Fetched content from {url} ({page.source}, {len(page.text)} chars).")
+    return paginate(page.text, part, settings()["part_chars"])
 
 async def get_current_datetime() -> str:
     """Returns the current date and time, with its offset, in the server

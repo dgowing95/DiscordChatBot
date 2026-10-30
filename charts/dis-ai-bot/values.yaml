@@ -141,6 +141,53 @@ diffusion:
   # placed on the same card.
   visibleDevices: ""
 
+# Reading links (the fetch_url tool). Pages, Reddit threads, Steam store pages
+# and YouTube captions are read in core and cached in Redis, so a link still
+# in the channel is not fetched again on every reply.
+webFetch:
+  # Characters of a page the model gets per call; longer pages come in parts
+  partChars: 10000
+  # Most characters of one page kept (all parts together)
+  maxChars: 200000
+  # Most bytes downloaded for one page, and seconds to wait for it
+  maxBytes: 5000000
+  timeout: 15
+  # How long a read page / a YouTube transcript / a failure stays cached
+  cacheTtlSeconds: 21600
+  videoCacheTtlSeconds: 2592000
+  failureCacheTtlSeconds: 300
+  # A plain fetch with less text than this goes to the browser (if enabled)
+  browserMinChars: 400
+
+# Headless browser (browserservice/) for pages whose text only appears once
+# their scripts run. core tries a plain fetch first and only asks the browser
+# when that comes back almost empty. enabled: false removes the pod; fetch_url
+# still works, without that fallback.
+browser:
+  enabled: true
+  # Container image: built by the release workflow (browser-<tag> tags)
+  image: ghcr.io/dgowing95/discordchatbot
+  port: 8000
+  # Optional: point core at a browser service outside the cluster
+  url: ""
+  # Pages rendered at once, and renders allowed to wait before a 503
+  concurrency: 2
+  queueSize: 8
+  # Seconds for one render, and seconds to let a page's scripts settle
+  timeout: 30
+  settleSeconds: 5
+  # In-memory /dev/shm for Chromium; counts against browserResources memory
+  shmSize: 512Mi
+  # A NetworkPolicy: only core may call the browser, and the browser may only
+  # reach the public internet (and cluster DNS). It does nothing unless the
+  # cluster's network plugin enforces NetworkPolicy; the service's own check
+  # on every request a page makes is the main guard either way. The pod's
+  # probes run inside it (exec), so the policy does not block them.
+  networkPolicy: true
+  # Labels of the cluster DNS pods the policy lets the browser query
+  dnsPodLabels:
+    k8s-app: kube-dns
+
 # Schedules and message rules (docs/automations.md), stored in Redis.
 # enabled: false stops running them and hides /schedule, /rule and the chat
 # tools, but keeps what is stored. A maxPerGuild of 0 blocks new entries of
@@ -536,6 +583,16 @@ speechResources:
   requests:
     cpu: 2000m
     memory: 2048Mi
+
+# Browser (browser.enabled only): one Chromium, a few hundred MB per page
+# rendered at once (browser.concurrency) plus browser.shmSize.
+browserResources:
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+  requests:
+    cpu: 500m
+    memory: 1Gi
 
 voiceSidecarResources:
   limits:

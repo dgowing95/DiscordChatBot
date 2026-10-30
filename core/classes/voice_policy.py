@@ -463,6 +463,7 @@ def greeting_messages(persona: str, bot_name: str, people: list[str]) -> list[di
 TOOL_ACTIONS = {
     "web_search": "searching the web",
     "fetch_url": "reading a web page",
+    "search_messages": "searching old messages",
     "generate_image": "making a picture",
     "run_code_sandbox": "running some code",
     "store_memory": "remembering that",

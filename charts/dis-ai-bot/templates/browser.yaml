@@ -1,0 +1,143 @@
+{{- if .Values.browser.enabled }}
+# Browser service (browserservice/): headless Chromium that renders pages
+# whose text only appears once their scripts run. core's fetch_url asks it
+# only when a plain fetch comes back almost empty. CPU only.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-browser-deployment
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-browser
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-browser
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+        # Chromium keeps its renderer memory in /dev/shm; the runtime's 64MB
+        # default crashes tabs on heavy pages. Counts against the memory limit.
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.browser.shmSize }}
+      containers:
+      - name: browser
+        image: "{{ .Values.browser.image }}:browser-{{ .Values.image.tag | default .Chart.AppVersion }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        ports:
+        - name: http
+          containerPort: 8000
+        # BROWSER_* come from the shared configmap
+        envFrom:
+        - configMapRef:
+            name: {{ .Release.Name }}-configmap
+        volumeMounts:
+          - name: shm
+            mountPath: /dev/shm
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
+        # exec, not httpGet: the kubelet's probes come from the node, which
+        # the NetworkPolicy below does not let in. /health also relaunches a
+        # browser that has exited, so readiness recovers on its own.
+        readinessProbe:
+          exec:
+            command: ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"]
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+        livenessProbe:
+          exec:
+            command: ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=8)"]
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 4
+        resources:
+          limits:
+            cpu: {{ .Values.browserResources.limits.cpu }}
+            memory: {{ .Values.browserResources.limits.memory }}
+          requests:
+            cpu: {{ .Values.browserResources.requests.cpu }}
+            memory: {{ .Values.browserResources.requests.memory }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-browser-service
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: {{ .Release.Name }}-browser
+  ports:
+    - port: {{ .Values.browser.port }}
+      targetPort: 8000
+      protocol: TCP
+      name: http
+  type: ClusterIP
+{{- if .Values.browser.networkPolicy }}
+---
+# Only core may call the browser, and the browser may only reach the public
+# internet (plus cluster DNS): a page cannot make it talk to Redis, the LLM
+# server or the node's metadata address. The service checks every request a
+# page makes itself as well; this is the second wall, where the cluster's
+# network plugin enforces NetworkPolicy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-browser-policy
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ .Release.Name }}-browser
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: {{ .Release.Name }}-core
+      ports:
+        - port: 8000
+          protocol: TCP
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.browser.dnsPodLabels | nindent 14 }}
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 0.0.0.0/8
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 224.0.0.0/4
+        - ipBlock:
+            cidr: ::/0
+            except:
+              - ::1/128
+              - fc00::/7
+              - fe80::/10
+{{- end }}
+{{- end }}

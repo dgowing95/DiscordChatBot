@@ -101,6 +101,9 @@ services:
       # speech services below, on the compose network.
       - VOICE_BRIDGE_URL=${VOICE_BRIDGE_URL:-ws://voice:8765}
       - SPEECH_URL=${SPEECH_URL:-http://speech:8000}
+      # fetch_url's fallback for pages that need their scripts run (the
+      # browser service below); set it empty in .env to go without.
+      - BROWSER_URL=${BROWSER_URL-http://browser:8000}
     depends_on:
       redis:
         condition: service_started
@@ -163,6 +166,23 @@ services:
       timeout: 5s
       retries: 40
       start_period: 5m
+  browser:
+    # Headless Chromium for fetch_url (see browserservice/): renders pages
+    # whose text only appears once their scripts run. CPU only.
+    build: ./browserservice
+    volumes:
+      - ./browserservice:/app
+    shm_size: 1g
+    environment:
+      - BROWSER_CONCURRENCY=${BROWSER_CONCURRENCY:-2}
+      - BROWSER_TIMEOUT=${BROWSER_TIMEOUT:-30}
+      - BROWSER_SETTLE_SECONDS=${BROWSER_SETTLE_SECONDS:-5}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
   speech:
     # Speech-to-text + text-to-speech for voice channels (see speechservice/).
     # CPU only; models download into the volume on first boot.
