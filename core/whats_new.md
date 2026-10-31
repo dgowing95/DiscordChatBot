@@ -12,10 +12,10 @@ first time someone triggers the bot after that release is deployed.
   (checked by core/tests/whats_new_tests.py).
 -->
 
-## Better link reading
-I read links much better now: Like YouTube videos (from their captions) and Reddit threads, and sites that only show their content once their scripts run. I also cache the content to speed up replies.
-How to use: paste a link and @mention me, e.g. "what is said in this video?" or "what are people saying in this thread?"
+## Deeper web searches
+When I search the web I now read the top results myself and give you a short summary of what they say, with links to the sources. I also look things up before drawing or making something that depends on real facts.
+How to use: @mention me with a question, e.g. "what changed in the latest Python release?" or "draw the newest Mars rover".
 
-## Find old messages
-I can search the server's past messages to find something said long ago, and link you straight to it. I search the whole server, or just one channel if you say which.
-How to use: @mention me, e.g. "find the message where Sam posted the trip link" or "what did Alex say about the patch in #general?"
+## Code sandbox works on your files
+The code sandbox can now work on files from the chat: files you upload, the message you reply to, and pictures I made earlier.
+How to use: upload a file and @mention me, e.g. "make a chart from this spreadsheet", or after I draw something, "turn that picture into a spinning GIF".

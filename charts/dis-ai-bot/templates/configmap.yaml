@@ -67,6 +67,19 @@ data:
   WEB_CACHE_VIDEO_TTL_SECONDS: {{ .Values.webFetch.videoCacheTtlSeconds | int64 | toString | quote }}
   WEB_CACHE_FAILURE_TTL_SECONDS: {{ .Values.webFetch.failureCacheTtlSeconds | int64 | toString | quote }}
   BROWSER_MIN_CHARS: {{ .Values.webFetch.browserMinChars | int64 | toString | quote }}
+  # web_search's brief: a CORE-side LLM call. Unset model/host fall back to
+  # the bot's own MODEL/LLM_HOST; the key lives in secret.yaml.
+  RESEARCH_BRIEF_ENABLED: {{ .Values.research.enabled | quote }}
+  RESEARCH_PAGES: {{ .Values.research.pages | toString | quote }}
+  RESEARCH_PAGE_CHARS: {{ .Values.research.pageChars | int64 | toString | quote }}
+  RESEARCH_FETCH_TIMEOUT: {{ .Values.research.fetchTimeout | toString | quote }}
+  RESEARCH_TIMEOUT: {{ .Values.research.timeout | toString | quote }}
+  {{- if .Values.research.model }}
+  RESEARCH_MODEL: {{ .Values.research.model }}
+  {{- end }}
+  {{- if .Values.research.llmHost }}
+  RESEARCH_LLM_HOST: {{ .Values.research.llmHost }}
+  {{- end }}
   BROWSER_URL: {{ if .Values.browser.url }}{{ .Values.browser.url | quote }}{{ else if .Values.browser.enabled }}{{ printf "http://%s-browser-service.%s.svc.cluster.local:%v" .Release.Name .Release.Namespace .Values.browser.port | quote }}{{ else }}""{{ end }}
   BROWSER_CONCURRENCY: {{ .Values.browser.concurrency | toString | quote }}
   BROWSER_QUEUE_SIZE: {{ .Values.browser.queueSize | toString | quote }}
@@ -126,6 +139,7 @@ data:
   SANDBOX_REQUEST_TIMEOUT_SECONDS: {{ .Values.sandbox.requestTimeout | toString | quote }}
   SANDBOX_MAX_RETRIES: {{ .Values.sandbox.maxRetries | toString | quote }}
   SANDBOX_SNAPSHOT_MAX_BYTES: {{ .Values.sandbox.snapshotMaxBytes | toString | quote }}
+  SANDBOX_INPUT_MAX_BYTES: {{ .Values.sandbox.inputMaxBytes | int64 | toString | quote }}
   SANDBOX_SNAPSHOT_TTL_SECONDS: {{ .Values.sandbox.snapshotTtlSeconds | toString | quote }}
   {{- with .Values.sandbox.memoryLimit }}
   {{- /* Refused here: core would otherwise run every sandbox uncapped over a typo */}}

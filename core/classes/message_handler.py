@@ -12,6 +12,7 @@ from PIL import Image
 pillow_heif.register_heif_opener()
 from classes.text_llm_handler import TextLLMHandler, slot_context_tokens
 from classes import attachment_cache, history_policy, reply_policy
+from classes.sandbox_inputs import attachment_note
 from classes.history_policy import (
     ANCHORED,
     KEEP,
@@ -382,8 +383,15 @@ class MessageHandler:
         if role is None:
             role = "assistant" if message.author.id == self.client.user.id else "user"
         entries = []
-        if message.content or image_parts or always:
-            text = f"Message from '{message.author.name}': {self.clean_message_content(message)}"
+        # Names a user's files (a CSV would otherwise not be in the prompt at
+        # all), so the model can hand them to run_code_sandbox. Not on the
+        # bot's own messages: the model copies its earlier replies' shape, and
+        # would start writing the tag itself.
+        files = ""
+        if role == "user":
+            files = attachment_note([(a.filename, a.size) for a in message.attachments or []])
+        if message.content or image_parts or always or files:
+            text = f"Message from '{message.author.name}': {self.clean_message_content(message)}{files}"
             # With images the content becomes a list of parts (base64 images + text);
             # the agents SDK forwards them as multimodal chat-completions input.
             entries.append({

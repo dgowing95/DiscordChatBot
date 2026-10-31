@@ -14,11 +14,13 @@ from classes.metrics import (
     set_slot_context,
 )
 from agents import Agent, Runner, OpenAIChatCompletionsModel, AsyncOpenAI, FunctionTool, function_tool, RunContextWrapper, ModelSettings, RunHooks, set_tracing_disabled
+from agents import ItemHelpers
 from agents.models.interface import ModelTracing
+from agents.run_error_handlers import RunErrorHandlerResult
 from openai import BadRequestError, UnprocessableEntityError
 from openai.types.responses import ResponseCreatedEvent, ResponseTextDeltaEvent
 from classes.config_manager import configManager
-from classes.response_filter import extract_reasoning_items, extract_thinking
+from classes.response_filter import extract_reasoning_items, extract_thinking, strip_tool_call_text
 from classes.llm_config import llm_api_key, llm_auth_headers, llm_host, llm_model, parse_temperature
 from classes.reply_policy import INSTRUCTION as DOUBLE_REPLY_INSTRUCTION
 from classes.side_llm import NO_THINKING
@@ -47,6 +49,17 @@ def llm_max_turns() -> int:
         return value if value > 0 else DEFAULT_LLM_MAX_TURNS
     except (TypeError, ValueError):
         return DEFAULT_LLM_MAX_TURNS
+
+
+# Sent after the last allowed turn, when a reply runs out of turns. Before
+# this the run raised MaxTurnsExceeded and the user got a bare ❌, even though
+# the tools had already posted their results; a long chain (search, read,
+# draw, sandbox) is exactly the reply that runs out.
+WRAP_UP_INSTRUCTION = (
+    "(You have used every step you get for this reply, so no more tools can "
+    "run. Write your reply to the user now from what you already have: what "
+    "you found or made, and plainly what is still not done.)"
+)
 
 
 # Wall-clock seconds ONE model call (one turn's request, the OpenAI client's
@@ -547,7 +560,8 @@ class TextLLMHandler:
       try:
          response = await Runner.run(self.agent, messages_for_run, context=user_info,
                                      max_turns=llm_max_turns(),
-                                     hooks=hooks)
+                                     hooks=hooks,
+                                     error_handlers={"max_turns": self._wrap_up})
          logger.info('Response generated')
          logger.debug(response)
          final_output = response.final_output
@@ -636,6 +650,53 @@ class TextLLMHandler:
           return self._streamed_failure(hooks, user_info, e)
         except Exception as e:
           return self._streamed_failure(hooks, user_info, e)
+
+    async def _wrap_up(self, data):
+      """The SDK's max_turns handler: one last model call, with tools
+      refused, that writes the reply from what the run already did.
+
+      Sent the same tools with tool_choice "none" rather than none at all, so
+      the prompt prefix matches the turns before it and llama.cpp reuses its
+      cache. Called on the model directly, not through Runner, so a tool call
+      the model makes anyway is dropped instead of run, and one it writes out
+      as text is stripped (strip_tool_call_text). Returns None (the
+      run then raises MaxTurnsExceeded, the old ❌ path) when the call fails
+      or writes no text.
+
+      Text replies only: a voice turn speaks what streams, and this answer
+      would not stream.
+      """
+      started = time.monotonic()
+      outcome = "error"
+      try:
+        run_context = data.context
+        response = await self.agent.model.get_response(
+            system_instructions=await self.agent.get_system_prompt(run_context),
+            input=list(data.run_data.history) + [{"role": "user", "content": WRAP_UP_INSTRUCTION}],
+            model_settings=self.agent.model_settings.resolve(ModelSettings(tool_choice="none")),
+            tools=await self.agent.get_all_tools(run_context),
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+            previous_response_id=None,
+            conversation_id=None,
+            prompt=None,
+        )
+        self._record_prompt_tokens([response])
+        text = strip_tool_call_text("".join(ItemHelpers.extract_last_text(item) or "" for item in response.output))
+        outcome = "ok" if text else "empty"
+      except asyncio.CancelledError:
+        outcome = "cancelled"
+        raise
+      except Exception as e:
+        logger.warning(f"Max turns wrap-up failed: {e}")
+        return None
+      finally:
+        observe_llm_call("max_turns_wrap_up", outcome, time.monotonic() - started)
+      if not text:
+        return None
+      logger.info("Reply ran out of turns; answered with a wrap-up")
+      return RunErrorHandlerResult(final_output=text)
 
     def _streamed_failure(self, hooks, user_info, e) -> str:
       hooks.abandon_llm_call("error")

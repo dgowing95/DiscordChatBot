@@ -35,7 +35,8 @@ class HelpEntry:
 # "Just ask me" - agent tools, described by what a person asks for rather
 # than by tool name, since nobody calls them directly.
 ASK_ENTRIES = (
-    HelpEntry("🔎 Search the web", "Ask about news or anything recent and I'll look it up.",
+    HelpEntry("🔎 Search the web", "Ask about news or anything recent and I'll look it up, "
+              "read the top results and tell you what they say, with links.",
               tools=("web_search",)),
     HelpEntry("🔗 Read a link", "Paste a link (a page, a YouTube video, a Reddit thread...) and "
               "ask me to summarise or explain it.",

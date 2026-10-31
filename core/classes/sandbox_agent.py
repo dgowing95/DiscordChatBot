@@ -32,6 +32,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 
 import discord
 # httpx2, not httpx: openai>=3 speaks HTTPX2 and does not translate a legacy
@@ -55,7 +56,7 @@ from agents import (
 )
 from agents.sandbox.config import DEFAULT_PYTHON_SANDBOX_IMAGE
 
-from classes import sandbox_thread_inbox
+from classes import sandbox_inputs, sandbox_thread_inbox
 from classes.sandbox_conversation import (
     MAX_CONTINUATIONS,
     MIN_CONTINUATION_TURNS,
@@ -1727,6 +1728,36 @@ async def _mark_run_start(session, out_dir: str | None) -> str | None:
     return marker if res.ok() else None
 
 
+async def _write_inputs(session, out_dir: str | None, inputs, problems) -> str:
+    """Writes the chat files into in/ and returns the task preamble naming
+    them (and anything that could not be given). Never raises: a file that
+    cannot be written is named as not provided instead."""
+    problems = list(problems)
+    written = []
+    in_dir = posixpath.join(posixpath.dirname(out_dir), sandbox_inputs.INPUT_DIRNAME) if out_dir else None
+    try:
+        if in_dir is None or not (await session.exec("mkdir", "-p", in_dir, shell=False)).ok():
+            raise RuntimeError("no workspace folder for the files")
+    except Exception as e:
+        logger.warning(f"Sandbox: could not make the input folder: {e}")
+        in_dir = None
+    for name, data in inputs:
+        if in_dir is None:
+            problems.append(f"{name} (could not be copied in)")
+            continue
+        try:
+            # session.write streams through exec (no put_archive) and keeps
+            # the path inside the workspace root, which in/ is.
+            await session.write(PurePosixPath(in_dir, name), io.BytesIO(data))
+            written.append((name, len(data)))
+        except Exception as e:
+            logger.warning(f"Sandbox: could not write input {name}: {e}")
+            problems.append(f"{name} (could not be copied in)")
+    if written:
+        logger.info(f"Sandbox: gave the run {len(written)} file(s) in {in_dir}")
+    return sandbox_inputs.task_preamble(written, problems)
+
+
 async def _deliver(
     session, deliverables: list[dict], out_dir: str | None, marker: str | None,
 ) -> tuple[list[SandboxArtifact], list[str]]:
@@ -1753,6 +1784,8 @@ async def run_sandbox_task(
     requesting_user_id=None,
     resumed: bool = False,
     ledger=None,
+    inputs=(),
+    input_problems=(),
 ) -> SandboxResult:
     """Run one self-contained task in a fresh Docker sandbox.
 
@@ -1789,6 +1822,11 @@ async def run_sandbox_task(
     to be restorable. The value that comes back on SandboxResult.resumed is
     the ground truth, which differs from this argument exactly when that
     recovery fired.
+
+    inputs are (name, bytes) files from the chat, written to `in/` beside
+    out/ before the run (see classes/sandbox_inputs.py); input_problems are
+    the caller's notes on files it could not provide. Both are named at the
+    top of the task, so the model knows what it has and what not to look for.
 
     We create and own the container ourselves (rather than letting
     RunConfig(sandbox=...) manage it) so we can read artifacts out of it
@@ -1828,6 +1866,8 @@ async def run_sandbox_task(
         # after any snapshot restore (session.start(), above) so every
         # restored file is older than it. See _mark_run_start.
         marker = await _mark_run_start(session, out_dir)
+        if inputs or input_problems:
+            task = await _write_inputs(session, out_dir, inputs, input_problems) + task
         agent = build_sandbox_agent(out_dir, conversation)
         nested_context = {
             "thread": thread,
