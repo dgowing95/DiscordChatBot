@@ -15,7 +15,7 @@ run starts:
   * any other file the outer model names in the tool's `files` argument,
     found by name among the channel's recent messages (newest first). That is
     how the bot's own pictures are reached: every one is called
-    GENERATED_IMAGE_NAME, so naming it gets the newest.
+    image_generation.GENERATED_IMAGE_FILENAME, so naming it gets the newest.
 
 Caps: MAX_INPUT_FILES files, and SANDBOX_INPUT_MAX_BYTES (default 25MB) in
 total, kept well under SANDBOX_SNAPSHOT_MAX_BYTES since `in/` is saved with
@@ -33,7 +33,6 @@ from collections import namedtuple
 INPUT_DIRNAME = "in"
 MAX_INPUT_FILES = 10
 DEFAULT_MAX_BYTES = 25_000_000
-GENERATED_IMAGE_NAME = "generated-image.png"
 
 # name: as Discord shows it; size: bytes; ref: the attachment itself, carried
 # through untouched so the caller can download what was chosen.

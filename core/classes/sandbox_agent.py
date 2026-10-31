@@ -1271,7 +1271,12 @@ class SandboxResult:
     the outer model is told what was actually handled rather than assuming
     every message was applied. unsent_replies are acknowledgements the model
     wrote that Discord refused at the time; the caller posts them with the
-    closing note so none is silently lost."""
+    closing note so none is silently lost.
+
+    inputs are the chat files actually written to in/, and input_problems
+    every file that was asked for but is not there (the caller's own notes
+    plus any write that failed), so the outer model is told what really
+    landed rather than what was downloaded."""
     text: str
     artifacts: list[SandboxArtifact] = field(default_factory=list)
     ok: bool = True
@@ -1280,6 +1285,8 @@ class SandboxResult:
     resumed: bool = False
     conversation: list[dict] = field(default_factory=list)
     unsent_replies: list[str] = field(default_factory=list)
+    inputs: list[str] = field(default_factory=list)
+    input_problems: list[str] = field(default_factory=list)
 
 
 def build_sandbox_client() -> "object":
@@ -1728,10 +1735,11 @@ async def _mark_run_start(session, out_dir: str | None) -> str | None:
     return marker if res.ok() else None
 
 
-async def _write_inputs(session, out_dir: str | None, inputs, problems) -> str:
-    """Writes the chat files into in/ and returns the task preamble naming
-    them (and anything that could not be given). Never raises: a file that
-    cannot be written is named as not provided instead."""
+async def _write_inputs(session, out_dir: str | None, inputs, problems):
+    """Writes the chat files into in/. Returns (task preamble, names
+    written, problems): the caller's problems plus every file that could not
+    be written. Never raises: a file that cannot be written is named as not
+    provided instead."""
     problems = list(problems)
     written = []
     in_dir = posixpath.join(posixpath.dirname(out_dir), sandbox_inputs.INPUT_DIRNAME) if out_dir else None
@@ -1755,7 +1763,7 @@ async def _write_inputs(session, out_dir: str | None, inputs, problems) -> str:
             problems.append(f"{name} (could not be copied in)")
     if written:
         logger.info(f"Sandbox: gave the run {len(written)} file(s) in {in_dir}")
-    return sandbox_inputs.task_preamble(written, problems)
+    return sandbox_inputs.task_preamble(written, problems), [n for n, _ in written], problems
 
 
 async def _deliver(
@@ -1866,8 +1874,14 @@ async def run_sandbox_task(
         # after any snapshot restore (session.start(), above) so every
         # restored file is older than it. See _mark_run_start.
         marker = await _mark_run_start(session, out_dir)
+        given, problems = [], list(input_problems)
         if inputs or input_problems:
-            task = await _write_inputs(session, out_dir, inputs, input_problems) + task
+            preamble, given, problems = await _write_inputs(session, out_dir, inputs, problems)
+            task = preamble + task
+
+        def _with_inputs(result: SandboxResult) -> SandboxResult:
+            result.inputs, result.input_problems = given, problems
+            return result
         agent = build_sandbox_agent(out_dir, conversation)
         nested_context = {
             "thread": thread,
@@ -1908,24 +1922,25 @@ async def run_sandbox_task(
             # already produced a final answer, which still stands.
             run_result = conversation.completed_result
             if run_result is None:
-                return await _failure_result(session, nested_context, out_dir, marker,
-                                             "timeout", resumed=resumed)
+                return _with_inputs(await _failure_result(session, nested_context, out_dir,
+                                                          marker, "timeout", resumed=resumed))
             logger.warning("Sandbox: timed out during a continuation; delivering the "
                            "answer from before it")
             conversation.finalize()
         except MaxTurnsExceeded:
-            return await _failure_result(session, nested_context, out_dir, marker,
-                                         "max_turns", resumed=resumed)
+            return _with_inputs(await _failure_result(session, nested_context, out_dir, marker,
+                                                      "max_turns", resumed=resumed))
         except (ModelBehaviorError, ModelRefusalError) as e:
-            return await _failure_result(session, nested_context, out_dir, marker,
-                                         "model_error", str(e), resumed=resumed)
+            return _with_inputs(await _failure_result(session, nested_context, out_dir, marker,
+                                                      "model_error", str(e), resumed=resumed))
         final_output = run_result.final_output
         text = final_output if isinstance(final_output, str) else str(final_output)
         artifacts, skip_notes = await _deliver(
             session, nested_context["deliverables"], out_dir, marker)
-        return SandboxResult(text=text, artifacts=artifacts, skipped_artifacts=skip_notes,
-                             resumed=resumed, conversation=conversation.ledger.outcomes(),
-                             unsent_replies=list(conversation.unsent_replies))
+        return _with_inputs(SandboxResult(
+            text=text, artifacts=artifacts, skipped_artifacts=skip_notes,
+            resumed=resumed, conversation=conversation.ledger.outcomes(),
+            unsent_replies=list(conversation.unsent_replies)))
     finally:
         # Idempotent, and a no-op when _converse already committed it: this
         # covers the exits that bypass it (an infra error mid-run), so no

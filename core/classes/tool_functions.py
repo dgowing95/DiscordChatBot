@@ -737,7 +737,7 @@ async def _run_claimed_sandbox(wrapper, task, channel, thread_created, in_thread
         resumable=remaining is not None,
         steering=outcomes,
         resume_correction=resume_correction,
-    ) + tool_note(input_names, input_problems)
+    ) + tool_note(result.inputs, result.input_problems)
 
 
 _CONVERSATION_SAVE_ATTEMPTS = 5

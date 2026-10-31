@@ -20,7 +20,7 @@ points the brief at another server to avoid that.
 
 web_research.py does the fetching and the call; this module holds the rules
 and the text, so it is unit tested without a network
-(core/tests/research_format_tests.py).
+(core/tests/research_tests.py).
 
 Environment variables:
     RESEARCH_BRIEF_ENABLED  "0"/"false" returns the search results alone

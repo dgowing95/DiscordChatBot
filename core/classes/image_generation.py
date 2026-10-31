@@ -48,9 +48,9 @@ EDIT_LOOKBACK_MESSAGES = 20
 # seen live). Three still allows "draw three versions".
 MAX_IMAGE_CALLS = 3
 TOO_MANY_IMAGES_TEXT = (
-    f"{MAX_IMAGE_CALLS} pictures have already been made for this reply, so no more "
-    "can be made now. Tell the user what the earlier ones show, and offer to try "
-    "again if they want.")
+    f"The limit of {MAX_IMAGE_CALLS} picture requests for this reply has been reached, "
+    "so no more can be made now. Tell the user what has already been made, and offer "
+    "to try again if they want.")
 
 
 def image_generation_enabled() -> bool:
@@ -240,8 +240,14 @@ def tool_result_text(result: ImageResult) -> str:
         tries = "attempt" if result.attempts == 1 else "attempts"
         text += (f" Still not right after {result.attempts} {tries}: "
                  f"{'; '.join(review.missing)}. Say plainly that this did not come "
-                 f"out; do not claim it did. It has already been retried, so do not "
-                 f"call generate_image again for it in this reply: offer to try again.")
+                 f"out; do not claim it did.")
+        # A retry may not have happened (IMAGE_REVIEW_RETRIES=0, or it failed),
+        # but another call in this reply is still not the answer.
+        if result.attempts > 1:
+            text += " It has already been retried, so"
+        else:
+            text += " So"
+        text += " do not call generate_image again for it in this reply: offer to try again."
     return text + " Describe the image only as shown here."
 
 

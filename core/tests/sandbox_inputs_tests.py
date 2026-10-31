@@ -160,12 +160,14 @@ async def test_write_inputs_puts_files_beside_out_and_names_them():
     from classes.sandbox_agent import _write_inputs
 
     session = _session()
-    preamble = await _write_inputs(session, "/workspace/out", [("a.csv", b"123")], ["b (x)"])
+    preamble, given, problems = await _write_inputs(
+        session, "/workspace/out", [("a.csv", b"123")], ["b (x)"])
     session.exec.assert_awaited_once_with("mkdir", "-p", "/workspace/in", shell=False)
     path, stream = session.write.await_args.args
     assert str(path) == "/workspace/in/a.csv" and stream.read() == b"123"
     assert preamble == ("Files for this task are already in in/: a.csv (3 B).\n"
                         "Asked for but not provided: b (x).\n\n")
+    assert given == ["a.csv"] and problems == ["b (x)"]
 
 
 @pytest.mark.asyncio
@@ -175,5 +177,8 @@ async def test_write_inputs_puts_files_beside_out_and_names_them():
 async def test_a_file_that_cannot_be_written_is_named_as_not_provided(out_dir, session):
     from classes.sandbox_agent import _write_inputs
 
-    preamble = await _write_inputs(session, out_dir, [("a.csv", b"1")], [])
+    preamble, given, problems = await _write_inputs(session, out_dir, [("a.csv", b"1")], [])
     assert preamble == "Asked for but not provided: a.csv (could not be copied in).\n\n"
+    # What the outer model is told comes from these, so a failed write is
+    # never reported as given.
+    assert given == [] and problems == ["a.csv (could not be copied in)"]
