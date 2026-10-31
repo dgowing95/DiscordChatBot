@@ -49,6 +49,9 @@ core/                  # the main bot (the app that runs in production)
     image_generation.py    # create_image (prompt, generate, check, retry), diffusion
                            #   client, /health capabilities, which image to edit
     image_prompt.py        # LLM rewrite of an image request -> SDXL prompt + negative prompt
+    research_format.py     # PURE (stdlib-only) web_search: RESEARCH_* settings, which
+                           #   results are read, the brief prompt, what the model is told
+    web_research.py        # web_search's I/O: DuckDuckGo, pages via web_reader, the brief
     image_review.py        # vision check of a generated image: what it shows, what's missing
     side_llm.py            # shared client + thinking-off latch for those two side calls
     sandbox_agent.py       # nested SandboxAgent + run_sandbox_task (throwaway Docker sandbox)
@@ -57,6 +60,8 @@ core/                  # the main bot (the app that runs in production)
     sandbox_progress.py    # streams sandbox commands/output to one edited Discord message
                            #   (single embed: one field per command, state-coloured)
     sandbox_snapshot_store.py  # Redis-backed workspace snapshots, keyed by thread id
+    sandbox_inputs.py      # PURE (stdlib-only) chat files given to a run (in/): which,
+                           #   caps, and what the sandbox / outer model are told
     sandbox_thread_inbox.py    # PURE (stdlib-only) ledger of thread messages to a run in
                                #   flight: staged events, atomic per-thread claim
     sandbox_conversation.py    # conversation coordinator: model-input filter, tool gate,
@@ -224,6 +229,17 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
    ❌. Without that, a failed tool run left the tool's embeds and files in the
    channel — posted during the unlocked phase, before the failure — with no answer
    and no reasoning, which reads as the bot going quiet mid-task.
+   **Running out of turns is answered, not failed**: `generate()` passes the SDK
+   a `max_turns` error handler (`TextLLMHandler._wrap_up`) that makes one more
+   model call with the same tools but `tool_choice="none"` (so the cached
+   prefix still matches) and `WRAP_UP_INSTRUCTION` last, and that text is the
+   reply. It calls the model directly, so a tool call written anyway is never
+   run, and one it writes out as `<tool_call>` text (Strata drops the tools
+   from the template under `"none"`, seen live) is stripped
+   (`response_filter.strip_tool_call_text`); no text, or a failed call, falls
+   back to the ❌ above. Text replies
+   only: a voice turn speaks what streams. `max_turns_wrap_up_tests.py` runs it
+   on the real Runner.
 5. Per-guild settings live in Redis under the `dcb` namespace; per-user memories under
    `guild:<id>:user:<id>`.
 6. Image generation: when enabled (`IMAGE_GEN_ENABLED`, set from the chart's
@@ -262,6 +278,10 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
    string tells the outer model what the posted image actually shows. Before
    this the bot captioned images from its own prompt, and so claimed exactly
    what the image model had missed. Checking fails soft (posted unchecked).
+   A miss that survives the retry tells the model not to call the tool again
+   in that reply, and `MAX_IMAGE_CALLS` (3) caps it anyway: on Strata the
+   model otherwise re-called it for a subject the image model could not draw
+   (5 calls, ~5.5 minutes, seen live).
 
    **Editing** works only on images the bot generated
    (`image_generation.pick_edit_source`: attachment `generated-image.png` from
@@ -328,6 +348,14 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
      model-error each become `SandboxResult(ok=False, error=...)`, artifacts are
      recovered from the still-live container, and the model is pointed at a
      follow-up in the thread instead — which resumes rather than starting over.
+   - **Files from the chat go in `in/`** (`sandbox_inputs.py`). The asking
+     message's and its reply target's attachments always; anything else the
+     outer model names in `files` (as `[Attached: ...]` shows it in the
+     prompt, user messages only), found among the channel's 20 newest
+     messages, which is how the bot's own `generated-image.png` is reached.
+     Written with `session.write` before the run (checked live against
+     Docker), capped by `SANDBOX_INPUT_MAX_BYTES`, and named at the top of the
+     task; what was left out is told to both models.
 
    Every one of these carries its full rationale — the production incident that
    produced it, and what breaks if it is undone — in the docstring of the
@@ -482,6 +510,17 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
    - **Long pages come in parts** (`WEB_FETCH_PART_CHARS`); the result's last
      line tells the model which `part` to ask for next.
 
+   **`web_search(search_request)`** (`classes/web_research.py`, rules in
+   `research_format.py`) searches DuckDuckGo, reads the top `RESEARCH_PAGES`
+   results through the same `web_reader.read` (cache, private-address checks),
+   and a side LLM call writes a brief of at most 200 words with numbered
+   sources; the source list itself is built from the real results. It
+   replaced the old snippet-only search instead of sitting beside it, because
+   a small model given "search" and "research" picks the wrong one. The cost
+   is an LLM call per search, which at `parallel: 1` also takes llama.cpp's
+   slot (`RESEARCH_LLM_HOST` can move it). No page read, or a failed brief,
+   returns the search results as plain text.
+
    **`search_messages(query, channel, author, limit)`**
    (`classes/message_search_tools.py`) calls Discord's Search Guild Messages
    endpoint (`GET /guilds/{id}/messages/search`, open to bots since
@@ -545,7 +584,7 @@ needs an entry there, gated with `requires` when it can be switched off;
    the existing home rather than restating it nearby — the comment block above
    `SANDBOX_INSTRUCTIONS` records which bullets were merged and why.
    Sizes worth re-measuring before adding: `SANDBOX_INSTRUCTIONS` ~3850 chars
-   formatted (pinned by a test, ceiling 3950), `run_code_sandbox` ~1750
+   formatted (pinned by a test, ceiling 3950), `run_code_sandbox` ~2000
    including its JSON schema.
 
    **Prefer a positive example over a list of prohibitions.** The design-
@@ -574,6 +613,10 @@ needs an entry there, gated with `requires` when it can be switched off;
 | `WEB_CACHE_TTL_SECONDS` / `WEB_CACHE_VIDEO_TTL_SECONDS` / `WEB_CACHE_FAILURE_TTL_SECONDS` | how long a read page / a YouTube transcript / a failure stays cached in Redis (defaults 21600 / 2592000 / 300). Chart: `webFetch.*TtlSeconds` |
 | `BROWSER_URL` | the browser service core asks to render thin pages; empty = no fallback. Compose: `http://browser:8000`; chart: `browser.url`, else the in-cluster service when `browser.enabled` |
 | `BROWSER_MIN_CHARS` | a plain fetch with less text than this goes to the browser (default 400). Chart: `webFetch.browserMinChars` |
+| `RESEARCH_BRIEF_ENABLED` | `0`/`false`: `web_search` returns the search results alone, with no pages read and no brief (default: on). Chart: `research.enabled` |
+| `RESEARCH_PAGES` / `RESEARCH_PAGE_CHARS` | results `web_search` reads in full (default 3, max 5), and characters of each given to the brief (default 6000). Chart: `research.pages` / `pageChars` |
+| `RESEARCH_FETCH_TIMEOUT` / `RESEARCH_TIMEOUT` | seconds to wait for those pages (default 25; a page not read by then is left out) and for the brief (default 90). Chart: `research.fetchTimeout` / `timeout` |
+| `RESEARCH_MODEL` / `RESEARCH_LLM_HOST` / `RESEARCH_LLM_API_KEY` | the brief's own LLM connection; each falls back to `MODEL` / `LLM_HOST` / `LLM_PASS`, like `IMAGE_PROMPT_*`. Chart: `research.*` (the key via secret.yaml) |
 | `BROWSER_CONCURRENCY` / `BROWSER_QUEUE_SIZE` | browser service: pages rendered at once, and renders allowed to wait before a 503 (defaults 2 / 8). Chart: `browser.concurrency` / `queueSize` |
 | `BROWSER_TIMEOUT` / `BROWSER_SETTLE_SECONDS` | browser service: seconds for one render, and seconds to let a page's scripts settle (defaults 30 / 5); core reads both to know how long to wait. Chart: `browser.timeout` / `settleSeconds` |
 | `METRICS_PORT` | port to serve the Prometheus `/metrics` endpoint on (default 9464); empty/`0` disables. Chart: `metrics.enabled`/`metrics.port` also add a ClusterIP Service, the pod port, and a kube-prometheus-stack ServiceMonitor (labelled `release: kube-prometheus-stack` — the operator only imports ServiceMonitors with that label). The same `metrics.enabled` switch turns on **llama.cpp's own** `/metrics` (`LLAMA_ARG_ENDPOINT_METRICS`, off upstream by default) plus a second ServiceMonitor for it; with `llmEngine: strata` that second one scrapes Strata's `/metrics` instead (`vllm:*` / `strata:*` names), sending the Strata key |
@@ -628,6 +671,7 @@ needs an entry there, gated with `requires` when it can be switched off;
 | `SANDBOX_REQUEST_TIMEOUT_SECONDS` | seconds of silence on one HTTP request to the sandbox's LLM before the client gives up (default 180, down from the OpenAI client's unstated 600). This is the HTTP client's per-read timeout: it catches a hung connection or a server that sends nothing, but NOT one that dribbles keep-alive padding while it works (OpenRouter pads non-streaming responses) — that case is caught by the wall-clock bound below. Chart: `sandbox.requestTimeout` |
 | `SANDBOX_MAX_RETRIES` | how many times that client retries a failed request (default 2; 0 disables). One model call is also wall-clock bounded (`ModelSettings.timeout`, see `sandbox_model_call_timeout()`) at (1 + this) x `SANDBOX_REQUEST_TIMEOUT_SECONDS` — the figure that was already the documented worst case for a silent server, now enforced for a padding one too. Chart: `sandbox.maxRetries` |
 | `SANDBOX_SNAPSHOT_MAX_BYTES` | max size of one thread's stored workspace snapshot in Redis (default 50MB). Chart: `sandbox.snapshotMaxBytes` |
+| `SANDBOX_INPUT_MAX_BYTES` | most bytes of chat files copied into a run's `in/`, all together (default 25MB; at most 10 files). Kept under the snapshot cap, since `in/` is saved with the workspace. Chart: `sandbox.inputMaxBytes` |
 | `SANDBOX_SNAPSHOT_TTL_SECONDS` | how long an unused thread's workspace snapshot survives in Redis (default 604800 = 7 days). Chart: `sandbox.snapshotTtlSeconds` |
 | `SANDBOX_MEMORY_LIMIT` | memory cap for each sandbox container, Docker notation (`4g`, `512m`; swap capped at the same figure); empty (default) = no cap. The containers run on the node's Docker daemon, outside Kubernetes accounting. The SDK has no option for it, so `build_sandbox_client` wraps the docker client's `containers.create`. Chart: `sandbox.memoryLimit` |
 | `VOICE_ENABLED` | `1`/`true` turns voice calls on: `/voice`, the join/leave tools and the bridge to the sidecar (default: off in code; the chart sets it from `voice.enabled`, default true, which also adds the sidecar container and the speech pod/PVC |

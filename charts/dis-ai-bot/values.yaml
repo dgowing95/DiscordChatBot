@@ -20,10 +20,11 @@ discordToken: ""
 # Name of a Secret you manage yourself (e.g. via External Secrets Operator or
 # sealed-secrets) holding the core credentials, instead of the one this chart
 # renders from discordToken / openaiApiKey / sandbox.apiKey /
-# diffusion.promptRewrite.apiKey / diffusion.review.apiKey (all ignored when
-# this is set). Keys are the env var names: DISCORD_TOKEN (required),
-# OPENAI_API_KEY, SANDBOX_LLM_API_KEY, IMAGE_PROMPT_LLM_API_KEY,
-# IMAGE_REVIEW_LLM_API_KEY (each optional - omit rather than leave empty).
+# diffusion.promptRewrite.apiKey / diffusion.review.apiKey / research.apiKey
+# (all ignored when this is set). Keys are the env var names: DISCORD_TOKEN
+# (required), OPENAI_API_KEY, SANDBOX_LLM_API_KEY, IMAGE_PROMPT_LLM_API_KEY,
+# IMAGE_REVIEW_LLM_API_KEY, RESEARCH_LLM_API_KEY (each optional - omit rather
+# than leave empty).
 existingSecret: ""
 redisHost: "dchatbot-redis-service.dchatbot.svc.cluster.local"
 # Which local LLM server the chart runs: llamacpp (default) or strata.
@@ -159,6 +160,24 @@ webFetch:
   # A plain fetch with less text than this goes to the browser (if enabled)
   browserMinChars: 400
 
+# web_search: searches, reads the top results itself (through fetch_url's
+# reader and cache) and has an LLM call write a short brief with sources.
+# That call is one more request to the LLM per search; with llamacpp.parallel
+# at 1 it also takes the slot, so llmHost can point it at another server.
+research:
+  # false = return the search results alone (no pages read, no brief)
+  enabled: true
+  # Results read in full (at most 5), and characters of each given to the brief
+  pages: 3
+  pageChars: 6000
+  # Seconds to wait for those pages, and for the brief
+  fetchTimeout: 25
+  timeout: 90
+  # Empty = reuse the bot's own model/host/key.
+  model: ""
+  llmHost: ""
+  apiKey: ""
+
 # Headless browser (browserservice/) for pages whose text only appears once
 # their scripts run. core tries a plain fetch first and only asks the browser
 # when that comes back almost empty. enabled: false removes the pod; fetch_url
@@ -290,6 +309,10 @@ sandbox:
   maxRetries: 2
   # Max size (bytes) of one thread's stored workspace snapshot in Redis
   snapshotMaxBytes: 50000000
+  # Most bytes of chat files (uploads, the bot's own pictures) copied into a
+  # run's in/ folder, all files together. Keep it well under snapshotMaxBytes:
+  # in/ is saved with the workspace.
+  inputMaxBytes: 25000000
   # How long an unused thread's workspace snapshot survives in Redis (seconds)
   snapshotTtlSeconds: 604800
   # Node path of the Docker socket to mount into the core pod

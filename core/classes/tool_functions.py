@@ -6,7 +6,6 @@ from agents import FunctionTool, function_tool,RunContextWrapper
 from classes.common import Common
 from classes.content_guard import check_web_request
 import discord
-from ddgs import DDGS
 
 logger = logging.getLogger(__name__)
 
@@ -22,10 +21,16 @@ async def add_emoji_to_message(message: discord.Message, emoji: str) -> None:
     
 @function_tool
 async def web_search(wrapper: RunContextWrapper[dict], search_request: str) -> str:
-    """Searches the internet for a given query.
+    """Searches the web, reads the top results and returns a short brief of
+    what they say, with numbered source links. Use it for anything current or
+    factual you are not sure of, and before making something (a picture, a
+    file) that depends on facts you don't know: for "draw the new Mars
+    rover", look up what it looks like first, then describe that. To read
+    one particular link, use fetch_url instead.
 
     Args:
-        search_request: The query to search for.
+        search_request: What you want to find out, as a question or search
+            terms.
     """
     logger.info(f"Searching the web for: {search_request}")
 
@@ -39,12 +44,12 @@ async def web_search(wrapper: RunContextWrapper[dict], search_request: str) -> s
         wrapper.context["channel"],
         f"Searching the web for: {search_request}",
     )
+    from classes import web_research
     try:
-        results = await asyncio.to_thread(DDGS().text, search_request, max_results=5)
+        return await web_research.research(search_request, await get_current_datetime())
     except Exception as e:
         logger.warning(f"An error occurred while searching: {e}")
         return "Error fetching search results."
-    return results
     
 @function_tool
 async def fetch_url(wrapper: RunContextWrapper[dict], url: str, part: int = 1) -> str:
@@ -209,6 +214,8 @@ async def generate_image(wrapper: RunContextWrapper[dict], prompt: str,
     """
     from classes.image_generation import (
         GENERATED_IMAGE_FILENAME,
+        MAX_IMAGE_CALLS,
+        TOO_MANY_IMAGES_TEXT,
         create_image,
         find_edit_source,
         service_capabilities,
@@ -216,6 +223,10 @@ async def generate_image(wrapper: RunContextWrapper[dict], prompt: str,
     )
 
     context = wrapper.context
+    context["image_calls"] = context.get("image_calls", 0) + 1
+    if context["image_calls"] > MAX_IMAGE_CALLS:
+        logger.info("generate_image: per-reply limit reached; not generating")
+        return TOO_MANY_IMAGES_TEXT
     channel = context["channel"]
     message = context.get("original_message")
     logger.info(f"{'Editing' if edit_previous else 'Generating'} image for prompt: {prompt}")
@@ -312,7 +323,8 @@ async def _send_sandbox_closing_note(
 
 
 @function_tool
-async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
+async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str,
+                           files: list[str] | None = None) -> str:
     """Hands a request to a code-sandbox agent: a Linux container (Python +
     shell) with its own model, which writes and actually runs code. Use it
     when the answer depends on running something rather than reasoning about
@@ -323,7 +335,7 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
     The sandbox agent designs it, not you — it can run code and look at the
     output, you can't. Pass the user's request in their own words, plus only
     what the sandbox cannot see for itself: results or filenames from earlier
-    runs in this thread, attachment contents, and constraints the user
+    runs in this thread, facts you looked up, and constraints the user
     actually stated. Nothing else. For "can you make me a gif of a cow doing
     a backflip", the whole task is `Generate a gif of a cow doing a backflip.`
 
@@ -342,6 +354,10 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
         task: The user's request in their own words, plus context from this
             conversation the sandbox cannot see. Short, and with no
             implementation details of your own.
+        files: Files from the chat to work on, by the name shown in
+            [Attached: ...]. A picture you made is "generated-image.png"
+            (the newest is used). Files on the message asking are always
+            given.
     """
     logger.info(f"Running sandbox task: {task}")
 
@@ -397,7 +413,7 @@ async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str) -> str:
                                                actor_id=requesting_user_id if wrapper.context.get("automatic") else None)
     try:
         return await _run_claimed_sandbox(
-            wrapper, task, channel, thread_created, in_thread, ledger)
+            wrapper, task, channel, thread_created, in_thread, ledger, files)
     finally:
         # Held through artifact delivery and the closing note, not just the
         # run: the claim used to end before delivery, so a message posted
@@ -439,10 +455,75 @@ def _forward_to_running_sandbox(channel, original_message, task: str, actor_id=N
             "finished, and do not retry now.")
 
 
-async def _run_claimed_sandbox(wrapper, task, channel, thread_created, in_thread, ledger) -> str:
+# How far back run_code_sandbox's `files` names are looked for, like
+# image_generation.EDIT_LOOKBACK_MESSAGES: the newest messages, since the file
+# is often one the bot posted earlier in this same reply.
+SANDBOX_FILE_LOOKBACK_MESSAGES = 20
+SANDBOX_FILE_DOWNLOAD_TIMEOUT = 60
+
+
+async def _replied_to(message, channel):
+    reply = getattr(message, "reference", None)
+    if reply is None or not getattr(reply, "message_id", None):
+        return None
+    resolved = getattr(reply, "resolved", None)
+    # A deleted original resolves to a stand-in with no attachments.
+    if getattr(resolved, "attachments", None) is not None:
+        return resolved
+    try:
+        return await channel.fetch_message(reply.message_id)
+    except Exception as e:
+        logger.info(f"Could not fetch the replied-to message ({e!r})")
+        return None
+
+
+async def _sandbox_input_files(wrapper, requested) -> tuple[list, list, list]:
+    """(inputs, problems, names) for a sandbox run: the files it is given
+    (see classes/sandbox_inputs.py for which, and why), downloaded."""
+    from classes import sandbox_inputs as si
+
+    def _candidates(message):
+        return [si.Candidate(a.filename, a.size, a) for a in getattr(message, "attachments", None) or []]
+
+    channel = wrapper.context.get("channel")
+    message = wrapper.context.get("original_message")
+    given = []
+    if message is not None:
+        given = _candidates(message) + _candidates(await _replied_to(message, channel))
+    requested = [name for name in requested or [] if isinstance(name, str)]
+    recent = []
+    if requested and channel is not None:
+        try:
+            async for older in channel.history(limit=SANDBOX_FILE_LOOKBACK_MESSAGES):
+                recent.extend(_candidates(older))
+        except Exception as e:
+            logger.warning(f"Sandbox: could not read the channel for files ({e!r})")
+    chosen, missing, problems = si.select(given, recent, requested, si.max_input_bytes())
+    problems = [f"{name} (not found in the chat)" for name in missing] + problems
+
+    async def _download(candidate):
+        try:
+            return await asyncio.wait_for(candidate.ref.read(), SANDBOX_FILE_DOWNLOAD_TIMEOUT)
+        except Exception as e:
+            logger.warning(f"Sandbox: could not download {candidate.name}: {e!r}")
+            return None
+
+    inputs = []
+    data = await asyncio.gather(*(_download(c) for c in chosen))
+    for name, candidate, content in zip(si.unique_names(c.name for c in chosen), chosen, data):
+        if content is None:
+            problems.append(f"{candidate.name} (could not be downloaded)")
+        else:
+            inputs.append((name, content))
+    return inputs, problems, [name for name, _ in inputs]
+
+
+async def _run_claimed_sandbox(wrapper, task, channel, thread_created, in_thread, ledger,
+                               files=None) -> str:
     """run_code_sandbox after the thread has been resolved and (in a thread)
     claimed: announce, run, deliver, close. Split out only so the claim's
     release can sit in one `finally` around all of it."""
+    from classes.sandbox_inputs import tool_note
     from classes.config_manager import configManager
     from classes.sandbox_agent import (
         run_sandbox_task,
@@ -477,6 +558,9 @@ async def _run_claimed_sandbox(wrapper, task, channel, thread_created, in_thread
     snapshot_id = sandbox_snapshot_id_for(channel)
     resumed = await sandbox_snapshot_exists(snapshot_id)
     workspace_note = sandbox_workspace_note(resumed)
+    inputs, input_problems, input_names = await _sandbox_input_files(wrapper, files)
+    if input_names:
+        workspace_note += f"\n📎 Files: {', '.join(input_names)}"
     # Loose ends the previous run in this thread left behind (messages that
     # arrived too late, an unanswered question). Offered to this run as
     # context — a follow-up in the thread IS the explicit resume — and
@@ -539,6 +623,8 @@ async def _run_claimed_sandbox(wrapper, task, channel, thread_created, in_thread
             requesting_user_id=requesting_user_id,
             resumed=resumed,
             ledger=ledger,
+            inputs=inputs,
+            input_problems=input_problems,
         )
     except Exception as e:
         logger.warning(f"Sandbox task failed: {e}")
@@ -651,7 +737,7 @@ async def _run_claimed_sandbox(wrapper, task, channel, thread_created, in_thread
         resumable=remaining is not None,
         steering=outcomes,
         resume_correction=resume_correction,
-    )
+    ) + tool_note(result.inputs, result.input_problems)
 
 
 _CONVERSATION_SAVE_ATTEMPTS = 5

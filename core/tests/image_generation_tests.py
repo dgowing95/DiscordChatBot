@@ -491,6 +491,29 @@ async def test_tool_posts_the_final_image_and_reports_what_it_shows():
 
 
 @pytest.mark.asyncio
+async def test_tool_makes_at_most_a_few_pictures_per_reply():
+    # On Strata the model kept calling generate_image for a subject the image
+    # model could not draw; the context is one dict for the whole reply.
+    _, context = _tool_env()
+    made = ImageResult(b"PNG", "a fox", MATCH, 1)
+    with patch.object(image_generation, "create_image", _creates(made)) as create:
+        for _ in range(image_generation.MAX_IMAGE_CALLS):
+            await _invoke(context, prompt="a fox")
+        result, _, _ = await _invoke(context, prompt="a fox")
+    assert create.await_count == image_generation.MAX_IMAGE_CALLS
+    assert result == image_generation.TOO_MANY_IMAGES_TEXT
+
+
+def test_a_picture_still_wrong_is_not_tried_again_in_the_reply():
+    review = ImageReview(shows="a mug", missing=["the console"])
+    retried = image_generation.tool_result_text(ImageResult(b"PNG", "p", review, 2))
+    assert "It has already been retried, so do not call generate_image again" in retried
+    # IMAGE_REVIEW_RETRIES=0, or a retry that failed: no claim it was retried.
+    once = image_generation.tool_result_text(ImageResult(b"PNG", "p", review, 1))
+    assert "retried" not in once and "So do not call generate_image again" in once
+
+
+@pytest.mark.asyncio
 async def test_tool_edits_the_previous_image():
     channel, context = _tool_env()
     made = ImageResult(b"EDITED", "make her fatter", MATCH, 1, edited=True)

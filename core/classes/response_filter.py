@@ -62,6 +62,21 @@ def strip_thinking(text: str) -> str:
     return text.strip()
 
 
+# A tool call written out as text, closed or cut off.
+_TOOL_CALL_TEXT_RE = re.compile(r"<tool_call>[\s\S]*?(?:</tool_call>|$)", re.IGNORECASE)
+
+
+def strip_tool_call_text(text: str) -> str:
+    """Remove tool calls the model wrote as plain text.
+
+    Only reachable when tools were sent with tool_choice "none" (the
+    max-turns wrap-up): Strata then takes them out of the chat template, and
+    a model that still wants one writes Qwen's <tool_call> markup into its
+    answer instead (seen live), which would otherwise be posted as-is.
+    """
+    return _TOOL_CALL_TEXT_RE.sub("", text or "").strip()
+
+
 def extract_thinking(text: str) -> str:
     """Collect the reasoning captured in open/close "think" tags, in order.
 
