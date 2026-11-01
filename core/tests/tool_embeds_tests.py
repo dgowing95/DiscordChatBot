@@ -88,3 +88,9 @@ def test_one_home_for_stop_wording():
     assert sandbox_agent.SANDBOX_STOP_TITLES.keys() == sandbox_agent.SANDBOX_OUTCOME_NOTES.keys()
     assert sandbox_agent.sandbox_outcome_note("infra_error") == \
         "❌ Stopped: the sandbox itself failed."
+
+
+def test_page_link_reads_a_bare_domain_as_https():
+    # fetch_url accepts "example.com/page" (normalize_url adds https)
+    assert te.page_link("example.com/wiki/Pluto") == \
+        "[example.com › wiki › Pluto](https://example.com/wiki/Pluto)"

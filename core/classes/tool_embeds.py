@@ -92,6 +92,11 @@ def page_link(url: str) -> str:
     the URL are percent-encoded: a Wikipedia "Mercury_(planet)" link left
     them in, and Discord showed the whole thing as raw text (checked live;
     encoding only the ")" was not enough)."""
+    # fetch_url takes a bare "example.com/page" (web_policy.normalize_url
+    # reads it as https), which would be neither a readable label nor a link.
+    url = (url or "").strip()
+    if "://" not in url:
+        url = "https://" + url
     target = url.replace(" ", "%20").replace("(", "%28").replace(")", "%29")
     return f"[{link_label(url)}]({target})"
 
