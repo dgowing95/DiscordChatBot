@@ -189,7 +189,8 @@ async def test_sandbox_combines_pair_in_thread():
 
     sends = []
     await _run_with_llm(LLM, 903, sends)
-    assert sends == []
+    # The original channel gets the same combined reply as the thread.
+    assert sends == ["result\n\ndetails"]
     thread.send.assert_awaited_once_with("result\n\ndetails")
 
 

@@ -699,6 +699,11 @@ async def _run_claimed_sandbox(wrapper, task, channel, thread_created, in_thread
             )
             logger.info(f"Sandbox artifact sent to channel: {artifact.name} ({len(artifact.data)} bytes)")
             sent_names.append(artifact.name)
+            # Kept for the reply: MessageHandler posts it, with these files,
+            # in the channel the request came from as well as the thread,
+            # so the result is where it was asked for. Extended, not set:
+            # one reply can make more than one sandbox call.
+            wrapper.context.setdefault("sandbox_files", []).append((artifact.name, artifact.data))
             # Only now: a failed send carried the message with it, so keeping
             # `lead` set is what lets the fallback below still deliver it.
             lead = ""

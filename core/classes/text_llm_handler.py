@@ -388,6 +388,17 @@ class TextLLMHandler:
         # self.message.channel so it lands next to the sandbox's own output
         # rather than outside the thread.
         self.sandbox_thread = None
+        # The files that sandbox run sent to its thread, as (name, bytes),
+        # so MessageHandler can post them with the reply in the channel the
+        # request came from too.
+        self.sandbox_files = []
+
+    def _capture_sandbox(self, user_info):
+        """Reads back what run_code_sandbox left on the run context. Called
+        on every way a run ends: a tool may have run before a later turn
+        failed."""
+        self.sandbox_thread = user_info.get("sandbox_thread")
+        self.sandbox_files = list(user_info.get("sandbox_files") or [])
 
 
     @staticmethod
@@ -527,6 +538,8 @@ class TextLLMHandler:
         # run ends, since a tool call may have already mutated this dict
         # before a later turn raises (e.g. MaxTurnsExceeded).
         "sandbox_thread": None,
+        # (name, bytes) of each file a sandbox run sent, also set by it.
+        "sandbox_files": [],
         # What a voice speaker said (no source message to read it from).
         "request_text": getattr(self, "request_text", None),
       }
@@ -560,14 +573,14 @@ class TextLLMHandler:
          final_output = response.final_output
          self._capture_reasoning(response.new_items, final_output)
          self._record_prompt_tokens(response.raw_responses)
-         self.sandbox_thread = user_info.get("sandbox_thread")
+         self._capture_sandbox(user_info)
          return final_output
       except asyncio.CancelledError:
          hooks.abandon_llm_call("cancelled")
          raise
       except Exception as e:
          hooks.abandon_llm_call("error")
-         self.sandbox_thread = user_info.get("sandbox_thread")
+         self._capture_sandbox(user_info)
          logger.warning('Failed to get response from LLM: ' + str(e))
          # A run that died part-way (MaxTurnsExceeded after a few chained
          # tool calls is the common one) still reasoned before it broke, and
@@ -624,7 +637,7 @@ class TextLLMHandler:
           final_output = result.final_output
           self._capture_reasoning(result.new_items, final_output)
           self._record_prompt_tokens(result.raw_responses)
-          self.sandbox_thread = user_info.get("sandbox_thread")
+          self._capture_sandbox(user_info)
           if retried_without_option:
             # Only now is the option known to be what the server refused;
             # a retry that failed too says nothing about it.
@@ -693,7 +706,7 @@ class TextLLMHandler:
 
     def _streamed_failure(self, hooks, user_info, e) -> str:
       hooks.abandon_llm_call("error")
-      self.sandbox_thread = user_info.get("sandbox_thread")
+      self._capture_sandbox(user_info)
       logger.warning('Failed to get a streamed response from LLM: ' + str(e))
       inc_llm_error(self.guild_id)
       return "Error"

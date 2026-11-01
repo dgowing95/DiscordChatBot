@@ -13,6 +13,7 @@ pillow_heif.register_heif_opener()
 from classes.text_llm_handler import TextLLMHandler, slot_context_tokens
 from classes import attachment_cache, history_policy, reply_policy
 from classes.sandbox_inputs import attachment_note
+from classes.common import send_with_files
 from classes.history_policy import (
     ANCHORED,
     KEEP,
@@ -485,6 +486,53 @@ class MessageHandler:
 
 
 
+    def _sandbox_copy_channel(self, thread):
+        """Where a sandbox run's reply and files are copied, besides the
+        thread they went to; None for nowhere.
+
+        A request made outside the thread: the channel it was made in. A
+        follow-up made inside a thread the bot started (a sandbox thread):
+        the channel that thread belongs to, so each new result shows up in
+        the channel the work began in. Not a thread people started
+        themselves, where the bot only joined in, and not a run whose thread
+        could not be made (it ran in the request's own channel)."""
+        channel = self.message.channel
+        if thread is None:
+            return None
+        if thread is not channel and getattr(thread, "id", None) != getattr(channel, "id", None):
+            return channel
+        bot_id = getattr(getattr(self.client, "user", None), "id", None)
+        if (isinstance(channel, discord.Thread) and bot_id is not None
+                and getattr(channel, "owner_id", None) == bot_id):
+            return getattr(channel, "parent", None)
+        return None
+
+    async def _post_sandbox_copy(self, ollama, text):
+        """Posts the reply and the files a sandbox run sent to its thread in
+        the channel the work was asked for in too (_sandbox_copy_channel),
+        so the result is there as well as in the thread. Sent under THAT
+        channel's lock, taken after this handle's own is released (for a
+        follow-up the two differ, and holding one while waiting for the
+        other could deadlock).
+        Exception-safe: the thread already has everything, so a failure
+        here must not cost the rest of the handle."""
+        channel = self._sandbox_copy_channel(getattr(ollama, "sandbox_thread", None))
+        if channel is None:
+            return
+        files = list(getattr(ollama, "sandbox_files", None) or [])
+        chunks = chunk_for_discord(text or "")
+        if not chunks and not files:
+            return
+        try:
+            async with get_channel_lock(channel.id):
+                for chunk in chunks[:-1]:
+                    await channel.send(chunk)
+                    await asyncio.sleep(1)
+                await send_with_files(channel, chunks[-1] if chunks else None, files)
+        except Exception as e:
+            logger.warning(f"Could not post the sandbox result in the original channel: {e}")
+
+
     async def handle_message(self):
         logger.info(f'Handling message: {self.message.content}')
         # Histogram covers the whole handling: prompt build + LLM run + send.
@@ -535,8 +583,8 @@ class MessageHandler:
         thinking = ollama.reasoning if SHOW_THINKING else ""
         # If run_code_sandbox created/reused a thread this run, the sandbox's
         # own output already lives there — send the outer agent's reply
-        # there too instead of the original channel, so the conversation
-        # doesn't end up split across two places.
+        # there, next to it. The reply and the run's files are then posted
+        # in the channel the work was asked for as well (_post_sandbox_copy).
         target_channel = getattr(ollama, "sandbox_thread", None) or self.message.channel
 
         if response == "Error":
@@ -551,6 +599,8 @@ class MessageHandler:
                     started = time.monotonic()
                     await self.handle_thinking_send(thinking, channel=target_channel)
                     self._observe_stage("send", started)
+            # No reply to copy, but the files a sandbox run made still exist.
+            await self._post_sandbox_copy(ollama, "")
         else:
             response = self.filter_response(response)
             # 4) Send under the lock: serializes the chunked replies of
@@ -579,4 +629,7 @@ class MessageHandler:
                 if thinking:
                     await self.handle_thinking_send(thinking, channel=target_channel)
                 self._observe_stage("send", started)
+            # parts, not response: what the thread got (pair marker resolved).
+            # After the lock: the copy takes the lock of the channel it goes to.
+            await self._post_sandbox_copy(ollama, "\n\n".join(p for p in parts if p))
         observe_response_generation(self.message.guild.id, time.monotonic() - start)

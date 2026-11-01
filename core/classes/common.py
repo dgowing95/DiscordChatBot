@@ -1,3 +1,4 @@
+import io
 import logging
 
 import discord
@@ -46,6 +47,45 @@ class Common:
         except Exception as e:
             logging.getLogger(__name__).warning(f"Could not update a tool embed: {e}")
 
+
+
+logger = logging.getLogger(__name__)
+
+# Discord's cap on attachments per message.
+MAX_FILES_PER_MESSAGE = 10
+
+
+async def send_with_files(channel, content: str | None, files) -> None:
+    """Sends `content` with `files` ((name, bytes) pairs) attached: ten to a
+    message, the text on the first. Several files on one message can pass
+    the server's upload limit when each alone did not, so a message that is
+    refused is resent one file per message (the text going alone first).
+    Each discord.File is built here, per send: one is used up by sending it.
+    Only a text-only send (no files) can raise; past that, failures are logged.
+    """
+    files = list(files or [])
+    if not files:
+        if content:
+            await channel.send(content)
+        return
+    for start in range(0, len(files), MAX_FILES_PER_MESSAGE):
+        group = files[start:start + MAX_FILES_PER_MESSAGE]
+        text = content if start == 0 else None
+        try:
+            await channel.send(content=text, files=[
+                discord.File(io.BytesIO(data), filename=name) for name, data in group])
+        except Exception as e:
+            logger.info(f"Sending {len(group)} file(s) together failed ({e!r}); sending one by one")
+            if text:
+                try:
+                    await channel.send(text)
+                except Exception as e:
+                    logger.warning(f"Could not send the text with the files: {e!r}")
+            for name, data in group:
+                try:
+                    await channel.send(file=discord.File(io.BytesIO(data), filename=name))
+                except Exception as e:
+                    logger.warning(f"Could not send {name}: {e}")
 
 
 def embed_from_data(data: dict) -> discord.Embed:

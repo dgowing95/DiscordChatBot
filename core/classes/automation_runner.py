@@ -11,6 +11,7 @@ import discord
 
 from classes.automation_policy import matches, settings, validate_schedule
 from classes.automation_store import AutomationStore, PREFIX
+from classes.common import send_with_files
 from classes.message_queue import get_channel_lock
 from classes.response_filter import filter_response as clean_response, chunk_for_discord, format_thinking_for_discord
 from classes.text_llm_handler import TextLLMHandler
@@ -237,7 +238,11 @@ async def execute(job, client):
                 for chunk in chunk_for_discord(output):
                     await channel.send(chunk)
                 if handler.sandbox_thread:
-                    await channel.send(f"Sandbox work: {handler.sandbox_thread.mention}")
+                    # With the files the run made, so they are here too, unless
+                    # it ran here (no thread could be made): they already are.
+                    elsewhere = handler.sandbox_thread.id != channel.id
+                    await send_with_files(channel, f"Sandbox work: {handler.sandbox_thread.mention}",
+                                          getattr(handler, "sandbox_files", None) if elsewhere else None)
                 if handler.reasoning and os.getenv("SHOW_THINKING", "0").lower() in ("1", "true"):
                     for chunk in format_thinking_for_discord(handler.reasoning):
                         await channel.send(chunk)
