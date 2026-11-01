@@ -3,8 +3,13 @@
 The person asking must hold Create Events (or Manage Events) themselves.
 The bot holds the permission for everyone it talks to, so without that
 check any member could have it make events the server does not let them
-make. The check also runs in an automatic run (a follow-up), as the
-entry's last editor, since that is who the event is made for.
+make. The check also runs in an automatic run (a schedule or a rule), as
+the entry's last editor, since that is who the event is made for.
+
+Except in a follow-up, by the owner's choice (_checks_requester): there
+the bot makes or moves the event whatever the asker's own permission, so
+"check the poll, then make the event" always works. The bot's own
+permission is still checked.
 
 The bot only changes events it made: Create Events covers your own events,
 and the bot's own are the ones it can vouch for.

@@ -3894,17 +3894,41 @@ def test_steering_note_treats_an_accepted_message_as_handled():
 def test_sandbox_agent_gets_the_main_agents_shared_tools():
     agent = sandbox_agent.build_sandbox_agent(None)
     by_name = {t.name: t for t in agent.tools}
-    excluded = {"create_poll", "check_polls"}
-    shared = [t for t in prod_tool_functions.shared_tools() if t.name not in excluded]
+    allowed = prod_sandbox_agent._SANDBOX_SHARED_TOOLS
+    shared = [t for t in prod_tool_functions.shared_tools() if t.name in allowed]
+    assert {t.name for t in shared} == set(allowed)  # every allowlisted name is real
     assert {t.name for t in shared} <= set(by_name)
     # In the sandbox they would only post to and read its own thread.
-    assert not excluded & set(by_name)
+    assert not {"create_poll", "check_polls"} & set(by_name)
     for tool in shared:
         if tool.name in prod_sandbox_agent._GATED_SHARED_TOOLS:
             assert by_name[tool.name] is not tool
         else:
             # Read-only: the very same object, so there is nothing to keep in step.
             assert by_name[tool.name] is tool
+
+
+def test_a_new_shared_tool_stays_out_of_the_sandbox_until_allowed(monkeypatch):
+    # An allowlist fails closed: a run with internet access never picks up a
+    # tool just because the main agent got it.
+    new_tool = MagicMock()
+    new_tool.name = "delete_channel"
+    real = prod_tool_functions.shared_tools
+    monkeypatch.setattr(prod_tool_functions, "shared_tools", lambda: [*real(), new_tool])
+    names = {t.name for t in sandbox_agent.build_sandbox_agent(None).tools}
+    assert "delete_channel" not in names
+
+
+def test_the_sandbox_create_event_never_points_at_tools_it_lacks():
+    # A call to a tool the sandbox does not have aborts the whole run, so its
+    # copy must not suggest the poll-and-follow-up flow.
+    from classes import event_tools
+    agent = sandbox_agent.build_sandbox_agent(None)
+    copy = next(t for t in agent.tools if t.name == "create_event")
+    assert "follow-up" in event_tools.create_event.description  # the cut still matches
+    assert "poll" not in copy.description and "follow-up" not in copy.description
+    assert copy.description.startswith("Creates a Discord server event")
+    assert "Events cannot repeat" in copy.description
 
 
 def test_shared_tools_are_in_the_main_agent_too():

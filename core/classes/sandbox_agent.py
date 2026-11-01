@@ -1112,22 +1112,32 @@ send_preview_to_thread.on_invoke_tool = _gated_invoke(
     send_preview_to_thread.on_invoke_tool, "send_preview_to_thread")
 
 
-# Of the main agent's shared tools, the ones that change something in the
-# server. Gated like attach_file: an event made on a plan the user has just
-# changed is a stale action. The read-only ones are not gated, so a lookup
-# never waits on respond_to_updates or on a long shell command.
+# The main agent's shared tools the sandbox may have: an ALLOWLIST, so a tool
+# added to shared_tools() later stays out of a run with internet access until
+# someone decides it belongs here. Left out on purpose: the poll tools (in the
+# sandbox "channel" is its thread, so a poll would be posted there and
+# check_polls would read only that thread's polls, never the one meant).
+_SANDBOX_SHARED_TOOLS = frozenset({"web_search", "fetch_url", "search_messages",
+                                   "list_events", "create_event", "update_event"})
+# The ones that change something in the server. Gated like attach_file: an
+# event made on a plan the user has just changed is a stale action. The
+# read-only ones are not gated, so a lookup never waits on respond_to_updates
+# or on a long shell command.
 _GATED_SHARED_TOOLS = frozenset({"create_event", "update_event"})
-# Left out: in the sandbox "channel" is its thread, so a poll would be posted
-# there and check_polls would read only that thread's polls, never the one a
-# user meant.
-_SANDBOX_EXCLUDED_SHARED_TOOLS = frozenset({"create_poll", "check_polls"})
+# create_event's description tells the model to post a poll and schedule a
+# follow-up to find a time. The sandbox has neither tool, and a call to a tool
+# that does not exist aborts the whole run (ModelBehaviorError, as with
+# apply_patch: see build_sandbox_agent), so its copy loses that sentence.
+_SANDBOX_DESCRIPTION_CUTS = {"create_event": re.compile(r"\s*To find a time[^.]*\.")}
 
 
 def _sandbox_shared_tools() -> list:
-    """The main agent's shared tools (tool_functions.shared_tools), for the
-    sandbox agent. The read-only ones are the very same objects; the gated
-    ones are COPIES with a wrapped on_invoke_tool, since wrapping the shared
-    object in place, as attach_file is, would gate the main agent's too.
+    """The main agent's shared tools (tool_functions.shared_tools) that are
+    on _SANDBOX_SHARED_TOOLS, for the sandbox agent. The read-only ones are
+    the very same objects; the gated ones are COPIES with a wrapped
+    on_invoke_tool (and create_event's description trimmed, see
+    _SANDBOX_DESCRIPTION_CUTS), since changing the shared object in place, as
+    attach_file is wrapped, would change the main agent's too.
 
     They read "channel", "discord_client" and "user_id" from the run
     context, which run_sandbox_task fills from its thread, client and
@@ -1137,12 +1147,15 @@ def _sandbox_shared_tools() -> list:
     from classes.tool_functions import shared_tools
     tools = []
     for tool in shared_tools():
-        if tool.name in _SANDBOX_EXCLUDED_SHARED_TOOLS:
+        if tool.name not in _SANDBOX_SHARED_TOOLS:
             continue
+        changes = {}
         if tool.name in _GATED_SHARED_TOOLS:
-            tool = dataclasses.replace(
-                tool, on_invoke_tool=_gated_invoke(tool.on_invoke_tool, tool.name))
-        tools.append(tool)
+            changes["on_invoke_tool"] = _gated_invoke(tool.on_invoke_tool, tool.name)
+        cut = _SANDBOX_DESCRIPTION_CUTS.get(tool.name)
+        if cut is not None:
+            changes["description"] = cut.sub("", tool.description, count=1)
+        tools.append(dataclasses.replace(tool, **changes) if changes else tool)
     return tools
 
 
@@ -1164,7 +1177,9 @@ async def _resolve_requester(thread, user_id):
     try:
         return await guild.fetch_member(user_id)
     except Exception as e:
-        logger.info(f"Sandbox: could not look up the requester {user_id}: {e}")
+        # A warning, not info: the event tools then refuse as if the person
+        # lacked the permission, and this line is the only sign of why.
+        logger.warning(f"Sandbox: could not look up the requester {user_id}: {e}")
         return None
 
 
@@ -1940,7 +1955,10 @@ async def run_sandbox_task(
             result.inputs, result.input_problems = given, problems
             return result
         agent = build_sandbox_agent(out_dir, conversation)
-        requester = await _resolve_requester(thread, requesting_user_id)
+        # Only the event tools use it, so no lookup when they are switched off.
+        from classes.event_format import events_enabled
+        requester = (await _resolve_requester(thread, requesting_user_id)
+                     if events_enabled() else None)
         nested_context = {
             "thread": thread,
             "client": client,

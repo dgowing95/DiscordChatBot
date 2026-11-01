@@ -103,6 +103,7 @@ from classes.tool_functions import (
     get_current_datetime,
     remove_memory,
     run_code_sandbox,
+    shared_tools,
     store_memory,
 )
 
@@ -321,7 +322,6 @@ def agent_tools(automatic: bool = False, voice: bool = False) -> list:
     # Automatic runs keep them all: a follow-up's usual job is to read a poll
     # and make the event, and the event tools re-check the editor's
     # permission; search and the poll lookup are read-only.
-    from classes.tool_functions import shared_tools
     tools = [*shared_tools(), change_personality]
     if not automatic:
         tools.extend((store_memory, remove_memory, clear_memories))

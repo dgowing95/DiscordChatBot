@@ -358,8 +358,12 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
      task; what was left out is told to both models.
    - **It shares the main agent's lookup tools** (`tool_functions.shared_tools`:
      web_search, fetch_url, search_messages and the event tools) as the same
-     objects, never copies of their code. The poll tools are left out: in the
-     sandbox they would only post to and read its own thread. The run
+     objects, never copies of their code. Which ones is an allowlist
+     (`_SANDBOX_SHARED_TOOLS`), so a new shared tool stays out of a run with
+     internet access until added there. The poll tools are left out: in the
+     sandbox they would only post to and read its own thread, and the sandbox
+     copy of `create_event` drops its "poll, then follow-up" advice, since a
+     call to a tool the run lacks aborts it. The run
      context also carries `channel` / `discord_client` / `user_id` (= the
      thread, the client, the requester), which is what those tools read. The
      two that change something are gated through a COPY of the tool
