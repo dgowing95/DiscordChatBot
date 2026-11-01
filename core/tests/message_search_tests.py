@@ -83,6 +83,34 @@ def test_format_unknown_channel_and_member_nick():
     assert "- Ali," in text and "in <#999>:" in text and "newest first" in text
 
 
+def test_an_embeds_body_and_fields_are_shown():
+    # A game-tracker bot's message is nothing but an embed; the title alone
+    # says nothing about what happened.
+    tracker = {"author": {"name": "Team Ana"}, "title": "Shared Chest",
+               "description": "```\nTeam Ana deposited:\nN/A\n\nTeam Ana withdrew:\n"
+                              "- 20 x Iron bar (4K)\n```",
+               "fields": [{"name": "Player", "value": "Bo", "inline": True},
+                          {"name": "Net value", "value": "-4K gp", "inline": True}],
+               "footer": {"text": "Powered by Tracker"}, "image": {"url": "https://x/y.png"}}
+    text = msf.format_results(_body(_hit(1, content="", embeds=[tracker])), GUILD_ID, {}, "x")
+    assert ("[embed: Team Ana - Shared Chest: Team Ana deposited: N/A Team Ana withdrew: "
+            "- 20 x Iron bar (4K) | Player: Bo | Net value: -4K gp]") in text
+    assert "Powered by" not in text and "```" not in text
+
+
+def test_embed_text_is_capped_and_empty_embeds_are_skipped():
+    long_embed = {"title": "Feed", "description": "word " * 500}
+    image_only = {"type": "image", "url": "https://x/y.png"}
+    text = msf.format_results(_body(_hit(1, content="", embeds=[long_embed, image_only])),
+                              GUILD_ID, {}, "x")
+    embed = text[text.index("[embed:"):text.index("]", text.index("[embed:")) + 1]
+    assert embed.endswith("…]") and len(embed) <= msf.EMBED_CHARS + len("[embed: …]")
+    assert text.count("[embed:") == 1
+    assert "[embed: Only a title]" in msf.format_results(
+        _body(_hit(2, embeds=[{"title": "Only a title", "fields": [{"name": "", "value": ""}]}])),
+        GUILD_ID, {}, "x")
+
+
 # --- the tool --------------------------------------------------------------
 
 def _channel(ident, name, nsfw=False):
@@ -199,12 +227,13 @@ async def test_discord_errors():
 
 
 @pytest.mark.asyncio
-async def test_calls_per_reply_are_capped():
+async def test_searches_per_reply_are_not_capped():
+    # A sandbox task that tallies a bot's posts needs many searches; the
+    # agent's turn limit is what bounds a loop.
     context, http = _env()
-    for _ in range(msf.MAX_CALLS):
-        await _search(context, query="x")
-    assert (await _search(context, query="x")) == msf.TOO_MANY_TEXT
-    assert http.request.call_count == msf.MAX_CALLS
+    for _ in range(10):
+        assert "found in this server" in (await _search(context, query="x"))
+    assert http.request.call_count == 10
 
 
 @pytest.mark.asyncio
@@ -394,12 +423,10 @@ async def test_bad_input_and_discord_errors():
 
 
 @pytest.mark.asyncio
-async def test_reads_per_reply_are_capped_apart_from_searches():
+async def test_reads_are_not_capped_and_need_a_server():
     context, http, _ = _context_env()
-    context["message_search_calls"] = msf.MAX_CALLS
-    for _ in range(msf.MAX_CONTEXT_CALLS):
-        await _read(context, message=_link(20))
-    assert (await _read(context, message=_link(20))) == msf.CONTEXT_TOO_MANY_TEXT
-    assert http.get_message.await_count == msf.MAX_CONTEXT_CALLS
+    for _ in range(10):
+        assert (await _read(context, message=_link(20))).startswith("Messages in #general")
+    assert http.get_message.await_count == 10
     assert "only works in a server" in (await _read({"channel": SimpleNamespace()},
                                                    message=_link(20)))

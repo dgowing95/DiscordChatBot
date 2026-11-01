@@ -20,8 +20,8 @@ from discord.http import Route
 
 from classes.common import Common
 from classes.message_search_format import (
-    CONTEXT_TOO_MANY_TEXT, MAX_CALLS, MAX_CONTEXT_CALLS, NOT_INDEXED_TEXT, TOO_MANY_TEXT,
-    clamp_side, format_context, format_results, not_indexed, parse_message_link, search_params,
+    NOT_INDEXED_TEXT, clamp_side, format_context, format_results, not_indexed,
+    parse_message_link, search_params,
 )
 
 logger = logging.getLogger(__name__)
@@ -95,8 +95,6 @@ async def search_messages(wrapper: RunContextWrapper[dict], query: str, channel:
     # The model can send null for an optional argument.
     query, channel, author = query or "", channel or "", author or ""
     context["message_search_calls"] = context.get("message_search_calls", 0) + 1
-    if context["message_search_calls"] > MAX_CALLS:
-        return TOO_MANY_TEXT
     if not query.strip() and not channel.strip() and not author.strip():
         return "Give some words to search for, a channel, or an author."
 
@@ -173,8 +171,6 @@ async def read_messages_around(wrapper: RunContextWrapper[dict], message: str,
     if guild is None or client is None:
         return "Reading messages only works in a server. Tell the user."
     context["message_context_calls"] = context.get("message_context_calls", 0) + 1
-    if context["message_context_calls"] > MAX_CONTEXT_CALLS:
-        return CONTEXT_TOO_MANY_TEXT
     parsed = parse_message_link(message)
     if parsed is None:
         return ("That isn't a message link. Use a link from search_messages' results, or ask "

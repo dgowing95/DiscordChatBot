@@ -551,7 +551,9 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
    from channels the bot can read (sandbox runs included: by the owner's
    choice it is not limited to what the person asking can read). A server Discord has not indexed yet
    answers 202 (code 110000), which discord.py returns as a normal body.
-   At most `MAX_CALLS` searches per reply. Read-only, so automatic runs and
+   No cap on calls per reply (there were 3, which stopped a sandbox task
+   that needed far more): the agent's own turn limit bounds a loop, and
+   discord.py waits out Discord's rate limits. Read-only, so automatic runs and
    voice turns get it too.
 
    **`read_messages_around(message, before, after)`** (same module) shows
@@ -564,8 +566,11 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
    refused (the bot is in several), the channel is resolved only within
    this one (an uncached thread is fetched; `Guild.fetch_channel` refuses
    another server's), and an age-restricted channel is read only from one.
-   Like search it reads what the bot can see. Its own cap per reply,
-   `MAX_CONTEXT_CALLS`, so paging cannot use up the searches.
+   Like search it reads what the bot can see, with no cap on calls. Both
+   tools show a message's embeds in full (author, title, description,
+   fields; 400 characters each): a bot's embed is often the whole message,
+   and showing only its title left a sandbox task with none of the data it
+   was asked to add up.
 
 ### What's New notes (write these in every feature PR)
 

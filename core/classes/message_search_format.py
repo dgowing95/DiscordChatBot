@@ -32,18 +32,15 @@ MAX_LIMIT = 25
 # One message's text is cut at this: enough to recognise it, and 25 of them
 # still fit beside the rest of a prompt.
 CONTENT_CHARS = 300
-# Searches in one reply. Discord does not publish this endpoint's rate limit,
-# and a model that finds nothing tends to retry with near-identical words.
-MAX_CALLS = 3
+# Each embed's text (title, description, fields) is cut at this. A bot's
+# embed is often the whole message, so it gets a little more than text.
+EMBED_CHARS = 400
 INDEX_CODE = 110000
 
 # Reading around a message: how many messages on each side by default, and
-# at most (so one call shows at most 25, like a search). A model paging back
-# through a long conversation calls it again and again, so it has its own
-# cap per reply.
+# at most (so one call shows at most 25, like a search).
 CONTEXT_DEFAULT = 5
 CONTEXT_MAX_SIDE = 12
-MAX_CONTEXT_CALLS = 4
 _LINK = re.compile(r"https?://(?:(?:ptb|canary)\.)?discord(?:app)?\.com/channels/"
                    r"(\d+|@me)/(\d+)/(\d+)")
 _BARE_ID = re.compile(r"^\d{15,25}$")
@@ -109,13 +106,35 @@ def _when(message: dict) -> str:
     return f"<t:{int(stamp.timestamp())}:f>"
 
 
+def _cut(text: str, limit: int) -> str:
+    text = " ".join(str(text or "").split())
+    return text[:limit].rstrip() + "…" if len(text) > limit else text
+
+
+def _embed(embed: dict) -> str:
+    """An embed as one line: author and title, then the description and each
+    field as "name: value". Bots (game trackers, feeds) put everything that
+    matters in the body and fields; showing only the title once left a
+    sandbox run with 25 copies of "[embed: Group Shared Storage]" and none
+    of the items or values it had been asked to add up. Code-block fences
+    are dropped and the whole is cut at EMBED_CHARS; the footer and images
+    are left out."""
+    head = " - ".join(str(p) for p in ((embed.get("author") or {}).get("name"),
+                                       embed.get("title")) if p)
+    body = [str(embed.get("description") or "").replace("```", " ")]
+    body += [f"{f.get('name') or ''}: {f.get('value') or ''}".replace("```", " ")
+             for f in embed.get("fields") or [] if isinstance(f, dict)]
+    body = " | ".join(part for part in (" ".join(b.split()) for b in body) if part.strip(": "))
+    text = _cut(f"{head}: {body}" if head and body else head or body, EMBED_CHARS)
+    return f"[embed: {text}]" if text else ""
+
+
 def _content(message: dict) -> str:
-    text = " ".join(str(message.get("content") or "").split())
-    if len(text) > CONTENT_CHARS:
-        text = text[:CONTENT_CHARS].rstrip() + "…"
+    text = _cut(message.get("content"), CONTENT_CHARS)
     extras = [f"[attached: {a.get('filename')}]" for a in message.get("attachments") or []
               if a.get("filename")]
-    extras += [f"[embed: {e.get('title')}]" for e in message.get("embeds") or [] if e.get("title")]
+    extras += [e for e in (_embed(e) for e in message.get("embeds") or [] if isinstance(e, dict))
+               if e]
     poll = (message.get("poll") or {}).get("question") or {}
     if poll.get("text"):
         extras.append(f"[poll: {poll['text']}]")
@@ -232,7 +251,3 @@ def format_context(anchor: dict, older, newer, guild_id, channel_id, channel_nam
 NOT_INDEXED_TEXT = ("Discord hasn't finished indexing this server's messages for search yet, "
                     "so nothing can be found right now. Tell the user to try again in a little "
                     "while.")
-TOO_MANY_TEXT = ("The search limit for this reply has been reached. Answer with what the "
-                 "earlier searches found.")
-CONTEXT_TOO_MANY_TEXT = ("The limit for reading messages in this reply has been reached. "
-                         "Answer with what has been read so far.")
