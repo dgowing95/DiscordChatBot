@@ -766,13 +766,12 @@ async def sandbox_snapshot_exists(snapshot_id: str | None) -> bool:
         return False
 
 
-def sandbox_workspace_note(resumed: bool) -> str:
-    """The one-line origin badge shown at the top of a run's embed, so the
-    thread says plainly whether this run built on the last one or started
-    over — otherwise the two are indistinguishable from the outside."""
-    if resumed:
-        return "♻️ **Resumed** — this thread's saved workspace and memory were restored."
-    return "🆕 **Fresh sandbox** — empty workspace, nothing carried over."
+def sandbox_run_title(resumed: bool) -> str:
+    """The run embed's title, which says whether this run built on the last
+    one in the thread or started over — otherwise the two are
+    indistinguishable from the outside."""
+    from classes.tool_embeds import SANDBOX_NEW, SANDBOX_RESUMED
+    return SANDBOX_RESUMED if resumed else SANDBOX_NEW
 
 
 async def sandbox_snapshot_remaining_seconds(snapshot_id: str | None) -> int | None:
@@ -814,16 +813,20 @@ def format_resume_window(seconds: int) -> str:
     return "1 minute" if minutes == 1 else f"{minutes} minutes"
 
 
-def sandbox_closing_note(
-    remaining_seconds: int | None, in_thread: bool, outcome: str = "",
-) -> str:
-    """The description of the embed posted when a sandbox run is over.
+def sandbox_closing_embed(
+    remaining_seconds: int | None, in_thread: bool, error: str | None = None,
+    details: str = "",
+) -> dict:
+    """The embed posted when a sandbox run is over, as {title, description,
+    color, footer} for Common.send_tool_discord_embed.
 
-    `outcome` is a one-line reason the run ended, shown first and passed only
-    when it did NOT finish normally (see tool_functions.finalize_notes). With
-    live progress off this embed is the only end-of-run signal in the thread,
-    so without it a run that timed out looks exactly like one that succeeded
-    and simply produced no file.
+    `error` is why the run stopped (a SandboxResult.error, or "infra_error"
+    when the sandbox itself failed), None when it finished normally. It
+    picks the title, so the reason reads as the headline. With live progress
+    off this embed is the only end-of-run signal in the thread, so without
+    it a run that timed out looks exactly like one that succeeded and simply
+    produced no file. `details` (sandbox_unresolved_note) goes under the
+    description.
 
     It marks the boundary between "messages here steer the running sandbox"
     and "messages here are ordinary chat again" — without it the only signal
@@ -846,18 +849,25 @@ def sandbox_closing_note(
     earlier state — and the first run in a thread has no older key to fall
     back on, so it correctly reports that nothing was saved.
     """
-    head = f"{outcome}\n" if outcome else ""
+    from classes.tool_embeds import COLOR_DONE, COLOR_STOPPED
+    title = SANDBOX_STOP_TITLES.get(error, "❌ Sandbox stopped") if error else "✅ Sandbox finished"
+    footer = None
     if not in_thread:
-        return head + "🐳 Sandbox closed. It left nothing behind — the next request starts fresh."
-    if remaining_seconds is None:
-        return head + ("🐳 Sandbox closed. Its workspace could **not** be saved, so a "
-                       "follow-up here will start from scratch.")
-    return head + (
-        f"🐳 Sandbox closed — messages here are back to normal chat.\n"
-        f"Its workspace was saved for another **{format_resume_window(remaining_seconds)}**: "
-        f"@mention me *in this thread* to carry on from where it left off. "
-        f"Asking anywhere else always starts a brand-new sandbox."
-    )
+        description = "It left nothing behind, so the next request starts fresh."
+    elif remaining_seconds is None:
+        description = ("Its workspace could **not** be saved, so a follow-up here "
+                       "will start from scratch.")
+        footer = "Messages here are normal chat again."
+    else:
+        description = (
+            f"Workspace saved for **{format_resume_window(remaining_seconds)}**. "
+            f"@mention me in this thread to carry on"
+            + (" from where it stopped." if error else ".")
+        )
+        footer = ("Messages here are normal chat again. Asking anywhere else "
+                  "starts a new sandbox.")
+    return {"title": title, "description": description + details,
+            "color": COLOR_STOPPED if error else COLOR_DONE, "footer": footer}
 
 
 RESUMED_TASK_PREAMBLE = (
@@ -2179,6 +2189,14 @@ async def _failure_result(
 # One line naming how a run ended, shown to the USER: on the live-progress
 # message's final state and as the first line of the closing embed. Only used
 # when the run did NOT finish normally.
+# The closing embed's title for each way a run can stop (sandbox_closing_embed).
+SANDBOX_STOP_TITLES = {
+    "timeout": "⏱ Sandbox stopped: ran out of time",
+    "max_turns": "🔁 Sandbox stopped: ran out of turns",
+    "model_error": "⚠️ Sandbox stopped: its model misbehaved",
+    "infra_error": "❌ Sandbox stopped: the sandbox itself failed",
+}
+
 SANDBOX_OUTCOME_NOTES = {
     "timeout": "⏱ Stopped: the task timed out.",
     "max_turns": "🔁 Stopped: the task ran out of turns.",
@@ -2306,7 +2324,7 @@ def sandbox_steering_note(steering) -> str:
 
 
 # Closing-embed wording for messages that did not get handled. Short: this
-# sits under "Sandbox closed" in the thread, for the people who wrote them.
+# sits in the closing embed in the thread, for the people who wrote them.
 # "accepted" (the model replied will_apply but never said done) is left out
 # on purpose: the writer already got a 👍 reply and can see the result, so a
 # ⚠️ line for it read as noise in live testing. sandbox_steering_note treats

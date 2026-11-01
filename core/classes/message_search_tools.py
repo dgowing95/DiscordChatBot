@@ -24,6 +24,13 @@ from agents import RunContextWrapper, function_tool
 from discord.http import Route
 
 from classes.common import Common
+from classes.tool_embeds import (
+    COLOR_MESSAGES,
+    READING_MESSAGES,
+    SAVING_MESSAGES,
+    SEARCHING_MESSAGES,
+    message_search_line,
+)
 from classes.message_search_format import (
     EXPORT_DEFAULT, EXPORT_MAX_BYTES, EXPORT_MAX_OFFSET, MAX_LIMIT, NOT_INDEXED_TEXT, clamp_export,
     clamp_side, export_filename, export_record, export_summary, flatten, format_context,
@@ -100,8 +107,8 @@ async def search_messages(wrapper: RunContextWrapper[dict], query: str, channel:
     logger.info(f"Searching {scope.where} for {scope.query!r} (author {scope.author_id}, call "
                 f"{context['message_search_calls']})")
     await Common.send_tool_discord_embed(
-        scope.current, f"Searching {scope.where} for: {scope.query or 'recent messages'}"
-                       + (f" (by {scope.author})" if scope.author else ""))
+        scope.current, message_search_line(scope.query, scope.where, scope.author),
+        COLOR_MESSAGES, SEARCHING_MESSAGES)
     body = await _search_page(scope, limit)
     if isinstance(body, str):
         return body
@@ -203,9 +210,8 @@ async def save_messages_to_file(wrapper: RunContextWrapper[dict], query: str = "
     logger.info(f"Saving up to {wanted} messages from {scope.where} for {scope.query!r} "
                 f"(author {scope.author_id})")
     await Common.send_tool_discord_embed(
-        scope.current, f"Saving messages from {scope.where} to a file: "
-                       f"{scope.query or 'all messages'}"
-                       + (f" (by {scope.author})" if scope.author else ""))
+        scope.current, message_search_line(scope.query, scope.where, scope.author),
+        COLOR_MESSAGES, SAVING_MESSAGES)
     names = _channel_names(scope.guild)
     records, seen, total, size, stopped = [], set(), 0, 0, ""
     offset = 0
@@ -336,7 +342,9 @@ async def read_messages_around(wrapper: RunContextWrapper[dict], message: str,
     before, after = clamp_side(before), clamp_side(after)
     logger.info(f"Reading {before}/{after} messages around {message_id} in {place.id} (call "
                 f"{context['message_context_calls']})")
-    await Common.send_tool_discord_embed(current, f"Reading messages in #{place.name}")
+    await Common.send_tool_discord_embed(
+        current, f"Around a message in #{place.name}",
+        COLOR_MESSAGES, READING_MESSAGES)
     try:
         anchor = await client.http.get_message(place.id, message_id)
         older, newer = await asyncio.gather(

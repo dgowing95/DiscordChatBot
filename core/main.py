@@ -165,7 +165,7 @@ async def register_commands():
     # from the helm chart's sandbox.enabled). Per-guild toggle, default off:
     # when true, run_code_sandbox streams the sandbox's commands and output
     # to the channel in a live-updating message; when false it only sends
-    # the one static "Running in sandbox" embed.
+    # the one static run embed.
     if sandbox_enabled():
 
         @command_tree.command(name="sandbox_progress_updates",

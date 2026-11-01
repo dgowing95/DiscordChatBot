@@ -14,33 +14,35 @@ class Common:
     """
 
     @staticmethod
-    def tool_embed(description, color=0x00b0f4, title="Tool Usage"):
+    def tool_embed(description, color=0x00b0f4, title=None, footer=None):
         if len(description) > EMBED_DESCRIPTION_MAX_CHARS:
             description = description[: EMBED_DESCRIPTION_MAX_CHARS - 2] + "… "
-        return discord.Embed(title=title, description=description, color=color)
+        embed = discord.Embed(title=title, description=description, color=color)
+        if footer:
+            embed.set_footer(text=footer)
+        return embed
 
     @staticmethod
     async def send_tool_discord_embed(channel, description, color=0x00b0f4,
-                                      title="Tool Usage"):
+                                      title=None, footer=None):
         """
-        Sends a Discord embed with the given title, description, and color,
-        and returns the sent message (for edit_tool_discord_embed).
+        Sends a tool's embed and returns the sent message (for
+        edit_tool_discord_embed).
 
-        title defaults to "Tool Usage" — every caller that announces a tool
-        ABOUT to run leaves it alone. It is overridden only where "Tool
-        Usage" would be actively wrong, e.g. the sandbox's closing note,
-        which reports on a run that has already finished.
+        The title names the action and the description is only its subject;
+        both, and the colours, come from classes/tool_embeds.py, which says
+        why. There is no default title: the old shared "Tool Usage" said
+        nothing about which tool ran.
         """
-        return await channel.send(embed=Common.tool_embed(description, color, title))
+        return await channel.send(embed=Common.tool_embed(description, color, title, footer))
 
     @staticmethod
     async def edit_tool_discord_embed(message, description, color=0x00b0f4,
-                                      title="Tool Usage"):
-        """Replaces the description of an embed sent above. Never raises: the
-        embed is a progress note, and failing to update it must not cost the
-        tool's result."""
+                                      title=None, footer=None):
+        """Replaces an embed sent above. Never raises: the embed is a progress
+        note, and failing to update it must not cost the tool's result."""
         try:
-            await message.edit(embed=Common.tool_embed(description, color, title))
+            await message.edit(embed=Common.tool_embed(description, color, title, footer))
         except Exception as e:
             logging.getLogger(__name__).warning(f"Could not update a tool embed: {e}")
 
