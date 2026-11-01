@@ -167,7 +167,7 @@ specification.
   verify what you wrote.
 - The workspace starts empty unless the task says otherwise. Never assume
   files, packages or context exist unless the task provides them; install
-  what you need (e.g. `pip install ...`).
+  what you need (e.g. `pip install ...`). Look facts up with `web_search`.
 - Do the work: write files, run commands, read the output, iterate until the
   task is done. If a step fails, read the error, fix it and retry.
 - If the task includes code or data, create it exactly as given.
@@ -1112,6 +1112,40 @@ send_preview_to_thread.on_invoke_tool = _gated_invoke(
     send_preview_to_thread.on_invoke_tool, "send_preview_to_thread")
 
 
+# Of the main agent's shared tools, the ones that change something in the
+# server. Gated like attach_file: an event made on a plan the user has just
+# changed is a stale action. The read-only ones are not gated, so a lookup
+# never waits on respond_to_updates or on a long shell command.
+_GATED_SHARED_TOOLS = frozenset({"create_event", "update_event"})
+# Left out: in the sandbox "channel" is its thread, so a poll would be posted
+# there and check_polls would read only that thread's polls, never the one a
+# user meant.
+_SANDBOX_EXCLUDED_SHARED_TOOLS = frozenset({"create_poll", "check_polls"})
+
+
+def _sandbox_shared_tools() -> list:
+    """The main agent's shared tools (tool_functions.shared_tools), for the
+    sandbox agent. The read-only ones are the very same objects; the gated
+    ones are COPIES with a wrapped on_invoke_tool, since wrapping the shared
+    object in place, as attach_file is, would gate the main agent's too.
+
+    They read "channel", "discord_client" and "user_id" from the run
+    context, which run_sandbox_task fills from its thread, client and
+    requester. Imported here, not at the top: tool_functions imports this
+    module."""
+    import dataclasses
+    from classes.tool_functions import shared_tools
+    tools = []
+    for tool in shared_tools():
+        if tool.name in _SANDBOX_EXCLUDED_SHARED_TOOLS:
+            continue
+        if tool.name in _GATED_SHARED_TOOLS:
+            tool = dataclasses.replace(
+                tool, on_invoke_tool=_gated_invoke(tool.on_invoke_tool, tool.name))
+        tools.append(tool)
+    return tools
+
+
 def build_sandbox_agent(out_dir: str | None, conversation=None) -> "object":
     """The nested SandboxAgent that does the work inside the sandbox.
 
@@ -1161,7 +1195,8 @@ def build_sandbox_agent(out_dir: str | None, conversation=None) -> "object":
     subclass of Agent and accepts tools=[...] the same way. The thread tools
     no-op gracefully (return a string telling the model to proceed on its
     own) when no Discord thread context was passed into this run — see
-    run_sandbox_task's nested_context.
+    run_sandbox_task's nested_context. The main agent's lookup and event
+    tools come last (_sandbox_shared_tools), shared rather than copied.
 
     conversation: the run's SandboxConversation, whose AgentHooks commit
     "this input was seen" after each completed model call (see
@@ -1213,7 +1248,7 @@ def build_sandbox_agent(out_dir: str | None, conversation=None) -> "object":
             ),
         ],
         tools=[respond_to_updates, ask_user, attach_file, send_preview_to_thread,
-               say_in_thread],
+               say_in_thread, *_sandbox_shared_tools()],
         hooks=make_agent_hooks(conversation) if conversation is not None else None,
         # Slightly cooler than the chat agent: code tasks want determinism.
         # timeout: the wall-clock bound on each model call that the client's
@@ -1887,6 +1922,13 @@ async def run_sandbox_task(
             "thread": thread,
             "client": client,
             "requesting_user_id": requesting_user_id,
+            # The same three under the names the main agent's shared tools
+            # read (see _sandbox_shared_tools): their embeds and "here" are
+            # the thread, and the event tools check the requester's own
+            # permission.
+            "channel": thread,
+            "discord_client": client,
+            "user_id": requesting_user_id,
             "session": session,
             # The run's conversation coordinator: the tools read it from
             # here to gate side effects, answer thread messages and ask

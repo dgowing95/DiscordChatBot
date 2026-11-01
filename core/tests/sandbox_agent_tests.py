@@ -230,7 +230,7 @@ def test_sandbox_instructions_explain_out_in_exactly_one_place():
     agent = sandbox_agent.build_sandbox_agent("/root/out")
     assert agent.instructions.count("out/") <= 4
     # This ceiling is a deliberate brake, not a comfortable bound: the prompt
-    # is ~3870 chars, so there is under 100 to spare. It is meant to fail the
+    # is ~3890 chars, so there is about 60 to spare. It is meant to fail the
     # next person who adds a paragraph instead of editing one — the exact
     # accretion that took this prompt to ~5000 chars with `out/` explained in
     # five places. Rewrite to fit; only raise it with a reason.
@@ -3882,3 +3882,87 @@ def test_steering_note_treats_an_accepted_message_as_handled():
     assert "“make it a silly cow” → accepted by the sandbox" in note
     assert "do not call the result a mistake" in note
     assert "not confirm" not in note
+
+
+# ------------- the main agent's shared tools, in the sandbox -------------
+# The sandbox agent gets the main agent's lookup and event tools as the same
+# objects (tool_functions.shared_tools), not as copies of their code. The
+# poll tools are left out. The two that change something (create_event,
+# update_event) are gated like attach_file, through a copy, so the main
+# agent's own tools are never gated.
+
+def test_sandbox_agent_gets_the_main_agents_shared_tools():
+    agent = sandbox_agent.build_sandbox_agent(None)
+    by_name = {t.name: t for t in agent.tools}
+    excluded = {"create_poll", "check_polls"}
+    shared = [t for t in prod_tool_functions.shared_tools() if t.name not in excluded]
+    assert {t.name for t in shared} <= set(by_name)
+    # In the sandbox they would only post to and read its own thread.
+    assert not excluded & set(by_name)
+    for tool in shared:
+        if tool.name in prod_sandbox_agent._GATED_SHARED_TOOLS:
+            assert by_name[tool.name] is not tool
+        else:
+            # Read-only: the very same object, so there is nothing to keep in step.
+            assert by_name[tool.name] is tool
+
+
+def test_shared_tools_are_in_the_main_agent_too():
+    from classes.text_llm_handler import agent_tools
+    names = {t.name for t in agent_tools()}
+    assert {t.name for t in prod_tool_functions.shared_tools()} <= names
+
+
+def test_gating_the_sandbox_copy_leaves_the_main_agents_tool_alone():
+    from classes import event_tools
+    original = event_tools.create_event.on_invoke_tool
+    sandbox_agent.build_sandbox_agent(None)
+    sandbox_agent.build_sandbox_agent(None)
+    assert event_tools.create_event.on_invoke_tool is original
+
+
+@pytest.mark.asyncio
+async def test_a_sandbox_event_waits_for_thread_input_to_be_answered():
+    conversation = MagicMock()
+    conversation.run_gated = AsyncMock(return_value="REFUSED")
+    context = {"conversation": conversation, "channel": MagicMock()}
+    args = json.dumps({"name": "Game night", "start": "2030-01-05 20:00"})
+
+    agent = sandbox_agent.build_sandbox_agent(None)
+    event = next(t for t in agent.tools if t.name == "create_event")
+    assert await event.on_invoke_tool(_nested_tool_context(context), args) == "REFUSED"
+    assert conversation.run_gated.await_args.args[0] == "create_event"
+
+
+@pytest.mark.asyncio
+async def test_the_sandbox_run_context_gives_the_shared_tools_what_they_read():
+    # The shared tools read "channel", "discord_client" and "user_id"; the
+    # sandbox's own tools read "thread", "client" and "requesting_user_id".
+    # Without the second set, every event call was refused as the requester
+    # lacking permission (no message author and no user_id to look up).
+    captured = {}
+
+    async def _run(agent, task, **kwargs):
+        captured.update(kwargs.get("context") or {})
+        return MagicMock(final_output="done")
+
+    thread, client = MagicMock(name="thread"), MagicMock(name="discord_client")
+    thread.send = AsyncMock()
+    member = MagicMock(name="member")
+    thread.guild.get_member.return_value = member
+
+    patches = _patch_session_lifecycle()
+    with patches[0], patches[1], patches[2], patches[3], \
+         patch.object(prod_sandbox_agent.Runner, "run", _run):
+        await prod_sandbox_agent.run_sandbox_task(
+            "print 42", None, thread=thread, client=client, requesting_user_id=7)
+
+    assert captured["channel"] is thread
+    assert captured["discord_client"] is client
+    assert captured["user_id"] == 7
+
+    from classes.event_tools import _guild_and_actor
+    guild, actor = _guild_and_actor(captured)
+    assert guild is thread.guild
+    assert actor is member
+    thread.guild.get_member.assert_called_with(7)

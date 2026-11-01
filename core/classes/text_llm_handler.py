@@ -98,16 +98,12 @@ from classes.sandbox_agent import sandbox_enabled
 
 from classes.tool_functions import (
     change_personality,
-    check_polls,
     clear_memories,
-    create_poll,
-    fetch_url,
     generate_image,
     get_current_datetime,
     remove_memory,
     run_code_sandbox,
     store_memory,
-    web_search,
 )
 
 logger = logging.getLogger(__name__)
@@ -321,20 +317,12 @@ def agent_tools(automatic: bool = False, voice: bool = False) -> list:
 
     A voice turn gets the same tools as a chat reply, except that it can
     leave the call instead of joining one."""
-    tools = [
-        web_search,
-        fetch_url,
-        change_personality,
-        create_poll,
-        check_polls,
-    ]
-    # Automatic runs keep the event tools: a follow-up's usual job is to
-    # read a poll and make the event. They re-check the editor's permission.
-    from classes.event_tools import event_tools
-    tools.extend(event_tools())
-    # Read-only, so automatic runs keep it too.
-    from classes.message_search_tools import message_search_tools
-    tools.extend(message_search_tools())
+    # The sandbox agent gets these same tools (tool_functions.shared_tools).
+    # Automatic runs keep them all: a follow-up's usual job is to read a poll
+    # and make the event, and the event tools re-check the editor's
+    # permission; search and the poll lookup are read-only.
+    from classes.tool_functions import shared_tools
+    tools = [*shared_tools(), change_personality]
     if not automatic:
         tools.extend((store_memory, remove_memory, clear_memories))
         from classes.automation_tools import automation_tools

@@ -356,6 +356,14 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
      Written with `session.write` before the run (checked live against
      Docker), capped by `SANDBOX_INPUT_MAX_BYTES`, and named at the top of the
      task; what was left out is told to both models.
+   - **It shares the main agent's lookup tools** (`tool_functions.shared_tools`:
+     web_search, fetch_url, search_messages and the event tools) as the same
+     objects, never copies of their code. The poll tools are left out: in the
+     sandbox they would only post to and read its own thread. The run
+     context also carries `channel` / `discord_client` / `user_id` (= the
+     thread, the client, the requester), which is what those tools read. The
+     two that change something are gated through a COPY of the tool
+     (`_sandbox_shared_tools`), so the main agent's own are never gated.
 
    Every one of these carries its full rationale — the production incident that
    produced it, and what breaks if it is undone — in the docstring of the
@@ -583,7 +591,7 @@ needs an entry there, gated with `requires` when it can be switched off;
    versions of a rule follows neither reliably. So when adding guidance, edit
    the existing home rather than restating it nearby — the comment block above
    `SANDBOX_INSTRUCTIONS` records which bullets were merged and why.
-   Sizes worth re-measuring before adding: `SANDBOX_INSTRUCTIONS` ~3850 chars
+   Sizes worth re-measuring before adding: `SANDBOX_INSTRUCTIONS` ~3890 chars
    formatted (pinned by a test, ceiling 3950), `run_code_sandbox` ~2000
    including its JSON schema.
 

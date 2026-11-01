@@ -896,6 +896,27 @@ async def check_polls(wrapper: RunContextWrapper[dict]) -> str:
     return "Polls in this channel, newest first:\n\n" + "\n\n".join(found)
 
 
+def shared_tools() -> list:
+    """The tools the main agent AND the sandbox agent get, as the same
+    objects: looking things up (web, links, this server's messages, polls,
+    events) plus posting a poll and making or moving an event. The sandbox
+    leaves out the poll tools (see sandbox_agent._SANDBOX_EXCLUDED_SHARED_TOOLS).
+
+    One list so the two cannot drift apart. The tools read "channel",
+    "discord_client" and "user_id" from their run context; the sandbox
+    puts its thread, the client and the requester there (run_sandbox_task),
+    so nothing here needs a sandbox copy. Each tool is a fixed piece of code:
+    the model picks a tool and its arguments, never what is done with the
+    client.
+
+    The event and search tools are imported here, not at the top: both
+    modules import from this one."""
+    from classes.event_tools import event_tools
+    from classes.message_search_tools import message_search_tools
+    return [web_search, fetch_url, create_poll, check_polls,
+            *event_tools(), *message_search_tools()]
+
+
 @function_tool
 async def join_voice_channel(wrapper: RunContextWrapper[dict]) -> str:
     """Joins the voice channel the person asking is in, so you can talk with
