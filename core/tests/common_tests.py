@@ -15,12 +15,26 @@ from classes import common
 async def test_send_tool_discord_embed_sends_description_unchanged_under_cap():
     channel = MagicMock()
     channel.send = AsyncMock()
-    await common.Common.send_tool_discord_embed(channel, "short description")
+    await common.Common.send_tool_discord_embed(channel, "short description",
+                                                title="🔎 Web search")
 
     channel.send.assert_awaited_once()
     embed = channel.send.await_args.kwargs["embed"]
     assert embed.description == "short description"
-    assert embed.title == "Tool Usage"
+    assert embed.title == "🔎 Web search"
+    assert embed.footer.text is None
+
+
+@pytest.mark.asyncio
+async def test_send_tool_discord_embed_has_no_generic_title_and_takes_a_footer():
+    # the old default "Tool Usage" said nothing about which tool ran
+    channel = MagicMock()
+    channel.send = AsyncMock()
+    await common.Common.send_tool_discord_embed(channel, "x", footer="a hint")
+
+    embed = channel.send.await_args.kwargs["embed"]
+    assert embed.title is None
+    assert embed.footer.text == "a hint"
 
 
 @pytest.mark.asyncio

@@ -69,6 +69,8 @@ core/                  # the main bot (the app that runs in production)
     sandbox_conversation_store.py  # per-thread record of loose ends (late messages,
                                #   open question) for the next run, in Redis
     common.py              # shared helpers (Discord tool embeds, embed_from_data)
+    tool_embeds.py         # PURE (stdlib-only) how tool embeds read: action titles,
+                           #   per-tool colours, link labels, sandbox run/closing text
     whats_new.py           # PURE (stdlib-only) What's New notes: parse core/whats_new.md,
                            #   APP_VERSION / WHATS_NEW_ENABLED, embed data + Discord limits
     help_catalog.py        # PURE (stdlib-only) the hand-written /help listing

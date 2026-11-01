@@ -487,7 +487,8 @@ async def test_tool_posts_the_final_image_and_reports_what_it_shows():
     assert create.await_args.kwargs["reference"] is None
     # the embed is brought in line with the image that was actually posted
     edit.assert_awaited_once()
-    assert edit.await_args.args[1] == "Generating image: a red fox. Make sure..."
+    assert edit.await_args.args[1] == "a red fox. Make sure..."
+    assert edit.await_args.args[3] == "🎨 Drawing an image"
 
 
 @pytest.mark.asyncio
@@ -525,7 +526,8 @@ async def test_tool_edits_the_previous_image():
     assert find.await_args.args[2] == BOT
     assert create.await_args.kwargs["reference"] == b"OLD"
     assert result.startswith("Edited image")
-    assert embed.await_args.args[1] == "Editing image: make her fatter"
+    assert embed.await_args.args[1] == "make her fatter"
+    assert embed.await_args.args[3] == "🖌️ Editing an image"
     edit.assert_not_awaited()  # one attempt: the announced prompt is already right
 
 

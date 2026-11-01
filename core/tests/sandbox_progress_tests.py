@@ -21,6 +21,7 @@ from classes.sandbox_progress import (
     parse_exec_result,
     sandbox_progress_updates_enabled,
 )
+from classes.tool_embeds import COLOR_SANDBOX, SANDBOX_RESUMED, sandbox_task_text
 
 # To run this pytest file from the command line, use:
 # PYTHONPATH=$(pwd) pytest core/tests/sandbox_progress_tests.py
@@ -117,20 +118,21 @@ def _render(t):
 
 
 def _embed_chars(spec) -> int:
-    total = len(spec.title) + len(spec.description or "")
+    total = len(spec.title) + len(spec.description or "") + len(spec.footer or "")
     total += sum(len(f.name) + len(f.value) for f in spec.fields)
     return total
 
 
 def test_transcript_initial_embed_mirrors_tool_embed():
-    # no commands yet: just the "Tool Usage"-style embed, nothing in the
+    # no commands yet: just what the static run embed shows, nothing in the
     # message body
     body, spec = _render(SandboxTranscript("compute 6*7"))
     assert body == ""
-    assert spec.title == "🐳 Sandbox"
-    assert spec.description == "Running in sandbox: compute 6*7"
-    assert spec.color == COLOR_TOOL
+    assert spec.title == "🐳 Sandbox · new workspace"
+    assert spec.description == "compute 6*7"
+    assert spec.color == COLOR_TOOL == COLOR_SANDBOX
     assert spec.fields == []
+    assert spec.footer is None
 
 
 def test_transcript_one_field_per_command():
@@ -273,12 +275,11 @@ def test_transcript_fields_chronological():
 
 
 def test_transcript_long_task_truncated_in_description():
-    _, spec = _render(SandboxTranscript("x" * 5000))
-    prefix = "Running in sandbox: "
-    assert spec.description.startswith(prefix)
-    assert len(spec.description) <= len(prefix) + DESCRIPTION_CHARS
-    # the task tail is truncated, ellipsis marks what was cut
-    assert spec.description[len(prefix):len(prefix) + 2] == "… "
+    _, spec = _render(SandboxTranscript("word " * 1000))
+    assert len(spec.description) <= DESCRIPTION_CHARS
+    # the start of the task is kept, cut at a word; the ellipsis marks the cut
+    assert spec.description.startswith("word word")
+    assert spec.description.endswith("word…")
 
 
 # ---------------------- SandboxProgressHooks ----------------------
@@ -320,8 +321,8 @@ async def test_start_sends_initial_embed_like_tool_embed():
     sent = channel.send.await_args
     embeds = sent.kwargs.get("embeds") or []
     assert len(embeds) == 1
-    assert embeds[0].title == "🐳 Sandbox"
-    assert "Running in sandbox: print 42" in embeds[0].description
+    assert embeds[0].title == "🐳 Sandbox · new workspace"
+    assert embeds[0].description == "print 42"
     assert embeds[0].color.value == COLOR_TOOL
     assert len(embeds[0].fields) == 0  # no commands yet
     content = sent.args[0]
@@ -524,24 +525,40 @@ async def test_message_stays_under_discord_limits():
     assert any("line-29" in f.name for f in embed.fields)
 
 
-# ---------------------- workspace origin badge ----------------------
+# ---------------------- title, files and reply hint ----------------------
 
-def test_transcript_has_no_workspace_note_by_default():
-    # the no-thread fallback path passes nothing, and must look exactly as
-    # it did before the badge existed
-    _, spec = _render(SandboxTranscript("do a thing"))
-    assert spec.description == "Running in sandbox: do a thing"
-
-
-def test_transcript_puts_the_workspace_note_above_the_task():
-    _, spec = _render(SandboxTranscript("do a thing", workspace_note="♻️ **Resumed**"))
-    assert spec.description == "♻️ **Resumed**\nRunning in sandbox: do a thing"
+def test_transcript_shows_the_title_files_and_footer_it_is_given():
+    _, spec = _render(SandboxTranscript("do a thing", title=SANDBOX_RESUMED,
+                                        files=["a.csv", "b.png"], footer="reply here"))
+    assert spec.title == SANDBOX_RESUMED
+    assert spec.description == "do a thing\n📎 a.csv, b.png"
+    assert spec.footer == "reply here"
 
 
-def test_hooks_pass_the_workspace_note_into_the_transcript():
-    hooks = SandboxProgressHooks(MagicMock(), "do a thing", workspace_note="🆕 **Fresh**")
+def test_transcript_matches_the_static_embed_text():
+    # the thread looks the same whether live progress is on or off
+    _, spec = _render(SandboxTranscript("do a thing", files=["a.csv"]))
+    assert spec.description == sandbox_task_text("do a thing", ["a.csv"], DESCRIPTION_CHARS)
+
+
+def test_hooks_pass_the_title_files_and_footer_into_the_embed():
+    channel, _ = _channel_with_message()
+    hooks = SandboxProgressHooks(channel, "do a thing", title=SANDBOX_RESUMED,
+                                 files=["a.csv"], footer="reply here")
     _, spec = hooks.transcript.render_message()
-    assert spec.description.startswith("🆕 **Fresh**\n")
+    embed = hooks._build_embed(spec)
+    assert embed.title == SANDBOX_RESUMED
+    assert embed.footer.text == "reply here"
+
+
+def test_the_footer_counts_against_the_embed_budget():
+    big_footer = "f" * 2000
+    t = SandboxTranscript("t", footer=big_footer)
+    for i in range(20):
+        t.add_command(f"cmd{i}")
+        t.add_output("x" * 900, exit_code=0)
+    _, spec = _render(t)
+    assert _embed_chars(spec) <= 6000
 
 
 @pytest.mark.asyncio
@@ -598,3 +615,15 @@ def test_a_block_that_ran_is_never_marked_held():
     t.add_output("out", exit_code=0, block=block)
     t.mark_held(block)
     assert block.held is False
+
+
+@pytest.mark.asyncio
+async def test_finalize_drops_the_reply_hint():
+    # once the run is over, replying no longer steers it
+    channel, message = _channel_with_message()
+    hooks = SandboxProgressHooks(channel, "t", footer="reply here", edit_interval=0)
+    await hooks.start()
+    assert channel.send.await_args.kwargs["embeds"][0].footer.text == "reply here"
+    await hooks.finalize("✅ Done.")
+    _, embed = _last_flush(message)
+    assert embed.footer.text is None

@@ -5,6 +5,7 @@ import io
 from agents import FunctionTool, function_tool,RunContextWrapper
 from classes.common import Common
 from classes.content_guard import check_web_request
+from classes import tool_embeds
 import discord
 
 logger = logging.getLogger(__name__)
@@ -19,14 +20,15 @@ async def add_emoji_to_message(message: discord.Message, emoji: str) -> None:
     except Exception as e:
         logger.warning(f"Failed to add emoji {emoji} to message {message.id}: {e}")
     
-async def _tool_notice(wrapper: RunContextWrapper[dict], text: str) -> None:
-    """The "Tool Usage" embed a lookup posts where it was asked. Skipped
-    when the run has no channel: a sandbox run may have no thread (its
-    tests, and any caller that passes none), and a lookup must still work
-    there rather than fail on None.send."""
+async def _tool_notice(wrapper: RunContextWrapper[dict], title: str, text: str,
+                       color: int = tool_embeds.COLOR_WEB) -> None:
+    """The embed a lookup posts where it was asked. Skipped when the run has
+    no channel: a sandbox run may have no thread (its tests, and any caller
+    that passes none), and a lookup must still work there rather than fail
+    on None.send."""
     channel = wrapper.context.get("channel")
     if channel is not None:
-        await Common.send_tool_discord_embed(channel, text)
+        await Common.send_tool_discord_embed(channel, text, color, title)
 
 
 @function_tool
@@ -50,7 +52,7 @@ async def web_search(wrapper: RunContextWrapper[dict], search_request: str) -> s
         return ("I can't perform that search — it was blocked by the safety "
                 "guard. Please rephrase with a safe, non-harmful query.")
 
-    await _tool_notice(wrapper, f"Searching the web for: {search_request}")
+    await _tool_notice(wrapper, tool_embeds.WEB_SEARCH, search_request)
     from classes import web_research
     try:
         return await web_research.research(search_request, await get_current_datetime())
@@ -78,7 +80,7 @@ async def fetch_url(wrapper: RunContextWrapper[dict], url: str, part: int = 1) -
         return ("I can't fetch that URL — it was blocked by the safety "
                 "guard.")
 
-    await _tool_notice(wrapper, f"Visiting URL: {url}" + (f" (part {part})" if part > 1 else ""))
+    await _tool_notice(wrapper, tool_embeds.reading_page_title(part), tool_embeds.page_link(url))
     try:
         page = await web_reader.read(url)
     except web_reader.FetchError as e:
@@ -137,9 +139,7 @@ async def store_memory(wrapper: RunContextWrapper[dict], data: str) -> str:
         await user_memory.append(data)
         await add_emoji_to_message(wrapper.context.get("original_message"), "💾")
         await Common.send_tool_discord_embed(
-            wrapper.context["channel"],
-            f"Stored data: {data}",
-        )
+            wrapper.context["channel"], data, tool_embeds.COLOR_MEMORY, tool_embeds.REMEMBERED)
         
         response_message = "Data stored successfully."
     except Exception as e:
@@ -250,7 +250,7 @@ async def generate_image(wrapper: RunContextWrapper[dict], prompt: str,
             return ("There is no earlier picture of mine in this channel to edit, so "
                     "nothing was made. Call generate_image again with edit_previous "
                     "false and a description of the whole picture.")
-    verb = "Editing image" if source is not None else "Generating image"
+    title = tool_embeds.EDITING if source is not None else tool_embeds.DRAWING
 
     # The prompt the image model is given, not the requested one, is what the
     # embed shows: it is the thing worth seeing when the result does not match
@@ -260,7 +260,8 @@ async def generate_image(wrapper: RunContextWrapper[dict], prompt: str,
     async def announce(first_prompt):
         nonlocal embed
         try:
-            embed = await Common.send_tool_discord_embed(channel, f"{verb}: {first_prompt}")
+            embed = await Common.send_tool_discord_embed(
+                channel, first_prompt, tool_embeds.COLOR_IMAGE, title)
         except Exception as e:
             logger.warning(f"Could not post the image tool embed: {e}")
 
@@ -276,7 +277,8 @@ async def generate_image(wrapper: RunContextWrapper[dict], prompt: str,
                 "unavailable right now and do not retry.")
     if embed is not None and result.attempts > 1:
         # Only the final image is posted, so the embed must describe that one.
-        await Common.edit_tool_discord_embed(embed, f"{verb}: {result.prompt}")
+        await Common.edit_tool_discord_embed(
+            embed, result.prompt, tool_embeds.COLOR_IMAGE, title)
     try:
         await channel.send(
             file=discord.File(io.BytesIO(result.png), filename=GENERATED_IMAGE_FILENAME)
@@ -288,7 +290,7 @@ async def generate_image(wrapper: RunContextWrapper[dict], prompt: str,
 
 
 async def _send_sandbox_closing_note(
-    channel, snapshot_id, in_thread: bool, outcome: str = "",
+    channel, snapshot_id, in_thread: bool, error: str | None = None, details: str = "",
 ) -> int | None:
     """Posts the sandbox's closing embed: how the run ended, and (in a thread)
     how much longer it can be resumed from here.
@@ -303,24 +305,21 @@ async def _send_sandbox_closing_note(
     you've sent one — so people can't tell whether they're steering a live
     sandbox or talking to the bot again.
 
-    Exception-safe and posted on every path where a "Running in sandbox"
-    embed already went out: a failure to post this must never change what
-    the tool returns to the model.
+    Exception-safe and posted on every path where the run's embed already
+    went out: a failure to post this must never change what the tool
+    returns to the model.
     """
     from classes.sandbox_agent import (
-        sandbox_closing_note,
+        sandbox_closing_embed,
         sandbox_snapshot_remaining_seconds,
     )
 
     remaining = None
     try:
         remaining = await sandbox_snapshot_remaining_seconds(snapshot_id)
+        note = sandbox_closing_embed(remaining, in_thread, error, details)
         await Common.send_tool_discord_embed(
-            channel,
-            sandbox_closing_note(remaining, in_thread, outcome),
-            color=0x99AAB5,  # muted grey: this run is over, unlike the cyan "running" embed
-            title="Sandbox closed",
-        )
+            channel, note["description"], note["color"], note["title"], note["footer"])
     except Exception as e:
         logger.warning(f"Sandbox: failed to post the closing note: {e}")
     return remaining
@@ -535,14 +534,20 @@ async def _run_claimed_sandbox(wrapper, task, channel, thread_created, in_thread
         sandbox_snapshot_id_for,
         sandbox_outcome_note,
         sandbox_tool_result,
+        sandbox_run_title,
         sandbox_unresolved_note,
-        sandbox_workspace_note,
     )
     from classes.sandbox_conversation_store import SandboxConversationStore, resume_preamble
     from classes.sandbox_progress import (
         DESCRIPTION_CHARS,
         SandboxProgressHooks,
         sandbox_progress_updates_enabled,
+    )
+    from classes.tool_embeds import (
+        COLOR_SANDBOX,
+        SANDBOX_REPLY_HINT,
+        SANDBOX_STARTED,
+        sandbox_task_text,
     )
 
     original_message = wrapper.context.get("original_message")
@@ -551,9 +556,8 @@ async def _run_claimed_sandbox(wrapper, task, channel, thread_created, in_thread
     if thread_created:
         try:
             await Common.send_tool_discord_embed(
-                original_message.channel,
-                f"🧵 Started a sandbox thread: {channel.mention}",
-            )
+                original_message.channel, f"Follow along in {channel.mention}",
+                COLOR_SANDBOX, SANDBOX_STARTED)
         except Exception as e:
             logger.warning(f"Sandbox: failed to notify the original channel of the new thread: {e}")
     # Whether this run will resume the thread's saved workspace or start
@@ -561,10 +565,14 @@ async def _run_claimed_sandbox(wrapper, task, channel, thread_created, in_thread
     # exposes no way to find out afterwards (see sandbox_snapshot_exists).
     snapshot_id = sandbox_snapshot_id_for(channel)
     resumed = await sandbox_snapshot_exists(snapshot_id)
-    workspace_note = sandbox_workspace_note(resumed)
+    title = sandbox_run_title(resumed)
     inputs, input_problems, input_names = await _sandbox_input_files(wrapper, files)
-    if input_names:
-        workspace_note += f"\n📎 Files: {', '.join(input_names)}"
+    # The reply hint, only in a real thread, where a run is claimed and
+    # main.py routes messages to it: in the parent channel (the
+    # thread-creation-failed fallback) it would promise a conversation
+    # nothing would pick up. It sits in the run's own embed, static or live
+    # progress, so it shows whatever the progress setting.
+    footer = SANDBOX_REPLY_HINT if in_thread else None
     # Loose ends the previous run in this thread left behind (messages that
     # arrived too late, an unanswered question). Offered to this run as
     # context — a follow-up in the thread IS the explicit resume — and
@@ -592,31 +600,26 @@ async def _run_claimed_sandbox(wrapper, task, channel, thread_created, in_thread
         # command the sandbox runs and its output (throttled for Discord's
         # 5-edits/minute limit). start() is exception-safe (swallows send
         # failures), so a progress problem never blocks the run.
-        progress = SandboxProgressHooks(channel, task, workspace_note=workspace_note)
+        progress = SandboxProgressHooks(channel, task, title=title, files=input_names,
+                                        footer=footer)
         await progress.start()
-    else:
-        # The task is capped here the same way the live-progress embed caps
-        # it, so a verbose task degrades to a truncated line rather than a
-        # screenful of embed.
-        shown = task if len(task) <= DESCRIPTION_CHARS else task[: DESCRIPTION_CHARS - 1] + "…"
-        await Common.send_tool_discord_embed(
-            channel,
-            f"{workspace_note}\nRunning in sandbox: {shown}",
-        )
-    # Sent whatever the progress setting: conversational replies are not
-    # part of the optional progress embed, so a user needs to know they can
-    # talk to the run either way. Only in a real thread, where a run is
-    # claimed and main.py routes messages to it; sent in the parent channel
-    # (the thread-creation-failed fallback) it would promise a conversation
-    # nothing would pick up.
-    if in_thread:
-        await Common.send_tool_discord_embed(
-            channel,
-            "📨 Reply here while it runs — no @mention needed — to change the task "
-            "or ask a question. It will answer before its next step.",
-            0xB0F400,
-            "Thread Linked to Sandbox",
-        )
+    run_embed = None
+    run_text = sandbox_task_text(task, input_names, DESCRIPTION_CHARS)
+    if progress is None:
+        # The same description the live-progress embed renders (the task
+        # capped at DESCRIPTION_CHARS), so the thread looks alike either way.
+        run_embed = await Common.send_tool_discord_embed(
+            channel, run_text, COLOR_SANDBOX, title, footer)
+
+    async def end_run_embed(note):
+        # The reply hint is true only while the run is live: left on, it sits
+        # just above the closing embed's "normal chat again" and invites a
+        # reply that would no longer steer anything. finalize drops it from
+        # the live-progress embed; the static one is edited without it.
+        if progress is not None:
+            await progress.finalize(note)
+        elif run_embed is not None and footer:
+            await Common.edit_tool_discord_embed(run_embed, run_text, COLOR_SANDBOX, title)
 
     try:
         result = await run_sandbox_task(
@@ -632,14 +635,13 @@ async def _run_claimed_sandbox(wrapper, task, channel, thread_created, in_thread
         )
     except Exception as e:
         logger.warning(f"Sandbox task failed: {e}")
-        if progress is not None:
-            await progress.finalize("❌ Stopped: the sandbox itself failed.")
-        # The "Running in sandbox" embed already went out, so this path needs
-        # a closing note too or the thread is left looking mid-run forever.
+        await end_run_embed(sandbox_outcome_note("infra_error"))
+        # The run's embed already went out, so this path needs a closing
+        # note too or the thread is left looking mid-run forever.
         outcomes = ledger.outcomes() if ledger is not None else []
         await _send_sandbox_closing_note(
-            channel, snapshot_id, in_thread,
-            "❌ Stopped: the sandbox itself failed." + sandbox_unresolved_note(outcomes, in_thread))
+            channel, snapshot_id, in_thread, "infra_error",
+            sandbox_unresolved_note(outcomes, in_thread))
         await _save_conversation_record(snapshot_id, outcomes, "infra_error", ledger)
         return ("The sandbox task failed (the code sandbox may be unavailable). "
                 "Tell the user the sandbox is not working right now and do "
@@ -666,11 +668,9 @@ async def _run_claimed_sandbox(wrapper, task, channel, thread_created, in_thread
         except Exception as e:
             logger.warning(f"Sandbox: failed to post the resume correction: {e}")
 
-    if progress is not None:
-        # give the live message its final state (it would otherwise sit on
-        # the last "still running" / thinking snapshot)
-        note = "✅ Done." if result.ok else sandbox_outcome_note(result.error)
-        await progress.finalize(note)
+    # give the live message its final state (it would otherwise sit on the
+    # last "still running" / thinking snapshot)
+    await end_run_embed("✅ Done." if result.ok else sandbox_outcome_note(result.error))
 
     # Acknowledgements the sandbox wrote while Discord was refusing sends.
     # Posted now, before the result, so the thread reads in order.
@@ -719,13 +719,13 @@ async def _run_claimed_sandbox(wrapper, task, channel, thread_created, in_thread
     outcomes = ledger.outcomes() if ledger is not None else list(getattr(result, "conversation", None) or [])
 
     # After the artifacts, before the return: the thread's "here is how the run
-    # ended, and how long you can pick it back up" marker. The outcome line only
-    # goes out when the run did NOT finish normally. Posted on every path where
-    # a "Running in sandbox" embed already went out, and never on the early
-    # returns (content guard, forwarded-to-a-running-run) where nothing opened.
-    outcome = "" if result.ok else sandbox_outcome_note(result.error)
+    # ended, and how long you can pick it back up" marker; a run that did NOT
+    # finish normally says why in its title. Posted on every path where the
+    # run's embed already went out, and never on the early returns (content
+    # guard, forwarded-to-a-running-run) where nothing opened.
     remaining = await _send_sandbox_closing_note(
-        channel, snapshot_id, in_thread, outcome + sandbox_unresolved_note(outcomes, in_thread))
+        channel, snapshot_id, in_thread, None if result.ok else (result.error or "failed"),
+        sandbox_unresolved_note(outcomes, in_thread))
     await _save_conversation_record(
         snapshot_id, outcomes, "ok" if result.ok else (result.error or "failed"), ledger)
 
@@ -801,9 +801,9 @@ async def change_personality(wrapper: RunContextWrapper[dict], personality: str)
         await configmanager.update_setting("system", personality, wrapper.context.get("guild_id"))
         logger.info(f"Changed personality to: {personality}")
 
-        embed = discord.Embed(title="Personality Updated",
-                      description=personality)
-        await wrapper.context["channel"].send(embed=embed)
+        await Common.send_tool_discord_embed(
+            wrapper.context["channel"], personality, tool_embeds.COLOR_PERSONA,
+            tool_embeds.PERSONALITY)
         return True
     except Exception as e:
         logger.warning(f"An error occurred while changing personality: {e}")

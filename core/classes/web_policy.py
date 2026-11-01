@@ -135,7 +135,12 @@ def normalize_url(url: str) -> str | None:
     netloc = host if ":" not in host else f"[{host}]"
     if port and not ((scheme == "http" and port == 80) or (scheme == "https" and port == 443)):
         netloc += f":{port}"
-    return urlunsplit((scheme, netloc, parts.path or "/", _clean_query(parts.query), ""))
+    # Brackets come back percent-encoded from the bot's own "Reading a page"
+    # embed (tool_embeds.page_link encodes them, or Discord shows the link as
+    # raw text), and the model re-reads links from there. Decoded, so both
+    # spellings are one page and one cache entry.
+    path = re.sub("%29", ")", re.sub("%28", "(", parts.path or "/", flags=re.I), flags=re.I)
+    return urlunsplit((scheme, netloc, path, _clean_query(parts.query), ""))
 
 
 def _reddit_route(host: str, path: str):

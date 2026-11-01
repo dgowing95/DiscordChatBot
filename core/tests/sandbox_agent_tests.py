@@ -1033,13 +1033,44 @@ def _embed_descriptions(embed):
     return [call.args[1] for call in embed.await_args_list]
 
 
+_EMBED_PARAMS = ("channel", "description", "color", "title", "footer")
+
+
+def _embed_calls(embed):
+    """Every send_tool_discord_embed call as a dict of its parameters,
+    whether they were passed by position or by name."""
+    calls = []
+    for call in embed.await_args_list:
+        params = dict(zip(_EMBED_PARAMS, call.args))
+        params.update(call.kwargs)
+        calls.append(params)
+    return calls
+
+
+def _embed_titled(embed, needle):
+    """The single embed (as _embed_calls gives it) whose title contains
+    `needle`: the run's own embed is "🐳 Sandbox · ...", the closing one
+    "✅ Sandbox finished" or "... Sandbox stopped: ..."."""
+    matches = [c for c in _embed_calls(embed) if needle in (c.get("title") or "")]
+    assert len(matches) == 1, (needle, _embed_calls(embed))
+    return matches[0]
+
+
+def _closing(embed):
+    """The closing embed: the one that says the run finished or stopped."""
+    matches = [c for c in _embed_calls(embed)
+               if any(w in (c.get("title") or "") for w in ("Sandbox finished", "Sandbox stopped"))]
+    assert len(matches) == 1, _embed_calls(embed)
+    return matches[0]
+
+
 def _embed_matching(embed, needle):
     """The single embed description containing `needle`.
 
-    run_code_sandbox sends several embeds per call (the optional "started a
-    thread" note, the static "Running in sandbox" one, and the closing
-    note), so positional indexing into await_args_list is fragile — assert
-    on the one you actually mean.
+    run_code_sandbox sends several embeds per call (the optional "Sandbox
+    started" note, the static run embed and the closing one), so positional
+    indexing into await_args_list is fragile — assert on the one you
+    actually mean. To find one by title, use _embed_titled or _closing.
     """
     matches = [d for d in _embed_descriptions(embed) if needle in d]
     assert len(matches) == 1, (needle, _embed_descriptions(embed))
@@ -1131,7 +1162,7 @@ async def test_tool_runs_task_and_streams_progress_when_enabled(monkeypatch):
     instances[0].finalize.assert_awaited_once()
     assert "Done" in instances[0].finalize.await_args.args[0]
     # with progress on, the static embed is not sent (only the closing note)
-    assert not [d for d in _embed_descriptions(embed) if "Running in sandbox" in d]
+    assert not [c for c in _embed_calls(embed) if "Sandbox ·" in (c.get("title") or "")]
 
 
 @pytest.mark.asyncio
@@ -1155,7 +1186,7 @@ async def test_tool_progress_disabled_by_default_sends_embed(monkeypatch):
     # progress is off by default: no hooks, just the static embed
     hook_cls.assert_not_called()
     assert instances == []
-    assert "Running in sandbox: print 42" in _embed_matching(embed, "Running in sandbox")
+    assert _embed_titled(embed, "Sandbox ·")["description"] == "print 42"
     _assert_ran_with(task_api, "print 42", None)
 
 
@@ -1178,7 +1209,7 @@ async def test_tool_progress_disabled_when_setting_false(monkeypatch):
 
     assert result.startswith("done: 42")
     hook_cls.assert_not_called()
-    assert "Running in sandbox" in _embed_matching(embed, "Running in sandbox")
+    assert _embed_titled(embed, "Sandbox ·")
     _assert_ran_with(task_api, "print 42", None)
 
 
@@ -1203,7 +1234,7 @@ async def test_tool_progress_falls_back_to_off_on_config_error(monkeypatch):
 
     assert result.startswith("done: 42")  # the run still happens
     hook_cls.assert_not_called()
-    assert "Running in sandbox" in _embed_matching(embed, "Running in sandbox")
+    assert _embed_titled(embed, "Sandbox ·")
     _assert_ran_with(task_api, "print 42", None)
 
 
@@ -1272,7 +1303,7 @@ async def test_tool_reports_timeout_with_no_recovered_artifacts(monkeypatch):
     assert "do not retry" in result.lower()
     # the live message is closed with a timeout note
     instances[0].finalize.assert_awaited_once()
-    assert "timed out" in instances[0].finalize.await_args.args[0]
+    assert "ran out of time" in instances[0].finalize.await_args.args[0]
 
 
 @pytest.mark.asyncio
@@ -1303,7 +1334,7 @@ async def test_tool_reports_timeout_with_recovered_artifact(monkeypatch):
     assert "do not retry" in result.lower()
     assert "not claim" in result.lower() or "pending" in result.lower()
     instances[0].finalize.assert_awaited_once()
-    assert "timed out" in instances[0].finalize.await_args.args[0]
+    assert "ran out of time" in instances[0].finalize.await_args.args[0]
 
 
 @pytest.mark.asyncio
@@ -2509,15 +2540,17 @@ async def test_tool_notifies_original_channel_when_a_new_thread_is_created():
             _tool_context(message), json.dumps({"task": "print 42"}),
         )
 
-    # the "started a thread" note (to the ORIGINAL channel), then three to the
-    # thread (these tests do not enable progress updates): the static "Running
-    # in sandbox" embed, the "Thread Linked to Sandbox" notice telling people
-    # they can steer the run from here, and the closing note.
-    assert embed.await_count == 4
-    first_call = embed.await_args_list[0]
-    assert first_call.args[0] is message.channel
-    assert "sandbox thread" in first_call.args[1]
-    assert "<#555>" in first_call.args[1]
+    # the "started" note (to the ORIGINAL channel), then two to the thread
+    # (these tests do not enable progress updates): the static run embed,
+    # whose footer tells people they can steer the run from here, and the
+    # closing note.
+    assert embed.await_count == 3
+    first, run = _embed_calls(embed)[:2]
+    assert first["channel"] is message.channel
+    assert first["title"] == "🧵 Sandbox started"
+    assert "<#555>" in first["description"]
+    assert run["channel"] is new_thread
+    assert "Reply in this thread" in run["footer"]
 
 
 @pytest.mark.asyncio
@@ -2538,11 +2571,12 @@ async def test_tool_does_not_notify_when_reusing_an_existing_thread():
         )
 
     # ensure_sandbox_thread returned a plain channel, not a discord.Thread, so
-    # in_thread is False: the static "Running in sandbox" embed and the closing
-    # note only. No "started a thread" note, and no "Thread Linked to Sandbox"
-    # notice either — nothing would route messages from here to the run.
+    # in_thread is False: the static run embed and the closing note only. No
+    # "started" note, and no reply hint in the run embed's footer either —
+    # nothing would route messages from here to the run.
     assert embed.await_count == 2
-    assert not [d for d in _embed_descriptions(embed) if "sandbox thread" in d]
+    assert not [c for c in _embed_calls(embed) if "Sandbox started" in (c.get("title") or "")]
+    assert not _embed_titled(embed, "Sandbox ·").get("footer")
 
 
 # ---------------------- workspace origin: fresh vs resumed ----------------------
@@ -2591,12 +2625,12 @@ async def test_snapshot_exists_answers_false_when_redis_is_unreachable():
         assert await prod_sandbox_agent.sandbox_snapshot_exists("42") is False
 
 
-def test_workspace_note_distinguishes_fresh_from_resumed():
-    fresh = prod_sandbox_agent.sandbox_workspace_note(False)
-    resumed = prod_sandbox_agent.sandbox_workspace_note(True)
+def test_run_title_distinguishes_fresh_from_resumed():
+    fresh = prod_sandbox_agent.sandbox_run_title(False)
+    resumed = prod_sandbox_agent.sandbox_run_title(True)
     assert fresh != resumed
-    assert "Fresh" in fresh
-    assert "Resumed" in resumed
+    assert "new workspace" in fresh
+    assert "resumed" in resumed
 
 
 # ---------------------- resumed runs tell the nested model ----------------------
@@ -2953,9 +2987,9 @@ async def test_tool_marks_a_fresh_sandbox_in_the_static_embed(clean_inbox):
         await prod_tool_functions.run_code_sandbox.on_invoke_tool(
             _tool_context(message), json.dumps({"task": "print 42"}))
 
-    description = _embed_matching(embed, "Running in sandbox")
-    assert description.startswith(prod_sandbox_agent.sandbox_workspace_note(False))
-    assert "Running in sandbox: print 42" in description
+    run = _embed_titled(embed, "Sandbox ·")
+    assert run["title"] == prod_sandbox_agent.sandbox_run_title(False)
+    assert run["description"] == "print 42"
 
 
 @pytest.mark.asyncio
@@ -2969,8 +3003,8 @@ async def test_tool_marks_a_resumed_sandbox_in_the_static_embed(clean_inbox):
         await prod_tool_functions.run_code_sandbox.on_invoke_tool(
             _tool_context(message), json.dumps({"task": "print 42"}))
 
-    assert _embed_matching(embed, "Running in sandbox").startswith(
-        prod_sandbox_agent.sandbox_workspace_note(True))
+    assert _embed_titled(embed, "Sandbox ·")["title"] == \
+        prod_sandbox_agent.sandbox_run_title(True)
 
 
 @pytest.mark.asyncio
@@ -2985,9 +3019,9 @@ async def test_tool_truncates_a_very_long_task_in_the_static_embed(clean_inbox):
         await prod_tool_functions.run_code_sandbox.on_invoke_tool(
             _tool_context(message), json.dumps({"task": "x" * (DESCRIPTION_CHARS + 500)}))
 
-    description = _embed_matching(embed, "Running in sandbox")
+    description = _embed_titled(embed, "Sandbox ·")["description"]
     assert description.endswith("…")
-    assert len(description) < DESCRIPTION_CHARS + 200
+    assert len(description) <= DESCRIPTION_CHARS
 
 
 @pytest.mark.asyncio
@@ -3019,8 +3053,10 @@ async def test_tool_passes_the_badge_to_the_live_progress_embed(clean_inbox):
         await prod_tool_functions.run_code_sandbox.on_invoke_tool(
             _tool_context(message), json.dumps({"task": "print 42"}))
 
-    assert hooks_cls.call_args.kwargs["workspace_note"] == \
-        prod_sandbox_agent.sandbox_workspace_note(True)
+    kwargs = hooks_cls.call_args.kwargs
+    assert kwargs["title"] == prod_sandbox_agent.sandbox_run_title(True)
+    # the reply hint rides in the live embed too: replying is not optional
+    assert "Reply in this thread" in kwargs["footer"]
 
 
 # ---------------------- run_code_sandbox: one run per thread ----------------------
@@ -3311,7 +3347,7 @@ async def test_tool_does_not_claim_an_unanswered_message_was_applied(clean_inbox
     assert "adapted" not in out
     assert "do not call the result a mistake" not in out
     # and the thread's closing note names it for the user too
-    assert "make it blue" in _embed_matching(embed, "Sandbox closed")
+    assert "make it blue" in _closing(embed)["description"]
 
 
 @pytest.mark.asyncio
@@ -3426,25 +3462,28 @@ def test_resume_window_is_rounded_down_to_one_unit(seconds, expected):
 
 
 def test_closing_note_states_the_resume_window_and_where_it_works():
-    note = prod_sandbox_agent.sandbox_closing_note(604800, True)
-    assert "closed" in note
-    assert "7 days" in note
-    assert "in this thread" in note
-    # the point of the note: a request anywhere else is guaranteed fresh
-    assert "anywhere else" in note
+    note = prod_sandbox_agent.sandbox_closing_embed(604800, True)
+    assert note["title"] == "✅ Sandbox finished"
+    assert "7 days" in note["description"]
+    assert "in this thread" in note["description"]
+    # the point of the note: chat is normal again, and a request anywhere
+    # else is guaranteed fresh
+    assert "normal chat" in note["footer"]
+    assert "anywhere else" in note["footer"]
 
 
 def test_closing_note_admits_when_nothing_was_saved():
-    note = prod_sandbox_agent.sandbox_closing_note(None, True)
-    assert "not** be saved" in note or "not be saved" in note
-    assert "7 days" not in note
+    note = prod_sandbox_agent.sandbox_closing_embed(None, True)
+    assert "not** be saved" in note["description"]
+    assert "7 days" not in note["description"]
 
 
 def test_closing_note_claims_no_resume_outside_a_thread():
     # the no-thread fallback never snapshots, so it must not imply resume
-    note = prod_sandbox_agent.sandbox_closing_note(None, False)
-    assert "closed" in note
-    assert "thread" not in note
+    note = prod_sandbox_agent.sandbox_closing_embed(None, False)
+    assert "Sandbox finished" in note["title"]
+    assert "thread" not in note["description"]
+    assert note["footer"] is None
 
 
 @pytest.mark.asyncio
@@ -3495,16 +3534,16 @@ async def test_tool_posts_the_closing_note_after_a_successful_run(clean_inbox):
         await prod_tool_functions.run_code_sandbox.on_invoke_tool(
             _tool_context(message), json.dumps({"task": "print 42"}))
 
-    closing = _embed_matching(embed, "Sandbox closed")
-    assert "7 days" in closing
+    closing = _closing(embed)
+    assert "7 days" in closing["description"]
     # it must come after the run, not before it
-    assert _embed_descriptions(embed)[-1] == closing
+    assert _embed_calls(embed)[-1] == closing
 
 
 @pytest.mark.asyncio
 async def test_tool_posts_the_closing_note_when_the_sandbox_is_unavailable(clean_inbox):
-    # the "Running in sandbox" embed already went out, so the thread would
-    # otherwise be left looking permanently mid-run
+    # the run's embed already went out, so the thread would otherwise be
+    # left looking permanently mid-run
     message = MagicMock()
     message.author.id = 1
     thread, patches = _sandbox_tool_patches(_text_result("done"))
@@ -3518,7 +3557,7 @@ async def test_tool_posts_the_closing_note_when_the_sandbox_is_unavailable(clean
         await prod_tool_functions.run_code_sandbox.on_invoke_tool(
             _tool_context(message), json.dumps({"task": "print 42"}))
 
-    assert _embed_matching(embed, "Sandbox closed")
+    assert _closing(embed)["title"] == "❌ Sandbox stopped: the sandbox itself failed"
 
 
 @pytest.mark.asyncio
@@ -3602,8 +3641,8 @@ async def test_tool_reuses_the_thread_this_turn_already_opened(clean_inbox):
     ensure.assert_not_awaited()
     # and it is keyed on that thread, so the retry resumes its workspace
     exists.assert_awaited_once_with("888")
-    # no "🧵 Started a sandbox thread" note — nothing new was opened
-    assert not [d for d in _embed_descriptions(embed) if "Started a sandbox thread" in d]
+    # no "🧵 Sandbox started" note — nothing new was opened
+    assert not [c for c in _embed_calls(embed) if "Sandbox started" in (c.get("title") or "")]
 
 
 @pytest.mark.asyncio
@@ -3628,17 +3667,23 @@ async def test_tool_ignores_a_non_thread_left_in_the_context(clean_inbox):
 # ---------------------- the closing embed says how the run ended ----------------------
 
 
-def test_closing_note_leads_with_the_outcome_when_a_run_was_stopped():
-    note = prod_sandbox_agent.sandbox_closing_note(604800, True, "⏱ Stopped: the task timed out.")
-    # first line, so it reads as the headline rather than a footnote
-    assert note.splitlines()[0] == "⏱ Stopped: the task timed out."
-    assert "7 days" in note
+@pytest.mark.parametrize("error", ["timeout", "max_turns", "model_error", "infra_error"])
+def test_closing_note_leads_with_the_outcome_when_a_run_was_stopped(error):
+    note = prod_sandbox_agent.sandbox_closing_embed(604800, True, error)
+    # the title, so it reads as the headline rather than a footnote
+    assert note["title"] == prod_sandbox_agent.SANDBOX_STOP_TITLES[error]
+    assert "7 days" in note["description"]
+    assert "from where it stopped" in note["description"]
 
 
-def test_closing_note_omits_the_outcome_line_on_a_normal_finish():
-    assert not prod_sandbox_agent.sandbox_closing_note(604800, True).startswith("\n")
-    assert prod_sandbox_agent.sandbox_closing_note(604800, True) == \
-        prod_sandbox_agent.sandbox_closing_note(604800, True, "")
+def test_closing_note_names_an_unknown_stop_reason_as_stopped():
+    assert prod_sandbox_agent.sandbox_closing_embed(604800, True, "failed")["title"] == \
+        "❌ Sandbox stopped"
+
+
+def test_closing_note_puts_the_unresolved_lines_under_the_description():
+    note = prod_sandbox_agent.sandbox_closing_embed(604800, True, None, "\n⚠️ never answered: “x”")
+    assert note["description"].endswith("\n⚠️ never answered: “x”")
 
 
 @pytest.mark.asyncio
@@ -3657,8 +3702,8 @@ async def test_tool_puts_the_stop_reason_in_the_closing_embed(clean_inbox):
         out = await prod_tool_functions.run_code_sandbox.on_invoke_tool(
             _tool_context(message), json.dumps({"task": "sleep forever"}))
 
-    closing = _embed_matching(embed, "Sandbox closed")
-    assert "timed out" in closing
+    closing = _closing(embed)
+    assert closing["title"] == "⏱ Sandbox stopped: ran out of time"
     # and the model is pointed at the resume rather than at a retry
     assert "do NOT retry" in out
     assert "THIS thread" in out
@@ -3824,7 +3869,7 @@ async def test_a_message_during_the_closing_note_is_still_saved(clean_inbox, _no
     thread.send = AsyncMock()
 
     async def _embed(channel, description, *args, **kwargs):
-        if kwargs.get("title") == "Sandbox closed":
+        if "Sandbox finished" in (args[1] if len(args) > 1 else ""):
             clean_inbox.deliver(thread.id, 77, 1, "ana", "and a csv too")
 
     with patches[0], patches[1], patches[2], patches[3], \
@@ -4021,3 +4066,26 @@ async def test_the_web_tools_work_in_a_run_with_no_thread():
         out = await prod_tool_functions.web_search.on_invoke_tool(
             _nested_tool_context({"channel": None}), json.dumps({"search_request": "x"}))
     assert out == "brief"
+
+
+@pytest.mark.asyncio
+async def test_tool_takes_the_reply_hint_off_the_static_embed_when_the_run_ends(clean_inbox):
+    # left on, "reply here" would sit above "normal chat again"
+    message = MagicMock()
+    message.author.id = 1
+    thread, patches = _sandbox_tool_patches(_text_result("done"))
+    with patches[0], patches[1], patches[2], patches[3], \
+         patch.object(prod_tool_functions.Common, "send_tool_discord_embed",
+                      AsyncMock()) as embed, \
+         patch.object(prod_tool_functions.Common, "edit_tool_discord_embed",
+                      AsyncMock()) as edit:
+        await prod_tool_functions.run_code_sandbox.on_invoke_tool(
+            _tool_context(message), json.dumps({"task": "print 42"}))
+
+    run = _embed_titled(embed, "Sandbox ·")
+    assert "Reply in this thread" in run["footer"]
+    edit.assert_awaited_once()
+    args = edit.await_args.args
+    assert args[0] is embed.return_value
+    assert args[1:] == (run["description"], run["color"], run["title"])
+    assert not edit.await_args.kwargs.get("footer")

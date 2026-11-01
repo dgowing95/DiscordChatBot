@@ -26,14 +26,14 @@ Discord rate limits:
   before the next attempt; a deleted message falls back to a fresh send.
 
 Rendering:
-  ONE embed, styled like the static "Tool Usage" embed the tool sends
-  when progress is off: title "🐳 Sandbox", description "Running in
-  sandbox: {task}" (same wording as the static embed) and ONE FIELD PER
-  COMMAND. One-line commands are the field NAME (bold, "$ cmd");
+  ONE embed, the same as the static one the tool sends when progress is
+  off: its title ("🐳 Sandbox · new workspace" / "· resumed"), the task as
+  the description (tool_embeds.sandbox_task_text), the reply hint as the
+  footer in a thread, and ONE FIELD PER COMMAND. One-line commands are the field NAME (bold, "$ cmd");
   heredocs/long commands use the name "⌨ Command" and carry their full
   text in the value. Output goes in a code fence (monospace, whitespace
   kept) followed by an "exit N" / "… still running" status line. The
-  embed's accent colour is the overall state: cyan (idle/initial, the
+  embed's accent colour is the overall state: teal (idle/initial, the
   static embed's colour), yellow (latest command still running), red
   (latest command failed). Events are QUEUED in the transcript and the
   whole queue is rendered into every (throttled) edit, so many commands
@@ -43,8 +43,8 @@ Rendering:
 
 This is a per-guild opt-in: the /sandbox_progress_updates slash command
 stores the setting in Redis (configManager, dcb namespace); when it is off
-or unset (the default) the tool only sends the one static
-"Running in sandbox" embed and no progress hooks are attached.
+or unset (the default) the tool only sends the one static run embed and
+no progress hooks are attached.
 
 The pure parts (SandboxTranscript, parse_exec_result,
 sandbox_progress_updates_enabled) are unit-tested in
@@ -60,6 +60,7 @@ import discord
 from agents import RunHooks
 
 from classes.sandbox_conversation import GATE_REFUSAL_PREFIX
+from classes.tool_embeds import COLOR_SANDBOX, COLOR_STOPPED, SANDBOX_NEW, sandbox_task_text
 
 logger = logging.getLogger(__name__)
 
@@ -76,12 +77,12 @@ FIELD_VALUE_CHARS = 1024
 FIELD_CMD_CHARS = 400         # heredoc command text kept in the value
 MAX_FIELDS = 25
 EMBED_CHAR_BUDGET = 5800      # stay a bit under the 6000 hard cap
-DESCRIPTION_CHARS = 1000      # the task line in the embed description
+DESCRIPTION_CHARS = 1000      # the task in the embed description (the model reads it back from history)
 
 # Accent colours: the single embed's state.
-COLOR_TOOL = 0x00B0F4         # cyan — idle/initial, like the static embed
+COLOR_TOOL = COLOR_SANDBOX    # teal — idle/initial, like the static embed
 COLOR_RUNNING = 0xFEE75C      # yellow — latest command still running
-COLOR_FAIL = 0xED4245         # red — latest command exited non-zero
+COLOR_FAIL = COLOR_STOPPED    # red — latest command exited non-zero
 
 _EXIT_RE = re.compile(r"Process exited with code (-?\d+)")
 _RUNNING_RE = re.compile(r"Process running with session ID (\d+)")
@@ -161,6 +162,7 @@ class EmbedSpec:
     color: int
     description: str | None = None
     fields: list[FieldSpec] = field(default_factory=list)
+    footer: str | None = None
 
 
 @dataclass
@@ -204,18 +206,24 @@ class SandboxTranscript:
     queue is bigger, the OLDEST fields are dropped.
     """
 
-    def __init__(self, task: str, *, workspace_note: str = ""):
+    def __init__(self, task: str, *, title: str = SANDBOX_NEW, files=(),
+                 footer: str | None = None):
         self._task = " ".join((task or "").split())
-        # One line above the task saying whether this run started from an
-        # empty workspace or resumed the thread's saved one (built by
-        # sandbox_agent.sandbox_workspace_note). Empty renders nothing, so
-        # the no-thread fallback path looks exactly as it did before.
-        self._workspace_note = " ".join((workspace_note or "").split())
+        # Whether this run started from an empty workspace or resumed the
+        # thread's saved one (sandbox_agent.sandbox_run_title), the chat
+        # files given to it, and the reply hint (in a thread only): the
+        # same as the static embed sent when progress is off.
+        self._title = title
+        self._files = list(files or ())
+        self._footer = footer
         self._blocks: list[_Block] = []
         self._notes: list[str] = []
         self._thinking = False
 
     # -- events -----------------------------------------------------------
+
+    def clear_footer(self) -> None:
+        self._footer = None
 
     def add_note(self, text: str) -> None:
         note = " ".join((text or "").split())
@@ -348,15 +356,13 @@ class SandboxTranscript:
         return FieldSpec(name[:256], _tail(value, FIELD_VALUE_CHARS))
 
     def _render_embed(self) -> EmbedSpec:
-        title = "🐳 Sandbox"
-        description = f"Running in sandbox: {_tail(self._task, DESCRIPTION_CHARS)}"
-        if self._workspace_note:
-            description = f"{self._workspace_note}\n{description}"
+        title = self._title
+        description = sandbox_task_text(self._task, self._files, DESCRIPTION_CHARS)
         # newest first: keep whole fields while they fit Discord's embed
         # budget; older fields are evicted as a unit so a command never
         # ends up separated from its output
         fields: list[FieldSpec] = []
-        total = len(title) + len(description)
+        total = len(title) + len(description) + len(self._footer or "")
         for block in reversed(self._blocks):
             f = self._field_for_block(block)
             if f is None:
@@ -367,7 +373,7 @@ class SandboxTranscript:
             fields.append(f)
             total += cost
         fields.reverse()
-        return EmbedSpec(title, self._state_color(), description, fields)
+        return EmbedSpec(title, self._state_color(), description, fields, self._footer)
 
 
 class SandboxProgressHooks(RunHooks):
@@ -379,10 +385,10 @@ class SandboxProgressHooks(RunHooks):
     run loop, and a raised hook would abort the sandbox run.
     """
 
-    def __init__(self, channel, task: str, *, workspace_note: str = "",
-                 edit_interval: float = EDIT_INTERVAL_SECONDS):
+    def __init__(self, channel, task: str, *, title: str = SANDBOX_NEW, files=(),
+                 footer: str | None = None, edit_interval: float = EDIT_INTERVAL_SECONDS):
         self.channel = channel
-        self.transcript = SandboxTranscript(task, workspace_note=workspace_note)
+        self.transcript = SandboxTranscript(task, title=title, files=files, footer=footer)
         self.edit_interval = edit_interval
         self._message: discord.Message | None = None
         self._dirty = False
@@ -399,8 +405,8 @@ class SandboxProgressHooks(RunHooks):
     async def start(self) -> None:
         """Send the initial progress message (before Runner.run starts).
 
-        The embed mirrors the static "Tool Usage" embed sent when progress
-        is off — the channel sees the same thing either way.
+        The embed mirrors the static run embed sent when progress is off —
+        the channel sees the same thing either way.
         """
         self.transcript.add_note("starting container…")
         await self._flush(force=True)
@@ -411,6 +417,8 @@ class SandboxProgressHooks(RunHooks):
             return
         self._finalized = True
         self.transcript.set_thinking(False)
+        # The reply hint is over with the run (see run_code_sandbox).
+        self.transcript.clear_footer()
         if note:
             self.transcript.add_note(note)
         await self._flush(force=True)
@@ -490,6 +498,8 @@ class SandboxProgressHooks(RunHooks):
                               color=spec.color)
         for f in spec.fields:
             embed.add_field(name=f.name, value=f.value, inline=False)
+        if spec.footer:
+            embed.set_footer(text=spec.footer)
         return embed
 
     async def _flush(self, force: bool = False) -> None:

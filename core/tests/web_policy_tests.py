@@ -83,6 +83,17 @@ def test_normalize_drops_tracking_and_fragment_and_sorts():
     assert wp.normalize_url("example.com/page") == "https://example.com/page"
 
 
+def test_normalize_reads_encoded_brackets_as_brackets():
+    # the bot's own "Reading a page" embed links with them encoded, and the
+    # model re-reads links from there: both spellings must be one cache entry
+    plain = "https://en.wikipedia.org/wiki/Mercury_(planet)"
+    assert wp.normalize_url("https://en.wikipedia.org/wiki/Mercury_%28planet%29") == plain
+    assert wp.normalize_url("https://en.wikipedia.org/wiki/Mercury_%28planet%29".lower()) == \
+        plain.lower()
+    assert wp.cache_key(wp.route(plain).url) == \
+        wp.cache_key(wp.route("https://en.wikipedia.org/wiki/Mercury_%28planet%29").url)
+
+
 @pytest.mark.parametrize("url", ["", "ftp://example.com/x", "file:///etc/passwd", "https://",
                                  "javascript:alert(1)", "http://[::1"])
 def test_unreadable_urls(url):
