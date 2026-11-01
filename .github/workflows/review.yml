@@ -38,7 +38,12 @@ jobs:
           llm_use_anthropic: 'false'
           # Large reviews have hit the default 300-second request deadline before response headers.
           llm_timeout: '600'
-          review_concurrency: '2'
+          # 2 since #111, when requests on #110 hit the then 300-second deadline. With 600
+          # seconds and no rate-limit errors since, try 4: full reviews took 20-31 minutes of
+          # review time at 2, and the slowest jobs came close to timeout-minutes above.
+          review_concurrency: '4'
+          # Per-task progress in the job log, so the effect of the concurrency is measurable.
+          stream_progress: 'true'
           # Pin the installed CLI as well as the action commit. The action otherwise installs
           # `latest`, which can change review behaviour without a repository diff.
           # Dependabot bumps the action commit above but never this string: keep the two in step.
