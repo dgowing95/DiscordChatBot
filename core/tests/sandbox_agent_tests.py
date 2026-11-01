@@ -3949,7 +3949,9 @@ async def test_the_sandbox_run_context_gives_the_shared_tools_what_they_read():
     thread, client = MagicMock(name="thread"), MagicMock(name="discord_client")
     thread.send = AsyncMock()
     member = MagicMock(name="member")
-    thread.guild.get_member.return_value = member
+    # Not in the cache (the bot has no members intent): fetched instead.
+    thread.guild.get_member.return_value = None
+    thread.guild.fetch_member = AsyncMock(return_value=member)
 
     patches = _patch_session_lifecycle()
     with patches[0], patches[1], patches[2], patches[3], \
@@ -3960,9 +3962,39 @@ async def test_the_sandbox_run_context_gives_the_shared_tools_what_they_read():
     assert captured["channel"] is thread
     assert captured["discord_client"] is client
     assert captured["user_id"] == 7
+    assert captured["requester"] is member
+    assert captured["search_as_requester"] is True
+    thread.guild.fetch_member.assert_awaited_once_with(7)
 
     from classes.event_tools import _guild_and_actor
     guild, actor = _guild_and_actor(captured)
     assert guild is thread.guild
     assert actor is member
-    thread.guild.get_member.assert_called_with(7)
+
+
+@pytest.mark.asyncio
+async def test_resolve_requester_prefers_the_cache_and_fails_soft():
+    cached = MagicMock(name="cached")
+    thread = MagicMock()
+    thread.guild.get_member.return_value = cached
+    thread.guild.fetch_member = AsyncMock()
+    assert await prod_sandbox_agent._resolve_requester(thread, 7) is cached
+    thread.guild.fetch_member.assert_not_awaited()
+
+    thread.guild.get_member.return_value = None
+    thread.guild.fetch_member = AsyncMock(side_effect=discord.NotFound(MagicMock(status=404), "gone"))
+    assert await prod_sandbox_agent._resolve_requester(thread, 7) is None
+    assert await prod_sandbox_agent._resolve_requester(None, 7) is None
+    assert await prod_sandbox_agent._resolve_requester(thread, None) is None
+
+
+@pytest.mark.asyncio
+async def test_the_web_tools_work_in_a_run_with_no_thread():
+    # A sandbox run may have no thread (its "channel" is None); the lookup
+    # skips its notice instead of failing on None.send.
+    from classes import web_research
+    with patch.object(prod_tool_functions, "check_web_request",
+                      new=AsyncMock(return_value=(True, ""))),          patch.object(web_research, "research", new=AsyncMock(return_value="brief")):
+        out = await prod_tool_functions.web_search.on_invoke_tool(
+            _nested_tool_context({"channel": None}), json.dumps({"search_request": "x"}))
+    assert out == "brief"

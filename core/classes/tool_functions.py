@@ -19,6 +19,16 @@ async def add_emoji_to_message(message: discord.Message, emoji: str) -> None:
     except Exception as e:
         logger.warning(f"Failed to add emoji {emoji} to message {message.id}: {e}")
     
+async def _tool_notice(wrapper: RunContextWrapper[dict], text: str) -> None:
+    """The "Tool Usage" embed a lookup posts where it was asked. Skipped
+    when the run has no channel: a sandbox run may have no thread (its
+    tests, and any caller that passes none), and a lookup must still work
+    there rather than fail on None.send."""
+    channel = wrapper.context.get("channel")
+    if channel is not None:
+        await Common.send_tool_discord_embed(channel, text)
+
+
 @function_tool
 async def web_search(wrapper: RunContextWrapper[dict], search_request: str) -> str:
     """Searches the web, reads the top results and returns a short brief of
@@ -40,10 +50,7 @@ async def web_search(wrapper: RunContextWrapper[dict], search_request: str) -> s
         return ("I can't perform that search — it was blocked by the safety "
                 "guard. Please rephrase with a safe, non-harmful query.")
 
-    await Common.send_tool_discord_embed(
-        wrapper.context["channel"],
-        f"Searching the web for: {search_request}",
-    )
+    await _tool_notice(wrapper, f"Searching the web for: {search_request}")
     from classes import web_research
     try:
         return await web_research.research(search_request, await get_current_datetime())
@@ -71,10 +78,7 @@ async def fetch_url(wrapper: RunContextWrapper[dict], url: str, part: int = 1) -
         return ("I can't fetch that URL — it was blocked by the safety "
                 "guard.")
 
-    await Common.send_tool_discord_embed(
-        wrapper.context["channel"],
-        f"Visiting URL: {url}" + (f" (part {part})" if part > 1 else ""),
-    )
+    await _tool_notice(wrapper, f"Visiting URL: {url}" + (f" (part {part})" if part > 1 else ""))
     try:
         page = await web_reader.read(url)
     except web_reader.FetchError as e:

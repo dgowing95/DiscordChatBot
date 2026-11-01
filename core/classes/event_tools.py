@@ -43,9 +43,13 @@ def _timezone() -> str:
 
 def _guild_and_actor(context):
     """The server and the person asking. A voice turn or an automatic run
-    has no message; the speaker or the entry's editor is `user_id`."""
+    has no message; the speaker or the entry's editor is `user_id`. A
+    sandbox run has no message either, and passes the requester it fetched
+    as `requester` (sandbox_agent._resolve_requester): without the members
+    intent, get_member below usually misses for them."""
     guild = getattr(context.get("channel"), "guild", None)
-    actor = getattr(context.get("original_message"), "author", None)
+    actor = (getattr(context.get("original_message"), "author", None)
+             or context.get("requester"))
     if actor is None and guild is not None and context.get("user_id"):
         actor = guild.get_member(context["user_id"])
     # A webhook's author is a plain User with no server permissions (seen

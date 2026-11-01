@@ -364,6 +364,10 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
      thread, the client, the requester), which is what those tools read. The
      two that change something are gated through a COPY of the tool
      (`_sandbox_shared_tools`), so the main agent's own are never gated.
+     Before the run, `_resolve_requester` fetches the requester as a Member
+     (`requester` in the context): the bot has no members intent, so the
+     cache usually misses them, and without it every event call was refused.
+     Message search in a run is limited to what that person can read.
 
    Every one of these carries its full rationale — the production incident that
    produced it, and what breaks if it is undone — in the docstring of the
@@ -534,7 +538,10 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
    endpoint (`GET /guilds/{id}/messages/search`, open to bots since
    2026-03-19; needs Read Message History and the Message Content intent),
    which discord.py does not wrap. Whole server by default; results come only
-   from channels the bot can read. A server Discord has not indexed yet
+   from channels the bot can read, and in a sandbox run only from those the
+   requester can read too (`search_as_requester`: the run also has open
+   internet access, so this keeps a prompt-injected page from pulling private
+   channels out; unknown channels and private threads are dropped). A server Discord has not indexed yet
    answers 202 (code 110000), which discord.py returns as a normal body.
    At most `MAX_CALLS` searches per reply. Read-only, so automatic runs and
    voice turns get it too.

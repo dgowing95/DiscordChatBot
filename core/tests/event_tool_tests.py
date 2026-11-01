@@ -184,6 +184,17 @@ async def test_works_without_a_message_as_the_user_id():
 
 
 @pytest.mark.asyncio
+async def test_a_sandbox_run_uses_the_requester_it_fetched():
+    """A sandbox run has no message, and without the members intent the
+    cache usually misses its requester: it passes the Member it fetched."""
+    actor = _member(ident=777)
+    guild, context = _env(message=False)
+    context.update(user_id=777, requester=actor)  # not in the cache
+    await _invoke("create_event", context, name="x", start=_soon().isoformat(), location="here")
+    guild.create_scheduled_event.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_a_webhook_author_is_refused_not_an_error():
     guild, context = _env()
     context["original_message"].author = SimpleNamespace(id=4242, name="Captain Hook")

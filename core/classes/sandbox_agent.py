@@ -1146,6 +1146,29 @@ def _sandbox_shared_tools() -> list:
     return tools
 
 
+async def _resolve_requester(thread, user_id):
+    """The person who asked for this run, as a guild Member, or None.
+
+    The shared tools need a Member, not an id: the event tools check the
+    requester's own permissions, and search_messages limits results to the
+    channels they can read. The bot runs without the members intent, so
+    guild.get_member usually misses for someone who only typed a message,
+    and the sandbox context has no message author to fall back on. One
+    fetch_member here, before the run, is what makes those checks work. A
+    failure leaves None, which both tools treat as "not allowed"."""
+    guild = getattr(thread, "guild", None)
+    if guild is None or user_id is None:
+        return None
+    member = guild.get_member(user_id)
+    if member is not None:
+        return member
+    try:
+        return await guild.fetch_member(user_id)
+    except Exception as e:
+        logger.info(f"Sandbox: could not look up the requester {user_id}: {e}")
+        return None
+
+
 def build_sandbox_agent(out_dir: str | None, conversation=None) -> "object":
     """The nested SandboxAgent that does the work inside the sandbox.
 
@@ -1918,6 +1941,7 @@ async def run_sandbox_task(
             result.inputs, result.input_problems = given, problems
             return result
         agent = build_sandbox_agent(out_dir, conversation)
+        requester = await _resolve_requester(thread, requesting_user_id)
         nested_context = {
             "thread": thread,
             "client": client,
@@ -1929,6 +1953,11 @@ async def run_sandbox_task(
             "channel": thread,
             "discord_client": client,
             "user_id": requesting_user_id,
+            # The requester as a Member (see _resolve_requester): the event
+            # tools check THEIR permission with it, and search_messages
+            # returns only what they can read (search_as_requester).
+            "requester": requester,
+            "search_as_requester": True,
             "session": session,
             # The run's conversation coordinator: the tools read it from
             # here to gate side effects, answer thread messages and ask

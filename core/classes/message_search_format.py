@@ -62,18 +62,35 @@ def not_indexed(body) -> bool:
     return not isinstance(body, dict) or body.get("code") == INDEX_CODE or "messages" not in body
 
 
+def _hit(group):
+    """The message a result group is about: the one marked as the hit, else
+    its first message (a group may also be a bare message)."""
+    if isinstance(group, list):
+        chosen = next((m for m in group if isinstance(m, dict) and m.get("hit")), None)
+        return chosen or next((m for m in group if isinstance(m, dict)), None)
+    return group if isinstance(group, dict) else None
+
+
 def flatten(body: dict) -> list:
     """One message dict per hit, in Discord's order."""
-    hits = []
+    return [hit for hit in map(_hit, body.get("messages") or []) if hit]
+
+
+def only_channels(body: dict, allowed) -> dict:
+    """body with only the hits whose channel `allowed(channel_id)` accepts
+    (channel_id a string), and total_results lowered by the number dropped.
+    Used to limit a search to what one person can read; a hit with no
+    channel id is dropped."""
+    kept, dropped = [], 0
     for group in body.get("messages") or []:
-        if isinstance(group, list):
-            chosen = next((m for m in group if isinstance(m, dict) and m.get("hit")), None)
-            chosen = chosen or next((m for m in group if isinstance(m, dict)), None)
+        hit = _hit(group)
+        channel_id = str(hit.get("channel_id") or "") if hit else ""
+        if channel_id and allowed(channel_id):
+            kept.append(group)
         else:
-            chosen = group if isinstance(group, dict) else None
-        if chosen:
-            hits.append(chosen)
-    return hits
+            dropped += 1
+    total = body.get("total_results", len(kept) + dropped)
+    return {**body, "messages": kept, "total_results": max(len(kept), total - dropped)}
 
 
 def _author(message: dict) -> str:
