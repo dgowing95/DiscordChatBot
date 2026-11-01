@@ -67,3 +67,24 @@ def test_trim_cuts_at_a_word():
 def test_sandbox_task_text_lists_the_files():
     assert te.sandbox_task_text("chart it", ["a.csv", "b.png"]) == "chart it\n📎 a.csv, b.png"
     assert te.sandbox_task_text("chart it") == "chart it"
+
+
+def test_link_label_keeps_a_double_underscore_from_underlining():
+    # "__main__" underlined in a label, whatever invisible character sat
+    # between the underscores, so they become the look-alike U+02CD
+    label = te.link_label("https://docs.python.org/3/library/__main__.html")
+    assert label == "docs.python.org › 3 › library › \u02cd\u02cdmain\u02cd\u02cd.html"
+    # one between two letters never formats, so it stays as it is
+    assert te.link_label("https://example.com/Pluto_dwarf_planet") == \
+        "example.com › Pluto_dwarf_planet"
+    # and the link itself keeps the real path
+    assert te.page_link("https://docs.python.org/3/library/__main__.html").endswith(
+        "(https://docs.python.org/3/library/__main__.html)")
+
+
+def test_one_home_for_stop_wording():
+    # the closing title and the live-progress note say the same thing
+    from classes import sandbox_agent
+    assert sandbox_agent.SANDBOX_STOP_TITLES.keys() == sandbox_agent.SANDBOX_OUTCOME_NOTES.keys()
+    assert sandbox_agent.sandbox_outcome_note("infra_error") == \
+        "❌ Stopped: the sandbox itself failed."

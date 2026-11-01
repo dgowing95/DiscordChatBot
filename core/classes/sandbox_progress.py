@@ -60,7 +60,7 @@ import discord
 from agents import RunHooks
 
 from classes.sandbox_conversation import GATE_REFUSAL_PREFIX
-from classes.tool_embeds import COLOR_SANDBOX, SANDBOX_NEW, sandbox_task_text
+from classes.tool_embeds import COLOR_SANDBOX, COLOR_STOPPED, SANDBOX_NEW, sandbox_task_text
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +82,7 @@ DESCRIPTION_CHARS = 1000      # the task in the embed description (the model rea
 # Accent colours: the single embed's state.
 COLOR_TOOL = COLOR_SANDBOX    # teal — idle/initial, like the static embed
 COLOR_RUNNING = 0xFEE75C      # yellow — latest command still running
-COLOR_FAIL = 0xED4245         # red — latest command exited non-zero
+COLOR_FAIL = COLOR_STOPPED    # red — latest command exited non-zero
 
 _EXIT_RE = re.compile(r"Process exited with code (-?\d+)")
 _RUNNING_RE = re.compile(r"Process running with session ID (\d+)")
@@ -221,6 +221,9 @@ class SandboxTranscript:
         self._thinking = False
 
     # -- events -----------------------------------------------------------
+
+    def clear_footer(self) -> None:
+        self._footer = None
 
     def add_note(self, text: str) -> None:
         note = " ".join((text or "").split())
@@ -414,6 +417,8 @@ class SandboxProgressHooks(RunHooks):
             return
         self._finalized = True
         self.transcript.set_thinking(False)
+        # The reply hint is over with the run (see run_code_sandbox).
+        self.transcript.clear_footer()
         if note:
             self.transcript.add_note(note)
         await self._flush(force=True)

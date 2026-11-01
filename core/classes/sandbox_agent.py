@@ -2186,24 +2186,22 @@ async def _failure_result(
 # part hardest to review buried in 370 lines of orchestration. Keeping it pure
 # also means it is testable without a Discord channel or a Docker daemon.
 
-# One line naming how a run ended, shown to the USER: on the live-progress
-# message's final state and as the first line of the closing embed. Only used
-# when the run did NOT finish normally.
-# The closing embed's title for each way a run can stop (sandbox_closing_embed).
-SANDBOX_STOP_TITLES = {
-    "timeout": "⏱ Sandbox stopped: ran out of time",
-    "max_turns": "🔁 Sandbox stopped: ran out of turns",
-    "model_error": "⚠️ Sandbox stopped: its model misbehaved",
-    "infra_error": "❌ Sandbox stopped: the sandbox itself failed",
+# How a run that did NOT finish normally ended, as the USER is told it: the
+# one home for that wording. It is the closing embed's title
+# (SANDBOX_STOP_TITLES, used by sandbox_closing_embed) and the live-progress
+# message's final line (sandbox_outcome_note), built from the same pair so
+# the two never word one failure differently. "infra_error" is the sandbox
+# itself failing (run_sandbox_task raised), not a SandboxResult.error.
+_STOP_REASONS = {
+    "timeout": ("⏱", "ran out of time"),
+    "max_turns": ("🔁", "ran out of turns"),
+    "model_error": ("⚠️", "its model misbehaved"),
+    "infra_error": ("❌", "the sandbox itself failed"),
 }
+SANDBOX_STOP_TITLES = {k: f"{icon} Sandbox stopped: {why}" for k, (icon, why) in _STOP_REASONS.items()}
+SANDBOX_OUTCOME_NOTES = {k: f"{icon} Stopped: {why}." for k, (icon, why) in _STOP_REASONS.items()}
 
-SANDBOX_OUTCOME_NOTES = {
-    "timeout": "⏱ Stopped: the task timed out.",
-    "max_turns": "🔁 Stopped: the task ran out of turns.",
-    "model_error": "⚠️ Stopped: the sandbox's model misbehaved.",
-}
-
-# The same three reasons as a clause, for the sentence written to the MODEL.
+# The model-facing reasons, as a clause for the sentence written to the MODEL.
 _FAILURE_REASON = {
     "timeout": "it timed out",
     "max_turns": "it ran out of turns",

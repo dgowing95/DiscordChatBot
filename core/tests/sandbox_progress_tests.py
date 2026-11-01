@@ -615,3 +615,15 @@ def test_a_block_that_ran_is_never_marked_held():
     t.add_output("out", exit_code=0, block=block)
     t.mark_held(block)
     assert block.held is False
+
+
+@pytest.mark.asyncio
+async def test_finalize_drops_the_reply_hint():
+    # once the run is over, replying no longer steers it
+    channel, message = _channel_with_message()
+    hooks = SandboxProgressHooks(channel, "t", footer="reply here", edit_interval=0)
+    await hooks.start()
+    assert channel.send.await_args.kwargs["embeds"][0].footer.text == "reply here"
+    await hooks.finalize("✅ Done.")
+    _, embed = _last_flush(message)
+    assert embed.footer.text is None

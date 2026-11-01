@@ -603,12 +603,23 @@ async def _run_claimed_sandbox(wrapper, task, channel, thread_created, in_thread
         progress = SandboxProgressHooks(channel, task, title=title, files=input_names,
                                         footer=footer)
         await progress.start()
-    else:
+    run_embed = None
+    run_text = sandbox_task_text(task, input_names, DESCRIPTION_CHARS)
+    if progress is None:
         # The same description the live-progress embed renders (the task
         # capped at DESCRIPTION_CHARS), so the thread looks alike either way.
-        await Common.send_tool_discord_embed(
-            channel, sandbox_task_text(task, input_names, DESCRIPTION_CHARS),
-            COLOR_SANDBOX, title, footer)
+        run_embed = await Common.send_tool_discord_embed(
+            channel, run_text, COLOR_SANDBOX, title, footer)
+
+    async def end_run_embed(note):
+        # The reply hint is true only while the run is live: left on, it sits
+        # just above the closing embed's "normal chat again" and invites a
+        # reply that would no longer steer anything. finalize drops it from
+        # the live-progress embed; the static one is edited without it.
+        if progress is not None:
+            await progress.finalize(note)
+        elif run_embed is not None and footer:
+            await Common.edit_tool_discord_embed(run_embed, run_text, COLOR_SANDBOX, title)
 
     try:
         result = await run_sandbox_task(
@@ -624,8 +635,7 @@ async def _run_claimed_sandbox(wrapper, task, channel, thread_created, in_thread
         )
     except Exception as e:
         logger.warning(f"Sandbox task failed: {e}")
-        if progress is not None:
-            await progress.finalize("❌ Stopped: the sandbox itself failed.")
+        await end_run_embed(sandbox_outcome_note("infra_error"))
         # The run's embed already went out, so this path needs a closing
         # note too or the thread is left looking mid-run forever.
         outcomes = ledger.outcomes() if ledger is not None else []
@@ -658,11 +668,9 @@ async def _run_claimed_sandbox(wrapper, task, channel, thread_created, in_thread
         except Exception as e:
             logger.warning(f"Sandbox: failed to post the resume correction: {e}")
 
-    if progress is not None:
-        # give the live message its final state (it would otherwise sit on
-        # the last "still running" / thinking snapshot)
-        note = "✅ Done." if result.ok else sandbox_outcome_note(result.error)
-        await progress.finalize(note)
+    # give the live message its final state (it would otherwise sit on the
+    # last "still running" / thinking snapshot)
+    await end_run_embed("✅ Done." if result.ok else sandbox_outcome_note(result.error))
 
     # Acknowledgements the sandbox wrote while Discord was refusing sends.
     # Posted now, before the result, so the thread reads in order.

@@ -16,10 +16,12 @@ Footers cost prompt tokens on every history message, so only the sandbox's
 embeds have one.
 
 Titles never carry user text, links or mentions: Discord renders none of those
-in a title, and caps it at 256 characters. The sandbox's own titles and
-closing text live here too; the reasons behind what they say are in
-sandbox_agent (sandbox_run_title, sandbox_closing_embed).
+in a title, and caps it at 256 characters. The sandbox run embed's titles and
+reply hint live here; its closing embed (how a run ended, whether it can be
+resumed) is built in sandbox_agent (sandbox_closing_embed, SANDBOX_STOP_TITLES),
+beside the rules it reports on.
 """
+import re
 from urllib.parse import urlsplit
 
 # Accent colours, one per kind of tool.
@@ -58,10 +60,15 @@ def reading_page_title(part: int) -> str:
 
 def _plain(text: str) -> str:
     """Text safe as a masked link's label: brackets, which end the link
-    early, and markdown characters removed. Not escaped: Discord showed a
-    label with a backslash escape in it as raw text, not as a link. "_" is
-    kept, since inside a word (all a URL has) it never turns italic."""
-    return "".join(c for c in text if c not in "[]()<>\\*~|`")
+    early, and markdown characters removed. Not escaped: a backslash escape
+    shows literally inside a link's label. An "_" between two letters
+    ("Pluto_dwarf_planet") never formats and is kept; one at the edge of a
+    word or beside another ("__main__") underlines, and no invisible
+    character between them stops it (zero-width space, word joiner, soft
+    hyphen and hair space all tried live), so it becomes the look-alike
+    "ˍ" (U+02CD). The label is only shown: the link itself is untouched."""
+    text = "".join(c for c in text if c not in "[]()<>\\*~|`")
+    return re.sub(r"(?<![A-Za-z0-9])_|_(?![A-Za-z0-9])", "ˍ", text)
 
 
 def link_label(url: str) -> str:

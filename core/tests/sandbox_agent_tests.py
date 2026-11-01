@@ -1067,10 +1067,10 @@ def _closing(embed):
 def _embed_matching(embed, needle):
     """The single embed description containing `needle`.
 
-    run_code_sandbox sends several embeds per call (the optional "started a
-    thread" note, the static "Running in sandbox" one, and the closing
-    note), so positional indexing into await_args_list is fragile — assert
-    on the one you actually mean.
+    run_code_sandbox sends several embeds per call (the optional "Sandbox
+    started" note, the static run embed and the closing one), so positional
+    indexing into await_args_list is fragile — assert on the one you
+    actually mean. To find one by title, use _embed_titled or _closing.
     """
     matches = [d for d in _embed_descriptions(embed) if needle in d]
     assert len(matches) == 1, (needle, _embed_descriptions(embed))
@@ -1303,7 +1303,7 @@ async def test_tool_reports_timeout_with_no_recovered_artifacts(monkeypatch):
     assert "do not retry" in result.lower()
     # the live message is closed with a timeout note
     instances[0].finalize.assert_awaited_once()
-    assert "timed out" in instances[0].finalize.await_args.args[0]
+    assert "ran out of time" in instances[0].finalize.await_args.args[0]
 
 
 @pytest.mark.asyncio
@@ -1334,7 +1334,7 @@ async def test_tool_reports_timeout_with_recovered_artifact(monkeypatch):
     assert "do not retry" in result.lower()
     assert "not claim" in result.lower() or "pending" in result.lower()
     instances[0].finalize.assert_awaited_once()
-    assert "timed out" in instances[0].finalize.await_args.args[0]
+    assert "ran out of time" in instances[0].finalize.await_args.args[0]
 
 
 @pytest.mark.asyncio
@@ -4066,3 +4066,26 @@ async def test_the_web_tools_work_in_a_run_with_no_thread():
         out = await prod_tool_functions.web_search.on_invoke_tool(
             _nested_tool_context({"channel": None}), json.dumps({"search_request": "x"}))
     assert out == "brief"
+
+
+@pytest.mark.asyncio
+async def test_tool_takes_the_reply_hint_off_the_static_embed_when_the_run_ends(clean_inbox):
+    # left on, "reply here" would sit above "normal chat again"
+    message = MagicMock()
+    message.author.id = 1
+    thread, patches = _sandbox_tool_patches(_text_result("done"))
+    with patches[0], patches[1], patches[2], patches[3], \
+         patch.object(prod_tool_functions.Common, "send_tool_discord_embed",
+                      AsyncMock()) as embed, \
+         patch.object(prod_tool_functions.Common, "edit_tool_discord_embed",
+                      AsyncMock()) as edit:
+        await prod_tool_functions.run_code_sandbox.on_invoke_tool(
+            _tool_context(message), json.dumps({"task": "print 42"}))
+
+    run = _embed_titled(embed, "Sandbox ·")
+    assert "Reply in this thread" in run["footer"]
+    edit.assert_awaited_once()
+    args = edit.await_args.args
+    assert args[0] is embed.return_value
+    assert args[1:] == (run["description"], run["color"], run["title"])
+    assert not edit.await_args.kwargs.get("footer")
