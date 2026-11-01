@@ -901,15 +901,18 @@ async def check_polls(wrapper: RunContextWrapper[dict]) -> str:
 
 
 def shared_tools() -> list:
-    """The tools the main agent AND the sandbox agent get, as the same
-    objects: looking things up (web, links, this server's messages, polls,
-    events) plus posting a poll and making or moving an event. The sandbox
-    gets only those on sandbox_agent._SANDBOX_SHARED_TOOLS (no poll tools).
+    """The tools the main agent AND the sandbox agent get: looking things up
+    (web, links, this server's messages, polls, events) plus posting a poll
+    and making or moving an event. The sandbox gets only those on
+    sandbox_agent._SANDBOX_SHARED_TOOLS (no poll tools): the read-only ones
+    as these same objects, the two event tools as gated copies. So never
+    change one of these in place for the sandbox; it would change the main
+    agent's too.
 
     One list so the two cannot drift apart. The tools read "channel",
     "discord_client" and "user_id" from their run context; the sandbox
     puts its thread, the client and the requester there (run_sandbox_task),
-    so nothing here needs a sandbox copy. Each tool is a fixed piece of code:
+    so their code needs no sandbox version. Each tool is a fixed piece of code:
     the model picks a tool and its arguments, never what is done with the
     client.
 
