@@ -90,8 +90,9 @@ core/                  # the main bot (the app that runs in production)
     web_reader.py          # fetch_url's reader: Redis cache, one load per URL, site
                            #   readers, plain fetch + trafilatura, browser fallback
     message_search_format.py  # PURE (stdlib-only) Discord message search: query params,
-                           #   how results read, the endpoint's quirks
-    message_search_tools.py   # the search_messages agent tool
+                           #   how results read, the endpoint's quirks; message links
+                           #   and how the messages around one read
+    message_search_tools.py   # the search_messages and read_messages_around agent tools
     voice_policy.py        # PURE (stdlib-only) voice calls: VOICE_* settings, wake-phrase
                            #   match, leave/stop commands, anchored history, sentence
                            #   splitter + markdown stripping, VOICE_INSTRUCTIONS
@@ -357,7 +358,8 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
      Docker), capped by `SANDBOX_INPUT_MAX_BYTES`, and named at the top of the
      task; what was left out is told to both models.
    - **It shares the main agent's lookup tools** (`tool_functions.shared_tools`:
-     web_search, fetch_url, search_messages and the event tools) as the same
+     web_search, fetch_url, search_messages, read_messages_around and the
+     event tools) as the same
      objects, never copies of their code. Which ones is an allowlist
      (`_SANDBOX_SHARED_TOOLS`), so a new shared tool stays out of a run with
      internet access until added there. The poll tools are left out: in the
@@ -551,6 +553,19 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
    answers 202 (code 110000), which discord.py returns as a normal body.
    At most `MAX_CALLS` searches per reply. Read-only, so automatic runs and
    voice turns get it too.
+
+   **`read_messages_around(message, before, after)`** (same module) shows
+   the conversation around one message: a search result's link, or one
+   someone pasted. Search hits no longer carry their surrounding messages,
+   so it fetches the message plus `GET /channels/{id}/messages` with
+   `before=` / `after=` (at most 12 each side). Paging is driven by the
+   result's last lines, which name the oldest and newest link to call again
+   with, as `fetch_url`'s `part` line does. A link to another server is
+   refused (the bot is in several), the channel is resolved only within
+   this one (an uncached thread is fetched; `Guild.fetch_channel` refuses
+   another server's), and an age-restricted channel is read only from one.
+   Like search it reads what the bot can see. Its own cap per reply,
+   `MAX_CONTEXT_CALLS`, so paging cannot use up the searches.
 
 ### What's New notes (write these in every feature PR)
 

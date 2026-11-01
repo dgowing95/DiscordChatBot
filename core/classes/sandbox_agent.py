@@ -1118,7 +1118,8 @@ send_preview_to_thread.on_invoke_tool = _gated_invoke(
 # sandbox "channel" is its thread, so a poll would be posted there and
 # check_polls would read only that thread's polls, never the one meant).
 _SANDBOX_SHARED_TOOLS = frozenset({"web_search", "fetch_url", "search_messages",
-                                   "list_events", "create_event", "update_event"})
+                                   "read_messages_around", "list_events", "create_event",
+                                   "update_event"})
 # The ones that change something in the server. Gated like attach_file: an
 # event made on a plan the user has just changed is a stale action. The
 # read-only ones are not gated, so a lookup never waits on respond_to_updates

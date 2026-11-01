@@ -1,5 +1,5 @@
-"""Discord message search: the query sent and how results read in a prompt
-(PURE, stdlib only).
+"""Discord message search and reading around a message: the query sent and
+how results read in a prompt (PURE, stdlib only).
 
 The search_messages tool (message_search_tools.py) calls Discord's Search
 Guild Messages endpoint (GET /guilds/{id}/messages/search, opened to bots on
@@ -17,7 +17,14 @@ Shapes worth knowing (Discord's docs; check them again if this breaks):
   * booleans must be the strings "true"/"false" (yarl refuses Python bools).
   * thread names come in `threads`: an archived thread is often not in
     discord.py's cache.
+
+Reading around a message (read_messages_around) uses the ordinary
+GET /channels/{id}/messages with `before=` / `after=`, plus the message
+itself. Those messages have the same shape as search hits, so the same
+helpers format them. Each list comes back newest first, whichever of
+before/after was asked, so they are sorted by id here.
 """
+import re
 from datetime import datetime
 
 DEFAULT_LIMIT = 10
@@ -29,6 +36,17 @@ CONTENT_CHARS = 300
 # and a model that finds nothing tends to retry with near-identical words.
 MAX_CALLS = 3
 INDEX_CODE = 110000
+
+# Reading around a message: how many messages on each side by default, and
+# at most (so one call shows at most 25, like a search). A model paging back
+# through a long conversation calls it again and again, so it has its own
+# cap per reply.
+CONTEXT_DEFAULT = 5
+CONTEXT_MAX_SIDE = 12
+MAX_CONTEXT_CALLS = 4
+_LINK = re.compile(r"https?://(?:(?:ptb|canary)\.)?discord(?:app)?\.com/channels/"
+                   r"(\d+|@me)/(\d+)/(\d+)")
+_BARE_ID = re.compile(r"^\d{15,25}$")
 
 
 def clamp_limit(limit) -> int:
@@ -104,6 +122,17 @@ def _content(message: dict) -> str:
     return " ".join(part for part in [text] + extras if part) or "(no text)"
 
 
+def _reply_note(message: dict) -> str:
+    replied = message.get("referenced_message")
+    if isinstance(replied, dict):
+        return f" (replying to {_author(replied)})"
+    return ""
+
+
+def message_link(guild_id, channel_id, message_id) -> str:
+    return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
+
+
 def format_results(body: dict, guild_id, channel_names: dict, query: str = "",
                    where: str = "this server") -> str:
     """The results as the model reads them: one line per message with who,
@@ -120,12 +149,13 @@ def format_results(body: dict, guild_id, channel_names: dict, query: str = "",
     else:
         order = "best matches first" if query else "newest first"
         lines = [f"{total} message{'s' if total != 1 else ''} found in {where}; showing "
-                 f"{len(hits)}, {order}. Share a message's link so people can jump to it."]
+                 f"{len(hits)}, {order}. Share a message's link so people can jump to it; "
+                 f"to see the conversation around one, pass its link to read_messages_around."]
         for message in hits:
             channel_id = str(message.get("channel_id", ""))
             channel = names.get(channel_id)
             place = f"#{channel}" if channel else f"<#{channel_id}>"
-            link = f"https://discord.com/channels/{guild_id}/{channel_id}/{message.get('id')}"
+            link = message_link(guild_id, channel_id, message.get("id"))
             lines.append(f"- {_author(message)}, {_when(message)}, in {place}: "
                          f"{_content(message)}\n  {link}")
     if body.get("doing_deep_historical_index"):
@@ -134,8 +164,75 @@ def format_results(body: dict, guild_id, channel_names: dict, query: str = "",
     return "\n".join(lines)
 
 
+def parse_message_link(text):
+    """(guild id, channel id, message id) from a message link, or
+    (None, None, message id) for a bare id, which means the channel being
+    talked in. None when it is neither. A DM link (@me) is refused by the
+    caller, so its guild comes back as 0."""
+    raw = (text or "").strip().strip("<>")
+    match = _LINK.search(raw)
+    if match:
+        guild = 0 if match.group(1) == "@me" else int(match.group(1))
+        return guild, int(match.group(2)), int(match.group(3))
+    if _BARE_ID.match(raw):
+        return None, None, int(raw)
+    return None
+
+
+def clamp_side(value) -> int:
+    """Messages wanted on one side: 0 to CONTEXT_MAX_SIDE."""
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return CONTEXT_DEFAULT
+    return max(0, min(CONTEXT_MAX_SIDE, value))
+
+
+def _sorted(messages) -> list:
+    unique = {}
+    for message in messages or []:
+        if isinstance(message, dict) and str(message.get("id", "")).isdigit():
+            unique[str(message["id"])] = message
+    return sorted(unique.values(), key=lambda m: int(m["id"]))
+
+
+def format_context(anchor: dict, older, newer, guild_id, channel_id, channel_name: str,
+                   wanted_before: int, wanted_after: int) -> str:
+    """The messages around `anchor`, oldest first, the anchor marked with ►
+    and given its link. The last lines say how to read further back or
+    forward (call again from the oldest or newest message), or that there is
+    nothing more that way: the model only pages if the result tells it how."""
+    anchor_id = str(anchor.get("id"))
+    older = [m for m in _sorted(older) if int(m["id"]) < int(anchor_id)]
+    newer = [m for m in _sorted(newer) if int(m["id"]) > int(anchor_id)]
+    shown = older + [anchor] + newer
+    lines = [f"Messages in #{channel_name} around the one asked for, oldest first "
+             f"(► marks it):"]
+    for message in shown:
+        mark = "►" if str(message.get("id")) == anchor_id else "-"
+        lines.append(f"{mark} {_author(message)}{_reply_note(message)}, {_when(message)}: "
+                     f"{_content(message)}")
+        if mark == "►":
+            lines.append(f"  {message_link(guild_id, channel_id, anchor_id)}")
+    first = message_link(guild_id, channel_id, shown[0].get("id"))
+    last = message_link(guild_id, channel_id, shown[-1].get("id"))
+    if wanted_before and len(older) < wanted_before:
+        lines.append("Nothing earlier: this is the start of the channel.")
+    else:
+        lines.append(f"Earlier messages: call read_messages_around with message={first}, "
+                     f"before={CONTEXT_MAX_SIDE}, after=0.")
+    if wanted_after and len(newer) < wanted_after:
+        lines.append("Nothing later: these are the channel's newest messages.")
+    else:
+        lines.append(f"Later messages: call read_messages_around with message={last}, "
+                     f"before=0, after={CONTEXT_MAX_SIDE}.")
+    return "\n".join(lines)
+
+
 NOT_INDEXED_TEXT = ("Discord hasn't finished indexing this server's messages for search yet, "
                     "so nothing can be found right now. Tell the user to try again in a little "
                     "while.")
 TOO_MANY_TEXT = ("The search limit for this reply has been reached. Answer with what the "
                  "earlier searches found.")
+CONTEXT_TOO_MANY_TEXT = ("The limit for reading messages in this reply has been reached. "
+                         "Answer with what has been read so far.")

@@ -42,8 +42,8 @@ ASK_ENTRIES = (
               "ask me to summarise or explain it.",
               tools=("fetch_url",)),
     HelpEntry("🗂️ Find old messages", "Ask me to find something said earlier in the server or a "
-              "channel.",
-              tools=("search_messages",)),
+              "channel, or paste a message link and ask what was being said around it.",
+              tools=("search_messages", "read_messages_around")),
     HelpEntry("🧠 Remember things", "Tell me things to remember about you, or ask me to forget "
               "them. Memories are per server.",
               tools=("store_memory", "remove_memory", "clear_memories")),

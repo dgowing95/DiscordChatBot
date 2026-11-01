@@ -212,3 +212,194 @@ async def test_outside_a_server_or_with_nothing_to_search():
     assert "only works in a server" in (await _search({"channel": SimpleNamespace()}, query="x"))
     context, _ = _env()
     assert "Give some words" in (await _search(context, query=""))
+
+
+# --- reading around a message ---------------------------------------------
+
+def _link(message_id, channel_id=GENERAL_ID, guild_id=GUILD_ID):
+    return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
+
+
+def test_parse_message_link():
+    assert msf.parse_message_link(_link(5)) == (GUILD_ID, GENERAL_ID, 5)
+    assert msf.parse_message_link(f"<https://ptb.discordapp.com/channels/{GUILD_ID}/1/2>") == (
+        GUILD_ID, 1, 2)
+    assert msf.parse_message_link("see https://discord.com/channels/@me/1/2 here") == (0, 1, 2)
+    assert msf.parse_message_link(" 123456789012345678 ") == (None, None, 123456789012345678)
+    assert msf.parse_message_link("the trip message") is None
+    assert msf.parse_message_link("") is None and msf.parse_message_link(None) is None
+
+
+def test_clamp_side():
+    assert msf.clamp_side(3) == 3 and msf.clamp_side(0) == 0
+    assert msf.clamp_side(-2) == 0 and msf.clamp_side(99) == msf.CONTEXT_MAX_SIDE
+    assert msf.clamp_side(None) == msf.CONTEXT_DEFAULT
+    assert msf.clamp_side("x") == msf.CONTEXT_DEFAULT
+
+
+def _named(ident, name, content="hi", **extra):
+    return _hit(ident, content=content, author={"id": "1", "username": name.lower(),
+                                                "global_name": name}, **extra)
+
+
+def test_format_context_orders_marks_and_offers_paging():
+    anchor = _named(20, "Alice", "the trip link")
+    # Discord returns each list newest first; the anchor or a duplicate is dropped.
+    older = [_named(19, "Bo", "where to?"), _named(18, "Cy", "trip time"), _named(20, "Alice")]
+    newer = [_named(22, "Cy", "thanks", referenced_message=_named(20, "Alice")),
+             _named(21, "Bo", "nice"), _named(21, "Bo", "nice")]
+    text = msf.format_context(anchor, older, newer, GUILD_ID, GENERAL_ID, "general", 2, 2)
+    lines = text.splitlines()
+    assert lines[0].startswith("Messages in #general around the one asked for, oldest first")
+    assert [line.split(",")[0] for line in lines[1:3]] == ["- Cy", "- Bo"]
+    assert lines[3].startswith("► Alice, <t:") and lines[3].endswith(": the trip link")
+    assert lines[4] == f"  {_link(20)}"
+    assert lines[5].startswith("- Bo,") and lines[6].startswith("- Cy (replying to Alice),")
+    assert lines[7] == (f"Earlier messages: call read_messages_around with message={_link(18)}, "
+                        f"before={msf.CONTEXT_MAX_SIDE}, after=0.")
+    assert lines[8] == (f"Later messages: call read_messages_around with message={_link(22)}, "
+                        f"before=0, after={msf.CONTEXT_MAX_SIDE}.")
+
+
+def test_format_context_at_the_ends_of_a_channel():
+    anchor = _named(20, "Alice")
+    text = msf.format_context(anchor, [_named(19, "Bo")], [], GUILD_ID, GENERAL_ID, "general",
+                              5, 5)
+    assert "Nothing earlier: this is the start of the channel." in text
+    assert "Nothing later: these are the channel's newest messages." in text
+    # A side not asked for is offered, never claimed empty.
+    text = msf.format_context(anchor, [], [], GUILD_ID, GENERAL_ID, "general", 0, 0)
+    assert f"message={_link(20)}, before={msf.CONTEXT_MAX_SIDE}, after=0" in text
+    assert f"message={_link(20)}, before=0, after={msf.CONTEXT_MAX_SIDE}" in text
+
+
+def test_search_results_point_at_reading_around():
+    assert "read_messages_around" in msf.format_results(_body(_hit(1)), GUILD_ID, {}, "x")
+
+
+def _perms(read=True, history=True):
+    return SimpleNamespace(read_messages=read, read_message_history=history)
+
+
+def _not_found():
+    return discord.NotFound(MagicMock(status=404, reason="Not Found"), "Unknown Channel")
+
+
+def _context_env(anchor=None, older=(), newer=(), nsfw_target=False, nsfw_here=False,
+                 perms=None, get_error=None):
+    context, _ = _env(nsfw=nsfw_here)
+    guild = context["channel"].guild
+    memes = next(c for c in guild.channels if c.id == MEMES_ID)
+    memes.is_nsfw = lambda: nsfw_target
+    for place in list(guild.channels) + list(guild.threads):
+        place.guild = guild
+        place.permissions_for = lambda member, p=perms or _perms(): p
+    guild.me = SimpleNamespace(id=1)
+    guild.fetch_channel = AsyncMock(side_effect=_not_found())
+    calls = []
+
+    async def logs_from(channel_id, limit, before=None, after=None, around=None):
+        calls.append((channel_id, limit, before, after))
+        return list(older if before else newer)[:limit]
+
+    http = SimpleNamespace(
+        get_message=AsyncMock(side_effect=get_error,
+                              return_value=anchor or _named(20, "Alice", "the trip link")),
+        logs_from=logs_from)
+    context["discord_client"] = SimpleNamespace(http=http)
+    return context, http, calls
+
+
+async def _read(context, **arguments):
+    from agents.tool_context import ToolContext
+    from classes.message_search_tools import read_messages_around
+    tool_context = ToolContext(context=context, tool_name="read_messages_around",
+                               tool_call_id="t2", tool_arguments="{}")
+    return await read_messages_around.on_invoke_tool(tool_context, json.dumps(arguments))
+
+
+@pytest.mark.asyncio
+async def test_reads_around_a_linked_message():
+    context, http, calls = _context_env(older=[_named(19, "Bo")], newer=[_named(21, "Cy")])
+    text = await _read(context, message=_link(20, MEMES_ID), before=3, after=2)
+    http.get_message.assert_awaited_once_with(MEMES_ID, 20)
+    assert sorted(calls, key=str) == sorted([(MEMES_ID, 3, 20, None), (MEMES_ID, 2, None, 20)],
+                                            key=str)
+    assert text.startswith("Messages in #memes around")
+    assert "- Bo," in text and "► Alice," in text and "- Cy," in text
+
+
+@pytest.mark.asyncio
+async def test_a_bare_id_is_the_current_channel_and_zero_skips_a_side():
+    context, http, calls = _context_env()
+    await _read(context, message="123456789012345678", before=0, after=4)
+    http.get_message.assert_awaited_once_with(GENERAL_ID, 123456789012345678)
+    assert calls == [(GENERAL_ID, 4, None, 123456789012345678)]
+
+
+@pytest.mark.asyncio
+async def test_another_servers_link_is_refused():
+    context, http, _ = _context_env()
+    text = await _read(context, message=_link(20, MEMES_ID, guild_id=999999999999999999))
+    assert "different server" in text
+    text = await _read(context, message="https://discord.com/channels/@me/5/6")
+    assert "different server" in text
+    http.get_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_an_uncached_channel_is_fetched_but_only_from_this_server():
+    context, http, _ = _context_env()
+    guild = context["channel"].guild
+    archived = SimpleNamespace(id=777777777777777777, name="old-thread", guild=guild,
+                               is_nsfw=lambda: False, permissions_for=lambda m: _perms())
+    guild.fetch_channel = AsyncMock(return_value=archived)
+    assert (await _read(context, message=_link(20, archived.id))).startswith(
+        "Messages in #old-thread")
+    # Another server's channel: Guild.fetch_channel raises InvalidData.
+    guild.fetch_channel = AsyncMock(side_effect=discord.InvalidData("other guild"))
+    assert "can't find that channel" in (await _read(context,
+                                                     message=_link(20, 888888888888888888)))
+    # Deleted, or not visible to the bot.
+    guild.fetch_channel = AsyncMock(side_effect=_not_found())
+    assert "can't find that channel" in (await _read(context,
+                                                     message=_link(20, 888888888888888888)))
+    assert http.get_message.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_permissions_and_nsfw():
+    context, http, _ = _context_env(perms=_perms(history=False))
+    assert "permission" in (await _read(context, message=_link(20, MEMES_ID)))
+    context, http, _ = _context_env(nsfw_target=True)
+    assert "age-restricted" in (await _read(context, message=_link(20, MEMES_ID)))
+    http.get_message.assert_not_called()
+    context, http, _ = _context_env(nsfw_target=True, nsfw_here=True)
+    assert (await _read(context, message=_link(20, MEMES_ID))).startswith("Messages in #memes")
+
+
+@pytest.mark.asyncio
+async def test_bad_input_and_discord_errors():
+    context, http, _ = _context_env()
+    assert "isn't a message link" in (await _read(context, message="the trip one"))
+    response = MagicMock(status=404, reason="Not Found")
+    context, _, _ = _context_env(get_error=discord.NotFound(response, "Unknown Message"))
+    assert "doesn't exist any more" in (await _read(context, message=_link(20)))
+    response = MagicMock(status=403, reason="Forbidden")
+    context, _, _ = _context_env(get_error=discord.Forbidden(response, "Missing Access"))
+    assert "permission" in (await _read(context, message=_link(20)))
+    response = MagicMock(status=500, reason="Server Error")
+    context, _, _ = _context_env(get_error=discord.HTTPException(response, "boom"))
+    assert "try again later" in (await _read(context, message=_link(20)))
+
+
+@pytest.mark.asyncio
+async def test_reads_per_reply_are_capped_apart_from_searches():
+    context, http, _ = _context_env()
+    context["message_search_calls"] = msf.MAX_CALLS
+    for _ in range(msf.MAX_CONTEXT_CALLS):
+        await _read(context, message=_link(20))
+    assert (await _read(context, message=_link(20))) == msf.CONTEXT_TOO_MANY_TEXT
+    assert http.get_message.await_count == msf.MAX_CONTEXT_CALLS
+    assert "only works in a server" in (await _read({"channel": SimpleNamespace()},
+                                                   message=_link(20)))
