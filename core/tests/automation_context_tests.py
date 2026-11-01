@@ -38,6 +38,9 @@ def test_automatic_handler_needs_no_source_message():
     assert handler.user_memory is None
     assert handler.original_message is None
     assert handler.actor_id == 30
+    assert handler.followup is False
+    assert TextLLMHandler([], 20, None, actor_id=30, channel=channel, automatic=True,
+                          followup=True).followup is True
 
 
 def test_disabled_automations_hide_management_tools(monkeypatch):

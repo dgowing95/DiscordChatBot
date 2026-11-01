@@ -15,8 +15,7 @@ from discord.http import Route
 
 from classes.common import Common
 from classes.message_search_format import (
-    MAX_CALLS, NOT_INDEXED_TEXT, TOO_MANY_TEXT, format_results, not_indexed, only_channels,
-    search_params,
+    MAX_CALLS, NOT_INDEXED_TEXT, TOO_MANY_TEXT, format_results, not_indexed, search_params,
 )
 
 logger = logging.getLogger(__name__)
@@ -68,35 +67,6 @@ async def _find_author(guild, text: str):
     return member.id if member is not None else None
 
 
-# A thread's type in Discord's API when it is private (members only).
-_PRIVATE_THREAD = 12
-
-
-def _readable(guild, member, channel_id: str, threads: dict) -> bool:
-    """Whether `member` can read the channel or thread `channel_id`. Fails
-    closed: an unknown channel, or a private thread (whose member list this
-    cannot check), is not readable. A thread missing from the cache (often
-    an archived one) is judged by its parent, from the search's `threads`."""
-    try:
-        place = guild.get_channel_or_thread(int(channel_id))
-    except (TypeError, ValueError):
-        return False
-    if place is None:
-        info = threads.get(channel_id) or {}
-        if info.get("type") == _PRIVATE_THREAD or not info.get("parent_id"):
-            return False
-        try:
-            place = guild.get_channel(int(info["parent_id"]))
-        except (TypeError, ValueError):
-            return False
-        if place is None:
-            return False
-    elif isinstance(place, discord.Thread) and place.is_private():
-        return False
-    perms = place.permissions_for(member)
-    return bool(perms.view_channel and perms.read_message_history)
-
-
 @function_tool
 async def search_messages(wrapper: RunContextWrapper[dict], query: str, channel: str = "",
                           author: str = "", limit: int = 10) -> str:
@@ -124,22 +94,11 @@ async def search_messages(wrapper: RunContextWrapper[dict], query: str, channel:
     if not query.strip() and not channel.strip() and not author.strip():
         return "Give some words to search for, a channel, or an author."
 
-    # A sandbox run searches only what the person who asked can read: it also
-    # has open internet access, so a page it reads could tell it to search
-    # private channels and send the results out. Limited to the requester,
-    # it can never reach anything they could not already see.
-    requester = context.get("requester")
-    if context.get("search_as_requester") and requester is None:
-        return ("Message search is not available here: I could not check which channels the "
-                "person asking can read. Tell the user.")
-
     where, channel_id = "this server", None
     if channel.strip():
         place = _find_channel(guild, channel, current)
         if place is None:
             return f"There is no channel called \"{channel}\" here. Ask the user which one they mean."
-        if context.get("search_as_requester") and not _readable(guild, requester, str(place.id), {}):
-            return f"The person asking can't read #{place.name}, so I can't search it."
         where, channel_id = f"#{place.name}", place.id
     author_id = None
     if author.strip():
@@ -165,9 +124,6 @@ async def search_messages(wrapper: RunContextWrapper[dict], query: str, channel:
         return "The search failed on Discord's side. Tell the user to try again later."
     if not_indexed(body):
         return NOT_INDEXED_TEXT
-    if context.get("search_as_requester"):
-        threads = {str(t.get("id")): t for t in body.get("threads") or [] if isinstance(t, dict)}
-        body = only_channels(body, lambda cid: _readable(guild, requester, cid, threads))
     names = {str(c.id): c.name for c in list(guild.channels) + list(guild.threads)}
     return format_results(body, guild.id, names, query.strip(), where)
 

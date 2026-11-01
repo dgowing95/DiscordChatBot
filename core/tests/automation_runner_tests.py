@@ -92,6 +92,48 @@ async def test_automatic_run_uses_saved_action_and_origin_channel(monkeypatch):
     assert args[0][2] is None
     assert args[0][3]["automatic"] is True
     assert args[0][3]["channel"] is channel
+    assert args[0][3]["followup"] is False  # a rule never is
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("followup", [True, False])
+async def test_only_a_followup_run_is_marked_as_one(monkeypatch, followup):
+    # The event tools skip the person's own permission check in a follow-up
+    # only, so a plain schedule must never be marked as one.
+    row = dict(id="s1", guild_id=1, channel_id=4, status="enabled", revision=1, editor_id=8,
+               kind="schedule", action="check the poll", next_run=1.0, timezone="Europe/London",
+               followup=followup, creator_id=8, created_at="2026-10-31T12:00:00+00:00")
+    class Redis:
+        async def set(self, *a, **kw): return True
+    class Store:
+        redis = Redis()
+        async def get(self, guild, ident): return row
+        async def finish(self, record, outcome, detail="", started_at=None): pass
+        async def release(self, claim): pass
+    class Typing:
+        async def __aenter__(self): pass
+        async def __aexit__(self, *exc): pass
+    class Channel:
+        id = 4
+        def permissions_for(self, member):
+            return SimpleNamespace(view_channel=True, send_messages=True)
+        def typing(self): return Typing()
+        async def send(self, text): pass
+    guild = SimpleNamespace(get_member=lambda user_id: SimpleNamespace(id=8))
+    client = SimpleNamespace(get_channel=lambda channel_id: Channel(),
+                             get_guild=lambda guild_id: guild, user=SimpleNamespace(id=42))
+    args = []
+    class Handler:
+        def __init__(self, messages, guild_id, original_message, **kw):
+            args.append(kw)
+            self.reasoning = ""
+            self.sandbox_thread = None
+        async def generate(self): return "Done"
+    monkeypatch.setattr(automation_runner, "AutomationStore", Store)
+    monkeypatch.setattr(automation_runner, "TextLLMHandler", Handler)
+    job = automation_runner.AutomationJob([row], [("key", "busy", "token")], None, 0)
+    await automation_runner.execute(job, client)
+    assert args[0]["followup"] is followup
 
 
 @pytest.mark.asyncio

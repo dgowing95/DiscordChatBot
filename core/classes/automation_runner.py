@@ -226,7 +226,8 @@ async def execute(job, client):
         # typing for as long as it is working on the scheduled/rule action.
         async with channel.typing():
             handler = TextLLMHandler([{"role": "user", "content": prompt}], rows[0]["guild_id"], None,
-                                     client=client, actor_id=rows[0]["editor_id"], channel=channel, automatic=True)
+                                     client=client, actor_id=rows[0]["editor_id"], channel=channel, automatic=True,
+                                     followup=job.message is None and bool(rows[0].get("followup")))
             result = await handler.generate()
             if result == "Error":
                 raise RuntimeError("Model run failed")

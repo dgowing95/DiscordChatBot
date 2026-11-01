@@ -1149,13 +1149,12 @@ def _sandbox_shared_tools() -> list:
 async def _resolve_requester(thread, user_id):
     """The person who asked for this run, as a guild Member, or None.
 
-    The shared tools need a Member, not an id: the event tools check the
-    requester's own permissions, and search_messages limits results to the
-    channels they can read. The bot runs without the members intent, so
+    The event tools need a Member, not an id, to check the requester's own
+    permission. The bot runs without the members intent, so
     guild.get_member usually misses for someone who only typed a message,
     and the sandbox context has no message author to fall back on. One
-    fetch_member here, before the run, is what makes those checks work. A
-    failure leaves None, which both tools treat as "not allowed"."""
+    fetch_member here, before the run, is what makes that check work. A
+    failure leaves None, which the event tools treat as "not allowed"."""
     guild = getattr(thread, "guild", None)
     if guild is None or user_id is None:
         return None
@@ -1954,10 +1953,8 @@ async def run_sandbox_task(
             "discord_client": client,
             "user_id": requesting_user_id,
             # The requester as a Member (see _resolve_requester): the event
-            # tools check THEIR permission with it, and search_messages
-            # returns only what they can read (search_as_requester).
+            # tools check THEIR permission with it.
             "requester": requester,
-            "search_as_requester": True,
             "session": session,
             # The run's conversation coordinator: the tools read it from
             # here to gate side effects, answer thread messages and ask

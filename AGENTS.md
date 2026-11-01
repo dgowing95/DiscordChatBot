@@ -367,7 +367,6 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
      Before the run, `_resolve_requester` fetches the requester as a Member
      (`requester` in the context): the bot has no members intent, so the
      cache usually misses them, and without it every event call was refused.
-     Message search in a run is limited to what that person can read.
 
    Every one of these carries its full rationale — the production incident that
    produced it, and what breaks if it is undone — in the docstring of the
@@ -484,7 +483,12 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
    that the server does not let them make. The actor is resolved like
    `automation_tools._scope` (message author, else `user_id`), so the check
    also runs in voice turns and in automatic runs, as the entry's editor.
-   Event tools stay in the AUTOMATIC tool set on purpose: the usual
+   **Except in a follow-up**, by the owner's choice: `followup` in the run
+   context (from the record, through `TextLLMHandler`) skips the person's
+   check, not the bot's (`event_tools._checks_requester`). Without the members
+   intent the editor is often not in the cache, so the check refused people
+   who had the permission. A sandbox run fetches its requester instead
+   (`sandbox_agent._resolve_requester`). Event tools stay in the AUTOMATIC tool set on purpose: the usual
    follow-up is "read the poll, make the event". Only events the bot made
    (`creator_id`) can be changed. Naive times are read in
    `AUTOMATIONS_TIMEZONE`; results give `<t:unix:F>` so readers see their
@@ -538,10 +542,8 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
    endpoint (`GET /guilds/{id}/messages/search`, open to bots since
    2026-03-19; needs Read Message History and the Message Content intent),
    which discord.py does not wrap. Whole server by default; results come only
-   from channels the bot can read, and in a sandbox run only from those the
-   requester can read too (`search_as_requester`: the run also has open
-   internet access, so this keeps a prompt-injected page from pulling private
-   channels out; unknown channels and private threads are dropped). A server Discord has not indexed yet
+   from channels the bot can read (sandbox runs included: by the owner's
+   choice it is not limited to what the person asking can read). A server Discord has not indexed yet
    answers 202 (code 110000), which discord.py returns as a normal body.
    At most `MAX_CALLS` searches per reply. Read-only, so automatic runs and
    voice turns get it too.

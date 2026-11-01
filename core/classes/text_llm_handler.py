@@ -348,7 +348,7 @@ class TextLLMHandler:
 
     def __init__(self, messages, guild_id, original_message, client=None,
                  actor_id=None, channel=None, automatic=False, voice=False, request_text=None,
-                 bot_name=None):
+                 bot_name=None, followup=False):
         self.original_message = original_message
         self.messages = messages
         self.guild_id = guild_id
@@ -362,6 +362,9 @@ class TextLLMHandler:
         self.actor_id = actor_id if actor_id is not None else original_message.author.id
         self.channel = channel if channel is not None else original_message.channel
         self.automatic = automatic
+        # A follow-up run (automation_runner): the event tools then skip the
+        # requester's own permission check (event_tools._checks_requester).
+        self.followup = followup
         # A turn in a voice call: spoken instructions, thinking off, and no
         # source message (original_message is None; request_text is what the
         # speaker said, for tools that compare their result against it).
@@ -511,6 +514,7 @@ class TextLLMHandler:
         "original_message": self.original_message,
         "channel": self.channel if hasattr(self, "channel") else self.original_message.channel,
         "automatic": getattr(self, "automatic", False),
+        "followup": getattr(self, "followup", False),
         "discord_client": self.client,
         "redis_save_tool_calls": 0,
         "personality_tool_calls": 0,

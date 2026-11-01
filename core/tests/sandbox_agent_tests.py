@@ -3963,7 +3963,6 @@ async def test_the_sandbox_run_context_gives_the_shared_tools_what_they_read():
     assert captured["discord_client"] is client
     assert captured["user_id"] == 7
     assert captured["requester"] is member
-    assert captured["search_as_requester"] is True
     thread.guild.fetch_member.assert_awaited_once_with(7)
 
     from classes.event_tools import _guild_and_actor
