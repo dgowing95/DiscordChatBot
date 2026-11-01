@@ -1233,7 +1233,8 @@ def build_sandbox_agent(out_dir: str | None, conversation=None) -> "object":
     no-op gracefully (return a string telling the model to proceed on its
     own) when no Discord thread context was passed into this run — see
     run_sandbox_task's nested_context. The main agent's lookup and event
-    tools come last (_sandbox_shared_tools), shared rather than copied.
+    tools come last (_sandbox_shared_tools): the read-only ones as the same
+    objects, the two event tools as gated copies.
 
     conversation: the run's SandboxConversation, whose AgentHooks commit
     "this input was seen" after each completed model call (see
@@ -1971,7 +1972,10 @@ async def run_sandbox_task(
             "discord_client": client,
             "user_id": requesting_user_id,
             # The requester as a Member (see _resolve_requester): the event
-            # tools check THEIR permission with it.
+            # tools check THEIR permission with it, for the whole run. Anyone
+            # who can see the thread can steer the run, so an event asked for
+            # mid-run by someone else is checked against the requester, not
+            # them. Accepted, like follow-ups skipping the check.
             "requester": requester,
             "session": session,
             # The run's conversation coordinator: the tools read it from

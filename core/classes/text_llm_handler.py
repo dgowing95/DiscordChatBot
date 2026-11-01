@@ -320,8 +320,9 @@ def agent_tools(automatic: bool = False, voice: bool = False) -> list:
     leave the call instead of joining one."""
     # The sandbox agent gets these same tools (tool_functions.shared_tools).
     # Automatic runs keep them all: a follow-up's usual job is to read a poll
-    # and make the event, and the event tools re-check the editor's
-    # permission; search and the poll lookup are read-only.
+    # and make the event; search and the poll lookup are read-only. The event
+    # tools check the editor's permission in a schedule or a rule, but not in
+    # a follow-up (event_tools._checks_requester).
     tools = [*shared_tools(), change_personality]
     if not automatic:
         tools.extend((store_memory, remove_memory, clear_memories))

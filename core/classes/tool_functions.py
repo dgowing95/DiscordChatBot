@@ -904,7 +904,7 @@ def shared_tools() -> list:
     """The tools the main agent AND the sandbox agent get, as the same
     objects: looking things up (web, links, this server's messages, polls,
     events) plus posting a poll and making or moving an event. The sandbox
-    leaves out the poll tools (see sandbox_agent._SANDBOX_EXCLUDED_SHARED_TOOLS).
+    gets only those on sandbox_agent._SANDBOX_SHARED_TOOLS (no poll tools).
 
     One list so the two cannot drift apart. The tools read "channel",
     "discord_client" and "user_id" from their run context; the sandbox
