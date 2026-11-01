@@ -18,12 +18,19 @@ Shapes worth knowing (Discord's docs; check them again if this breaks):
   * thread names come in `threads`: an archived thread is often not in
     discord.py's cache.
 
+Saving messages to a file (save_messages_to_file, sandbox runs only) pages
+through the same search, 25 at a time, with `offset`. Discord refuses an
+offset over 9975, so one search can reach 10000 messages at most. Every
+message is written in full, as one JSON object per line, for code to read:
+a tally of a bot's 2,000 posts cannot go through a prompt 25 at a time.
+
 Reading around a message (read_messages_around) uses the ordinary
 GET /channels/{id}/messages with `before=` / `after=`, plus the message
 itself. Those messages have the same shape as search hits, so the same
 helpers format them. Each list comes back newest first, whichever of
 before/after was asked, so they are sorted by id here.
 """
+import json
 import re
 from datetime import datetime
 
@@ -41,6 +48,15 @@ INDEX_CODE = 110000
 # at most (so one call shows at most 25, like a search).
 CONTEXT_DEFAULT = 5
 CONTEXT_MAX_SIDE = 12
+# Saving to a file: messages by default and at most (Discord's offset stops
+# at 9975), the bytes one file may hold (it is kept in the thread's workspace
+# snapshot, capped at 50MB by default), and how much of one record the model
+# is shown as a sample.
+EXPORT_DEFAULT = 1000
+EXPORT_MAX = 10000
+EXPORT_MAX_OFFSET = 9975
+EXPORT_MAX_BYTES = 20_000_000
+EXPORT_SAMPLE_CHARS = 800
 _LINK = re.compile(r"https?://(?:(?:ptb|canary)\.)?discord(?:app)?\.com/channels/"
                    r"(\d+|@me)/(\d+)/(\d+)")
 _BARE_ID = re.compile(r"^\d{15,25}$")
@@ -55,20 +71,27 @@ def clamp_limit(limit) -> int:
 
 
 def search_params(query: str, channel_id=None, author_id=None, limit=DEFAULT_LIMIT,
-                  include_nsfw: bool = False) -> list:
+                  include_nsfw: bool = False, offset: int = 0,
+                  newest_first: bool = False) -> list:
     """The query string, as (key, value) pairs. Best matches first when there
-    are words to match, else newest first (listing someone's messages)."""
+    are words to match, else newest first (listing someone's messages).
+    Saving to a file pages with `offset` and always asks newest first: a
+    relevance order is not stable from one page to the next."""
     params = [("limit", str(clamp_limit(limit))),
               ("include_nsfw", "true" if include_nsfw else "false")]
     query = (query or "").strip()[:1024]
     if query:
-        params += [("content", query), ("sort_by", "relevance")]
+        params.append(("content", query))
+    if query and not newest_first:
+        params.append(("sort_by", "relevance"))
     else:
         params += [("sort_by", "timestamp"), ("sort_order", "desc")]
     if channel_id:
         params.append(("channel_id", str(channel_id)))
     if author_id:
         params.append(("author_id", str(author_id)))
+    if offset:
+        params.append(("offset", str(int(offset))))
     return params
 
 
@@ -245,6 +268,79 @@ def format_context(anchor: dict, older, newer, guild_id, channel_id, channel_nam
     else:
         lines.append(f"Later messages: call read_messages_around with message={last}, "
                      f"before=0, after={CONTEXT_MAX_SIDE}.")
+    return "\n".join(lines)
+
+
+def clamp_export(value) -> int:
+    """Messages to save: 1 to EXPORT_MAX."""
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return EXPORT_DEFAULT
+    return max(1, min(EXPORT_MAX, value))
+
+
+def export_record(message: dict, guild_id, channel_names: dict) -> dict:
+    """One message as saved to the file: everything, uncut, in plain keys."""
+    author = message.get("author") or {}
+    channel_id = str(message.get("channel_id", ""))
+    embeds = []
+    for embed in message.get("embeds") or []:
+        if not isinstance(embed, dict):
+            continue
+        record = {
+            "author": (embed.get("author") or {}).get("name") or "",
+            "title": embed.get("title") or "",
+            "description": embed.get("description") or "",
+            "fields": [{"name": f.get("name") or "", "value": f.get("value") or ""}
+                       for f in embed.get("fields") or [] if isinstance(f, dict)],
+            "footer": (embed.get("footer") or {}).get("text") or "",
+            "url": embed.get("url") or "",
+        }
+        if any(record.values()):
+            embeds.append(record)
+    return {
+        "id": str(message.get("id", "")),
+        "link": message_link(guild_id, channel_id, message.get("id")),
+        "channel": channel_names.get(channel_id, channel_id),
+        "author": _author(message),
+        "author_id": str(author.get("id", "")),
+        "bot": bool(author.get("bot")),
+        "timestamp": str(message.get("timestamp") or ""),
+        "content": str(message.get("content") or ""),
+        "embeds": embeds,
+        "attachments": [a.get("filename") for a in message.get("attachments") or []
+                        if a.get("filename")],
+    }
+
+
+def export_filename(query: str, where: str, author: str) -> str:
+    """A readable file name from what was asked for, e.g.
+    discord-group-shared-storage.jsonl."""
+    words = " ".join(part for part in (query, author,
+                                       "" if where == "this server" else where) if part)
+    slug = re.sub(r"[^a-z0-9]+", "-", words.casefold()).strip("-")[:60].strip("-")
+    return f"discord-{slug or 'messages'}.jsonl"
+
+
+def export_summary(path: str, saved: int, total: int, first: dict | None,
+                   stopped: str = "") -> str:
+    """What the sandbox model is told: where the file is, how much is in it,
+    its shape (one real record, cut short), and why it stopped if it did."""
+    if not saved:
+        return "No messages matched, so no file was written."
+    lines = [f"Saved {saved} message{'s' if saved != 1 else ''} "
+             f"({'all' if saved >= total else f'the newest {saved} of {total}'} found) to "
+             f"{path}, newest first, one JSON object per line. Keys: id, link, channel, author, "
+             f"author_id, bot, timestamp (ISO 8601, UTC), content, embeds (each: author, title, "
+             f"description, fields [{{name, value}}], footer, url), attachments (file names). "
+             f"Read it with code; don't print the whole file."]
+    if stopped:
+        lines.append(stopped)
+    if first is not None:
+        sample = json.dumps(first, ensure_ascii=False)
+        lines.append("The newest record: " + (sample[:EXPORT_SAMPLE_CHARS] + "…"
+                                              if len(sample) > EXPORT_SAMPLE_CHARS else sample))
     return "\n".join(lines)
 
 

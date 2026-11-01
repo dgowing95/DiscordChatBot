@@ -430,3 +430,165 @@ async def test_reads_are_not_capped_and_need_a_server():
     assert http.get_message.await_count == 10
     assert "only works in a server" in (await _read({"channel": SimpleNamespace()},
                                                    message=_link(20)))
+
+
+# --- saving messages to a file (sandbox runs) -----------------------------
+
+TRACKER_EMBED = {"author": {"name": "Team Ana"}, "title": "Shared Chest",
+                 "description": "Team Ana withdrew:\n- 20 x Iron bar (4K)",
+                 "fields": [{"name": "Player", "value": "Bo"},
+                            {"name": "Net value", "value": "-4K gp"}],
+                 "footer": {"text": "Powered by Tracker"}}
+
+
+def test_params_for_saving_page_newest_first():
+    params = msf.search_params("chest", None, None, 25, offset=50, newest_first=True)
+    assert params == [("limit", "25"), ("include_nsfw", "false"), ("content", "chest"),
+                      ("sort_by", "timestamp"), ("sort_order", "desc"), ("offset", "50")]
+
+
+def test_export_record_keeps_everything():
+    message = _hit(7, content="", embeds=[TRACKER_EMBED, {"type": "image"}],
+                   attachments=[{"filename": "a.png"}])
+    message["author"]["bot"] = True
+    record = msf.export_record(message, GUILD_ID, {str(GENERAL_ID): "general"})
+    assert record == {
+        "id": "7", "link": f"https://discord.com/channels/{GUILD_ID}/{GENERAL_ID}/7",
+        "channel": "general", "author": "Alice", "author_id": str(ALICE_ID), "bot": True,
+        "timestamp": "2026-03-01T12:00:00.000000+00:00", "content": "",
+        "embeds": [{"author": "Team Ana", "title": "Shared Chest",
+                    "description": "Team Ana withdrew:\n- 20 x Iron bar (4K)",
+                    "fields": [{"name": "Player", "value": "Bo"},
+                               {"name": "Net value", "value": "-4K gp"}],
+                    "footer": "Powered by Tracker", "url": ""}],
+        "attachments": ["a.png"]}
+
+
+def test_export_filename_and_clamp():
+    assert msf.export_filename("Shared Chest!", "this server", "") == "discord-shared-chest.jsonl"
+    assert msf.export_filename("", "#trip-plans", "Bo") == "discord-bo-trip-plans.jsonl"
+    assert msf.export_filename("", "this server", "🙂") == "discord-messages.jsonl"
+    assert msf.clamp_export(0) == 1 and msf.clamp_export(10**6) == msf.EXPORT_MAX
+    assert msf.clamp_export("lots") == msf.EXPORT_DEFAULT
+
+
+def test_export_summary():
+    text = msf.export_summary("in/x.jsonl", 3, 3, {"id": "1", "content": "y" * 2000})
+    assert text.startswith("Saved 3 messages (all found) to in/x.jsonl, newest first")
+    assert "The newest record: {" in text and text.endswith("…")
+    text = msf.export_summary("in/x.jsonl", 1, 40, {"id": "1"}, "Stopped early: why.")
+    assert "Saved 1 message (the newest 1 of 40 found)" in text and "Stopped early: why." in text
+    assert msf.export_summary("", 0, 0, None) == "No messages matched, so no file was written."
+
+
+class _FakeSession:
+    def __init__(self, cwd="/work"):
+        self.cwd, self.files, self.commands = cwd, {}, []
+
+    async def exec(self, *argv, shell=False):
+        self.commands.append(argv)
+        out = self.cwd if argv[0] == "pwd" else ""
+        return SimpleNamespace(ok=lambda: True, stdout=out.encode())
+
+    async def write(self, path, data):
+        self.files[str(path)] = data.read().decode("utf-8")
+
+
+def _pages(total, page_size=25, start_id=10_000):
+    """Search pages for `total` messages, newest first, answered by offset."""
+    ids = list(range(start_id + total, start_id, -1))
+
+    async def request(route, params):
+        params = dict(params)
+        offset, limit = int(params.get("offset", 0)), int(params["limit"])
+        chunk = ids[offset:offset + limit]
+        return {"total_results": total, "messages": [[_hit(i, content="", embeds=[TRACKER_EMBED])]
+                                                     for i in chunk]}
+    return request
+
+
+async def _save(context, **arguments):
+    from agents.tool_context import ToolContext
+    from classes.message_search_tools import save_messages_to_file
+    tool_context = ToolContext(context=context, tool_name="save_messages_to_file",
+                               tool_call_id="t3", tool_arguments="{}")
+    return await save_messages_to_file.on_invoke_tool(tool_context, json.dumps(arguments))
+
+
+@pytest.mark.asyncio
+async def test_saves_every_page_to_a_file():
+    context, http = _env()
+    http.request = AsyncMock(side_effect=_pages(60))
+    session = _FakeSession()
+    context.update(session=session, out_dir="/work/out")
+    text = await _save(context, query="shared chest", channel="general")
+    assert http.request.await_count == 3
+    offsets = [dict(c.kwargs["params"]).get("offset", "0") for c in http.request.await_args_list]
+    assert offsets == ["0", "25", "50"]
+    assert all(dict(c.kwargs["params"])["channel_id"] == str(GENERAL_ID)
+               for c in http.request.await_args_list)
+    lines = session.files["/work/in/discord-shared-chest-general.jsonl"].splitlines()
+    assert len(lines) == 60 and json.loads(lines[0])["id"] == "10060"
+    assert json.loads(lines[0])["embeds"][0]["fields"][1] == {"name": "Net value",
+                                                              "value": "-4K gp"}
+    assert ("mkdir", "-p", "/work/in") in session.commands
+    assert text.startswith("Saved 60 messages (all found) to in/discord-shared-chest-general.jsonl")
+
+
+@pytest.mark.asyncio
+async def test_saving_stops_at_max_and_skips_repeats():
+    context, http = _env()
+    pages = _pages(100)
+
+    async def shifting(route, params):
+        # A new message arrived between pages: the second page repeats one.
+        body = await pages(route, params)
+        if dict(params).get("offset") == "25":
+            body["messages"].insert(0, [_hit(10_076, content="")])
+        return body
+    http.request = AsyncMock(side_effect=shifting)
+    session = _FakeSession()
+    context.update(session=session)  # no out_dir: found from pwd
+    text = await _save(context, query="chest", max_messages=40)
+    lines = session.files["/work/in/discord-chest.jsonl"].splitlines()
+    ids = [json.loads(line)["id"] for line in lines]
+    assert len(ids) == 40 and len(set(ids)) == 40
+    assert "the newest 40 of 100 found" in text
+
+
+@pytest.mark.asyncio
+async def test_saving_only_in_the_sandbox_and_failures():
+    context, http = _env()
+    assert "only works inside the code sandbox" in (await _save(context, query="x"))
+    http.request.assert_not_called()
+    context["session"] = _FakeSession()
+    http.request = AsyncMock(return_value=_body())
+    assert (await _save(context, query="x")) == "No messages matched, so no file was written."
+    assert context["session"].files == {}
+    response = MagicMock(status=500, reason="Server Error")
+    calls = {"n": 0}
+    pages = _pages(60)
+
+    async def fails_later(route, params):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise discord.HTTPException(response, "boom")
+        return await pages(route, params)
+    http.request = AsyncMock(side_effect=fails_later)
+    text = await _save(context, query="x")
+    assert "Saved 25 messages (the newest 25 of 60 found)" in text and "Stopped early" in text
+
+
+@pytest.mark.asyncio
+async def test_a_big_search_in_the_sandbox_points_at_saving():
+    context, http = _env(body=_body(_hit(1), total_results=500))
+    assert "save_messages_to_file" not in (await _search(context, query="x"))
+    context["session"] = _FakeSession()
+    assert "To work with all 500 of them" in (await _search(context, query="x"))
+
+
+def test_only_the_sandbox_gets_the_save_tool():
+    from classes import sandbox_agent, tool_functions
+    assert "save_messages_to_file" not in {t.name for t in tool_functions.shared_tools()}
+    names = {t.name for t in sandbox_agent.build_sandbox_agent(None).tools}
+    assert {"save_messages_to_file", "read_messages_around", "search_messages"} <= names

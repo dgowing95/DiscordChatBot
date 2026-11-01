@@ -1132,6 +1132,16 @@ _GATED_SHARED_TOOLS = frozenset({"create_event", "update_event"})
 _SANDBOX_DESCRIPTION_CUTS = {"create_event": re.compile(r"\s*To find a time[^.]*\.")}
 
 
+def _sandbox_only_tools() -> list:
+    """Discord lookups only a run can use, since they need its workspace:
+    save_messages_to_file writes a big search's messages to a file for code
+    to read. Read-only towards the server and ungated, like the shared
+    lookups. Imported here because message_search_tools imports
+    tool_functions, which this module's callers import too."""
+    from classes.message_search_tools import save_messages_to_file
+    return [save_messages_to_file]
+
+
 def _sandbox_shared_tools() -> list:
     """The main agent's shared tools (tool_functions.shared_tools) that are
     on _SANDBOX_SHARED_TOOLS, for the sandbox agent. The read-only ones are
@@ -1287,7 +1297,7 @@ def build_sandbox_agent(out_dir: str | None, conversation=None) -> "object":
             ),
         ],
         tools=[respond_to_updates, ask_user, attach_file, send_preview_to_thread,
-               say_in_thread, *_sandbox_shared_tools()],
+               say_in_thread, *_sandbox_shared_tools(), *_sandbox_only_tools()],
         hooks=make_agent_hooks(conversation) if conversation is not None else None,
         # Slightly cooler than the chat agent: code tasks want determinism.
         # timeout: the wall-clock bound on each model call that the client's
@@ -1979,6 +1989,8 @@ async def run_sandbox_task(
             # them. Accepted, like follow-ups skipping the check.
             "requester": requester,
             "session": session,
+            # Where in/ goes (beside it), for save_messages_to_file.
+            "out_dir": out_dir,
             # The run's conversation coordinator: the tools read it from
             # here to gate side effects, answer thread messages and ask
             # questions (see classes/sandbox_conversation.py).

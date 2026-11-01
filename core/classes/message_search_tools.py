@@ -11,7 +11,12 @@ message_search_format.py holds the query and result rules and the
 endpoint's quirks.
 """
 import asyncio
+import io
+import json
 import logging
+import posixpath
+from dataclasses import dataclass
+from pathlib import PurePosixPath
 import re
 
 import discord
@@ -20,8 +25,9 @@ from discord.http import Route
 
 from classes.common import Common
 from classes.message_search_format import (
-    NOT_INDEXED_TEXT, clamp_side, format_context, format_results, not_indexed,
-    parse_message_link, search_params,
+    EXPORT_DEFAULT, EXPORT_MAX_BYTES, EXPORT_MAX_OFFSET, MAX_LIMIT, NOT_INDEXED_TEXT, clamp_export,
+    clamp_side, export_filename, export_record, export_summary, flatten, format_context,
+    format_results, not_indexed, parse_message_link, search_params,
 )
 
 logger = logging.getLogger(__name__)
@@ -87,39 +93,75 @@ async def search_messages(wrapper: RunContextWrapper[dict], query: str, channel:
         limit: How many messages to return, 1 to 25.
     """
     context = wrapper.context
+    scope = await _scope(context, query, channel, author)
+    if isinstance(scope, str):
+        return scope
+    context["message_search_calls"] = context.get("message_search_calls", 0) + 1
+    logger.info(f"Searching {scope.where} for {scope.query!r} (author {scope.author_id}, call "
+                f"{context['message_search_calls']})")
+    await Common.send_tool_discord_embed(
+        scope.current, f"Searching {scope.where} for: {scope.query or 'recent messages'}"
+                       + (f" (by {scope.author})" if scope.author else ""))
+    body = await _search_page(scope, limit)
+    if isinstance(body, str):
+        return body
+    text = format_results(body, scope.guild.id, _channel_names(scope.guild), scope.query,
+                          scope.where)
+    # In a sandbox run (it has a workspace) a big result can go to a file for
+    # code to read; only the sandbox has that tool.
+    shown, total = len(flatten(body)), int(body.get("total_results") or 0)
+    if context.get("session") is not None and total > shown:
+        text += (f"\nTo work with all {total} of them (counting, adding up, charting), "
+                 f"save_messages_to_file writes them to a file in your workspace.")
+    return text
+
+
+@dataclass
+class _Scope:
+    current: object
+    guild: object
+    client: object
+    query: str
+    where: str
+    channel_id: int | None
+    author: str
+    author_id: int | None
+
+
+async def _scope(context: dict, query, channel, author):
+    """What a search covers: the server, words, channel and author, resolved;
+    or the text to return when that fails."""
     current = context.get("channel")
     guild = getattr(current, "guild", None)
     client = context.get("discord_client")
     if guild is None or client is None:
         return "Message search only works in a server. Tell the user."
     # The model can send null for an optional argument.
-    query, channel, author = query or "", channel or "", author or ""
-    context["message_search_calls"] = context.get("message_search_calls", 0) + 1
-    if not query.strip() and not channel.strip() and not author.strip():
+    query, channel, author = (query or "").strip(), (channel or "").strip(), (author or "").strip()
+    if not query and not channel and not author:
         return "Give some words to search for, a channel, or an author."
-
     where, channel_id = "this server", None
-    if channel.strip():
+    if channel:
         place = _find_channel(guild, channel, current)
         if place is None:
             return f"There is no channel called \"{channel}\" here. Ask the user which one they mean."
         where, channel_id = f"#{place.name}", place.id
     author_id = None
-    if author.strip():
+    if author:
         author_id = await _find_author(guild, author)
         if author_id is None:
             return f"No one called \"{author}\" was found in this server. Ask the user who they mean."
+    return _Scope(current, guild, client, query, where, channel_id, author, author_id)
 
-    logger.info(f"Searching {where} for {query.strip()!r} (author {author_id}, call "
-                f"{context['message_search_calls']})")
-    await Common.send_tool_discord_embed(
-        current, f"Searching {where} for: {query.strip() or 'recent messages'}"
-                 + (f" (by {author.strip()})" if author.strip() else ""))
-    nsfw = bool(getattr(current, "is_nsfw", lambda: False)())
+
+async def _search_page(scope: _Scope, limit, offset: int = 0, newest_first: bool = False):
+    """One page of Discord's search, or the text to return when it fails."""
+    nsfw = bool(getattr(scope.current, "is_nsfw", lambda: False)())
     try:
-        body = await client.http.request(
-            Route("GET", "/guilds/{guild_id}/messages/search", guild_id=guild.id),
-            params=search_params(query, channel_id, author_id, limit, include_nsfw=nsfw))
+        body = await scope.client.http.request(
+            Route("GET", "/guilds/{guild_id}/messages/search", guild_id=scope.guild.id),
+            params=search_params(scope.query, scope.channel_id, scope.author_id, limit,
+                                 include_nsfw=nsfw, offset=offset, newest_first=newest_first))
     except discord.Forbidden:
         return ("Discord didn't allow the search (I need Read Message History, and the bot needs "
                 "the Message Content intent). Tell the user.")
@@ -128,8 +170,103 @@ async def search_messages(wrapper: RunContextWrapper[dict], query: str, channel:
         return "The search failed on Discord's side. Tell the user to try again later."
     if not_indexed(body):
         return NOT_INDEXED_TEXT
-    names = {str(c.id): c.name for c in list(guild.channels) + list(guild.threads)}
-    return format_results(body, guild.id, names, query.strip(), where)
+    return body
+
+
+def _channel_names(guild) -> dict:
+    return {str(c.id): c.name for c in list(guild.channels) + list(guild.threads)}
+
+
+@function_tool
+async def save_messages_to_file(wrapper: RunContextWrapper[dict], query: str = "",
+                                channel: str = "", author: str = "",
+                                max_messages: int = EXPORT_DEFAULT) -> str:
+    """Saves every message in this server that matches a search to a file in your
+    workspace (one JSON object per line, embeds included), for code to count, add up or
+    chart. Use it instead of search_messages when you need more than a handful of messages.
+
+    Args:
+        query: Words the messages contain (a bot's embed titles and fields count). Leave
+            empty to save a channel's or an author's messages.
+        channel: Optional: only this channel (its name, #mention or id).
+        author: Optional: only messages by this person or bot (their name, @mention or id).
+        max_messages: The most to save, newest first, 1 to 10000.
+    """
+    context = wrapper.context
+    session = context.get("session")
+    if session is None:
+        return "Saving messages to a file only works inside the code sandbox."
+    scope = await _scope(context, query, channel, author)
+    if isinstance(scope, str):
+        return scope
+    wanted = clamp_export(max_messages)
+    logger.info(f"Saving up to {wanted} messages from {scope.where} for {scope.query!r} "
+                f"(author {scope.author_id})")
+    await Common.send_tool_discord_embed(
+        scope.current, f"Saving messages from {scope.where} to a file: "
+                       f"{scope.query or 'all messages'}"
+                       + (f" (by {scope.author})" if scope.author else ""))
+    names = _channel_names(scope.guild)
+    records, seen, total, size, stopped = [], set(), 0, 0, ""
+    offset = 0
+    while len(records) < wanted:
+        body = await _search_page(scope, MAX_LIMIT, offset, newest_first=True)
+        if isinstance(body, str):
+            if not records:
+                return body
+            stopped = (f"Stopped early: Discord stopped answering after {len(records)} "
+                       f"messages, so the file holds only those.")
+            break
+        total = max(total, int(body.get("total_results") or 0))
+        for thread in body.get("threads") or []:
+            if thread.get("id") and thread.get("name"):
+                names.setdefault(str(thread["id"]), thread["name"])
+        hits = flatten(body)
+        for message in hits:
+            # New messages arriving while it pages shift the pages, so a
+            # message can come round twice.
+            if str(message.get("id")) in seen or len(records) >= wanted:
+                continue
+            seen.add(str(message.get("id")))
+            line = json.dumps(export_record(message, scope.guild.id, names), ensure_ascii=False)
+            size += len(line.encode("utf-8")) + 1
+            records.append(line)
+        offset += len(hits)
+        if size > EXPORT_MAX_BYTES:
+            stopped = "Stopped early: the file reached its size limit."
+            break
+        if not hits or offset >= total:
+            break
+        if offset > EXPORT_MAX_OFFSET:
+            stopped = (f"Stopped at {len(records)}: Discord's search goes no deeper than "
+                       f"10000 results. Narrow it (a channel or an author) to reach the rest.")
+            break
+    if not records:
+        return export_summary("", 0, total, None)
+
+    name = export_filename(scope.query, scope.where, scope.author)
+    try:
+        in_dir = await _input_dir(context, session)
+        await session.write(PurePosixPath(in_dir, name),
+                            io.BytesIO(("\n".join(records) + "\n").encode("utf-8")))
+    except Exception as e:
+        logger.warning(f"could not write the message file: {e}")
+        return "The messages were found but could not be written to your workspace."
+    logger.info(f"Saved {len(records)} of {total} messages to in/{name}")
+    return export_summary(f"in/{name}", len(records), total, json.loads(records[0]), stopped)
+
+
+async def _input_dir(context: dict, session) -> str:
+    """The run's in/ folder (beside out/, where chat files go), made if
+    needed. Absolute, from the workspace's own working directory."""
+    out_dir = context.get("out_dir")
+    if not out_dir:
+        result = await session.exec("pwd", shell=False)
+        out_dir = posixpath.join(result.stdout.decode("utf-8", "replace").strip(), "out")
+    in_dir = posixpath.join(posixpath.dirname(out_dir), "in")
+    if not (await session.exec("mkdir", "-p", in_dir, shell=False)).ok():
+        raise RuntimeError(f"could not make {in_dir}")
+    return in_dir
 
 
 async def _channel_in_guild(guild, channel_id: int):

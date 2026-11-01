@@ -92,7 +92,8 @@ core/                  # the main bot (the app that runs in production)
     message_search_format.py  # PURE (stdlib-only) Discord message search: query params,
                            #   how results read, the endpoint's quirks; message links
                            #   and how the messages around one read
-    message_search_tools.py   # the search_messages and read_messages_around agent tools
+    message_search_tools.py   # the search_messages and read_messages_around agent tools,
+                           #   plus save_messages_to_file (sandbox runs only)
     voice_policy.py        # PURE (stdlib-only) voice calls: VOICE_* settings, wake-phrase
                            #   match, leave/stop commands, anchored history, sentence
                            #   splitter + markdown stripping, VOICE_INSTRUCTIONS
@@ -571,6 +572,18 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
    fields; 400 characters each): a bot's embed is often the whole message,
    and showing only its title left a sandbox task with none of the data it
    was asked to add up.
+
+   **`save_messages_to_file(query, channel, author, max_messages)`** is for
+   sandbox runs only (`sandbox_agent._sandbox_only_tools`): it needs the
+   run's workspace. It pages through the same search, 25 at a time, newest
+   first (a relevance order shifts between pages), and writes every match in
+   full as JSON lines to `in/discord-<words>.jsonl` with `session.write`, so
+   code can count or chart them. Up to 10000 (Discord's search offset stops
+   at 9975) and 20MB; a message seen twice while pages shift is written
+   once. The reason it exists: a sandbox task asked to chart ~2,000 of a
+   tracker bot's embeds could see at most 25 per search, each only as its
+   title. In a sandbox, a search that found more than it shows says so and
+   names this tool.
 
 ### What's New notes (write these in every feature PR)
 
