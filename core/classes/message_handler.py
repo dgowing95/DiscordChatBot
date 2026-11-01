@@ -526,7 +526,11 @@ class MessageHandler:
         try:
             async with get_channel_lock(channel.id):
                 for chunk in chunks[:-1]:
-                    await channel.send(chunk)
+                    # One lost chunk must not cost the files below.
+                    try:
+                        await channel.send(chunk)
+                    except Exception as e:
+                        logger.warning(f"Could not copy part of the sandbox reply: {e!r}")
                     await asyncio.sleep(1)
                 await send_with_files(channel, chunks[-1] if chunks else None, files)
         except Exception as e:

@@ -74,7 +74,8 @@ async def send_with_files(channel, content: str | None, files) -> None:
         try:
             await channel.send(content=text, files=[
                 discord.File(io.BytesIO(data), filename=name) for name, data in group])
-        except Exception as e:
+        except discord.HTTPException as e:
+            # Discord refused the message, so nothing of it was posted.
             logger.info(f"Sending {len(group)} file(s) together failed ({e!r}); sending one by one")
             if text:
                 try:
@@ -86,6 +87,10 @@ async def send_with_files(channel, content: str | None, files) -> None:
                     await channel.send(file=discord.File(io.BytesIO(data), filename=name))
                 except Exception as e:
                     logger.warning(f"Could not send {name}: {e}")
+        except Exception as e:
+            # A dropped connection or timeout: Discord may have posted it
+            # anyway, so it is not sent again (that could post it twice).
+            logger.warning(f"Sending {len(group)} file(s) failed ({e!r}); not retried")
 
 
 def embed_from_data(data: dict) -> discord.Embed:

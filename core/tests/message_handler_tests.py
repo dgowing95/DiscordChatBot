@@ -838,6 +838,43 @@ async def test_send_with_files_falls_back_to_one_file_per_message():
 
 
 @pytest.mark.asyncio
+async def test_send_with_files_does_not_resend_after_a_connection_error():
+    # Discord may have posted the message before the connection dropped, so
+    # resending could post it twice.
+    from classes.common import send_with_files
+
+    channel = MagicMock()
+    channel.send = AsyncMock(side_effect=TimeoutError())
+    await send_with_files(channel, "here", [("a.png", b"1"), ("b.png", b"2")])  # does not raise
+
+    channel.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_sandbox_copy_still_sends_the_files_when_a_text_chunk_fails():
+    thread = MagicMock()
+    thread.send = AsyncMock()
+    handler = _handled(
+        _handler(), _llm_message(69),
+        lambda h: setattr(h, "messages", [{"role": "user", "content": "hi"}]),
+    )
+    calls = []
+
+    async def _send(*args, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise RuntimeError("first chunk lost")
+    handler.message.channel.send = AsyncMock(side_effect=_send)
+    llm = _sandbox_llm(thread, [("plot.png", b"png")], answer="word " * 500)
+
+    with patch("classes.message_handler.TextLLMHandler", llm), \
+         patch("classes.message_handler.asyncio.sleep", AsyncMock()):
+        await handler.handle_message()
+
+    assert _sent_files(handler.message.channel.send)[-1] == ["plot.png"]
+
+
+@pytest.mark.asyncio
 async def test_send_with_files_puts_ten_files_on_a_message():
     from classes.common import send_with_files
 
