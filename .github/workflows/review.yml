@@ -43,6 +43,9 @@ jobs:
           # review time at 2, and the slowest jobs came close to timeout-minutes above.
           review_concurrency: '4'
           # Per-task progress in the job log, so the effect of the concurrency is measurable.
+          # An input of the pinned action (checked in its action.yml at v1.13.3, which also
+          # validates the value); unknown `with:` keys are ignored silently, so check it is still
+          # there when Dependabot bumps the action.
           stream_progress: 'true'
           # Pin the installed CLI as well as the action commit. The action otherwise installs
           # `latest`, which can change review behaviour without a repository diff.
