@@ -74,8 +74,13 @@ async def send_with_files(channel, content: str | None, files) -> None:
         try:
             await channel.send(content=text, files=[
                 discord.File(io.BytesIO(data), filename=name) for name, data in group])
+        except discord.DiscordServerError as e:
+            # A 5xx can come back after Discord created the message, so it
+            # is not resent, like a dropped connection below. Before the
+            # HTTPException clause: it is a subclass of it.
+            logger.warning(f"Sending {len(group)} file(s) failed ({e!r}); not retried")
         except discord.HTTPException as e:
-            # Discord refused the message, so nothing of it was posted.
+            # A 4xx: Discord refused the message, so nothing of it was posted.
             logger.info(f"Sending {len(group)} file(s) together failed ({e!r}); sending one by one")
             if text:
                 try:

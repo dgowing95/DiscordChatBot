@@ -851,6 +851,20 @@ async def test_send_with_files_does_not_resend_after_a_connection_error():
 
 
 @pytest.mark.asyncio
+async def test_send_with_files_does_not_resend_after_a_server_error():
+    # Same for a 5xx: it can arrive after the message was created.
+    import discord
+    from classes.common import send_with_files
+
+    channel = MagicMock()
+    response = MagicMock(status=502, reason="Bad Gateway")
+    channel.send = AsyncMock(side_effect=discord.DiscordServerError(response, "bad gateway"))
+    await send_with_files(channel, "here", [("a.png", b"1"), ("b.png", b"2")])  # does not raise
+
+    channel.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_sandbox_copy_still_sends_the_files_when_a_text_chunk_fails():
     thread = MagicMock()
     thread.send = AsyncMock()
