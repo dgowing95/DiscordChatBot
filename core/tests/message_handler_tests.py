@@ -643,7 +643,9 @@ async def test_handle_message_sends_final_reply_to_sandbox_thread_when_set():
         await handler.handle_message()
 
     thread.send.assert_awaited_once_with("here's your result")
-    handler.message.channel.send.assert_not_awaited()
+    # ...and, as the result of a request made out here, in the original
+    # channel as well.
+    handler.message.channel.send.assert_awaited_once_with("here's your result")
 
 
 @pytest.mark.asyncio
@@ -673,7 +675,230 @@ async def test_handle_message_sends_reasoning_to_sandbox_thread_when_set():
     sent_texts = [call.args[0] for call in thread.send.await_args_list]
     assert sent_texts[0] == "the answer"
     assert any("i thought about it" in t for t in sent_texts)
-    handler.message.channel.send.assert_not_awaited()
+    # The original channel gets the answer, never the reasoning.
+    handler.message.channel.send.assert_awaited_once_with("the answer")
+
+
+def _sandbox_llm(thread, files, answer="the answer"):
+    class _FakeLLM:
+        def __init__(self, messages, guild_id, original_message, client=None):
+            self.reasoning = ""
+            self.sandbox_thread = thread
+            self.sandbox_files = files
+
+        async def generate(self):
+            return answer
+    return _FakeLLM
+
+
+def _sent_files(send_mock):
+    return [[f.filename for f in call.kwargs.get("files") or []]
+            for call in send_mock.await_args_list]
+
+
+@pytest.mark.asyncio
+async def test_handle_message_posts_reply_and_sandbox_files_in_the_original_channel():
+    thread = MagicMock()
+    thread.send = AsyncMock()
+    files = [("plot.png", b"png"), ("data.csv", b"a,b")]
+    handler = _handled(
+        _handler(), _llm_message(63),
+        lambda h: setattr(h, "messages", [{"role": "user", "content": "hi"}]),
+    )
+    handler.message.channel.send = AsyncMock()
+
+    with patch("classes.message_handler.TextLLMHandler", _sandbox_llm(thread, files)):
+        await handler.handle_message()
+
+    thread.send.assert_awaited_once_with("the answer")  # the thread is unchanged
+    call = handler.message.channel.send.await_args
+    assert call.kwargs["content"] == "the answer"
+    assert _sent_files(handler.message.channel.send) == [["plot.png", "data.csv"]]
+
+
+@pytest.mark.asyncio
+async def test_handle_message_posts_nothing_extra_when_asked_inside_the_thread():
+    # A follow-up typed in the sandbox thread: the thread IS the original
+    # channel, so its one reply is all there is.
+    handler = _handled(
+        _handler(), _llm_message(64),
+        lambda h: setattr(h, "messages", [{"role": "user", "content": "hi"}]),
+    )
+    handler.message.channel.send = AsyncMock()
+    llm = _sandbox_llm(handler.message.channel, [("plot.png", b"png")])
+
+    with patch("classes.message_handler.TextLLMHandler", llm):
+        await handler.handle_message()
+
+    handler.message.channel.send.assert_awaited_once_with("the answer")
+
+
+def _sandbox_thread_message(mid, owner_id, bot_id=777):
+    """A message typed inside a thread (owned by owner_id), with its parent."""
+    import discord
+    msg = _llm_message(mid, channel_id=300 + mid)
+    typing_channel = msg.channel
+    thread = MagicMock(spec=discord.Thread)
+    thread.id = typing_channel.id
+    thread.typing = typing_channel.typing
+    thread.send = AsyncMock()
+    thread.owner_id = owner_id
+    thread.parent = MagicMock()
+    thread.parent.send = AsyncMock()
+    msg.channel = thread
+    handler = _handled(
+        _handler(), msg,
+        lambda h: setattr(h, "messages", [{"role": "user", "content": "hi"}]),
+    )
+    handler.client.user.id = bot_id
+    return handler, thread
+
+
+@pytest.mark.asyncio
+async def test_follow_up_in_a_sandbox_thread_posts_in_the_threads_channel():
+    # A follow-up typed in the bot's sandbox thread: the reply stays in the
+    # thread, and the new result is copied to the channel it belongs to.
+    handler, thread = _sandbox_thread_message(67, owner_id=777)
+    llm = _sandbox_llm(thread, [("plot.png", b"png")])
+
+    with patch("classes.message_handler.TextLLMHandler", llm):
+        await handler.handle_message()
+
+    thread.send.assert_awaited_once_with("the answer")
+    assert thread.parent.send.await_args.kwargs["content"] == "the answer"
+    assert _sent_files(thread.parent.send) == [["plot.png"]]
+
+
+@pytest.mark.asyncio
+async def test_sandbox_run_in_a_thread_people_started_posts_nothing_extra():
+    handler, thread = _sandbox_thread_message(68, owner_id=5)
+    llm = _sandbox_llm(thread, [("plot.png", b"png")])
+
+    with patch("classes.message_handler.TextLLMHandler", llm):
+        await handler.handle_message()
+
+    thread.send.assert_awaited_once_with("the answer")
+    thread.parent.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handle_message_posts_sandbox_files_in_the_original_channel_after_an_error():
+    thread = MagicMock()
+    thread.send = AsyncMock()
+    handler = _handled(
+        _handler(), _llm_message(65),
+        lambda h: setattr(h, "messages", [{"role": "user", "content": "hi"}]),
+    )
+    handler.message.channel.send = AsyncMock()
+    handler.message.add_reaction = AsyncMock()
+    llm = _sandbox_llm(thread, [("plot.png", b"png")], answer="Error")
+
+    with patch("classes.message_handler.TextLLMHandler", llm):
+        await handler.handle_message()
+
+    handler.message.add_reaction.assert_awaited_once_with('❌')
+    assert handler.message.channel.send.await_args.kwargs["content"] is None
+    assert _sent_files(handler.message.channel.send) == [["plot.png"]]
+
+
+@pytest.mark.asyncio
+async def test_handle_message_original_channel_failure_keeps_the_thread_reply():
+    thread = MagicMock()
+    thread.send = AsyncMock()
+    handler = _handled(
+        _handler(), _llm_message(66),
+        lambda h: setattr(h, "messages", [{"role": "user", "content": "hi"}]),
+    )
+    handler.message.channel.send = AsyncMock(side_effect=RuntimeError("no send permission"))
+
+    with patch("classes.message_handler.TextLLMHandler", _sandbox_llm(thread, [])):
+        await handler.handle_message()  # does not raise
+
+    thread.send.assert_awaited_once_with("the answer")
+
+
+@pytest.mark.asyncio
+async def test_send_with_files_falls_back_to_one_file_per_message():
+    import discord
+    from classes.common import send_with_files
+
+    channel = MagicMock()
+    response = MagicMock(status=413, reason="Payload Too Large")
+
+    async def _send(*args, **kwargs):
+        if len(kwargs.get("files") or []) > 1:
+            raise discord.HTTPException(response, "too large")
+    channel.send = AsyncMock(side_effect=_send)
+
+    await send_with_files(channel, "here", [("a.png", b"1"), ("b.png", b"2")])
+
+    calls = channel.send.await_args_list
+    assert calls[1].args == ("here",)
+    assert [c.kwargs["file"].filename for c in calls[2:]] == ["a.png", "b.png"]
+
+
+@pytest.mark.asyncio
+async def test_send_with_files_does_not_resend_after_a_connection_error():
+    # Discord may have posted the message before the connection dropped, so
+    # resending could post it twice.
+    from classes.common import send_with_files
+
+    channel = MagicMock()
+    channel.send = AsyncMock(side_effect=TimeoutError())
+    await send_with_files(channel, "here", [("a.png", b"1"), ("b.png", b"2")])  # does not raise
+
+    channel.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_send_with_files_does_not_resend_after_a_server_error():
+    # Same for a 5xx: it can arrive after the message was created.
+    import discord
+    from classes.common import send_with_files
+
+    channel = MagicMock()
+    response = MagicMock(status=502, reason="Bad Gateway")
+    channel.send = AsyncMock(side_effect=discord.DiscordServerError(response, "bad gateway"))
+    await send_with_files(channel, "here", [("a.png", b"1"), ("b.png", b"2")])  # does not raise
+
+    channel.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_sandbox_copy_still_sends_the_files_when_a_text_chunk_fails():
+    thread = MagicMock()
+    thread.send = AsyncMock()
+    handler = _handled(
+        _handler(), _llm_message(69),
+        lambda h: setattr(h, "messages", [{"role": "user", "content": "hi"}]),
+    )
+    calls = []
+
+    async def _send(*args, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise RuntimeError("first chunk lost")
+    handler.message.channel.send = AsyncMock(side_effect=_send)
+    llm = _sandbox_llm(thread, [("plot.png", b"png")], answer="word " * 500)
+
+    with patch("classes.message_handler.TextLLMHandler", llm), \
+         patch("classes.message_handler.asyncio.sleep", AsyncMock()):
+        await handler.handle_message()
+
+    assert _sent_files(handler.message.channel.send)[-1] == ["plot.png"]
+
+
+@pytest.mark.asyncio
+async def test_send_with_files_puts_ten_files_on_a_message():
+    from classes.common import send_with_files
+
+    channel = MagicMock()
+    channel.send = AsyncMock()
+    await send_with_files(channel, "here", [(f"{i}.png", b"x") for i in range(12)])
+
+    calls = channel.send.await_args_list
+    assert [len(c.kwargs["files"]) for c in calls] == [10, 2]
+    assert [c.kwargs["content"] for c in calls] == ["here", None]
 
 
 @pytest.mark.asyncio
@@ -860,6 +1085,22 @@ async def test_generate_captures_sandbox_thread_set_by_a_tool_call():
         await handler.generate()
 
     assert handler.sandbox_thread is thread
+
+
+@pytest.mark.asyncio
+async def test_generate_captures_the_files_a_sandbox_run_sent():
+    handler = _generate_handler(None)
+
+    async def _fake_run(agent, messages, context=None, **kwargs):
+        context["sandbox_thread"] = MagicMock()
+        context["sandbox_files"].append(("plot.png", b"png"))
+        return _run_result("the answer")
+
+    with patch("classes.text_llm_handler.Runner") as runner,          patch("classes.text_llm_handler.get_current_datetime", AsyncMock(return_value="now")):
+        runner.run = AsyncMock(side_effect=_fake_run)
+        await handler.generate()
+
+    assert handler.sandbox_files == [("plot.png", b"png")]
 
 
 @pytest.mark.asyncio

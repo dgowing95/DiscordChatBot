@@ -320,7 +320,12 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
 
    - **Every call runs in a Discord thread.** `ensure_sandbox_thread` creates one
      off the triggering message (or reuses the thread you are already in), and
-     everything — embeds, files, previews, questions — goes there.
+     everything — embeds, files, previews, questions — goes there. The one
+     copy: the outer reply and the files the run sent are also posted in the
+     channel the work was asked for in, which for a follow-up typed inside
+     the bot's thread is the thread's parent channel
+     (`MessageHandler._post_sandbox_copy`, from the run context's
+     `sandbox_files`; an automatic run attaches them to its thread link).
    - **The container is disposable; the workspace is not.** In a thread, the
      workspace is persisted to Redis before teardown and restored on the next
      call in that SAME thread. Resume is thread-local by construction: the
