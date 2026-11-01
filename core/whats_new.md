@@ -12,6 +12,10 @@ first time someone triggers the bot after that release is deployed.
   (checked by core/tests/whats_new_tests.py).
 -->
 
-## Code sandbox can look things up
-While working on a code task, the sandbox can now search the web, read links, search this server's messages and look up events. It can also make or move a server event.
-How to use: ask for code that needs facts, e.g. "make a chart of the last five Python release dates", or "build a quiz from what we said about the trip".
+## Read the conversation around a message
+After finding an old message, I can now show what was said just before and after it, and keep going further back or forward. Paste a message link and I can read around that too.
+How to use: ask "find where we talked about the trip and tell me what was decided", or paste a message link and ask "what was going on around this?"
+
+## Code sandbox can work through thousands of messages
+The code sandbox can now save every message that matches a search (bot embeds included) to a file and work through it with code, so it can count, add up or chart a bot's posts over months.
+How to use: ask e.g. "use the code sandbox to add up each player's net value from all the Shared Chest embeds in #game and chart it".

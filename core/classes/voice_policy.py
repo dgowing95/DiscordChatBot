@@ -464,6 +464,7 @@ TOOL_ACTIONS = {
     "web_search": "searching the web",
     "fetch_url": "reading a web page",
     "search_messages": "searching old messages",
+    "read_messages_around": "reading old messages",
     "generate_image": "making a picture",
     "run_code_sandbox": "running some code",
     "store_memory": "remembering that",

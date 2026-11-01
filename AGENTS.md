@@ -90,8 +90,10 @@ core/                  # the main bot (the app that runs in production)
     web_reader.py          # fetch_url's reader: Redis cache, one load per URL, site
                            #   readers, plain fetch + trafilatura, browser fallback
     message_search_format.py  # PURE (stdlib-only) Discord message search: query params,
-                           #   how results read, the endpoint's quirks
-    message_search_tools.py   # the search_messages agent tool
+                           #   how results read, the endpoint's quirks; message links
+                           #   and how the messages around one read
+    message_search_tools.py   # the search_messages and read_messages_around agent tools,
+                           #   plus save_messages_to_file (sandbox runs only)
     voice_policy.py        # PURE (stdlib-only) voice calls: VOICE_* settings, wake-phrase
                            #   match, leave/stop commands, anchored history, sentence
                            #   splitter + markdown stripping, VOICE_INSTRUCTIONS
@@ -357,7 +359,8 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
      Docker), capped by `SANDBOX_INPUT_MAX_BYTES`, and named at the top of the
      task; what was left out is told to both models.
    - **It shares the main agent's lookup tools** (`tool_functions.shared_tools`:
-     web_search, fetch_url, search_messages and the event tools) as the same
+     web_search, fetch_url, search_messages, read_messages_around and the
+     event tools) as the same
      objects, never copies of their code. Which ones is an allowlist
      (`_SANDBOX_SHARED_TOOLS`), so a new shared tool stays out of a run with
      internet access until added there. The poll tools are left out: in the
@@ -549,8 +552,38 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
    from channels the bot can read (sandbox runs included: by the owner's
    choice it is not limited to what the person asking can read). A server Discord has not indexed yet
    answers 202 (code 110000), which discord.py returns as a normal body.
-   At most `MAX_CALLS` searches per reply. Read-only, so automatic runs and
+   No cap on calls per reply (there were 3, which stopped a sandbox task
+   that needed far more): the agent's own turn limit bounds a loop, and
+   discord.py waits out Discord's rate limits. Read-only, so automatic runs and
    voice turns get it too.
+
+   **`read_messages_around(message, before, after)`** (same module) shows
+   the conversation around one message: a search result's link, or one
+   someone pasted. Search hits no longer carry their surrounding messages,
+   so it fetches the message plus `GET /channels/{id}/messages` with
+   `before=` / `after=` (at most 12 each side). Paging is driven by the
+   result's last lines, which name the oldest and newest link to call again
+   with, as `fetch_url`'s `part` line does. A link to another server is
+   refused (the bot is in several), the channel is resolved only within
+   this one (an uncached thread is fetched; `Guild.fetch_channel` refuses
+   another server's), and an age-restricted channel is read only from one.
+   Like search it reads what the bot can see, with no cap on calls. Both
+   tools show a message's embeds in full (author, title, description,
+   fields; 400 characters each): a bot's embed is often the whole message,
+   and showing only its title left a sandbox task with none of the data it
+   was asked to add up.
+
+   **`save_messages_to_file(query, channel, author, max_messages)`** is for
+   sandbox runs only (`sandbox_agent._sandbox_only_tools`): it needs the
+   run's workspace. It pages through the same search, 25 at a time, newest
+   first (a relevance order shifts between pages), and writes every match in
+   full as JSON lines to `in/discord-<words>.jsonl` with `session.write`, so
+   code can count or chart them. Up to 10000 (Discord's search offset stops
+   at 9975) and 20MB; a message seen twice while pages shift is written
+   once. The reason it exists: a sandbox task asked to chart ~2,000 of a
+   tracker bot's embeds could see at most 25 per search, each only as its
+   title. In a sandbox, a search that found more than it shows says so and
+   names this tool.
 
 ### What's New notes (write these in every feature PR)
 
