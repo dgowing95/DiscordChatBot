@@ -19,6 +19,16 @@ async def add_emoji_to_message(message: discord.Message, emoji: str) -> None:
     except Exception as e:
         logger.warning(f"Failed to add emoji {emoji} to message {message.id}: {e}")
     
+async def _tool_notice(wrapper: RunContextWrapper[dict], text: str) -> None:
+    """The "Tool Usage" embed a lookup posts where it was asked. Skipped
+    when the run has no channel: a sandbox run may have no thread (its
+    tests, and any caller that passes none), and a lookup must still work
+    there rather than fail on None.send."""
+    channel = wrapper.context.get("channel")
+    if channel is not None:
+        await Common.send_tool_discord_embed(channel, text)
+
+
 @function_tool
 async def web_search(wrapper: RunContextWrapper[dict], search_request: str) -> str:
     """Searches the web, reads the top results and returns a short brief of
@@ -40,10 +50,7 @@ async def web_search(wrapper: RunContextWrapper[dict], search_request: str) -> s
         return ("I can't perform that search — it was blocked by the safety "
                 "guard. Please rephrase with a safe, non-harmful query.")
 
-    await Common.send_tool_discord_embed(
-        wrapper.context["channel"],
-        f"Searching the web for: {search_request}",
-    )
+    await _tool_notice(wrapper, f"Searching the web for: {search_request}")
     from classes import web_research
     try:
         return await web_research.research(search_request, await get_current_datetime())
@@ -71,10 +78,7 @@ async def fetch_url(wrapper: RunContextWrapper[dict], url: str, part: int = 1) -
         return ("I can't fetch that URL — it was blocked by the safety "
                 "guard.")
 
-    await Common.send_tool_discord_embed(
-        wrapper.context["channel"],
-        f"Visiting URL: {url}" + (f" (part {part})" if part > 1 else ""),
-    )
+    await _tool_notice(wrapper, f"Visiting URL: {url}" + (f" (part {part})" if part > 1 else ""))
     try:
         page = await web_reader.read(url)
     except web_reader.FetchError as e:
@@ -894,6 +898,30 @@ async def check_polls(wrapper: RunContextWrapper[dict]) -> str:
     if not found:
         return "There have been no polls in this channel in the last week."
     return "Polls in this channel, newest first:\n\n" + "\n\n".join(found)
+
+
+def shared_tools() -> list:
+    """The tools the main agent AND the sandbox agent get: looking things up
+    (web, links, this server's messages, polls, events) plus posting a poll
+    and making or moving an event. The sandbox gets only those on
+    sandbox_agent._SANDBOX_SHARED_TOOLS (no poll tools): the read-only ones
+    as these same objects, the two event tools as gated copies. So never
+    change one of these in place for the sandbox; it would change the main
+    agent's too.
+
+    One list so the two cannot drift apart. The tools read "channel",
+    "discord_client" and "user_id" from their run context; the sandbox
+    puts its thread, the client and the requester there (run_sandbox_task),
+    so their code needs no sandbox version. Each tool is a fixed piece of code:
+    the model picks a tool and its arguments, never what is done with the
+    client.
+
+    The event and search tools are imported here, not at the top: both
+    modules import from this one."""
+    from classes.event_tools import event_tools
+    from classes.message_search_tools import message_search_tools
+    return [web_search, fetch_url, create_poll, check_polls,
+            *event_tools(), *message_search_tools()]
 
 
 @function_tool

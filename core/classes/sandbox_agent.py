@@ -167,7 +167,7 @@ specification.
   verify what you wrote.
 - The workspace starts empty unless the task says otherwise. Never assume
   files, packages or context exist unless the task provides them; install
-  what you need (e.g. `pip install ...`).
+  what you need (e.g. `pip install ...`). Look facts up with `web_search`.
 - Do the work: write files, run commands, read the output, iterate until the
   task is done. If a step fails, read the error, fix it and retry.
 - If the task includes code or data, create it exactly as given.
@@ -1112,6 +1112,77 @@ send_preview_to_thread.on_invoke_tool = _gated_invoke(
     send_preview_to_thread.on_invoke_tool, "send_preview_to_thread")
 
 
+# The main agent's shared tools the sandbox may have: an ALLOWLIST, so a tool
+# added to shared_tools() later stays out of a run with internet access until
+# someone decides it belongs here. Left out on purpose: the poll tools (in the
+# sandbox "channel" is its thread, so a poll would be posted there and
+# check_polls would read only that thread's polls, never the one meant).
+_SANDBOX_SHARED_TOOLS = frozenset({"web_search", "fetch_url", "search_messages",
+                                   "list_events", "create_event", "update_event"})
+# The ones that change something in the server. Gated like attach_file: an
+# event made on a plan the user has just changed is a stale action. The
+# read-only ones are not gated, so a lookup never waits on respond_to_updates
+# or on a long shell command.
+_GATED_SHARED_TOOLS = frozenset({"create_event", "update_event"})
+# create_event's description tells the model to post a poll and schedule a
+# follow-up to find a time. The sandbox has neither tool, and a call to a tool
+# that does not exist aborts the whole run (ModelBehaviorError, as with
+# apply_patch: see build_sandbox_agent), so its copy loses that sentence.
+_SANDBOX_DESCRIPTION_CUTS = {"create_event": re.compile(r"\s*To find a time[^.]*\.")}
+
+
+def _sandbox_shared_tools() -> list:
+    """The main agent's shared tools (tool_functions.shared_tools) that are
+    on _SANDBOX_SHARED_TOOLS, for the sandbox agent. The read-only ones are
+    the very same objects; the gated ones are COPIES with a wrapped
+    on_invoke_tool (and create_event's description trimmed, see
+    _SANDBOX_DESCRIPTION_CUTS), since changing the shared object in place, as
+    attach_file is wrapped, would change the main agent's too.
+
+    They read "channel", "discord_client" and "user_id" from the run
+    context, which run_sandbox_task fills from its thread, client and
+    requester. Imported here, not at the top: tool_functions imports this
+    module."""
+    import dataclasses
+    from classes.tool_functions import shared_tools
+    tools = []
+    for tool in shared_tools():
+        if tool.name not in _SANDBOX_SHARED_TOOLS:
+            continue
+        changes = {}
+        if tool.name in _GATED_SHARED_TOOLS:
+            changes["on_invoke_tool"] = _gated_invoke(tool.on_invoke_tool, tool.name)
+        cut = _SANDBOX_DESCRIPTION_CUTS.get(tool.name)
+        if cut is not None:
+            changes["description"] = cut.sub("", tool.description, count=1)
+        tools.append(dataclasses.replace(tool, **changes) if changes else tool)
+    return tools
+
+
+async def _resolve_requester(thread, user_id):
+    """The person who asked for this run, as a guild Member, or None.
+
+    The event tools need a Member, not an id, to check the requester's own
+    permission. The bot runs without the members intent, so
+    guild.get_member usually misses for someone who only typed a message,
+    and the sandbox context has no message author to fall back on. One
+    fetch_member here, before the run, is what makes that check work. A
+    failure leaves None, which the event tools treat as "not allowed"."""
+    guild = getattr(thread, "guild", None)
+    if guild is None or user_id is None:
+        return None
+    member = guild.get_member(user_id)
+    if member is not None:
+        return member
+    try:
+        return await guild.fetch_member(user_id)
+    except Exception as e:
+        # A warning, not info: the event tools then refuse as if the person
+        # lacked the permission, and this line is the only sign of why.
+        logger.warning(f"Sandbox: could not look up the requester {user_id}: {e}")
+        return None
+
+
 def build_sandbox_agent(out_dir: str | None, conversation=None) -> "object":
     """The nested SandboxAgent that does the work inside the sandbox.
 
@@ -1161,7 +1232,9 @@ def build_sandbox_agent(out_dir: str | None, conversation=None) -> "object":
     subclass of Agent and accepts tools=[...] the same way. The thread tools
     no-op gracefully (return a string telling the model to proceed on its
     own) when no Discord thread context was passed into this run — see
-    run_sandbox_task's nested_context.
+    run_sandbox_task's nested_context. The main agent's lookup and event
+    tools come last (_sandbox_shared_tools): the read-only ones as the same
+    objects, the two event tools as gated copies.
 
     conversation: the run's SandboxConversation, whose AgentHooks commit
     "this input was seen" after each completed model call (see
@@ -1213,7 +1286,7 @@ def build_sandbox_agent(out_dir: str | None, conversation=None) -> "object":
             ),
         ],
         tools=[respond_to_updates, ask_user, attach_file, send_preview_to_thread,
-               say_in_thread],
+               say_in_thread, *_sandbox_shared_tools()],
         hooks=make_agent_hooks(conversation) if conversation is not None else None,
         # Slightly cooler than the chat agent: code tasks want determinism.
         # timeout: the wall-clock bound on each model call that the client's
@@ -1883,10 +1956,27 @@ async def run_sandbox_task(
             result.inputs, result.input_problems = given, problems
             return result
         agent = build_sandbox_agent(out_dir, conversation)
+        # Only the event tools use it, so no lookup when they are switched off.
+        from classes.event_format import events_enabled
+        requester = (await _resolve_requester(thread, requesting_user_id)
+                     if events_enabled() else None)
         nested_context = {
             "thread": thread,
             "client": client,
             "requesting_user_id": requesting_user_id,
+            # The same three under the names the main agent's shared tools
+            # read (see _sandbox_shared_tools): their embeds and "here" are
+            # the thread, and the event tools check the requester's own
+            # permission.
+            "channel": thread,
+            "discord_client": client,
+            "user_id": requesting_user_id,
+            # The requester as a Member (see _resolve_requester): the event
+            # tools check THEIR permission with it, for the whole run. Anyone
+            # who can see the thread can steer the run, so an event asked for
+            # mid-run by someone else is checked against the requester, not
+            # them. Accepted, like follow-ups skipping the check.
+            "requester": requester,
             "session": session,
             # The run's conversation coordinator: the tools read it from
             # here to gate side effects, answer thread messages and ask

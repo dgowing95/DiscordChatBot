@@ -12,10 +12,6 @@ first time someone triggers the bot after that release is deployed.
   (checked by core/tests/whats_new_tests.py).
 -->
 
-## Deeper web searches
-When I search the web I now read the top results myself and give you a short summary of what they say, with links to the sources. I also look things up before drawing or making something that depends on real facts.
-How to use: @mention me with a question, e.g. "what changed in the latest Python release?" or "draw the newest Mars rover".
-
-## Code sandbox works on your files
-The code sandbox can now work on files from the chat: files you upload, the message you reply to, and pictures I made earlier.
-How to use: upload a file and @mention me, e.g. "make a chart from this spreadsheet", or after I draw something, "turn that picture into a spinning GIF".
+## Code sandbox can look things up
+While working on a code task, the sandbox can now search the web, read links, search this server's messages and look up events. It can also make or move a server event.
+How to use: ask for code that needs facts, e.g. "make a chart of the last five Python release dates", or "build a quiz from what we said about the trip".

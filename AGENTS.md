@@ -356,6 +356,21 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
      Written with `session.write` before the run (checked live against
      Docker), capped by `SANDBOX_INPUT_MAX_BYTES`, and named at the top of the
      task; what was left out is told to both models.
+   - **It shares the main agent's lookup tools** (`tool_functions.shared_tools`:
+     web_search, fetch_url, search_messages and the event tools) as the same
+     objects, never copies of their code. Which ones is an allowlist
+     (`_SANDBOX_SHARED_TOOLS`), so a new shared tool stays out of a run with
+     internet access until added there. The poll tools are left out: in the
+     sandbox they would only post to and read its own thread, and the sandbox
+     copy of `create_event` drops its "poll, then follow-up" advice, since a
+     call to a tool the run lacks aborts it. The run
+     context also carries `channel` / `discord_client` / `user_id` (= the
+     thread, the client, the requester), which is what those tools read. The
+     two that change something are gated through a COPY of the tool
+     (`_sandbox_shared_tools`), so the main agent's own are never gated.
+     Before the run, `_resolve_requester` fetches the requester as a Member
+     (`requester` in the context): the bot has no members intent, so the
+     cache usually misses them, and without it every event call was refused.
 
    Every one of these carries its full rationale — the production incident that
    produced it, and what breaks if it is undone — in the docstring of the
@@ -472,7 +487,12 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
    that the server does not let them make. The actor is resolved like
    `automation_tools._scope` (message author, else `user_id`), so the check
    also runs in voice turns and in automatic runs, as the entry's editor.
-   Event tools stay in the AUTOMATIC tool set on purpose: the usual
+   **Except in a follow-up**, by the owner's choice: `followup` in the run
+   context (from the record, through `TextLLMHandler`) skips the person's
+   check, not the bot's (`event_tools._checks_requester`). Without the members
+   intent the editor is often not in the cache, so the check refused people
+   who had the permission. A sandbox run fetches its requester instead
+   (`sandbox_agent._resolve_requester`). Event tools stay in the AUTOMATIC tool set on purpose: the usual
    follow-up is "read the poll, make the event". Only events the bot made
    (`creator_id`) can be changed. Naive times are read in
    `AUTOMATIONS_TIMEZONE`; results give `<t:unix:F>` so readers see their
@@ -526,7 +546,8 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
    endpoint (`GET /guilds/{id}/messages/search`, open to bots since
    2026-03-19; needs Read Message History and the Message Content intent),
    which discord.py does not wrap. Whole server by default; results come only
-   from channels the bot can read. A server Discord has not indexed yet
+   from channels the bot can read (sandbox runs included: by the owner's
+   choice it is not limited to what the person asking can read). A server Discord has not indexed yet
    answers 202 (code 110000), which discord.py returns as a normal body.
    At most `MAX_CALLS` searches per reply. Read-only, so automatic runs and
    voice turns get it too.
@@ -583,7 +604,7 @@ needs an entry there, gated with `requires` when it can be switched off;
    versions of a rule follows neither reliably. So when adding guidance, edit
    the existing home rather than restating it nearby — the comment block above
    `SANDBOX_INSTRUCTIONS` records which bullets were merged and why.
-   Sizes worth re-measuring before adding: `SANDBOX_INSTRUCTIONS` ~3850 chars
+   Sizes worth re-measuring before adding: `SANDBOX_INSTRUCTIONS` ~3890 chars
    formatted (pinned by a test, ceiling 3950), `run_code_sandbox` ~2000
    including its JSON schema.
 

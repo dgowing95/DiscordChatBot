@@ -184,6 +184,46 @@ async def test_works_without_a_message_as_the_user_id():
 
 
 @pytest.mark.asyncio
+async def test_a_sandbox_run_uses_the_requester_it_fetched():
+    """A sandbox run has no message, and without the members intent the
+    cache usually misses its requester: it passes the Member it fetched."""
+    actor = _member(ident=777)
+    guild, context = _env(message=False)
+    context.update(user_id=777, requester=actor)  # not in the cache
+    await _invoke("create_event", context, name="x", start=_soon().isoformat(), location="here")
+    guild.create_scheduled_event.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_followup_makes_the_event_whatever_the_askers_permission():
+    """A follow-up ("read the poll, then make the event") skips the person's
+    own check by the owner's choice. The bot still needs Create Events, and
+    any other automatic run still checks the person."""
+    guild, context = _env(actor=_member(create=False), message=False)
+    context["followup"] = True
+    await _invoke("create_event", context, name="x", start=_soon().isoformat(), location="here")
+    guild.create_scheduled_event.assert_awaited_once()
+
+    guild, context = _env(actor=_member(create=False), message=False)
+    context.update(followup=True, user_id=12345)  # not found at all: still fine
+    await _invoke("create_event", context, name="x", start=_soon().isoformat(), location="here")
+    guild.create_scheduled_event.assert_awaited_once()
+
+    guild, context = _env(actor=_member(create=False), bot=_member(create=False, ident=BOT_ID),
+                          message=False)
+    context["followup"] = True
+    result = await _invoke("create_event", context, name="x", start=_soon().isoformat(),
+                           location="here")
+    assert "I need the Create Events permission" in result
+
+    guild, context = _env(actor=_member(create=False), message=False)
+    context["automatic"] = True  # a schedule or a rule, not a follow-up
+    result = await _invoke("create_event", context, name="x", start=_soon().isoformat(),
+                           location="here")
+    assert "needs the Create Events permission" in result
+
+
+@pytest.mark.asyncio
 async def test_a_webhook_author_is_refused_not_an_error():
     guild, context = _env()
     context["original_message"].author = SimpleNamespace(id=4242, name="Captain Hook")

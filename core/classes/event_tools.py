@@ -3,8 +3,13 @@
 The person asking must hold Create Events (or Manage Events) themselves.
 The bot holds the permission for everyone it talks to, so without that
 check any member could have it make events the server does not let them
-make. The check also runs in an automatic run (a follow-up), as the
-entry's last editor, since that is who the event is made for.
+make. The check also runs in an automatic run (a schedule or a rule), as
+the entry's last editor, since that is who the event is made for.
+
+Except in a follow-up, by the owner's choice (_checks_requester): there
+the bot makes or moves the event whatever the asker's own permission, so
+"check the poll, then make the event" always works. The bot's own
+permission is still checked.
 
 The bot only changes events it made: Create Events covers your own events,
 and the bot's own are the ones it can vouch for.
@@ -43,9 +48,13 @@ def _timezone() -> str:
 
 def _guild_and_actor(context):
     """The server and the person asking. A voice turn or an automatic run
-    has no message; the speaker or the entry's editor is `user_id`."""
+    has no message; the speaker or the entry's editor is `user_id`. A
+    sandbox run has no message either, and passes the requester it fetched
+    as `requester` (sandbox_agent._resolve_requester): without the members
+    intent, get_member below usually misses for them."""
     guild = getattr(context.get("channel"), "guild", None)
-    actor = getattr(context.get("original_message"), "author", None)
+    actor = (getattr(context.get("original_message"), "author", None)
+             or context.get("requester"))
     if actor is None and guild is not None and context.get("user_id"):
         actor = guild.get_member(context["user_id"])
     # A webhook's author is a plain User with no server permissions (seen
@@ -60,14 +69,24 @@ def _may_make_events(perms) -> bool:
     return bool(getattr(perms, "create_events", False) or getattr(perms, "manage_events", False))
 
 
-def _refusal(guild, actor, place=None) -> str:
+def _checks_requester(context) -> bool:
+    """Whether the person asking must hold Create Events themselves. Not in
+    a follow-up (a one-off the bot scheduled itself, `followup` in the
+    context): its usual job is "read the poll, then make the event" for
+    whoever asked, and the owner chose to let that work whatever the
+    asker's own permission. The bot still needs Create Events."""
+    return not context.get("followup")
+
+
+def _refusal(guild, actor, place=None, check_actor=True) -> str:
     """"" when both the person and the bot may make events (in `place`, a
-    voice channel, when given), else what to tell the user."""
+    voice channel, when given), else what to tell the user. check_actor
+    False skips the person (see _checks_requester)."""
     if guild is None:
         return "No event was made: events only exist in servers. Tell the user."
     def perms(member):
         return place.permissions_for(member) if place is not None else member.guild_permissions
-    if actor is None or not _may_make_events(perms(actor)):
+    if check_actor and (actor is None or not _may_make_events(perms(actor))):
         return ("Not done: the person asking needs the Create Events permission in this server "
                 "to have me make or change events. Tell them.")
     if guild.me is None or not _may_make_events(perms(guild.me)):
@@ -131,7 +150,7 @@ def _check_create(context, guild, actor, name, start, end, description, location
     # Before the channel lookup: its "no such channel" answer lists every
     # voice channel, hidden ones included. The permission is server-wide;
     # the channel-specific check follows once the channel is known.
-    refusal = _refusal(guild, actor)
+    refusal = _refusal(guild, actor, check_actor=_checks_requester(context))
     if refusal:
         return None, {}, refusal
     place = None
@@ -145,7 +164,8 @@ def _check_create(context, guild, actor, name, start, end, description, location
     elif guild is not None and not location.strip():
         return None, {}, ("No event was made: it needs a place. Ask the user which voice channel it "
                           "is in, or where it happens, then call again.")
-    refusal = _refusal(guild, actor, place) if place is not None else ""
+    refusal = (_refusal(guild, actor, place, check_actor=_checks_requester(context))
+               if place is not None else "")
     if refusal:
         return place, {}, refusal
     fields, error = validate(name=name, start=start, end=end, description=description,
@@ -334,7 +354,7 @@ async def update_event(wrapper: RunContextWrapper[dict], event: str, name: str =
             "Not done: I can only change events I made, and someone else made this one. "
             "Tell the user to change it in Discord."))
     place = guild.get_channel(found.channel_id) if found.channel_id else None
-    refusal = _refusal(guild, actor, place)
+    refusal = _refusal(guild, actor, place, check_actor=_checks_requester(context))
     if refusal:
         return _failed(context, "update_event", refusal)
     if found.status not in LIVE:

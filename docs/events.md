@@ -13,7 +13,7 @@ Ask the bot to find a time, e.g. "find a time for game night this week". It post
 ## Permissions
 
 - The bot's role needs the **Create Events** permission.
-- The person asking needs **Create Events** (or **Manage Events**) too. Otherwise the bot would let anyone make events the server does not let them make. A follow-up checks this again, as the person who set it up, when it runs.
+- The person asking needs **Create Events** (or **Manage Events**) too. Otherwise the bot would let anyone make events the server does not let them make. The one exception is a follow-up: when it runs, it can make or move an event without the person having that permission, so "check the poll, then make the event" always works. The bot still needs it.
 - The bot only moves or cancels events it made.
 
 ## Details

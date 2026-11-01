@@ -98,16 +98,13 @@ from classes.sandbox_agent import sandbox_enabled
 
 from classes.tool_functions import (
     change_personality,
-    check_polls,
     clear_memories,
-    create_poll,
-    fetch_url,
     generate_image,
     get_current_datetime,
     remove_memory,
     run_code_sandbox,
+    shared_tools,
     store_memory,
-    web_search,
 )
 
 logger = logging.getLogger(__name__)
@@ -321,20 +318,12 @@ def agent_tools(automatic: bool = False, voice: bool = False) -> list:
 
     A voice turn gets the same tools as a chat reply, except that it can
     leave the call instead of joining one."""
-    tools = [
-        web_search,
-        fetch_url,
-        change_personality,
-        create_poll,
-        check_polls,
-    ]
-    # Automatic runs keep the event tools: a follow-up's usual job is to
-    # read a poll and make the event. They re-check the editor's permission.
-    from classes.event_tools import event_tools
-    tools.extend(event_tools())
-    # Read-only, so automatic runs keep it too.
-    from classes.message_search_tools import message_search_tools
-    tools.extend(message_search_tools())
+    # The sandbox agent gets these same tools (tool_functions.shared_tools).
+    # Automatic runs keep them all: a follow-up's usual job is to read a poll
+    # and make the event; search and the poll lookup are read-only. The event
+    # tools check the editor's permission in a schedule or a rule, but not in
+    # a follow-up (event_tools._checks_requester).
+    tools = [*shared_tools(), change_personality]
     if not automatic:
         tools.extend((store_memory, remove_memory, clear_memories))
         from classes.automation_tools import automation_tools
@@ -360,7 +349,7 @@ class TextLLMHandler:
 
     def __init__(self, messages, guild_id, original_message, client=None,
                  actor_id=None, channel=None, automatic=False, voice=False, request_text=None,
-                 bot_name=None):
+                 bot_name=None, followup=False):
         self.original_message = original_message
         self.messages = messages
         self.guild_id = guild_id
@@ -374,6 +363,9 @@ class TextLLMHandler:
         self.actor_id = actor_id if actor_id is not None else original_message.author.id
         self.channel = channel if channel is not None else original_message.channel
         self.automatic = automatic
+        # A follow-up run (automation_runner): the event tools then skip the
+        # requester's own permission check (event_tools._checks_requester).
+        self.followup = followup
         # A turn in a voice call: spoken instructions, thinking off, and no
         # source message (original_message is None; request_text is what the
         # speaker said, for tools that compare their result against it).
@@ -523,6 +515,7 @@ class TextLLMHandler:
         "original_message": self.original_message,
         "channel": self.channel if hasattr(self, "channel") else self.original_message.channel,
         "automatic": getattr(self, "automatic", False),
+        "followup": getattr(self, "followup", False),
         "discord_client": self.client,
         "redis_save_tool_calls": 0,
         "personality_tool_calls": 0,
