@@ -2,6 +2,8 @@ venv
 __pycache__
 config.yaml
 .env
+.env.*
+!.env.example
 node_modules
 .venv
 .pytest_cache

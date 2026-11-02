@@ -718,6 +718,7 @@ something, and that every `values.yaml` key is used by a template.
 | `EVENTS_ENABLED` | `0`/`false` removes the event tools (default: on). The bot's role needs Create Events. Chart: `events.enabled` |
 | `QUEUE_WORKERS` | queue worker tasks (default 2, min 1); each handles one message at a time, a per-channel lock keeps same-channel order. Chart: `queue.workers` |
 | `QUEUE_MAX_SIZE` | max messages waiting on the bounded queue (default 10, min 1); when full new messages are dropped (a mention gets a short "busy" reply). Chart: `queue.maxSize` |
+| `CORE_ENV_FILE` | compose only: the env file handed to core (default `.env`). `--env-file` alone changes only compose's own `${...}` values, so a second env file (`.env.v3`) sets this to its own name |
 | `LLAMA_CACHE_TYPE_K`, `LLAMA_CACHE_TYPE_V` | optional; compose `llamacpp` service only (compose passes them as llama.cpp's `LLAMA_ARG_CACHE_TYPE_K/V`): KV cache quantization type (llama.cpp `-ctk`/`-ctv`), default `q4_0`; in the Helm chart set via `llamacpp.cacheTypeK`/`cacheTypeV` |
 | `IMAGE_GEN_ENABLED` | `0`/`false` removes the `generate_image` tool from the LLM (default: on). Chart: `diffusion.enabled` also removes the diffusion pod/PVC |
 | `DIFFUSION_URL` | base URL of the diffusion service (core appends `/generate`); compose `diffusion` service on :8000 in dev, in-cluster `*-diffusion-service` in the chart; in-code fallback `http://diffusion:8000` |

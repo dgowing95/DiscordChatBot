@@ -95,7 +95,10 @@ services:
       # container on the local daemon (agents.sandbox DockerSandboxClient).
       # To disable the sandbox: SANDBOX_ENABLED=0 in .env (the mount can stay).
       - /var/run/docker.sock:/var/run/docker.sock
-    env_file: .env
+    # The same file compose read for ${...} above: `docker compose --env-file
+    # .env.v3 up` would otherwise still hand core the plain .env. Set
+    # CORE_ENV_FILE in that file to its own name.
+    env_file: ${CORE_ENV_FILE:-.env}
     environment:
       # Voice calls (VOICE_ENABLED=1 in .env turns them on): the sidecar and
       # speech services below, on the compose network.

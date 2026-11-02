@@ -118,9 +118,10 @@ fi
   # Settings v3 renamed or removed make core refuse to start
   # (classes/settings_check.py), so none may leak in from the runner's
   # environment. The list comes from core itself, so it never drifts.
-  for name in $("$WORK/core/bin/python" -I -c "import sys; sys.path.insert(0, sys.argv[1]); from classes.settings_check import REMOVED; print(' '.join(REMOVED))" "$ROOT/core"); do
-    unset "$name"
-  done
+  # (An assignment, so set -e stops here if the list cannot be read, rather
+  # than a `for` over an empty list skipping the unsets.)
+  removed=$("$WORK/core/bin/python" -I -c "import sys; sys.path.insert(0, sys.argv[1]); from classes.settings_check import REMOVED; print(' '.join(REMOVED))" "$ROOT/core")
+  for name in $removed; do unset "$name"; done
   export LLM_HOST="$E2E_LLM_HOST" LLM_MODEL="$E2E_MODEL" DIFFUSION_URL="$DIFFUSION_URL"
   # Always set, so a LLM_API_KEY in the caller's environment never reaches
   # the E2E server; empty means core's placeholder.
