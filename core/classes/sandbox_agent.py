@@ -22,6 +22,7 @@ Requirements (see docker-compose.yaml / charts/dis-ai-bot):
 The heavy imports (docker SDK, agents.sandbox) stay inside the builder
 functions so the pure helpers below are testable without them.
 """
+import functools
 import logging
 import asyncio
 import io
@@ -1818,18 +1819,6 @@ async def _deliver(
     return await _collect_artifacts(session, out_dir, marker)
 
 
-async def run_sandbox_task(*args, **kwargs) -> SandboxResult:
-    """_run_sandbox_task (its docstring has the whole story) as brain work:
-    the side calls its tools make (a research brief, an image rewrite) wait in
-    the brain lane, not the chat lane (llm_lanes.current_lane). Tool tasks
-    copy this context when the SDK creates them."""
-    token = llm_lanes.current_lane.set(llm_lanes.BRAIN)
-    try:
-        return await _run_sandbox_task(*args, **kwargs)
-    finally:
-        llm_lanes.current_lane.reset(token)
-
-
 async def _run_sandbox_task(
     task: str,
     progress_hooks=None,
@@ -2014,6 +2003,19 @@ async def _run_sandbox_task(
         conversation.finalize()
         await _persist_sandbox_snapshot(session, snapshot_id)
         await _delete_sandbox_session(sandbox_client, session)
+
+
+@functools.wraps(_run_sandbox_task)
+async def run_sandbox_task(*args, **kwargs) -> SandboxResult:
+    # Brain work: the side calls the run's tools make (a research brief, an
+    # image rewrite) wait in the brain lane, not the chat lane
+    # (llm_lanes.current_lane). Tool tasks copy this context when the SDK
+    # creates them. The docstring (functools.wraps) is _run_sandbox_task's.
+    token = llm_lanes.current_lane.set(llm_lanes.BRAIN)
+    try:
+        return await _run_sandbox_task(*args, **kwargs)
+    finally:
+        llm_lanes.current_lane.reset(token)
 
 
 async def _converse(agent, task, run_config, progress_hooks, nested_context,

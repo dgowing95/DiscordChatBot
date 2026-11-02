@@ -100,9 +100,9 @@ class LanedModel(Model):
                 tracing, previous_response_id=previous_response_id,
                 conversation_id=conversation_id, prompt=prompt,
             )
-            # The deadline covers the model's time only: each wait for the next
-            # event is bounded by what is left, but the consumer's own work
-            # between events (speaking a sentence) is not counted.
+            # One deadline for the whole stream from the moment the slot is
+            # taken, as the SDK's own was: each wait for the next event is
+            # bounded by what is left of it.
             deadline = time.monotonic() + self.call_timeout
             try:
                 while True:

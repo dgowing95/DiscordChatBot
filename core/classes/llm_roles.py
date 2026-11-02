@@ -125,6 +125,15 @@ def llm_host(env=None) -> str:
 
 # An HTTP header name (RFC 9110 token characters).
 _HEADER_NAME = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
+# Each skipped entry is warned about once per setting value: role configs are
+# resolved on every reply, which would repeat the same warning per message.
+_warned: set = set()
+
+
+def _warn_once(raw: str, message: str) -> None:
+    if (raw, message) not in _warned:
+        _warned.add((raw, message))
+        logger.warning(message)
 
 
 def llm_extra_headers(env=None) -> dict:
@@ -140,7 +149,8 @@ def llm_extra_headers(env=None) -> dict:
     """
     env = os.environ if env is None else env
     headers = {}
-    for position, entry in enumerate(_get(env, "LLM_EXTRA_HEADERS").split(","), 1):
+    raw = _get(env, "LLM_EXTRA_HEADERS")
+    for position, entry in enumerate(raw.split(","), 1):
         entry = entry.strip()
         if not entry:
             continue
@@ -153,10 +163,10 @@ def llm_extra_headers(env=None) -> dict:
                 or not (value.isascii() and value.isprintable())):
             # Only the position: a malformed entry may be a pasted key
             # ("Authorization Bearer sk-..."), which must not reach the logs.
-            logger.warning(f"LLM_EXTRA_HEADERS: skipping entry {position}, expected name=value")
+            _warn_once(raw, f"LLM_EXTRA_HEADERS: skipping entry {position}, expected name=value")
             continue
         if name.lower() == "authorization":
-            logger.warning("LLM_EXTRA_HEADERS: skipping Authorization; LLM_API_KEY sets it")
+            _warn_once(raw, "LLM_EXTRA_HEADERS: skipping Authorization; LLM_API_KEY sets it")
             continue
         headers[name] = value
     return headers
