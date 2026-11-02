@@ -5,7 +5,7 @@ Overview of this repository and how to work with it (for humans and AI coding ag
 ## What this is
 
 A Python Discord bot that answers messages using a local LLM (llama.cpp server serving a GGUF model, e.g. `ggml-org/Qwen3.8-27B-GGUF:Q4_K_M`;
-or, with the chart's `llmEngine: strata`, a [Strata](https://github.com/Niko1221/Strata) server for large mixture-of-experts models).
+or, with the chart's `llm.engine: strata`, a [Strata](https://github.com/Niko1221/Strata) server for large mixture-of-experts models).
 It is primarily deployed on **Kubernetes** via the Helm chart in `charts/dis-ai-bot`
 (releases are cut by `.github/workflows/auto-tag.yaml`, which bumps a `vMAJOR.MINOR` tag on every
 push to `main`, and the tag push starts `release.yaml`; a prebuilt chart is downloadable from GitHub
@@ -23,7 +23,7 @@ core/                  # the main bot (the app that runs in production)
                            #   anchored window, per-channel anchor store, token budget
     attachment_cache.py    # PURE (stdlib-only) encoded images kept between prompt builds:
                            #   LRU + TTL, shared in-flight loads, delete/edit invalidation
-    message_queue.py       # PURE (stdlib-only) queue sizing (WORKER_COUNT / QUEUE_MAX_SIZE),
+    message_queue.py       # PURE (stdlib-only) queue sizing (QUEUE_WORKERS / QUEUE_MAX_SIZE),
                            #   bounded queue factory + per-channel locks (scoped to build+send)
                            #   + in-flight task registry (prompt hint for still-running slow tools)
     text_llm_handler.py    # builds an `agents` Agent against the LLM server's (llama.cpp or Strata)
@@ -31,8 +31,10 @@ core/                  # the main bot (the app that runs in production)
     response_filter.py     # PURE (stdlib-only) response cleaning / thinking-block stripping
     content_guard.py       # OpenAI Moderations-based safety guard for web_search / fetch_url /
                            #   run_code_sandbox
-    llm_config.py          # PURE (stdlib-only) MODEL / LLM_HOST / LLM_PASS defaults and the
+    llm_config.py          # PURE (stdlib-only) LLM_MODEL / LLM_HOST / LLM_API_KEY defaults and the
                            #   temperature parser, shared by the main and sandbox agents
+    settings_check.py      # PURE (stdlib-only) settings renamed/removed in v3 (REMOVED) and
+                           #   the startup check that exits on any of them, or on no LLM_MODEL
     redis_client.py        # the two shared, lazily-built Redis clients (str + binary); the
                            #   stores below hold no client of their own
     metrics.py             # PURE (stdlib + prometheus_client) Prometheus metrics:
@@ -130,7 +132,7 @@ docs/voice.md          # user-facing guide to voice calls
 e2e/                   # end-to-end CI: start the PR's bot, talk to it through
                        #   Discord, check the replies (README.md there)
 charts/dis-ai-bot/     # Helm chart (credentials render into templates/secret.yaml,
-                       #   everything else into templates/configmap.yaml); llmEngine
+                       #   everything else into templates/configmap.yaml); llm.engine
                        #   picks templates/llamacpp.yaml (default) or templates/strata.yaml
 pyproject.toml         # pytest configuration - why bare `pytest` works from the repo root
 docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PROFILES in .env picks
@@ -147,7 +149,7 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
    reply-chance roll hits); only messages that pass go on a BOUNDED
    `asyncio.Queue` (`QUEUE_MAX_SIZE`, default 10 — once full, new messages are
    dropped and a mention gets a short "busy" reply), and a POOL of worker
-   tasks (`WORKER_COUNT`, default 2) pops messages, builds a `MessageHandler`,
+   tasks (`QUEUE_WORKERS`, default 2) pops messages, builds a `MessageHandler`,
    and handles them. A per-channel `asyncio.Lock` (keyed by channel id) is
    SCOPED to the two fast phases of a handle — prompt build and the chunked
    send (`MessageHandler.handle_message`) — so the slow LLM/tool phase runs
@@ -201,10 +203,10 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
    no channel history, can see results.
 3. `TextLLMHandler` uses the **OpenAI `agents` SDK** pointed at the LLM
    server's OpenAI-compatible endpoint (`LLM_HOST/v1`) with function tools attached.
-   That server is llama.cpp by default, or Strata (chart `llmEngine: strata`, compose
+   That server is llama.cpp by default, or Strata (chart `llm.engine: strata`, compose
    profile `strata`). Strata copies llama.cpp's API closely enough (`/props`,
    `reasoning_content`, `timings`, prefix reuse) that core treats both the same: the
-   only differences are that Strata checks `LLM_PASS` (so core's own `/props` and
+   only differences are that Strata checks `LLM_API_KEY` (so core's own `/props` and
    `/v1/models` calls send it, `llm_config.llm_auth_headers`), lists its one model
    only in the OpenAI `data` shape, and answers whatever model name is asked for.
 4. The returned text is cleaned by `MessageHandler.filter_response()` (delegate:
@@ -404,7 +406,7 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
    (timing, DST, matching, settings); `automation_store.py` keeps versioned
    records and does quotas, optimistic-revision edits and claims atomically
    (WATCH/MULTI and Lua). Automatic work rides the SAME bounded queue as chat,
-   as `AutomationJob` items, so `WORKER_COUNT` and the channel locks still
+   as `AutomationJob` items, so `QUEUE_WORKERS` and the channel locks still
    bound it. `schedule_forever` (main.py) polls due schedules every 15 seconds
    and admits only what the queue has room for; rule matching runs in
    `on_message` after sandbox steering and, when a rule is admitted, replaces
@@ -657,19 +659,31 @@ needs an entry there, gated with `requires` when it can be switched off;
 
 ### Environment variables
 
+v3 renamed many of these and keeps no aliases: an old name set in the
+environment makes core log each old name with its replacement and exit
+(`classes/settings_check.py`, run first thing in `main.py`), and an old values
+key fails `helm template` the same way (`templates/_removed.tpl`). Every
+rename goes in `settings_check.REMOVED`, `_removed.tpl` (for values keys) and
+`docs/upgrading-to-v3.md` in the same PR; `settings_check_tests.py` checks the
+doc and the map agree. `settings_docs_tests.py` checks that every env var core
+reads has a row here and a line in `.env.example`, that every row is read by
+something, and that every `values.yaml` key is used by a template.
+
 | Var | Purpose |
 |---|---|
-| `DISCORD_TOKEN` | required; bot token. Chart: `discordToken`, or bring your own Secret via `existingSecret` (keys = these env var names: `DISCORD_TOKEN`, `OPENAI_API_KEY`, `SANDBOX_LLM_API_KEY`, `IMAGE_PROMPT_LLM_API_KEY`); `llamacpp.existingSecret` does the same for the llamacpp pod's `HF_TOKEN` |
+| `DISCORD_TOKEN` | required; bot token. Chart: `discordToken`, or bring your own Secret via `existingSecret` (keys = these env var names: `DISCORD_TOKEN`, `LLM_API_KEY`, `CONTENT_GUARD_API_KEY`, `BRAIN_LLM_API_KEY`, `IMAGE_PROMPT_LLM_API_KEY`, `IMAGE_REVIEW_LLM_API_KEY`, `RESEARCH_LLM_API_KEY`); `llamacpp.existingSecret` does the same for the llamacpp pod's `HF_TOKEN` |
 | `REDIS_HOST` | required; Redis host |
-| `LLM_HOST` | LLM server base URL (OpenAI-compat; core appends `/v1`). docker-compose (dev): the `llamacpp` service on :8081, or `http://strata:8080`. Helm chart: `llm_host`, empty by default = the in-cluster service of `llmEngine`; the in-code fallback is `http://llamacpp:8080` |
-| `LLM_PASS` | the LLM server's API key. A placeholder for llama.cpp, which does not authenticate (the OpenAI client requires a non-empty key); the real key for Strata, which checks it (the chart takes it from `strata.apiKey` / `strata.existingSecret`, key `STRATA_API_KEY`; compose gives the same `.env` value to the `strata` service) |
-| `LLM_EXTRA_HEADERS` | extra headers sent with every request to `LLM_HOST`, as comma-separated `name=value` pairs (default: none). For a hosted API that needs more than a key: OpenCode Go refuses requests without `x-opencode-session` (E2E sets one per run). A side job or the sandbox agent given its own `*_LLM_HOST` sends none; `Authorization` is skipped (`LLM_PASS` sets it) |
-| `MODEL` | the model, single source of truth: the bot requests this name AND the compose `llamacpp` service serves it (as `LLAMA_ARG_HF_REPO`); in the Helm chart the one `model` value feeds both. With Strata it is only the requested name (Strata picks its model from `strata.model`, `STRATA_MODEL` in compose, and answers any name). In-code default `qwen3:4b` |
-| `OPENAI_API_KEY` | API key for the free OpenAI Moderations endpoint (web-tool guard); fail-open if unset. The agents SDK would also upload every run to OpenAI's trace dashboard with it; that is switched off in code (`set_tracing_disabled(True)` in `text_llm_handler.py` and `sandbox_agent.py`), with no setting to turn it back on |
-| `OPENAI_BASE_URL` | moderation API base (default `https://api.openai.com/v1`); any OpenAI-compatible `/v1/moderations` endpoint works. Chart: `openaiBaseUrl` |
-| `MODERATION_MODEL` | moderation model name, e.g. `text-moderation-latest`; unset omits the parameter and uses the server default. Chart: `moderationModel` |
-| `CONTENT_GUARD_ENABLED` | `0`/`false` disables the content guard on web tools (default: on) |
-| `CONTENT_GUARD_DEBUG` | `0`/`false` silences content-guard debug logging (default: on) |
+| `LLM_HOST` | the bot's own LLM server: base URL (OpenAI-compat; core appends `/v1`), the fallback for every role. docker-compose (dev): the `llamacpp` service on :8081, or `http://strata:8080`. Helm chart: `llm.host`, empty by default = the in-cluster service of `llm.engine`; the in-code fallback is `http://llamacpp:8080` |
+| `LLM_API_KEY` | the LLM server's API key. A placeholder for llama.cpp, which does not authenticate (the OpenAI client requires a non-empty key); the real key for Strata, which checks it (the chart takes it from `strata.apiKey` / `strata.existingSecret`, key `STRATA_API_KEY`; compose gives the same `.env` value to the `strata` service). Chart: `llm.apiKey` (via secret.yaml) for a server outside the chart |
+| `LLM_EXTRA_HEADERS` | extra headers sent with every request to `LLM_HOST`, as comma-separated `name=value` pairs (default: none). For a hosted API that needs more than a key: OpenCode Go refuses requests without `x-opencode-session` (E2E sets one per run). A side job or the brain given its own `*_LLM_HOST` sends none; `Authorization` is skipped (`LLM_API_KEY` sets it) |
+| `LLM_MODEL` | **required**; the model, single source of truth: the bot requests this name AND the compose `llamacpp` service serves it (as `LLAMA_ARG_HF_REPO`); in the Helm chart the one `llm.model` value feeds both. With Strata it is only the requested name (Strata picks its model from `strata.model`, `STRATA_MODEL` in compose, and answers any name). No in-code default: core refuses to start without it |
+| `CONTENT_GUARD_API_KEY` | API key for the moderation call (an OpenAI-compatible Moderations endpoint; OpenAI's is free); fail-open if unset. Chart: `contentGuard.apiKey` (via secret.yaml) |
+| `CONTENT_GUARD_BASE_URL` | moderation API base (default `https://api.openai.com/v1`); any OpenAI-compatible `/v1/moderations` endpoint works. Chart: `contentGuard.baseUrl` |
+| `CONTENT_GUARD_MODEL` | moderation model name, e.g. `text-moderation-latest`; unset omits the parameter and uses the server default. Chart: `contentGuard.model` |
+| `CONTENT_GUARD_CACHE_TTL_SECONDS` | seconds a verdict for the same input stays cached (default 600; 0 disables). Chart: `contentGuard.cacheTtlSeconds` |
+| `CONTENT_GUARD_MAX_RETRIES` / `CONTENT_GUARD_RETRY_BACKOFF` | retries after the first attempt on 429/5xx (default 2), and the base backoff in seconds, doubled per retry (default 2). Chart: `contentGuard.maxRetries` / `retryBackoff` |
+| `CONTENT_GUARD_ENABLED` | `0`/`false` disables the content guard on web tools and sandbox input (default: on). Chart: `contentGuard.enabled` |
+| `CONTENT_GUARD_DEBUG` | `1`/`true` logs the content guard's per-request detail (default: off). Chart: `contentGuard.debug` |
 | `WEB_FETCH_PART_CHARS` / `WEB_FETCH_MAX_CHARS` | characters of a page the model gets per `fetch_url` call, and most kept per page across all parts (defaults 10000 / 200000). Chart: `webFetch.partChars` / `maxChars` |
 | `WEB_FETCH_MAX_BYTES` / `WEB_FETCH_TIMEOUT` | most bytes downloaded for one page, and seconds to wait (defaults 5000000 / 15). Chart: `webFetch.maxBytes` / `timeout` |
 | `WEB_CACHE_TTL_SECONDS` / `WEB_CACHE_VIDEO_TTL_SECONDS` / `WEB_CACHE_FAILURE_TTL_SECONDS` | how long a read page / a YouTube transcript / a failure stays cached in Redis (defaults 21600 / 2592000 / 300). Chart: `webFetch.*TtlSeconds` |
@@ -678,19 +692,18 @@ needs an entry there, gated with `requires` when it can be switched off;
 | `RESEARCH_BRIEF_ENABLED` | `0`/`false`: `web_search` returns the search results alone, with no pages read and no brief (default: on). Chart: `research.enabled` |
 | `RESEARCH_PAGES` / `RESEARCH_PAGE_CHARS` | results `web_search` reads in full (default 3, max 5), and characters of each given to the brief (default 6000). Chart: `research.pages` / `pageChars` |
 | `RESEARCH_FETCH_TIMEOUT` / `RESEARCH_TIMEOUT` | seconds to wait for those pages (default 25; a page not read by then is left out) and for the brief (default 90). Chart: `research.fetchTimeout` / `timeout` |
-| `RESEARCH_MODEL` / `RESEARCH_LLM_HOST` / `RESEARCH_LLM_API_KEY` | the brief's own LLM connection; each falls back to `MODEL` / `LLM_HOST` / `LLM_PASS`, like `IMAGE_PROMPT_*`. Chart: `research.*` (the key via secret.yaml) |
+| `RESEARCH_MODEL` / `RESEARCH_LLM_HOST` / `RESEARCH_LLM_API_KEY` | the brief's own LLM connection; each falls back to `LLM_MODEL` / `LLM_HOST` / `LLM_API_KEY`, like `IMAGE_PROMPT_*`. Chart: `research.*` (the key via secret.yaml) |
 | `BROWSER_CONCURRENCY` / `BROWSER_QUEUE_SIZE` | browser service: pages rendered at once, and renders allowed to wait before a 503 (defaults 2 / 8). Chart: `browser.concurrency` / `queueSize` |
 | `BROWSER_TIMEOUT` / `BROWSER_SETTLE_SECONDS` | browser service: seconds for one render, and seconds to let a page's scripts settle (defaults 30 / 5); core reads both to know how long to wait. Chart: `browser.timeout` / `settleSeconds` |
-| `METRICS_PORT` | port to serve the Prometheus `/metrics` endpoint on (default 9464); empty/`0` disables. Chart: `metrics.enabled`/`metrics.port` also add a ClusterIP Service, the pod port, and a kube-prometheus-stack ServiceMonitor (labelled `release: kube-prometheus-stack` — the operator only imports ServiceMonitors with that label). The same `metrics.enabled` switch turns on **llama.cpp's own** `/metrics` (`LLAMA_ARG_ENDPOINT_METRICS`, off upstream by default) plus a second ServiceMonitor for it; with `llmEngine: strata` that second one scrapes Strata's `/metrics` instead (`vllm:*` / `strata:*` names), sending the Strata key |
-| `LLM_CONTEXT_LENGTH` | the TOTAL context window the LLM server was started with (chart: `llamacppContextLength`, which also sets the server's `LLAMA_ARG_CTX_SIZE`; with Strata, whose `strata.context` is per slot, that times `strata.parallel`), exported as the `discord_bot_llm_context_window_tokens` gauge so a dashboard can express prompt sizes as a fraction of it. Unset leaves the gauge at 0 |
+| `METRICS_PORT` | port to serve the Prometheus `/metrics` endpoint on (default 9464); empty/`0` disables. Chart: `metrics.enabled`/`metrics.port` also add a ClusterIP Service, the pod port, and a kube-prometheus-stack ServiceMonitor (labelled `release: kube-prometheus-stack` — the operator only imports ServiceMonitors with that label). The same `metrics.enabled` switch turns on **llama.cpp's own** `/metrics` (`LLAMA_ARG_ENDPOINT_METRICS`, off upstream by default) plus a second ServiceMonitor for it; with `llm.engine: strata` that second one scrapes Strata's `/metrics` instead (`vllm:*` / `strata:*` names), sending the Strata key |
 | `LOG_LEVEL` | root log level (default `INFO`); `DEBUG` also dumps the raw agent run result. Logging replaced bare `print()` calls, which had no level to tune |
-| `MSG_HISTORY_LIMIT` | messages in a (refreshed) history window, the trigger included, default 5. Chart: `message_history` |
+| `MSG_HISTORY_LIMIT` | messages in a (refreshed) history window, the trigger included, default 5. Chart: `history.limit` |
 | `MSG_HISTORY_MODE` | `sliding` (default: always the newest window) or `anchored` (the window's start stays fixed and grows, so the LLM server can reuse its cached prefix, until a refresh). Chart: `history.mode` |
 | `MSG_HISTORY_REFRESH_MESSAGES` | anchored mode: new channel messages since the last refresh (bot replies included, the trigger counted) that move the anchor to the newest window, default 10. Chart: `history.refreshMessages` |
 | `MSG_HISTORY_RESERVE_TOKENS` | tokens of the llama.cpp per-slot context (its `/props`, re-read every 5 minutes) kept free for the system prompt, tool schemas/results and the answer; older history messages are dropped whole past that, default 12000. Nothing is trimmed while the per-slot context is unknown. Chart: `history.reserveTokens` |
-| `REASONING_EFFORT` | sent to the LLM as the OpenAI-compat `reasoning_effort` field (low/medium/high, default medium). Chart: `reasoningEffort` |
-| `LLM_MAX_TURNS` | max model turns for ONE reply from the main agent (helm: `llmMaxTurns`), default 20. A turn is one model response, however many tool calls it carries. Passed explicitly to `Runner.run` because the SDK's own default of 10 is easily overrun by a reply that chains several sandbox/image calls — and overrunning raises `MaxTurnsExceeded`, which costs the whole answer |
-| `LLM_CALL_TIMEOUT_SECONDS` | wall-clock seconds ONE model call from the main agent may take, the OpenAI client's own retries included (helm: `llmCallTimeout`), default 600 — the same as the client's own timeout, so a slow local generation is no more likely to be cut off than before. Applied as `ModelSettings.timeout`, which the SDK runner enforces by cancelling the call. Needed because the client's timeout is per-read: a server that keeps the connection warm while it works (OpenRouter pads non-streaming responses with whitespace) resets it on every byte and was previously unbounded |
+| `PERSONA_REASONING_EFFORT` | the persona's `reasoning_effort` (OpenAI-compat field; low/medium/high, default medium). Chart: `persona.reasoningEffort` |
+| `PERSONA_MAX_TURNS` | max model turns for ONE reply from the persona (chart: `persona.maxTurns`), default 20. A turn is one model response, however many tool calls it carries. Passed explicitly to `Runner.run` because the SDK's own default of 10 is easily overrun by a reply that chains several tool calls — and overrunning raises `MaxTurnsExceeded`, which costs the whole answer |
+| `PERSONA_CALL_TIMEOUT_SECONDS` | wall-clock seconds ONE model call from the persona may take, the OpenAI client's own retries included (chart: `persona.callTimeout`), default 600. Applied as `ModelSettings.timeout`, which the SDK runner enforces by cancelling the call. Needed because the client's timeout is per-read: a server that keeps the connection warm while it works (OpenRouter pads non-streaming responses with whitespace) resets it on every byte |
 | `WHATS_NEW_ENABLED` | `0`/`false` stops the automatic What's New embed (default: on); `/whats_new` still works. Chart: `whatsNew.enabled` |
 | `APP_VERSION` | the release tag, baked into the core image by `release.yaml` (`--build-arg`), not configured. Unset = no What's New announcement |
 | `SHOW_THINKING` | `1`/`true` sends the model's reasoning as spoiler-hidden follow-up message(s); default (off) drops it entirely. Chart: `showThinking` |
@@ -703,9 +716,9 @@ needs an entry there, gated with `requires` when it can be switched off;
 | `RULE_COOLDOWN_SECONDS` | seconds before the same rule can fire again (default 60). Chart: `rules.cooldownSeconds` |
 | `FOLLOWUP_MAX_PER_GUILD` | follow-ups waiting at once per server (default 3; 0 turns them off), apart from `SCHEDULE_MAX_PER_GUILD`. Any two by the same person are at least `SCHEDULE_MIN_INTERVAL_HOURS` apart. Chart: `followups.maxPerGuild` |
 | `EVENTS_ENABLED` | `0`/`false` removes the event tools (default: on). The bot's role needs Create Events. Chart: `events.enabled` |
-| `WORKER_COUNT` | queue worker tasks (default 2, min 1); each handles one message at a time, a per-channel lock keeps same-channel order. Chart: `worker_count` |
-| `QUEUE_MAX_SIZE` | max messages waiting on the bounded queue (default 10, min 1); when full new messages are dropped (a mention gets a short "busy" reply). Chart: `queue_max_size` |
-| `LLAMA_ARG_CACHE_TYPE_K`, `LLAMA_ARG_CACHE_TYPE_V` | optional; compose `llamacpp` service only: KV cache quantization type (llama.cpp `-ctk`/`-ctv`), default `q4_0`; in the Helm chart set via `llamacpp.cacheTypeK`/`cacheTypeV` |
+| `QUEUE_WORKERS` | queue worker tasks (default 2, min 1); each handles one message at a time, a per-channel lock keeps same-channel order. Chart: `queue.workers` |
+| `QUEUE_MAX_SIZE` | max messages waiting on the bounded queue (default 10, min 1); when full new messages are dropped (a mention gets a short "busy" reply). Chart: `queue.maxSize` |
+| `LLAMA_CACHE_TYPE_K`, `LLAMA_CACHE_TYPE_V` | optional; compose `llamacpp` service only (compose passes them as llama.cpp's `LLAMA_ARG_CACHE_TYPE_K/V`): KV cache quantization type (llama.cpp `-ctk`/`-ctv`), default `q4_0`; in the Helm chart set via `llamacpp.cacheTypeK`/`cacheTypeV` |
 | `IMAGE_GEN_ENABLED` | `0`/`false` removes the `generate_image` tool from the LLM (default: on). Chart: `diffusion.enabled` also removes the diffusion pod/PVC |
 | `DIFFUSION_URL` | base URL of the diffusion service (core appends `/generate`); compose `diffusion` service on :8000 in dev, in-cluster `*-diffusion-service` in the chart; in-code fallback `http://diffusion:8000` |
 | `IMAGE_MODEL` | HF repo id for the diffusion service (default `stabilityai/sd-turbo` — smallest practical model); the service downloads it into its `HF_HOME` volume on first boot |
@@ -718,20 +731,20 @@ needs an entry there, gated with `requires` when it can be switched off;
 | `IMAGE_QUEUE_SIZE` | max queued image requests in the diffusion service (default 16); over that it returns 503 |
 | `IMAGE_GEN_TIMEOUT` | seconds core waits on the diffusion service (default 300) |
 | `IMAGE_PROMPT_REWRITE_ENABLED` | `0`/`false` sends image requests to the service verbatim instead of rewriting them first (default: on). Chart: `diffusion.promptRewrite.enabled` |
-| `IMAGE_PROMPT_MODEL` / `IMAGE_PROMPT_LLM_HOST` / `IMAGE_PROMPT_LLM_API_KEY` / `IMAGE_PROMPT_TIMEOUT` | the prompt rewrite's own LLM connection; each falls back to the bot's `MODEL` / `LLM_HOST` / `LLM_PASS` (timeout default 60s), exactly like the `SANDBOX_*` equivalents. Chart: `diffusion.promptRewrite.*` (the key via secret.yaml) |
+| `IMAGE_PROMPT_MODEL` / `IMAGE_PROMPT_LLM_HOST` / `IMAGE_PROMPT_LLM_API_KEY` / `IMAGE_PROMPT_TIMEOUT` | the prompt rewrite's own LLM connection; each falls back to the bot's `LLM_MODEL` / `LLM_HOST` / `LLM_API_KEY` (timeout default 60s), exactly like the `BRAIN_*` equivalents. Chart: `diffusion.promptRewrite.*` (the key via secret.yaml) |
 | `IMAGE_REVIEW_ENABLED` | `0`/`false` posts generated images unchecked (default: on). Chart: `diffusion.review.enabled` |
 | `IMAGE_REVIEW_RETRIES` | extra attempts when the check finds something asked for missing (default 1, max 2; `0` = check only, so captions stay honest). Each costs a generation plus another check. Chart: `diffusion.review.retries` |
-| `IMAGE_REVIEW_MODEL` / `IMAGE_REVIEW_LLM_HOST` / `IMAGE_REVIEW_LLM_API_KEY` / `IMAGE_REVIEW_TIMEOUT` | the check's own LLM connection — it must be a vision model; each falls back to `MODEL` / `LLM_HOST` / `LLM_PASS` (timeout default 60s). Chart: `diffusion.review.*` (the key via secret.yaml) |
+| `IMAGE_REVIEW_MODEL` / `IMAGE_REVIEW_LLM_HOST` / `IMAGE_REVIEW_LLM_API_KEY` / `IMAGE_REVIEW_TIMEOUT` | the check's own LLM connection — it must be a vision model; each falls back to `LLM_MODEL` / `LLM_HOST` / `LLM_API_KEY` (timeout default 60s). Chart: `diffusion.review.*` (the key via secret.yaml) |
 | `SANDBOX_ENABLED` | `0`/`false` removes the `run_code_sandbox` tool from the LLM (default: on). Chart: `sandbox.enabled` also removes the Docker-socket hostPath mount |
 | `SANDBOX_IMAGE` | container image for the sandbox workspace, pulled once onto the daemon (default `python:3.14-slim`). Chart: `sandbox.image` |
 | `SANDBOX_MAX_TURNS` | max model turns for one sandbox task (default 10). Chart: `sandbox.maxTurns` |
-| `SANDBOX_MODEL` | model id for the nested sandbox agent; empty (default) = the main bot's `MODEL`. Chart: `sandbox.model` |
-| `SANDBOX_LLM_HOST` | base URL of the sandbox agent's LLM (core appends `/v1`); empty (default) = the main `LLM_HOST`. E.g. `https://openrouter.ai/api` for OpenRouter. Chart: `sandbox.llmHost` |
-| `SANDBOX_LLM_API_KEY` | API key for the sandbox agent's LLM; empty (default) = the main `LLM_PASS` placeholder. Chart: `sandbox.apiKey` |
+| `SANDBOX_TIMEOUT` | wall-clock seconds before a sandbox task is stopped and its container removed (default 600). Chart: `sandbox.timeout` |
+| `BRAIN_MODEL` | model id for the brain (the agent in the code sandbox); empty (default) = the bot's `LLM_MODEL`. Chart: `brain.model` |
+| `BRAIN_LLM_HOST` | base URL of the brain's LLM (core appends `/v1`); empty (default) = `LLM_HOST`. E.g. `https://openrouter.ai/api` for OpenRouter. Chart: `brain.llmHost` |
+| `BRAIN_LLM_API_KEY` | API key for the brain's LLM; empty (default) = `LLM_API_KEY`. Chart: `brain.apiKey` (via secret.yaml) |
 | `SANDBOX_ASK_USER_TIMEOUT` | max seconds the sandbox's `ask_user` tool waits for a reply in its thread before telling the model to proceed on its own (default 300); also clamped to whatever of the run's own `SANDBOX_TIMEOUT` budget remains. Chart: `sandbox.askUserTimeout` |
 | `SANDBOX_PERSIST_TIMEOUT_SECONDS` | seconds allowed to persist a thread's workspace snapshot to Redis on container teardown, after `SANDBOX_TIMEOUT` has already elapsed (default 180 — generous since the `Memory` capability's own extraction runs here too). Chart: `sandbox.persistTimeout` |
-| `SANDBOX_REQUEST_TIMEOUT_SECONDS` | seconds of silence on one HTTP request to the sandbox's LLM before the client gives up (default 180, down from the OpenAI client's unstated 600). This is the HTTP client's per-read timeout: it catches a hung connection or a server that sends nothing, but NOT one that dribbles keep-alive padding while it works (OpenRouter pads non-streaming responses) — that case is caught by the wall-clock bound below. Chart: `sandbox.requestTimeout` |
-| `SANDBOX_MAX_RETRIES` | how many times that client retries a failed request (default 2; 0 disables). One model call is also wall-clock bounded (`ModelSettings.timeout`, see `sandbox_model_call_timeout()`) at (1 + this) x `SANDBOX_REQUEST_TIMEOUT_SECONDS` — the figure that was already the documented worst case for a silent server, now enforced for a padding one too. Chart: `sandbox.maxRetries` |
+| `BRAIN_CALL_TIMEOUT_SECONDS` | wall-clock seconds ONE brain model call may take, the client's two retries included (default 600), like `PERSONA_CALL_TIMEOUT_SECONDS`; also its per-read timeout. `ModelSettings.timeout` is what bounds a server that dribbles keep-alive padding (OpenRouter's non-streaming responses), which a per-read timeout never trips. Chart: `brain.callTimeout` |
 | `SANDBOX_SNAPSHOT_MAX_BYTES` | max size of one thread's stored workspace snapshot in Redis (default 50MB). Chart: `sandbox.snapshotMaxBytes` |
 | `SANDBOX_INPUT_MAX_BYTES` | most bytes of chat files copied into a run's `in/`, all together (default 25MB; at most 10 files). Kept under the snapshot cap, since `in/` is saved with the workspace. Chart: `sandbox.inputMaxBytes` |
 | `SANDBOX_SNAPSHOT_TTL_SECONDS` | how long an unused thread's workspace snapshot survives in Redis (default 604800 = 7 days). Chart: `sandbox.snapshotTtlSeconds` |
@@ -800,7 +813,9 @@ needs an entry there, gated with `requires` when it can be switched off;
   ```
 
   This is exactly what CI runs, so a new test file is picked up automatically;
-  there is no list to keep in step. ~1000 tests, roughly 20 seconds.
+  there is no list to keep in step. ~1400 tests, roughly 20 seconds. It
+  includes `settings_docs_tests.py`, so a new setting fails the suite until
+  it has an env-table row below and an `.env.example` line.
 
   The voice sidecar is Node and has its own `node:test` suite (pure helpers:
   audio, protocol validation, the playback queue): `cd voicesidecar && npm ci
@@ -1002,7 +1017,7 @@ failure shows in the run's step summary, and the full logs are in its
   Cover it in `core/tests/attachment_cache_tests.py` and the download path
   (lock not held, concurrency limit, deletion during a download) in
   `core/tests/message_handler_tests.py`.
-- The queue worker pool, bounded-queue sizing (WORKER_COUNT / QUEUE_MAX_SIZE),
+- The queue worker pool, bounded-queue sizing (QUEUE_WORKERS / QUEUE_MAX_SIZE),
   the per-channel locks (SCOPED to build+send — the LLM/tool phase runs
   unlocked) and the in-flight task registry (register_task_run /
   in_flight_hint) live in `core/classes/message_queue.py` — keep it pure
@@ -1036,15 +1051,15 @@ failure shows in the run's step summary, and the full logs are in its
   hard-splits anything still over the limit. Use it rather than calling `wrap` directly.
 - llama.cpp has no pull API: the `llamacpp` container downloads the model itself on boot
   (`LLAMA_ARG_HF_REPO` into the `LLAMA_CACHE` volume). Changing the model therefore requires
-  restarting the server (`docker compose up -d` after editing `MODEL` in `.env`; `helm upgrade`
+  restarting the server (`docker compose up -d` after editing `LLM_MODEL` in `.env`; `helm upgrade`
   in k8s) — `compose restart` alone does not re-read `.env`. On startup `main.py` verifies
-  readiness by GETting `{LLM_HOST}/v1/models` and checking the configured `MODEL` is listed
+  readiness by GETting `{LLM_HOST}/v1/models` and checking the configured `LLM_MODEL` is listed
   (`TextLLMHandler.check_model_ready`, fail-soft — a first-boot model may still be downloading).
 - The chart's LLM PersistentVolume/Claim are still named `*-pvc-ollama` / `ollama-pv-claim`
   (hostPath `…/ollama`) on purpose, so data survives the Ollama → llama.cpp switch and keeps
   matching on upgrade — do not rename; the llamacpp pod mounts it at `/models`, which is also
   its `LLAMA_CACHE`, so the GGUF model (downloaded once via `--hf-repo`) persists across redeploys.
-  It is rendered whatever `llmEngine` is, so switching to Strata and back keeps that model.
+  It is rendered whatever `llm.engine` is, so switching to Strata and back keeps that model.
 - Strata (`templates/strata.yaml`) needs three things llama.cpp does not, each verified
   against the real image: unlimited locked memory, because it page-locks the RAM holding
   the experts. Kubernetes has no per-pod ulimit, so the pod gets `SYS_RESOURCE` and starts

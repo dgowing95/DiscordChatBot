@@ -87,7 +87,7 @@ def test_settings_defaults_and_bounds(monkeypatch):
 
 def test_the_brief_model_falls_back_to_the_bots_own(monkeypatch):
     monkeypatch.delenv("RESEARCH_MODEL", raising=False)
-    monkeypatch.setenv("MODEL", "main-model")
+    monkeypatch.setenv("LLM_MODEL", "main-model")
     assert rf.research_model() == "main-model"
     monkeypatch.setenv("RESEARCH_MODEL", "other")
     assert rf.research_model() == "other"

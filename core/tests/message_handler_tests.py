@@ -1186,7 +1186,7 @@ async def test_generate_survives_a_failure_carrying_no_run_data():
 @pytest.mark.asyncio
 async def test_generate_passes_an_explicit_max_turns():
     """The SDK's own default is 10, which a chained tool run overruns."""
-    from classes.text_llm_handler import llm_max_turns
+    from classes.text_llm_handler import persona_max_turns
 
     handler = _generate_handler(None)
     with patch("classes.text_llm_handler.Runner") as runner, \
@@ -1194,22 +1194,22 @@ async def test_generate_passes_an_explicit_max_turns():
         runner.run = AsyncMock(return_value=_run_result("ok"))
         await handler.generate()
 
-    assert runner.run.await_args.kwargs["max_turns"] == llm_max_turns()
-    assert llm_max_turns() > 10
+    assert runner.run.await_args.kwargs["max_turns"] == persona_max_turns()
+    assert persona_max_turns() > 10
 
 
 def test_llm_call_timeout_default_and_parsing(monkeypatch):
-    from classes.text_llm_handler import DEFAULT_LLM_CALL_TIMEOUT, llm_call_timeout
+    from classes.text_llm_handler import DEFAULT_PERSONA_CALL_TIMEOUT, persona_call_timeout
 
-    monkeypatch.delenv("LLM_CALL_TIMEOUT_SECONDS", raising=False)
-    assert llm_call_timeout() == DEFAULT_LLM_CALL_TIMEOUT == 600.0
-    monkeypatch.setenv("LLM_CALL_TIMEOUT_SECONDS", "90")
-    assert llm_call_timeout() == 90.0
+    monkeypatch.delenv("PERSONA_CALL_TIMEOUT_SECONDS", raising=False)
+    assert persona_call_timeout() == DEFAULT_PERSONA_CALL_TIMEOUT == 600.0
+    monkeypatch.setenv("PERSONA_CALL_TIMEOUT_SECONDS", "90")
+    assert persona_call_timeout() == 90.0
     # ModelSettings.timeout is validated as a finite positive float, so every
     # unusable value must fall back rather than blow up Agent construction.
     for junk in ("nope", "", "0", "-5", "inf", "nan"):
-        monkeypatch.setenv("LLM_CALL_TIMEOUT_SECONDS", junk)
-        assert llm_call_timeout() == DEFAULT_LLM_CALL_TIMEOUT, junk
+        monkeypatch.setenv("PERSONA_CALL_TIMEOUT_SECONDS", junk)
+        assert persona_call_timeout() == DEFAULT_PERSONA_CALL_TIMEOUT, junk
 
 
 @pytest.mark.asyncio
@@ -1219,7 +1219,7 @@ async def test_get_client_bounds_each_model_call(monkeypatch):
     is the wall-clock bound the runner enforces on the whole call."""
     from classes.text_llm_handler import TextLLMHandler
 
-    monkeypatch.setenv("LLM_CALL_TIMEOUT_SECONDS", "45")
+    monkeypatch.setenv("PERSONA_CALL_TIMEOUT_SECONDS", "45")
     handler = TextLLMHandler.__new__(TextLLMHandler)  # __init__ needs Redis
     handler.system = "a bot"
     handler.options = {"temperature": 1.0}

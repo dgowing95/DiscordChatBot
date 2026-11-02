@@ -6,6 +6,7 @@ import random
 import time
 import aiohttp
 import io
+import sys
 from classes.message_handler import MessageHandler, close_http_session
 from classes.text_llm_handler import TextLLMHandler
 from classes.llm_config import llm_model
@@ -16,7 +17,7 @@ from classes.image_generation import (
     image_generation_enabled,
 )
 from classes.sandbox_agent import sandbox_enabled
-from classes import attachment_cache, help_catalog, sandbox_thread_inbox, whats_new
+from classes import attachment_cache, help_catalog, sandbox_thread_inbox, settings_check, whats_new
 from classes.common import embed_from_data
 from classes.redis_client import text_client
 from classes import automation_runner, voice_gate
@@ -24,7 +25,7 @@ from classes.polls import remember_poll
 from classes.automation_policy import settings as automation_settings
 from classes.voice_policy import settings as voice_settings
 from classes.message_queue import (
-    get_channel_lock, make_message_queue, mark_enqueued, pop_enqueued, worker_count,
+    get_channel_lock, make_message_queue, mark_enqueued, pop_enqueued, queue_workers,
 )
 from classes.metrics import (
     inc_messages_processed,
@@ -34,7 +35,6 @@ from classes.metrics import (
     observe_queue_wait,
     observe_reply_latency,
     set_attachment_cache_bytes,
-    set_context_window_from_env,
     set_message_queue_size,
     start_metrics_server_from_env,
 )
@@ -48,9 +48,9 @@ logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
 )
-# CONTENT_GUARD_DEBUG=1 (the default) means the guard's per-request detail is
+# CONTENT_GUARD_DEBUG=1 (default off) means the guard's per-request detail is
 # wanted, which is DEBUG on its own logger rather than on the root.
-if os.environ.get("CONTENT_GUARD_DEBUG", "1").strip().lower() not in ("0", "false", "no", "off"):
+if os.environ.get("CONTENT_GUARD_DEBUG", "").strip().lower() in ("1", "true", "yes", "on"):
     logging.getLogger("classes.content_guard").setLevel(logging.DEBUG)
 # VOICE_DEBUG=1 logs what is heard and said in voice calls (every transcript,
 # so off by default); the voice sidecar reads the same switch.
@@ -86,7 +86,7 @@ class Bot(discord.Client):
 client = Bot(intents=intents)
 config = configManager()
 
-# Bounded queue shared by the worker pool. Sizing (WORKER_COUNT /
+# Bounded queue shared by the worker pool. Sizing (QUEUE_WORKERS /
 # QUEUE_MAX_SIZE), the per-channel locks and the concurrency model live in
 # classes/message_queue.py (pure, unit-tested in core/tests/).
 message_queue = make_message_queue()
@@ -220,12 +220,9 @@ async def on_ready():
     logger.info(f'Logged in as {client.user}')
     # Prometheus /metrics endpoint (METRICS_PORT; empty/0 disables).
     start_metrics_server_from_env()
-    # The context window the LLM server was started with (LLM_CONTEXT_LENGTH),
-    # published as a gauge so a dashboard can express prompt sizes as a
-    # fraction of it without hard-coding the number.
-    set_context_window_from_env()
     # The per-slot context (llama.cpp /props) is what one request can actually
-    # use, and what the history token budget is measured against.
+    # use, and what the history token budget is measured against; the same
+    # read publishes the server's total context gauge.
     if not getattr(client, "background_tasks", None):
         client.background_tasks = [client.loop.create_task(refresh_slot_context_forever())]
         if automation_settings()["enabled"]:
@@ -237,15 +234,15 @@ async def on_ready():
     # Start the worker pool immediately so the bot still consumes messages
     # even if the model check or command sync fails (e.g. server not up yet
     # after a power cycle).
-    count = worker_count()
+    count = queue_workers()
     logger.info(f"Starting {count} queue worker(s)")
     if not getattr(client, "workers_started", False):
         client.workers_started = True
         for _ in range(count):
             client.background_tasks.append(client.loop.create_task(process_messages()))
     try:
-        # Same accessor the bot itself uses, so an unset MODEL cannot make
-        # the readiness check verify a different model than the one requested.
+        # Same accessor the bot itself uses, so the readiness check verifies
+        # the model that is actually requested.
         model = llm_model()
         await TextLLMHandler.check_model_ready(model)
     except Exception as e:
@@ -600,5 +597,11 @@ async def schedule_forever():
 if __name__ == "__main__":
     # Guarded so the module can be imported (by the tests, and by anything
     # that just wants to inspect it) without connecting to Discord.
+    # Renamed or missing settings stop the bot before anything starts
+    # (classes/settings_check.py): a stale config must not run on defaults.
+    settings_error = settings_check.check()
+    if settings_error:
+        logger.error(settings_error)
+        sys.exit(1)
     automation_settings()
     client.run(os.environ['DISCORD_TOKEN'])

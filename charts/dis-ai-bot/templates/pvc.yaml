@@ -16,7 +16,7 @@ spec:
 # llama.cpp (ex-Ollama) volume: PV/PVC names and hostPath are INTENTIONALLY still
 # "ollama" so the pre-existing PV keeps matching and the data on the node is
 # preserved on upgrade (renaming would create a new empty volume). Rendered
-# whatever llmEngine is, so switching to Strata and back neither deletes nor
+# whatever llm.engine is, so switching to Strata and back neither deletes nor
 # re-binds it.
 apiVersion: v1
 kind: PersistentVolume

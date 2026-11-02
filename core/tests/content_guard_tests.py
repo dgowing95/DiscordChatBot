@@ -19,7 +19,7 @@ from classes.content_guard import (
 
 @pytest.fixture(autouse=True)
 def _fast_retries(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("CONTENT_GUARD_API_KEY", "sk-test")
     monkeypatch.setenv("CONTENT_GUARD_RETRY_BACKOFF", "0.01")
     monkeypatch.setattr(guard, "_verdict_cache", {})
 
@@ -145,7 +145,7 @@ def _error_response(message="Too Many Requests"):
 
 @pytest.mark.asyncio
 async def test_fail_open_when_api_key_missing(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("CONTENT_GUARD_API_KEY", "")
     assert await moderate_with_openai("anything") is True
 
 
@@ -208,7 +208,7 @@ async def test_verdict_is_cached(monkeypatch):
     with patch("aiohttp.ClientSession",
                return_value=_fake_client_session(responses=responses)):
         assert await moderate_with_openai("same input") is True
-        monkeypatch.setenv("OPENAI_API_KEY", "")  # prove the 2nd call was cached
+        monkeypatch.setenv("CONTENT_GUARD_API_KEY", "")  # prove the 2nd call was cached
     assert await moderate_with_openai("same input") is True
     # a different input is still sent to the API (and fails open)
     assert await moderate_with_openai("different input") is True

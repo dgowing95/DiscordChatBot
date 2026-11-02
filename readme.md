@@ -21,7 +21,7 @@ docker-compose stack for local development.
 |---|---|
 | `core/` | the bot itself: Discord client, message queue, agent + tools, Prometheus metrics |
 | `llamacpp` | the LLM server (OpenAI-compatible API), serving the GGUF named by `model` |
-| `strata` | optional instead of `llamacpp` (`llmEngine: strata`): [Strata](https://github.com/Niko1221/Strata), for large mixture-of-experts models on consumer GPUs |
+| `strata` | optional instead of `llamacpp` (`llm.engine: strata`): [Strata](https://github.com/Niko1221/Strata), for large mixture-of-experts models on consumer GPUs |
 | `redis` | per-guild settings, per-user memories, and sandbox workspace snapshots |
 | `diffusionservice/` | optional image generation (text-to-image); disable with `diffusion.enabled=false` |
 
@@ -63,7 +63,7 @@ docker compose logs core -f
 added, or no LLM server starts. The Strata settings are commented in `.env.example`.
 
 `./core` is bind-mounted into the container, so `docker compose restart core` picks up
-code edits without a rebuild. Changing `MODEL` needs `docker compose up -d` (a plain
+code edits without a rebuild. Changing `LLM_MODEL` needs `docker compose up -d` (a plain
 `restart` does not re-read `.env`).
 
 ## Occasional two-message replies

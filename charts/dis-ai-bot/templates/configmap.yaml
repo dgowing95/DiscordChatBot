@@ -1,3 +1,4 @@
+{{- include "dcb.failOnRemoved" . }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -6,16 +7,14 @@ metadata:
 data:
   # Credentials are NOT here - see secret.yaml (same values.yaml keys).
   REDIS_HOST: {{ .Values.redisHost | toString | quote }}
-  # llm_host, else the selected engine's in-cluster service (see _helpers.tpl)
+  # llm.host, else the selected engine's in-cluster service (see _helpers.tpl).
+  # The key is in secret.yaml (llm.apiKey), or the Strata secret (core.yaml).
   LLM_HOST: {{ include "dcb.llmHost" . }}
-  # A placeholder for llama.cpp; with llmEngine=strata core.yaml overrides it
-  # with the real key from the Strata secret.
-  LLM_PASS: {{ .Values.llm_pass }}
-  MODEL: {{ .Values.model }}
-  REASONING_EFFORT: {{ .Values.reasoningEffort | quote }}
-  LLM_MAX_TURNS: {{ .Values.llmMaxTurns | toString | quote }}
-  LLM_CALL_TIMEOUT_SECONDS: {{ .Values.llmCallTimeout | toString | quote }}
-  MSG_HISTORY_LIMIT: {{ .Values.message_history | toString | quote }}
+  LLM_MODEL: {{ .Values.llm.model | quote }}
+  PERSONA_REASONING_EFFORT: {{ .Values.persona.reasoningEffort | quote }}
+  PERSONA_MAX_TURNS: {{ .Values.persona.maxTurns | toString | quote }}
+  PERSONA_CALL_TIMEOUT_SECONDS: {{ .Values.persona.callTimeout | toString | quote }}
+  MSG_HISTORY_LIMIT: {{ .Values.history.limit | toString | quote }}
   MSG_HISTORY_MODE: {{ .Values.history.mode | quote }}
   MSG_HISTORY_REFRESH_MESSAGES: {{ .Values.history.refreshMessages | toString | quote }}
   MSG_HISTORY_RESERVE_TOKENS: {{ .Values.history.reserveTokens | toString | quote }}
@@ -24,8 +23,8 @@ data:
   DOUBLE_REPLY_CHANCE: {{ .Values.doubleReply.chance | toString | quote }}
   DOUBLE_REPLY_COOLDOWN_REPLIES: {{ .Values.doubleReply.cooldownReplies | toString | quote }}
   # Queue concurrency: worker task count + bounded queue size (see core/main.py)
-  WORKER_COUNT: {{ .Values.worker_count | toString | quote }}
-  QUEUE_MAX_SIZE: {{ .Values.queue_max_size | toString | quote }}
+  QUEUE_WORKERS: {{ .Values.queue.workers | toString | quote }}
+  QUEUE_MAX_SIZE: {{ .Values.queue.maxSize | toString | quote }}
   AUTOMATIONS_ENABLED: {{ .Values.automations.enabled | quote }}
   AUTOMATIONS_TIMEZONE: {{ .Values.automations.timezone | quote }}
   SCHEDULE_MIN_INTERVAL_HOURS: {{ .Values.schedules.minIntervalHours | toString | quote }}
@@ -68,7 +67,7 @@ data:
   WEB_CACHE_FAILURE_TTL_SECONDS: {{ .Values.webFetch.failureCacheTtlSeconds | int64 | toString | quote }}
   BROWSER_MIN_CHARS: {{ .Values.webFetch.browserMinChars | int64 | toString | quote }}
   # web_search's brief: a CORE-side LLM call. Unset model/host fall back to
-  # the bot's own MODEL/LLM_HOST; the key lives in secret.yaml.
+  # the bot's own LLM_MODEL/LLM_HOST; the key lives in secret.yaml.
   RESEARCH_BRIEF_ENABLED: {{ .Values.research.enabled | quote }}
   RESEARCH_PAGES: {{ .Values.research.pages | toString | quote }}
   RESEARCH_PAGE_CHARS: {{ .Values.research.pageChars | int64 | toString | quote }}
@@ -106,7 +105,7 @@ data:
   {{- end }}
   # Prompt rewriter: a CORE-side LLM call (not the diffusion pod) that turns a
   # request into an SDXL prompt + negative prompt. Unset model/host fall back
-  # to the bot's own MODEL/LLM_HOST; the key lives in secret.yaml.
+  # to the bot's own LLM_MODEL/LLM_HOST; the key lives in secret.yaml.
   IMAGE_PROMPT_REWRITE_ENABLED: {{ .Values.diffusion.promptRewrite.enabled | quote }}
   IMAGE_PROMPT_TIMEOUT: {{ .Values.diffusion.promptRewrite.timeout | toString | quote }}
   {{- if .Values.diffusion.promptRewrite.model }}
@@ -136,8 +135,6 @@ data:
   SANDBOX_TIMEOUT: {{ .Values.sandbox.timeout | toString | quote }}
   SANDBOX_ASK_USER_TIMEOUT: {{ .Values.sandbox.askUserTimeout | toString | quote }}
   SANDBOX_PERSIST_TIMEOUT_SECONDS: {{ .Values.sandbox.persistTimeout | toString | quote }}
-  SANDBOX_REQUEST_TIMEOUT_SECONDS: {{ .Values.sandbox.requestTimeout | toString | quote }}
-  SANDBOX_MAX_RETRIES: {{ .Values.sandbox.maxRetries | toString | quote }}
   SANDBOX_SNAPSHOT_MAX_BYTES: {{ .Values.sandbox.snapshotMaxBytes | toString | quote }}
   SANDBOX_INPUT_MAX_BYTES: {{ .Values.sandbox.inputMaxBytes | int64 | toString | quote }}
   SANDBOX_SNAPSHOT_TTL_SECONDS: {{ .Values.sandbox.snapshotTtlSeconds | toString | quote }}
@@ -148,28 +145,28 @@ data:
   {{- end }}
   SANDBOX_MEMORY_LIMIT: {{ . | toString | quote }}
   {{- end }}
-  {{- if .Values.sandbox.model }}
-  SANDBOX_MODEL: {{ .Values.sandbox.model }}
+  # The brain's LLM: empty model/host fall back to the bot's own (LLM_*); its
+  # key lives in secret.yaml.
+  {{- if .Values.brain.model }}
+  BRAIN_MODEL: {{ .Values.brain.model | quote }}
   {{- end }}
-  {{- if .Values.sandbox.llmHost }}
-  SANDBOX_LLM_HOST: {{ .Values.sandbox.llmHost }}
+  {{- if .Values.brain.llmHost }}
+  BRAIN_LLM_HOST: {{ .Values.brain.llmHost | quote }}
   {{- end }}
-  {{- if .Values.openaiBaseUrl }}
-  OPENAI_BASE_URL: {{ .Values.openaiBaseUrl }}
+  BRAIN_CALL_TIMEOUT_SECONDS: {{ .Values.brain.callTimeout | toString | quote }}
+  # Content guard (moderation of web and sandbox input); the key lives in
+  # secret.yaml.
+  CONTENT_GUARD_ENABLED: {{ .Values.contentGuard.enabled | quote }}
+  {{- if .Values.contentGuard.baseUrl }}
+  CONTENT_GUARD_BASE_URL: {{ .Values.contentGuard.baseUrl | quote }}
   {{- end }}
-  {{- if .Values.moderationModel }}
-  MODERATION_MODEL: {{ .Values.moderationModel }}
+  {{- if .Values.contentGuard.model }}
+  CONTENT_GUARD_MODEL: {{ .Values.contentGuard.model | quote }}
   {{- end }}
-  CONTENT_GUARD_MAX_RETRIES: {{ .Values.guardMaxRetries | toString | quote }}
-  CONTENT_GUARD_RETRY_BACKOFF: {{ .Values.guardRetryBackoff | toString | quote }}
-  MODERATION_CACHE_TTL: {{ .Values.moderationCacheTtl | toString | quote }}
+  CONTENT_GUARD_MAX_RETRIES: {{ .Values.contentGuard.maxRetries | toString | quote }}
+  CONTENT_GUARD_RETRY_BACKOFF: {{ .Values.contentGuard.retryBackoff | toString | quote }}
+  CONTENT_GUARD_CACHE_TTL_SECONDS: {{ .Values.contentGuard.cacheTtlSeconds | toString | quote }}
+  CONTENT_GUARD_DEBUG: {{ .Values.contentGuard.debug | quote }}
   # Prometheus metrics: core serves /metrics on METRICS_PORT; empty disables
   # the metrics server (helm: metrics.enabled)
   METRICS_PORT: {{ if .Values.metrics.enabled }}{{ .Values.metrics.port | toString | quote }}{{ else }}""{{ end }}
-  # The LLM server's total context window, which only its own pod knew about
-  # (llama.cpp: LLAMA_ARG_CTX_SIZE; Strata: per-slot CONTEXT x PARALLEL, see
-  # _helpers.tpl). core exports it as a gauge so a dashboard can show
-  # prompt sizes as a fraction of it. llama.cpp rounds this up to a block
-  # boundary (80000 -> 80128), so the fraction reads ~0.2% high — not worth
-  # modelling.
-  LLM_CONTEXT_LENGTH: {{ include "dcb.llmContextLength" . | quote }}

@@ -115,17 +115,23 @@ fi
   # outlast the whole voice case.
   export DISCORD_TOKEN="$DISCORD_TOKEN_VALUE"
   export REDIS_HOST=127.0.0.1
-  export LLM_HOST="$E2E_LLM_HOST" MODEL="$E2E_MODEL" DIFFUSION_URL="$DIFFUSION_URL"
-  # Always set, so a LLM_PASS in the caller's environment never reaches the
-  # E2E server; empty means core's placeholder.
-  export LLM_PASS="$LLM_API_KEY_VALUE"
+  # Settings v3 renamed or removed make core refuse to start
+  # (classes/settings_check.py), so none may leak in from the runner's
+  # environment. The list comes from core itself, so it never drifts.
+  for name in $("$WORK/core/bin/python" -I -c "import sys; sys.path.insert(0, sys.argv[1]); from classes.settings_check import REMOVED; print(' '.join(REMOVED))" "$ROOT/core"); do
+    unset "$name"
+  done
+  export LLM_HOST="$E2E_LLM_HOST" LLM_MODEL="$E2E_MODEL" DIFFUSION_URL="$DIFFUSION_URL"
+  # Always set, so a LLM_API_KEY in the caller's environment never reaches
+  # the E2E server; empty means core's placeholder.
+  export LLM_API_KEY="$LLM_API_KEY_VALUE"
   export LLM_EXTRA_HEADERS="${E2E_LLM_EXTRA_HEADERS:-}"
   # A tiny model draws noise, so the vision check would rightly say the
   # picture is missing everything, and the model would then call the tool
   # again. Off on this path only; core PRs test it against the real service.
   if [ "${E2E_LOCAL_DIFFUSION:-0}" = 1 ]; then export IMAGE_REVIEW_ENABLED=0; fi
   export SANDBOX_ENABLED=0 CONTENT_GUARD_ENABLED=0 WHATS_NEW_ENABLED=0
-  export DOUBLE_REPLY_CHANCE=0 REASONING_EFFORT=low METRICS_PORT=9464 LOG_LEVEL=INFO
+  export DOUBLE_REPLY_CHANCE=0 PERSONA_REASONING_EFFORT=low METRICS_PORT=9464 LOG_LEVEL=INFO
   export VOICE_ENABLED=1 VOICE_DEV_INJECT=1 VOICE_DEBUG=1 VOICE_IDLE_LEAVE_SECONDS=1800
   export VOICE_BRIDGE_URL=ws://127.0.0.1:8765 VOICE_BRIDGE_TOKEN="$BRIDGE_TOKEN"
   export SPEECH_URL=http://127.0.0.1:8002

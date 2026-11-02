@@ -7,11 +7,10 @@ already imports sandbox_agent (`sandbox_enabled`), so putting them there would
 be a circular import.
 
 These defaults are the single source of truth. They used to be repeated at
-every call site and had drifted apart: main.py's startup readiness check
-defaulted MODEL to "gemma3:4b" while text_llm_handler.py requested "qwen3:4b",
-so with MODEL unset the bot verified that one model was loaded and then asked
-for a different one; and LLM_PASS defaulted to "ollama" here (a leftover from
-before the llama.cpp switch) while the chart and .env.example use "llamacpp".
+every call site and had drifted apart. LLM_MODEL has no default at all: the
+old one ("qwen3:4b", an Ollama tag from before llama.cpp) matched nothing the
+chart or compose serves, so main.py refuses to start without it
+(settings_check.missing_required).
 """
 import logging
 import os
@@ -19,7 +18,6 @@ import re
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "qwen3:4b"
 DEFAULT_LLM_HOST = "http://llamacpp:8080"
 DEFAULT_LLM_API_KEY = "llamacpp"
 DEFAULT_TEMPERATURE = 1.0
@@ -29,9 +27,9 @@ def env_or(primary: str, fallback: str, default: str) -> str:
     """First non-empty of: env var `primary`, env var `fallback`, `default`.
 
     How every secondary LLM caller overrides the main bot's connection one
-    variable at a time — the sandbox agent (SANDBOX_MODEL / SANDBOX_LLM_HOST /
-    SANDBOX_LLM_API_KEY) and the image prompt rewriter (IMAGE_PROMPT_*) both
-    fall back to MODEL / LLM_HOST / LLM_PASS when their own var is unset.
+    variable at a time — the sandbox agent (BRAIN_MODEL / BRAIN_LLM_HOST /
+    BRAIN_LLM_API_KEY) and the image prompt rewriter (IMAGE_PROMPT_*) both
+    fall back to LLM_MODEL / LLM_HOST / LLM_API_KEY when their own var is unset.
     """
     for name in (primary, fallback):
         value = os.environ.get(name, "").strip()
@@ -41,8 +39,8 @@ def env_or(primary: str, fallback: str, default: str) -> str:
 
 
 def llm_model() -> str:
-    """The model name the bot requests (MODEL)."""
-    return os.environ.get("MODEL") or DEFAULT_MODEL
+    """The model name the bot requests (LLM_MODEL, required: checked at startup)."""
+    return os.environ.get("LLM_MODEL", "").strip()
 
 
 def llm_host() -> str:
@@ -51,10 +49,10 @@ def llm_host() -> str:
 
 
 def llm_api_key() -> str:
-    """The LLM server's API key (LLM_PASS). For llama.cpp, which does not
+    """The LLM server's API key (LLM_API_KEY). For llama.cpp, which does not
     authenticate, it is only a placeholder: the OpenAI client refuses to
     start without a non-empty one. Strata does check it."""
-    return os.environ.get("LLM_PASS") or DEFAULT_LLM_API_KEY
+    return os.environ.get("LLM_API_KEY") or DEFAULT_LLM_API_KEY
 
 
 # An HTTP header name (RFC 9110 token characters).
@@ -69,7 +67,7 @@ def llm_extra_headers() -> dict:
     needs more than a key: OpenCode Go refuses every request without an
     `x-opencode-session` header (400 MissingSessionID), which is what the
     E2E job runs against. Unset (the default, and llama.cpp/Strata) sends
-    nothing extra. A malformed entry, or an Authorization header (LLM_PASS
+    nothing extra. A malformed entry, or an Authorization header (LLM_API_KEY
     sets that one), is skipped with a warning rather than failing a reply.
     """
     headers = {}
@@ -89,7 +87,7 @@ def llm_extra_headers() -> dict:
             logger.warning(f"LLM_EXTRA_HEADERS: skipping entry {position}, expected name=value")
             continue
         if name.lower() == "authorization":
-            logger.warning("LLM_EXTRA_HEADERS: skipping Authorization; LLM_PASS sets it")
+            logger.warning("LLM_EXTRA_HEADERS: skipping Authorization; LLM_API_KEY sets it")
             continue
         headers[name] = value
     return headers
@@ -99,7 +97,7 @@ def extra_headers_for(host: str) -> dict:
     """llm_extra_headers() for a client of `host`, when that is LLM_HOST.
 
     The side jobs and the sandbox agent can each be given a server of their
-    own (IMAGE_PROMPT_LLM_HOST, SANDBOX_LLM_HOST, ...). The extra headers
+    own (IMAGE_PROMPT_LLM_HOST, BRAIN_LLM_HOST, ...). The extra headers
     belong to LLM_HOST's server, so a job pointed elsewhere sends none; one
     that falls back to LLM_HOST sends them like the main agent does.
     """

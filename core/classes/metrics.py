@@ -46,10 +46,11 @@ Metrics (scraped by Prometheus from the /metrics HTTP endpoint):
            context window. This is the answer to "how much of the configured
            context are we actually using"; divide by the gauge below.
   Gauge    discord_bot_llm_context_window_tokens
-           The configured context window (LLM_CONTEXT_LENGTH), exported so a
-           dashboard has the denominator without hard-coding it. This is the
-           server TOTAL: with several slots one request only gets its share,
-           so use the per-slot gauge below as a request's capacity.
+           The LLM server's TOTAL context (per-slot n_ctx x total_slots from
+           its /props, refreshed with the per-slot gauge below), so a
+           dashboard has the denominator without hard-coding it. With several
+           slots one request only gets its share, so use the per-slot gauge
+           as a request's capacity.
   Gauge    discord_bot_llm_slot_context_tokens
            Per-slot context of the running llama.cpp server, read from its
            /props (default_generation_settings.n_ctx) at startup and every few
@@ -331,7 +332,7 @@ llm_prompt_tokens = Histogram(
 
 llm_context_window_tokens = Gauge(
     "discord_bot_llm_context_window_tokens",
-    "Configured LLM context window in tokens (LLM_CONTEXT_LENGTH)",
+    "Total context of the LLM server in tokens (per-slot n_ctx x total_slots, from its /props)",
 )
 
 llm_slot_context_tokens = Gauge(
@@ -616,20 +617,10 @@ def inc_web_fetch_failure(reason: str) -> None:
     web_fetch_failures_total.labels(reason=str(reason)).inc()
 
 
-def set_context_window_from_env() -> None:
-    """Publish LLM_CONTEXT_LENGTH as the context-window gauge.
-
-    Fail-soft like start_metrics_server_from_env(): an unset or unparseable
-    value leaves the gauge at 0 rather than raising out of startup - a
-    dashboard dividing by it then reads +Inf, which is at least obviously
-    wrong rather than quietly plausible. Only reachable outside the chart
-    (docker-compose dev), which sets it unconditionally.
-    """
-    raw = os.environ.get("LLM_CONTEXT_LENGTH", "").strip()
-    try:
-        llm_context_window_tokens.set(int(raw))
-    except (TypeError, ValueError):
-        logger.info(f"LLM_CONTEXT_LENGTH not set or unparseable ({raw!r}); context-window gauge left at 0")
+def set_context_window(tokens: int | None) -> None:
+    """Publish the server's total context; None (not read) keeps the last value."""
+    if tokens:
+        llm_context_window_tokens.set(tokens)
 
 
 # ---------------------------------------------------------------------------

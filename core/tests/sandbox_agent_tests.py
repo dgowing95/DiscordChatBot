@@ -104,34 +104,35 @@ def test_timeout_invalid_falls_back(monkeypatch):
 # ---------------------- sandbox LLM (model / host / api key) ----------------------
 
 def _clear_llm_env(monkeypatch):
-    for var in ("SANDBOX_MODEL", "SANDBOX_LLM_HOST", "SANDBOX_LLM_API_KEY",
-                "MODEL", "LLM_HOST", "LLM_PASS"):
+    for var in ("BRAIN_MODEL", "BRAIN_LLM_HOST", "BRAIN_LLM_API_KEY",
+                "LLM_MODEL", "LLM_HOST", "LLM_API_KEY"):
         monkeypatch.delenv(var, raising=False)
 
 
 def test_sandbox_llm_defaults_to_main_llm(monkeypatch):
     _clear_llm_env(monkeypatch)
-    monkeypatch.setenv("MODEL", "orcarouter/Qwen3.8-27B-Uncensored-GGUF:Q4_K_M")
+    monkeypatch.setenv("LLM_MODEL", "orcarouter/Qwen3.8-27B-Uncensored-GGUF:Q4_K_M")
     monkeypatch.setenv("LLM_HOST", "http://llamacpp:8080")
-    monkeypatch.setenv("LLM_PASS", "llamacpp")
+    monkeypatch.setenv("LLM_API_KEY", "llamacpp")
     assert sandbox_agent.sandbox_model() == "orcarouter/Qwen3.8-27B-Uncensored-GGUF:Q4_K_M"
     assert sandbox_agent.sandbox_llm_host() == "http://llamacpp:8080"
     assert sandbox_agent.sandbox_llm_api_key() == "llamacpp"
 
 
 def test_sandbox_llm_falls_back_to_incode_defaults(monkeypatch):
+    # LLM_MODEL has no code default (startup requires it); host and key do.
     _clear_llm_env(monkeypatch)
-    assert sandbox_agent.sandbox_model() == "qwen3:4b"
+    assert sandbox_agent.sandbox_model() == ""
     assert sandbox_agent.sandbox_llm_host() == "http://llamacpp:8080"
     assert sandbox_agent.sandbox_llm_api_key() == "llamacpp"
 
 
 def test_sandbox_llm_openrouter_override(monkeypatch):
     _clear_llm_env(monkeypatch)
-    monkeypatch.setenv("MODEL", "some/local-model")
-    monkeypatch.setenv("SANDBOX_MODEL", "deepseek/deepseek-v4-flash-0731")
-    monkeypatch.setenv("SANDBOX_LLM_HOST", "https://openrouter.ai/api")
-    monkeypatch.setenv("SANDBOX_LLM_API_KEY", "sk-or-test")
+    monkeypatch.setenv("LLM_MODEL", "some/local-model")
+    monkeypatch.setenv("BRAIN_MODEL", "deepseek/deepseek-v4-flash-0731")
+    monkeypatch.setenv("BRAIN_LLM_HOST", "https://openrouter.ai/api")
+    monkeypatch.setenv("BRAIN_LLM_API_KEY", "sk-or-test")
     assert sandbox_agent.sandbox_model() == "deepseek/deepseek-v4-flash-0731"
     assert sandbox_agent.sandbox_llm_host() == "https://openrouter.ai/api"
     assert sandbox_agent.sandbox_llm_api_key() == "sk-or-test"
@@ -139,17 +140,17 @@ def test_sandbox_llm_openrouter_override(monkeypatch):
 
 def test_sandbox_llm_empty_override_falls_back(monkeypatch):
     _clear_llm_env(monkeypatch)
-    monkeypatch.setenv("MODEL", "some/local-model")
+    monkeypatch.setenv("LLM_MODEL", "some/local-model")
     for empty in ("", "  "):
-        monkeypatch.setenv("SANDBOX_MODEL", empty)
+        monkeypatch.setenv("BRAIN_MODEL", empty)
         assert sandbox_agent.sandbox_model() == "some/local-model", repr(empty)
 
 
 def test_build_sandbox_agent_uses_configured_llm(monkeypatch):
     _clear_llm_env(monkeypatch)
-    monkeypatch.setenv("SANDBOX_MODEL", "deepseek/deepseek-v4-flash-0731")
-    monkeypatch.setenv("SANDBOX_LLM_HOST", "https://openrouter.ai/api")
-    monkeypatch.setenv("SANDBOX_LLM_API_KEY", "sk-or-test")
+    monkeypatch.setenv("BRAIN_MODEL", "deepseek/deepseek-v4-flash-0731")
+    monkeypatch.setenv("BRAIN_LLM_HOST", "https://openrouter.ai/api")
+    monkeypatch.setenv("BRAIN_LLM_API_KEY", "sk-or-test")
     agent = sandbox_agent.build_sandbox_agent(None)
     assert agent.model.model == "deepseek/deepseek-v4-flash-0731"
     # the client stores the base URL with /v1 appended by the core
@@ -160,9 +161,9 @@ def test_build_sandbox_agent_uses_configured_llm(monkeypatch):
 
 def test_build_sandbox_agent_defaults_to_main_llm(monkeypatch):
     _clear_llm_env(monkeypatch)
-    monkeypatch.setenv("MODEL", "some/local-model")
+    monkeypatch.setenv("LLM_MODEL", "some/local-model")
     monkeypatch.setenv("LLM_HOST", "http://llamacpp:8080")
-    monkeypatch.setenv("LLM_PASS", "llamacpp")
+    monkeypatch.setenv("LLM_API_KEY", "llamacpp")
     agent = sandbox_agent.build_sandbox_agent(None)
     assert agent.model.model == "some/local-model"
     assert agent.model._client.base_url == "http://llamacpp:8080/v1/"
@@ -2043,9 +2044,9 @@ def test_build_sandbox_agent_memory_uses_the_sandbox_llm_not_hosted_openai(monke
     # this self-hosted bot has no chat API key for and must never silently
     # send sandbox workspace content to.
     _clear_llm_env(monkeypatch)
-    monkeypatch.setenv("SANDBOX_MODEL", "deepseek/deepseek-v4-flash-0731")
-    monkeypatch.setenv("SANDBOX_LLM_HOST", "https://openrouter.ai/api")
-    monkeypatch.setenv("SANDBOX_LLM_API_KEY", "sk-or-test")
+    monkeypatch.setenv("BRAIN_MODEL", "deepseek/deepseek-v4-flash-0731")
+    monkeypatch.setenv("BRAIN_LLM_HOST", "https://openrouter.ai/api")
+    monkeypatch.setenv("BRAIN_LLM_API_KEY", "sk-or-test")
     agent = sandbox_agent.build_sandbox_agent(None)
     memory = agent.capabilities[1]
     assert memory.generate.phase_one_model is agent.model
@@ -2081,64 +2082,27 @@ def test_persist_timeout_override(monkeypatch):
     assert sandbox_agent.sandbox_persist_timeout() == 30
 
 
-# ---------------------- sandbox_request_timeout / sandbox_max_retries ----------------------
+# ---------------------- brain_call_timeout ----------------------
 
-def test_request_timeout_default(monkeypatch):
-    monkeypatch.delenv("SANDBOX_REQUEST_TIMEOUT_SECONDS", raising=False)
-    assert sandbox_agent.sandbox_request_timeout() == 180
-
-
-def test_request_timeout_override(monkeypatch):
-    monkeypatch.setenv("SANDBOX_REQUEST_TIMEOUT_SECONDS", "45")
-    assert sandbox_agent.sandbox_request_timeout() == 45
+def test_brain_call_timeout_default(monkeypatch):
+    monkeypatch.delenv("BRAIN_CALL_TIMEOUT_SECONDS", raising=False)
+    assert sandbox_agent.brain_call_timeout() == 600.0
 
 
-def test_request_timeout_ignores_junk(monkeypatch):
-    monkeypatch.setenv("SANDBOX_REQUEST_TIMEOUT_SECONDS", "nope")
-    assert sandbox_agent.sandbox_request_timeout() == 180
-
-
-def test_max_retries_default(monkeypatch):
-    monkeypatch.delenv("SANDBOX_MAX_RETRIES", raising=False)
-    assert sandbox_agent.sandbox_max_retries() == 2
-
-
-def test_max_retries_override(monkeypatch):
-    monkeypatch.setenv("SANDBOX_MAX_RETRIES", "5")
-    assert sandbox_agent.sandbox_max_retries() == 5
-
-
-def test_max_retries_zero_disables_retries(monkeypatch):
-    """0 is a meaningful value here (unlike the _positive_int settings), so it
-    must survive rather than falling back to the default."""
-    monkeypatch.setenv("SANDBOX_MAX_RETRIES", "0")
-    assert sandbox_agent.sandbox_max_retries() == 0
-
-
-def test_max_retries_ignores_negative(monkeypatch):
-    monkeypatch.setenv("SANDBOX_MAX_RETRIES", "-1")
-    assert sandbox_agent.sandbox_max_retries() == 2
-
-
-# ---------------------- sandbox_model_call_timeout ----------------------
-
-def test_model_call_timeout_is_the_documented_worst_case(monkeypatch):
-    """(1 + retries) x request timeout: the figure SANDBOX_MAX_RETRIES' docs
-    already gave as the worst case, now enforced as a wall-clock bound."""
-    monkeypatch.setenv("SANDBOX_REQUEST_TIMEOUT_SECONDS", "100")
-    monkeypatch.setenv("SANDBOX_MAX_RETRIES", "2")
-    assert sandbox_agent.sandbox_model_call_timeout() == 300.0
-    monkeypatch.setenv("SANDBOX_MAX_RETRIES", "0")
-    assert sandbox_agent.sandbox_model_call_timeout() == 100.0
+def test_brain_call_timeout_override_and_junk(monkeypatch):
+    monkeypatch.setenv("BRAIN_CALL_TIMEOUT_SECONDS", "45")
+    assert sandbox_agent.brain_call_timeout() == 45.0
+    for junk in ("nope", "0", "-5", "inf", "nan", ""):
+        monkeypatch.setenv("BRAIN_CALL_TIMEOUT_SECONDS", junk)
+        assert sandbox_agent.brain_call_timeout() == 600.0, junk
 
 
 def test_build_sandbox_agent_bounds_each_model_call(monkeypatch):
     _clear_llm_env(monkeypatch)
-    monkeypatch.setenv("SANDBOX_REQUEST_TIMEOUT_SECONDS", "100")
-    monkeypatch.setenv("SANDBOX_MAX_RETRIES", "1")
+    monkeypatch.setenv("BRAIN_CALL_TIMEOUT_SECONDS", "100")
     agent = sandbox_agent.build_sandbox_agent(None)
 
-    assert agent.model_settings.timeout == 200.0
+    assert agent.model_settings.timeout == 100.0
     # Regression: openai>=3 talks HTTPX2 and stores a legacy httpx.Timeout as
     # one opaque object in every phase of the underlying client's timeout
     # instead of translating it. The per-phase budgets must be plain floats.

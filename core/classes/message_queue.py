@@ -8,7 +8,7 @@ without the discord/agents SDKs.
 
 Concurrency model (see process_messages() / on_message() in main.py and
 MessageHandler.handle_message() in message_handler.py):
-  - N worker tasks (worker_count(), WORKER_COUNT env, default 2) share one
+  - N worker tasks (queue_workers(), QUEUE_WORKERS env, default 2) share one
     bounded asyncio.Queue (queue_max_size(), QUEUE_MAX_SIZE env, default 10).
     A message stuck in a slow tool (sandbox / image generation) therefore
     pins only ONE worker; the others keep handling other channels.
@@ -34,7 +34,7 @@ import asyncio
 import os
 import time
 
-DEFAULT_WORKER_COUNT = 2
+DEFAULT_QUEUE_WORKERS = 2
 DEFAULT_QUEUE_MAX_SIZE = 10
 
 # The tools that can pin a worker for a long time (sandbox up to
@@ -75,14 +75,14 @@ def _env_positive_int(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
-def worker_count() -> int:
-    """Queue worker tasks to run (WORKER_COUNT, default 2, min 1).
+def queue_workers() -> int:
+    """Queue worker tasks to run (QUEUE_WORKERS, default 2, min 1).
 
     Each worker handles one message at a time, so a message stuck in a slow
     tool (sandbox / image generation) no longer blocks messages from other
     channels. Same-channel chunk sends stay ordered via get_channel_lock().
     """
-    return _env_positive_int("WORKER_COUNT", DEFAULT_WORKER_COUNT)
+    return _env_positive_int("QUEUE_WORKERS", DEFAULT_QUEUE_WORKERS)
 
 
 def queue_max_size() -> int:

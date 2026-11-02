@@ -11,6 +11,7 @@ from classes.metrics import (
     observe_llm_completion_tokens,
     observe_llm_prompt_tokens,
     observe_tool_duration,
+    set_context_window,
     set_slot_context,
 )
 from agents import Agent, Runner, OpenAIChatCompletionsModel, AsyncOpenAI, FunctionTool, function_tool, RunContextWrapper, ModelSettings, RunHooks, set_tracing_disabled
@@ -28,8 +29,9 @@ from classes import voice_policy
 
 # The agents SDK uploads every run (prompt, replies, tool calls - so
 # Discord users' messages) to OpenAI's trace dashboard by default, whenever
-# OPENAI_API_KEY is set, and that key is set for the moderation check. Off
-# for good, in code: the SDK lets this call win over its
+# OPENAI_API_KEY is set (v3 names the moderation key CONTENT_GUARD_API_KEY, but
+# an operator may still export the old one for something else). Off for good,
+# in code: the SDK lets this call win over its
 # OPENAI_AGENTS_DISABLE_TRACING env var and a run's own RunConfig.
 # sandbox_agent.py does the same for the nested agent.
 set_tracing_disabled(True)
@@ -39,16 +41,16 @@ set_tracing_disabled(True)
 # chained tool run overruns easily - three sandbox calls plus the reasoning
 # turns around them is already most of it - and overrunning raises
 # MaxTurnsExceeded, which costs the user the whole answer.
-DEFAULT_LLM_MAX_TURNS = 20
+DEFAULT_PERSONA_MAX_TURNS = 20
 
 
-def llm_max_turns() -> int:
-    """Max model turns for one reply (LLM_MAX_TURNS, default 20)."""
+def persona_max_turns() -> int:
+    """Max model turns for one reply (PERSONA_MAX_TURNS, default 20)."""
     try:
-        value = int(str(os.environ.get("LLM_MAX_TURNS")).strip())
-        return value if value > 0 else DEFAULT_LLM_MAX_TURNS
+        value = int(str(os.environ.get("PERSONA_MAX_TURNS")).strip())
+        return value if value > 0 else DEFAULT_PERSONA_MAX_TURNS
     except (TypeError, ValueError):
-        return DEFAULT_LLM_MAX_TURNS
+        return DEFAULT_PERSONA_MAX_TURNS
 
 
 # Sent after the last allowed turn, when a reply runs out of turns. Before
@@ -71,17 +73,17 @@ WRAP_UP_INSTRUCTION = (
 # until now nothing bounded that at all. The default matches the client's
 # 600s so a slow local generation is no more likely to be cut off than
 # before; it only closes the unbounded case.
-DEFAULT_LLM_CALL_TIMEOUT = 600.0
+DEFAULT_PERSONA_CALL_TIMEOUT = 600.0
 
 
-def llm_call_timeout() -> float:
-    """Wall-clock seconds per model call (LLM_CALL_TIMEOUT_SECONDS, default 600)."""
+def persona_call_timeout() -> float:
+    """Wall-clock seconds per model call (PERSONA_CALL_TIMEOUT_SECONDS, default 600)."""
     try:
-        value = float(str(os.environ.get("LLM_CALL_TIMEOUT_SECONDS")).strip())
+        value = float(str(os.environ.get("PERSONA_CALL_TIMEOUT_SECONDS")).strip())
         # ModelSettings.timeout is validated as a finite positive float.
-        return value if value > 0 and math.isfinite(value) else DEFAULT_LLM_CALL_TIMEOUT
+        return value if value > 0 and math.isfinite(value) else DEFAULT_PERSONA_CALL_TIMEOUT
     except (TypeError, ValueError):
-        return DEFAULT_LLM_CALL_TIMEOUT
+        return DEFAULT_PERSONA_CALL_TIMEOUT
 
 
 
@@ -153,6 +155,15 @@ def parse_slot_context(props) -> int | None:
     """
     try:
         value = int(props["default_generation_settings"]["n_ctx"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def parse_total_slots(props) -> int | None:
+    """Number of parallel slots from a /props body (total_slots), or None."""
+    try:
+        value = int(props["total_slots"])
     except (KeyError, TypeError, ValueError):
         return None
     return value if value > 0 else None
@@ -413,7 +424,7 @@ class TextLLMHandler:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, headers=llm_auth_headers()) as response:
                     if response.status in (401, 403):
-                        logger.warning(f"LLM server rejected the API key ({response.status}); LLM_PASS must be the server's key")
+                        logger.warning(f"LLM server rejected the API key ({response.status}); LLM_API_KEY must be the server's key")
                         return
                     if response.status != 200:
                         logger.warning(f"LLM server not ready yet ({response.status}); model may still be downloading")
@@ -436,6 +447,8 @@ class TextLLMHandler:
 
         On failure the last value is kept for the token budget but the gauge
         is marked unavailable, so a dashboard can tell stale from measured.
+        The same read publishes the server's total context (per-slot x
+        total_slots), which replaced the hand-set LLM_CONTEXT_LENGTH.
         """
         global _slot_context
         url = llm_host() + "/props"
@@ -445,11 +458,14 @@ class TextLLMHandler:
                 async with session.get(url, headers=llm_auth_headers(),
                                        timeout=aiohttp.ClientTimeout(total=10)) as response:
                     if response.status == 200:
-                        value = parse_slot_context(await response.json())
+                        props = await response.json()
+                        value = parse_slot_context(props)
+                        slots = parse_total_slots(props)
+                        set_context_window(value * slots if value and slots else None)
                     elif response.status in (401, 403):
                         # Not a slow start: the key is wrong, and the history
                         # budget stops trimming until it is fixed.
-                        logger.warning(f"LLM server /props rejected the API key ({response.status}); LLM_PASS must be the server's key")
+                        logger.warning(f"LLM server /props rejected the API key ({response.status}); LLM_API_KEY must be the server's key")
                     else:
                         logger.info(f"LLM server /props returned {response.status}")
         except Exception as e:
@@ -504,7 +520,7 @@ class TextLLMHandler:
             # list_events, an id, a name) came out mangled - "2026-10-23T21:00
             # +08:35 UTC+8?" - in about a third of calls.
             top_p=1.0,
-            timeout=llm_call_timeout(),
+            timeout=persona_call_timeout(),
         )
         if getattr(self, "voice", False) and no_thinking:
             # Off, not merely "low": a spoken reply waits for every reasoning
@@ -512,7 +528,7 @@ class TextLLMHandler:
             # use (side_llm.NO_THINKING).
             settings["extra_body"] = NO_THINKING
         else:
-            settings["reasoning"] = {"effort": os.environ.get("REASONING_EFFORT", "medium")}
+            settings["reasoning"] = {"effort": os.environ.get("PERSONA_REASONING_EFFORT", "medium")}
         return ModelSettings(**settings)
 
     async def _prepare(self) -> dict:
@@ -566,7 +582,7 @@ class TextLLMHandler:
       hooks = ToolMetricsHooks(self.guild_id)
       try:
          response = await Runner.run(self.agent, messages_for_run, context=user_info,
-                                     max_turns=llm_max_turns(),
+                                     max_turns=persona_max_turns(),
                                      hooks=hooks,
                                      error_handlers={"max_turns": self._wrap_up})
          logger.info('Response generated')
@@ -623,7 +639,7 @@ class TextLLMHandler:
         sent_no_thinking = self.agent.model_settings.extra_body is not None
         try:
           result = Runner.run_streamed(self.agent, messages_for_run, context=user_info,
-                                       max_turns=llm_max_turns(), hooks=hooks)
+                                       max_turns=persona_max_turns(), hooks=hooks)
           async for event in result.stream_events():
             if event.type == "raw_response_event":
               if isinstance(event.data, ResponseTextDeltaEvent) and event.data.delta:
