@@ -220,7 +220,9 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
    call timeout it uses: the persona (chat replies, voice turns, automatic
    runs), the brain (the sandbox agent) or, later, a subagent. Each
    falls back to the bot's own `LLM_*`, and a side job (research brief,
-   image rewrite and check) falls back to the brain. A key only ever falls
+   image rewrite and check) falls back to the brain. The model and key
+   follow the server: they come from the brain only for a job on the
+   brain's server, else from `LLM_*`. A key only ever falls
    back to a key for the same server (`host_key`), so a brain pointed at
    OpenRouter with no key of its own sends none, never the local Strata
    key (startup warns). The lane (`classes/llm_lanes.py`) is the call's

@@ -185,3 +185,28 @@ def test_env_names_cover_every_role_and_side_job():
 ])
 def test_parse_temperature(raw, expected):
     assert llm_roles.parse_temperature(raw) == expected
+
+
+def test_a_side_job_back_on_llm_host_asks_for_llm_model_not_the_brains():
+    """The model follows the server: the brain's hosted model name means
+    nothing to the local llama.cpp."""
+    env = _env(LLM_HOST=LOCAL, BRAIN_LLM_HOST=REMOTE, BRAIN_MODEL="hosted/model",
+               BRAIN_LLM_API_KEY="brain-key", IMAGE_REVIEW_LLM_HOST=LOCAL)
+    config = side_job_config("IMAGE_REVIEW_", env=env)
+    assert (config.model, config.host) == ("local-model", LOCAL)
+
+
+def test_a_subagent_on_its_own_server_does_not_inherit_the_brains_model():
+    env = _env(LLM_HOST=LOCAL, BRAIN_LLM_HOST=REMOTE, BRAIN_MODEL="hosted/model",
+               SUBAGENT_LLM_HOST=LOCAL)
+    assert role_config(SUBAGENT, env).model == "local-model"
+
+
+def test_role_warnings_cover_side_jobs_on_their_own_server():
+    env = _env(LLM_HOST=LOCAL, IMAGE_REVIEW_LLM_HOST=REMOTE)
+    warnings = llm_roles.role_warnings(env)
+    assert any(w.startswith("IMAGE_REVIEW_LLM_HOST") and "LLM_API_KEY is empty" in w for w in warnings)
+    # On the brain's server it inherits the brain's key and model: no warning.
+    env = _env(LLM_HOST=LOCAL, BRAIN_LLM_HOST=REMOTE, BRAIN_MODEL="m", BRAIN_LLM_API_KEY="k",
+               RESEARCH_LLM_HOST=REMOTE)
+    assert llm_roles.role_warnings(env) == []

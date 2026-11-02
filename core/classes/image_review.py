@@ -20,9 +20,9 @@ Environment variables:
     IMAGE_REVIEW_ENABLED      "0"/"false"/"no"/"off" to post images unchecked
     IMAGE_REVIEW_RETRIES      extra attempts when something asked for is
                               missing (default 1, max 2; 0 = check only)
-    IMAGE_REVIEW_MODEL        model id (default: the bot's LLM_MODEL)
-    IMAGE_REVIEW_LLM_HOST     API base, /v1 appended (default: LLM_HOST)
-    IMAGE_REVIEW_LLM_API_KEY  API key (default: LLM_API_KEY)
+    IMAGE_REVIEW_MODEL        model id (default: the brain's, see llm_roles)
+    IMAGE_REVIEW_LLM_HOST     API base, /v1 appended (default: the brain's)
+    IMAGE_REVIEW_LLM_API_KEY  API key (default: the brain's, same server only)
     IMAGE_REVIEW_TIMEOUT      seconds to wait for the check (default 60)
 """
 import asyncio

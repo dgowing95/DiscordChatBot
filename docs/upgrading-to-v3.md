@@ -66,8 +66,9 @@ The research brief, the image prompt rewrite and the image check (`RESEARCH_*`, 
 `IMAGE_REVIEW_*`) now fall back to the **brain's** settings (`BRAIN_*`), and only then to `LLM_*`. With
 `BRAIN_*` unset nothing changes. **If you set `BRAIN_LLM_HOST`** (say, to OpenRouter), those three jobs
 move there too unless their own `*_LLM_HOST` is set. The image check needs a vision model, so point
-`IMAGE_REVIEW_LLM_HOST` / `IMAGE_REVIEW_MODEL` back at the bot's own server if the brain's model cannot
-see pictures.
+`IMAGE_REVIEW_LLM_HOST` back at the bot's own server if the brain's model cannot see pictures. A job
+on the bot's own server asks for `LLM_MODEL` with `LLM_API_KEY`, never for the brain's model, so the host
+alone is enough.
 
 ### Lanes
 

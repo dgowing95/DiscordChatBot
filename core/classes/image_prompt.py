@@ -25,9 +25,9 @@ degrades to the previous behaviour instead of costing the user their image.
 Environment variables:
     IMAGE_PROMPT_REWRITE_ENABLED  "0"/"false"/"no"/"off" to skip the rewrite
                                   and send the request through as-is
-    IMAGE_PROMPT_MODEL            model id (default: the bot's LLM_MODEL)
-    IMAGE_PROMPT_LLM_HOST         API base, /v1 appended (default: LLM_HOST)
-    IMAGE_PROMPT_LLM_API_KEY      API key (default: LLM_API_KEY)
+    IMAGE_PROMPT_MODEL            model id (default: the brain's, see llm_roles)
+    IMAGE_PROMPT_LLM_HOST         API base, /v1 appended (default: the brain's)
+    IMAGE_PROMPT_LLM_API_KEY      API key (default: the brain's, same server only)
     IMAGE_PROMPT_TIMEOUT          seconds to wait for the rewrite (default 60)
 """
 import json

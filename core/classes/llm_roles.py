@@ -9,6 +9,13 @@ Every role falls back to the bot's own LLM server (LLM_MODEL / LLM_HOST /
 LLM_API_KEY); a subagent falls back to the brain; a side job falls back to the
 role that calls it. First non-empty value wins.
 
+The host falls back first; the model and key then follow it:
+
+  * The model and key only come from the parent (a subagent's brain, a side
+    job's caller) when the job is on the parent's server. A side job pointed
+    back at LLM_HOST while the brain is on OpenRouter asks for LLM_MODEL with
+    LLM_API_KEY, not for the brain's hosted model.
+
 Two rules keep a local key from leaking to someone else's server:
 
   * A key only falls back to a key for the SAME host. A brain pointed at
@@ -180,12 +187,13 @@ def _resolve(role: str, env, model: str, host: str, key: str, parent: "RoleConfi
     base_host = parent.host if parent else own_host
     host = host or base_host
     hkey = host_key(host)
+    on_parents_server = parent is not None and hkey == parent.host_key
     if not key:
-        if parent and hkey == parent.host_key:
+        if on_parents_server:
             key = parent.api_key
         elif hkey == host_key(own_host):
             key = _get(env, "LLM_API_KEY") or DEFAULT_LLM_API_KEY
-    model = model or (parent.model if parent else _get(env, "LLM_MODEL"))
+    model = model or (parent.model if on_parents_server else _get(env, "LLM_MODEL"))
     headers = llm_extra_headers(env) if hkey == host_key(own_host) else {}
     return RoleConfig(role=role, model=model, host=host, api_key=key, reasoning_effort=effort,
                       call_timeout=call_timeout, host_key=hkey, extra_headers=headers)
@@ -220,23 +228,28 @@ def side_job_config(prefix: str, caller_role: str = BRAIN, default_timeout: floa
 
 
 def role_warnings(env=None) -> list[str]:
-    """Startup warnings for role settings that will not work as meant."""
+    """Startup warnings for role and side-job settings that will not work as
+    meant: a server of their own (not LLM_HOST's, not inherited) with no key
+    or no model of its own."""
     env = os.environ if env is None else env
     own = host_key(llm_host(env))
+    brain = role_config(BRAIN, env)
+    checks = [(prefix, role_config(role, env), brain if role == SUBAGENT else None, role)
+              for role, prefix in _PREFIX.items()]
+    checks += [(prefix, side_job_config(prefix, env=env), brain, prefix.rstrip("_").lower())
+               for prefix in SIDE_JOB_PREFIXES]
     warnings = []
-    for role in (PERSONA, BRAIN, SUBAGENT):
-        prefix = _PREFIX[role]
-        if not _get(env, prefix + "LLM_HOST"):
+    for prefix, config, parent, name in checks:
+        if not _get(env, prefix + "LLM_HOST") or config.host_key == own:
             continue
-        config = role_config(role, env)
-        if config.host_key == own:
-            continue
+        if parent is not None and config.host_key == parent.host_key:
+            continue  # the parent's server: its key and model are inherited
         if not config.api_key:
             warnings.append(f"{prefix}LLM_HOST points at another server but {prefix}LLM_API_KEY is empty: "
-                            f"the {role} sends no key (the bot's own key is never sent to another server)")
-        if not _get(env, prefix + "MODEL") and not (role == SUBAGENT and _get(env, "BRAIN_MODEL")):
+                            f"{name} sends no key (the bot's own key is never sent to another server)")
+        if not _get(env, prefix + "MODEL"):
             warnings.append(f"{prefix}LLM_HOST points at another server but {prefix}MODEL is empty: "
-                            f"the {role} will ask it for LLM_MODEL ({config.model or 'unset'})")
+                            f"{name} will ask it for LLM_MODEL ({config.model or 'unset'})")
     return warnings
 
 

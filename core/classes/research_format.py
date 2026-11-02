@@ -30,9 +30,9 @@ Environment variables:
                             (default 6000)
     RESEARCH_FETCH_TIMEOUT  seconds to wait for the pages (default 25);
                             a page not read by then is left out
-    RESEARCH_MODEL          model id (default: the bot's LLM_MODEL)
-    RESEARCH_LLM_HOST       API base, /v1 appended (default: LLM_HOST)
-    RESEARCH_LLM_API_KEY    API key (default: LLM_API_KEY)
+    RESEARCH_MODEL          model id (default: the brain's, see llm_roles)
+    RESEARCH_LLM_HOST       API base, /v1 appended (default: the brain's)
+    RESEARCH_LLM_API_KEY    API key (default: the brain's, same server only)
     RESEARCH_TIMEOUT        seconds to wait for the brief (default 90)
 """
 import math
