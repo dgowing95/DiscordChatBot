@@ -139,7 +139,8 @@ class FakeDaemon:
 
         def stop(timeout=None):
             daemon.containers[cid]["status"] = "exited"
-        return SimpleNamespace(id=cid, remove=remove, stop=stop)
+        return SimpleNamespace(id=cid, remove=remove, stop=stop,
+                               status=daemon.containers[cid]["status"])
 
 
 class FakeStore:
@@ -556,6 +557,21 @@ async def test_status():
     warm = await manager.status("1")
     assert warm["warm"] is True and warm["jobs"] == 3 and warm["snapshot_bytes"] > 0
     assert warm["last_snapshot_at"] is not None and warm["snapshot_too_large"] is False
+    assert warm["waiting"] is False
+
+
+@pytest.mark.asyncio
+async def test_status_after_a_restart_sees_the_container_still_running():
+    env = Env()
+    first = env.manager()
+    await _use(first)
+    record = await first._load_record("1")
+    env.daemon.containers[record["container_id"]] = {"labels": {}, "status": "running"}
+    later = env.manager()  # a new core process: nothing warm in it yet
+    status = await later.status("1")
+    assert status["warm"] is False and status["waiting"] is True
+    env.daemon.containers[record["container_id"]]["status"] = "exited"
+    assert (await later.status("1"))["waiting"] is False
 
 
 # ---------------------- Docker check and limits ----------------------

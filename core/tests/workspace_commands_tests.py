@@ -78,6 +78,11 @@ def test_status_of_a_stopped_workspace_that_was_never_saved():
     assert "Stopped" in text and "Not saved yet" in text
 
 
+def test_status_of_a_workspace_waiting_after_a_restart():
+    text = wc.status_text({"warm": False, "waiting": True, "last_snapshot_at": 1})
+    assert "Waiting" in text and "Stopped" not in text
+
+
 def test_status_of_a_running_busy_workspace():
     text = wc.status_text({"warm": True, "started_at": 1000, "busy": 2, "jobs": 4,
                            "last_snapshot_at": 1500, "snapshot_bytes": 3 * 1024 * 1024},

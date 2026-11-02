@@ -69,6 +69,9 @@ def status_text(status: dict, now: float | None = None) -> str:
         lines.append(f"🟢 **Running** for {up} min" + (f", {busy} task(s) using it now" if busy else ""))
         if status.get("jobs") is not None:
             lines.append(f"Task folders: {status['jobs']}")
+    elif status.get("waiting"):
+        lines.append("🟡 **Waiting**: still running from before the bot restarted; "
+                     "the next task picks it up.")
     else:
         lines.append("⚪ **Stopped**: it starts on the next task that needs it.")
     saved = status.get("last_snapshot_at")

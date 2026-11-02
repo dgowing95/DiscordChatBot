@@ -731,6 +731,14 @@ class Workspaces:
 
     # --- /workspace status -------------------------------------------------
 
+    async def _container_running(self, container_id) -> bool:
+        def _check():
+            return self.docker.containers.get(container_id).status == "running"
+        try:
+            return await asyncio.to_thread(_check)
+        except Exception:
+            return False
+
     async def status(self, guild_id) -> dict:
         guild = str(guild_id)
         record = await self._load_record(guild) or {}
@@ -748,8 +756,14 @@ class Workspaces:
             size = await self.store.size(wl.snapshot_id(guild))
         except Exception:
             size = None
+        # Not in use by this process, but its container may still be running
+        # from before a core restart: the next task re-attaches to it.
+        waiting = False
+        if workspace is None and record.get("container_id"):
+            waiting = await self._container_running(record["container_id"])
         return {
             "warm": workspace is not None,
+            "waiting": waiting,
             "busy": state.refcount,
             "started_at": workspace.started_wall if workspace is not None else None,
             "last_snapshot_at": record.get("last_snapshot_at"),

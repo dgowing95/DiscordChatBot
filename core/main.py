@@ -3,6 +3,7 @@ import discord
 import os
 import asyncio
 import random
+import signal
 import time
 import aiohttp
 import io
@@ -63,6 +64,9 @@ intents.message_content = True
 
 
 class Bot(discord.Client):
+    async def setup_hook(self):
+        install_sigterm_handler(self, asyncio.get_running_loop())
+
     async def close(self):
         for task in getattr(self, "background_tasks", []):
             task.cancel()
@@ -84,6 +88,29 @@ class Bot(discord.Client):
         from classes.workspace_manager import workspaces
         await workspaces().shutdown()
         await super().close()
+
+
+def install_sigterm_handler(bot, loop) -> bool:
+    """Run bot.close() on SIGTERM, once.
+
+    docker stop and Kubernetes stop core with SIGTERM, which Python's default
+    handling turns into an immediate exit, so close() never ran: the server
+    workspaces were not snapshotted at shutdown (their containers survive,
+    so nothing was lost, but the snapshot was older than it had to be).
+    discord.py only handles Ctrl+C. Returns False where the loop has no
+    signal support (Windows)."""
+    closing = []
+
+    def _on_sigterm():
+        if not closing:
+            logger.info("SIGTERM: closing")
+            closing.append(asyncio.ensure_future(bot.close()))
+
+    try:
+        loop.add_signal_handler(signal.SIGTERM, _on_sigterm)
+    except (NotImplementedError, RuntimeError):
+        return False
+    return True
 
 
 client = Bot(intents=intents)

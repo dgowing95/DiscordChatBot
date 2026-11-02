@@ -480,3 +480,34 @@ async def test_closing_the_bot_closes_the_download_session():
         await m.client.close()
     close.assert_awaited_once()
     parent_close.assert_awaited_once()
+
+
+class _SignalLoop:
+    def __init__(self, supported=True):
+        self.handlers = {}
+        self.supported = supported
+
+    def add_signal_handler(self, sig, callback):
+        if not self.supported:
+            raise NotImplementedError
+        self.handlers[sig] = callback
+
+
+@pytest.mark.asyncio
+async def test_sigterm_closes_the_bot_once():
+    """docker stop / Kubernetes send SIGTERM; without a handler close() never
+    ran, so workspaces were not snapshotted at shutdown."""
+    import signal
+    m = _import_main()
+    bot = MagicMock(close=AsyncMock())
+    loop = _SignalLoop()
+    assert m.install_sigterm_handler(bot, loop) is True
+    loop.handlers[signal.SIGTERM]()
+    loop.handlers[signal.SIGTERM]()
+    await asyncio.sleep(0)
+    bot.close.assert_awaited_once()
+
+
+def test_sigterm_handler_is_skipped_without_signal_support():
+    m = _import_main()
+    assert m.install_sigterm_handler(MagicMock(), _SignalLoop(supported=False)) is False

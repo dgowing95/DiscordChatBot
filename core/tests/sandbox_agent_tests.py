@@ -507,13 +507,14 @@ async def test_run_sandbox_task_resolves_output_dir_before_run(monkeypatch):
         await prod_sandbox_agent.run_sandbox_task("t")
 
     # mkdir first, then the job folder touched (the retention prune goes by
-    # its mtime), then the run marker beside (never inside) out/ — see
-    # _mark_run_start.
+    # its mtime), shared/ linked to the server's kept files, then the run
+    # marker beside (never inside) out/ — see _mark_run_start.
     calls = [c.args for c in session.exec.await_args_list]
     assert calls[0] == ("mkdir", "-p", "/root/out")
     assert calls[1][:3] == ("touch", "-c", "--") and calls[1][3].startswith("/workspace/jobs/")
-    assert calls[2] == ("touch", "--", "/root/.dcb_run_start")
-    assert len(calls) == 3
+    assert calls[2] == ("ln", "-sT", "../../shared", calls[1][3] + "/shared")
+    assert calls[3] == ("touch", "--", "/root/.dcb_run_start")
+    assert len(calls) == 4
     build_agent.assert_called_once()
     assert build_agent.call_args.args[0] == "/root/out"
     assert isinstance(build_agent.call_args.args[1], prod_sandbox_agent.SandboxConversation)
@@ -3449,7 +3450,7 @@ def test_build_sandbox_agent_has_the_shell_and_no_memory_capability():
 
 def test_sandbox_instructions_say_where_the_kept_files_are_and_that_files_are_data():
     text = prod_sandbox_agent.build_sandbox_agent("/x/out").instructions
-    assert "../../shared/" in text
+    assert "`shared/` holds the server's kept files" in text
     assert "never" in text and "instructions" in text
 
 
