@@ -92,3 +92,25 @@ core would never see, so the render fails instead.
 {{- fail "llm.engine=strata needs strata.apiKey or strata.existingSecret (key STRATA_API_KEY): Strata will not serve without an API key" }}
 {{- end }}
 {{- end }}
+
+{{/*
+A positive whole number, as digits; fails the render otherwise. For counts a
+template multiplies: sprig's mul turns anything it cannot parse ("40k") into
+0, which would quietly become llama.cpp's "use the model's own context".
+Values numbers arrive as float64 (so 1000000 is 1e+06 as a string), hence the
+numeric branch. Usage: include "dcb.wholeNumber" (list "key.path" value)
+*/}}
+{{- define "dcb.wholeNumber" -}}
+{{- $name := index . 0 }}
+{{- $v := index . 1 }}
+{{- $ok := false }}
+{{- if kindIs "string" $v }}
+{{- $ok = regexMatch "^[1-9][0-9]*$" $v }}
+{{- else if or (kindIs "float64" $v) (kindIs "int" $v) (kindIs "int64" $v) }}
+{{- $ok = and (gt (float64 $v) 0.0) (eq (float64 $v) (floor $v)) }}
+{{- end }}
+{{- if not $ok }}
+{{- fail (printf "%s must be a positive whole number, not %v" $name $v) }}
+{{- end }}
+{{- int64 $v }}
+{{- end }}

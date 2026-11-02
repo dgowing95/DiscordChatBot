@@ -89,7 +89,7 @@ spec:
           value: {{ .Values.llamacpp.ctxCheckpoints | quote }}
         - name: LLAMA_ARG_CTX_SIZE
           # Total context: llama.cpp splits it across the slots
-          value: {{ mul .Values.llamacpp.contextPerSlot (.Values.llamacpp.parallel | int) | toString | quote }}
+          value: {{ mul (include "dcb.wholeNumber" (list "llamacpp.contextPerSlot" .Values.llamacpp.contextPerSlot) | int64) (include "dcb.wholeNumber" (list "llamacpp.parallel" .Values.llamacpp.parallel) | int64) | toString | quote }}
         - name: LLAMA_ARG_PORT
           value: {{ .Values.llamacpp.port | quote }}
         - name: LLAMA_ARG_N_PARALLEL
