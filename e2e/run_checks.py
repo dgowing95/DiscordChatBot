@@ -1,7 +1,8 @@
 """End-to-end checks: the PR's bot, answering real Discord messages.
 
 e2e/start_stack.sh starts the bot (core) from the checked-out source, with
-its voice sidecar and speech service, against a real LLM and image service.
+its voice sidecar, speech service and (in CI) its own CPU image service,
+against a real LLM.
 This script then talks to it the way a person would -- through a webhook in
 a private test server -- and checks what comes back through Discord's REST
 API. It is what lets a dependency bump be merged without trying it by hand.
@@ -45,8 +46,8 @@ import redis.asyncio as redis
 
 API = "https://discord.com/api/v10"
 WAKE_PHRASE = "hey tester"
-# Generous: the LLM is shared with real traffic, and an image is a generation
-# plus a vision check of it.
+# Generous: the LLM is a shared API, and an image is a prompt rewrite plus a
+# CPU generation (plus a vision check of it, against a real image service).
 REPLY_TIMEOUT = 300
 IMAGE_TIMEOUT = 420
 READY_TIMEOUT = 600
@@ -394,8 +395,12 @@ async def main() -> int:
             await run.case("slash commands", run.slash_commands)
             await run.case("chat reply", run.chat)
             await run.case("memory tool", run.memory)
-            await run.case("image", run.image)
+            # The poll before the image: once the picture is in the thread,
+            # every later reply sends it to the LLM as part of the history,
+            # and the E2E LLM may be a text-only model. (Voice turns use no
+            # channel history.)
             await run.case("poll", run.poll)
+            await run.case("image", run.image)
             if voice_channel_id:
                 await run.case("voice call", run.voice)
             await run.case("no tracebacks", run.clean_log)

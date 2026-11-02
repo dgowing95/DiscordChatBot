@@ -19,17 +19,13 @@ on:
       - voicesidecar/package-lock.json
       - e2e/**
   workflow_dispatch:
-    inputs:
-      diffusion:
-        description: Also run this branch's image service (on CPU, tiny model)
-        type: boolean
-        default: false
 
 permissions:
   contents: read
 
 # A newer push to the same PR replaces the run in progress: only the latest
-# commit's result matters, and runs queue for the one self-hosted runner.
+# commit's result matters. (One run at a time across the repository is the
+# e2e job's own concurrency group, below.)
 concurrency:
   group: e2e-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -43,7 +39,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       run: ${{ steps.diff.outputs.run }}
-      diffusion: ${{ steps.diff.outputs.diffusion }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -54,47 +49,46 @@ jobs:
           EVENT: ${{ github.event_name }}
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
-          FORCE_DIFFUSION: ${{ inputs.diffusion }}
         run: |
           set -euo pipefail
           if [ "$EVENT" = workflow_dispatch ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
-            echo "diffusion=${FORCE_DIFFUSION:-false}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [ -z "$BASE" ] || [ -z "${BASE//0/}" ]; then
             # No usable base (a branch's first push): run everything.
             echo "run=true" >> "$GITHUB_OUTPUT"
-            echo "diffusion=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           changed=$(git diff --name-only "$BASE" "$HEAD")
           printf '%s\n' "$changed"
-          run=false; diffusion=false
+          run=false
           if grep -qE '^(core|speechservice|voicesidecar|diffusionservice|e2e)/|^\.github/workflows/e2e\.yaml$' <<< "$changed"; then
             run=true
           fi
-          if grep -q '^diffusionservice/' <<< "$changed"; then
-            diffusion=true
-          fi
           echo "run=$run" >> "$GITHUB_OUTPUT"
-          echo "diffusion=$diffusion" >> "$GITHUB_OUTPUT"
 
   e2e:
     needs: e2e-changes
-    # Forks are skipped: they have no secrets, and the self-hosted runner is
-    # for this repository's own branches. This `if` is a convenience, not the
-    # security boundary -- a fork can edit it -- which is why fork PRs need a
-    # maintainer's approval before any workflow runs.
+    # Forks are skipped: they have no secrets. This `if` is a convenience,
+    # not the security boundary -- a fork can edit it -- which is why fork
+    # PRs need a maintainer's approval before any workflow runs.
     if: >-
       needs.e2e-changes.outputs.run == 'true' &&
       (github.event_name != 'pull_request' ||
        github.event.pull_request.head.repo.full_name == github.repository)
-    # Self-hosted: it needs a real LLM (and image service, unless the local
-    # CPU one is used), provided through the runner's E2E_LLM_HOST /
-    # E2E_LLM_API_KEY / E2E_DIFFUSION_URL / E2E_MODEL environment.
-    # The runner must be unprivileged: this job runs the PR's dependencies.
-    runs-on: discordchatbot-e2e
+    # GitHub-hosted: a fresh VM per job, deleted afterwards, so the PR's
+    # unreviewed dependencies never run on a machine that is kept. The LLM
+    # is a hosted API (below); the image service is the PR's own, on CPU.
+    runs-on: ubuntu-latest
+    # One run at a time across the repository: every run logs in as the same
+    # test bot, and two copies of it would both answer in each other's
+    # threads. GitHub keeps one run waiting here; a third one arriving
+    # cancels the waiting one, which then needs a re-run (a Dependabot
+    # rebase starts a new one anyway).
+    concurrency:
+      group: e2e-test-bot
+      cancel-in-progress: false
     # Above the worst case the scripts allow (cold caches, every wait in
     # run_checks.py at its limit), so a slow run still reports.
     timeout-minutes: 90
@@ -102,27 +96,30 @@ jobs:
       E2E_DISCORD_TOKEN: ${{ secrets.E2E_DISCORD_TOKEN }}
       E2E_WEBHOOK_URL: ${{ secrets.E2E_WEBHOOK_URL }}
       E2E_VOICE_CHANNEL_ID: ${{ secrets.E2E_VOICE_CHANNEL_ID }}
-      E2E_LOCAL_DIFFUSION: ${{ needs.e2e-changes.outputs.diffusion == 'true' && '1' || '0' }}
+      # The LLM: DeepSeek V4.1 Flash on OpenCode Go (OpenAI-compatible; core
+      # appends /v1). Its key is the OPENCODE_API_KEY secret (review.yml's),
+      # given only to the steps that need it. OpenCode Go refuses requests
+      # without a session id header, so core sends one (LLM_EXTRA_HEADERS).
+      E2E_LLM_HOST: https://opencode.ai/zen/go
+      E2E_MODEL: deepseek-v4.1-flash
+      E2E_LLM_EXTRA_HEADERS: x-opencode-session=${{ github.repository }}-e2e-${{ github.run_id }}
+      # No GPU and no shared image service here: every run starts the PR's
+      # own image service on CPU with a tiny model (start_stack.sh).
+      E2E_LOCAL_DIFFUSION: "1"
       E2E_RUN_NAME: ${{ github.event.pull_request.number && format('PR {0}', github.event.pull_request.number) || github.ref_name }} run ${{ github.run_id }}
     steps:
       - name: Check configuration
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
         run: |
           set -euo pipefail
           missing=()
-          for var in E2E_DISCORD_TOKEN E2E_WEBHOOK_URL E2E_LLM_HOST E2E_MODEL; do
+          for var in E2E_DISCORD_TOKEN E2E_WEBHOOK_URL OPENCODE_API_KEY; do
             [ -n "${!var:-}" ] || missing+=("$var")
           done
-          # A runner without an image service of its own (a deployment that
-          # runs the bot with image generation off) leaves E2E_DIFFUSION_URL
-          # unset: every run then uses the local CPU image service, the same
-          # one image-service PRs get. Later steps see this through env.
-          if [ "$E2E_LOCAL_DIFFUSION" != 1 ] && [ -z "${E2E_DIFFUSION_URL:-}" ]; then
-            echo "E2E_DIFFUSION_URL is not set: using the local CPU image service"
-            echo "E2E_LOCAL_DIFFUSION=1" >> "$GITHUB_ENV"
-          fi
           if [ ${#missing[@]} -gt 0 ]; then
             # Secrets for Dependabot's PRs live in the separate Dependabot
-            # secrets store; the runner settings come from the runner itself.
+            # secrets store.
             echo "Not configured: ${missing[*]}" >&2
             exit 1
           fi
@@ -132,9 +129,9 @@ jobs:
           persist-credentials: false
 
       # The job writes several GB (venvs, models, package caches). Keep all of
-      # it under the runner's work directory, which a runner can put on a
-      # roomy volume, rather than in $HOME and /tmp on the root filesystem.
-      - name: Keep caches and temp files in the work directory
+      # it under the runner's temp directory, in one place that the cache
+      # step below saves and restores.
+      - name: Keep caches and temp files in the runner's temp directory
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/tmp" "$RUNNER_TEMP/cache"
@@ -166,7 +163,6 @@ jobs:
         with:
           python-version: ${{ steps.versions.outputs.speech }}
       - id: diffusion_python
-        if: env.E2E_LOCAL_DIFFUSION == '1'
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ steps.versions.outputs.diffusion }}
@@ -181,11 +177,31 @@ jobs:
           key: e2e-${{ runner.os }}-${{ hashFiles('core/requirements.txt', 'speechservice/requirements.txt', 'diffusionservice/requirements.txt', 'voicesidecar/package-lock.json', 'e2e/start_stack.sh') }}
           restore-keys: e2e-${{ runner.os }}-
 
+      # After the restore, so the restored caches are already counted. The
+      # rest (three fresh venvs under the workspace's .e2e/, CPU torch
+      # included, plus any model not cached yet) needs about 8 GB. GitHub
+      # only guarantees ~14 GB in all (ubuntu-24.04 had 86 GB free when this
+      # moved here); fail here with a clear message rather than mid-install
+      # with "No space left on device".
+      - name: Check free disk space
+        run: |
+          set -euo pipefail
+          df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+          need_kb=$((8 * 1024 * 1024))
+          for dir in "$GITHUB_WORKSPACE" "$RUNNER_TEMP"; do
+            avail_kb=$(df -Pk "$dir" | awk 'NR==2 {print $4}')
+            if [ "$avail_kb" -lt "$need_kb" ]; then
+              echo "Only $((avail_kb / 1024)) MB free under $dir; the job needs about 8 GB more" >&2
+              exit 1
+            fi
+          done
+
       - name: Start the bot and its services
         env:
           CORE_PYTHON: ${{ steps.core_python.outputs.python-path }}
           SPEECH_PYTHON: ${{ steps.speech_python.outputs.python-path }}
           DIFFUSION_PYTHON: ${{ steps.diffusion_python.outputs.python-path }}
+          E2E_LLM_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
         run: e2e/start_stack.sh
 
       - name: Talk to the bot through Discord
