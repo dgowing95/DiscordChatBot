@@ -36,6 +36,14 @@ services:
       - LLAMA_ARG_LOG_VERBOSITY=4
     volumes:
       - ollama_data:/models  # pre-existing volume from the ollama days
+    # The image's own check asks port 8080, so with LLAMA_ARG_PORT=8081 it
+    # always reported unhealthy. /health is 503 while the model loads.
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8081/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10m
     runtime: nvidia
     deploy:
       resources:
