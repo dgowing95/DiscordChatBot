@@ -59,6 +59,14 @@ def test_extra_headers_parse(monkeypatch, raw, expected):
     assert llm_extra_headers() == expected
 
 
+def test_malformed_extra_header_is_not_logged(monkeypatch, caplog):
+    monkeypatch.setenv("LLM_EXTRA_HEADERS", "ok=1, Authorization Bearer sk-live-secret")
+    with caplog.at_level(logging.WARNING, logger="classes.llm_config"):
+        assert llm_extra_headers() == {"ok": "1"}
+    assert "entry 2" in caplog.text
+    assert "sk-live-secret" not in caplog.text
+
+
 def test_extra_headers_go_with_the_auth_header(monkeypatch):
     monkeypatch.setenv("LLM_PASS", "secret-key")
     monkeypatch.setenv("LLM_EXTRA_HEADERS", "x-opencode-session=s1")

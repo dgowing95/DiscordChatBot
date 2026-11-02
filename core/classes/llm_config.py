@@ -73,14 +73,16 @@ def llm_extra_headers() -> dict:
     sets that one), is skipped with a warning rather than failing a reply.
     """
     headers = {}
-    for entry in os.environ.get("LLM_EXTRA_HEADERS", "").split(","):
+    for position, entry in enumerate(os.environ.get("LLM_EXTRA_HEADERS", "").split(","), 1):
         entry = entry.strip()
         if not entry:
             continue
         name, sep, value = entry.partition("=")
         name, value = name.strip(), value.strip()
         if not sep or not value or not _HEADER_NAME.match(name):
-            logger.warning(f"LLM_EXTRA_HEADERS: skipping {name or entry!r}, expected name=value")
+            # Only the position: a malformed entry may be a pasted key
+            # ("Authorization Bearer sk-..."), which must not reach the logs.
+            logger.warning(f"LLM_EXTRA_HEADERS: skipping entry {position}, expected name=value")
             continue
         if name.lower() == "authorization":
             logger.warning("LLM_EXTRA_HEADERS: skipping Authorization; LLM_PASS sets it")

@@ -130,10 +130,18 @@ jobs:
       # The job writes several GB (venvs, models, package caches). Keep all of
       # it under the runner's temp directory, in one place that the cache
       # step below saves and restores.
-      - name: Keep caches and temp files in the work directory
+      - name: Keep caches and temp files in the runner's temp directory
         run: |
           set -euo pipefail
           df -h / "$RUNNER_TEMP"
+          # GitHub only guarantees ~14 GB (ubuntu-24.04 had 86 GB free when
+          # this moved here). Fail here with a clear message rather than
+          # mid-install with "No space left on device".
+          avail_kb=$(df -Pk "$RUNNER_TEMP" | awk 'NR==2 {print $4}')
+          if [ "$avail_kb" -lt $((10 * 1024 * 1024)) ]; then
+            echo "Only $((avail_kb / 1024)) MB free for the job, which needs about 10 GB" >&2
+            exit 1
+          fi
           mkdir -p "$RUNNER_TEMP/tmp" "$RUNNER_TEMP/cache"
           {
             echo "TMPDIR=$RUNNER_TEMP/tmp"

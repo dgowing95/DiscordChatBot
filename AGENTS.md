@@ -897,8 +897,9 @@ failure shows in the run's step summary, and the full logs are in its
   never the CUDA/nf4 paths or prod's image model, so `diffusionservice/` PRs
   are never auto-merged.
 - **Secrets** `E2E_DISCORD_TOKEN`, `E2E_WEBHOOK_URL` and `E2E_VOICE_CHANNEL_ID`
-  belong to a bot and a server made only for testing; `OPENCODE_API_KEY`
-  (also `review.yml`'s) is that LLM's key, and each run sends its own
+  belong to a bot and a server made only for testing. `OPENCODE_API_KEY` is
+  that LLM's key and is NOT test-only: it is `review.yml`'s key too, reused
+  by the owner's choice (see the security rules below). Each run sends its own
   `x-opencode-session` header through `LLM_EXTRA_HEADERS`, which OpenCode Go
   requires. Each one goes in **both**
   the Actions secrets and the Dependabot secrets: a run started by Dependabot
@@ -910,9 +911,14 @@ failure shows in the run's step summary, and the full logs are in its
     `if:` are not a boundary.
   - The job must stay on GitHub-hosted runners. It has sudo and Docker
     there, which is fine only because the VM is thrown away; never move it
-    to a self-hosted machine that is kept. Everything the job can read (the
-    test bot's token, the LLM key) is readable by the PR's code, so keep
-    both made for testing only. The code sandbox is still off in E2E.
+    to a self-hosted machine that is kept. Everything the job can read is
+    readable by the PR's code (core, its dependencies, the services). The
+    test bot's token is made for testing only; the OpenCode key is shared
+    with `review.yml` by the owner's choice, accepting that a PR (a
+    malicious dependency bump included) could read it or spend its quota.
+    If one ever does, rotate it in both the Actions and the Dependabot
+    secrets, and consider a key used only here. The code sandbox is still
+    off in E2E.
   - Never switch this to `pull_request_target` to reach secrets.
   - Only one run at a time across the repository (the e2e job's
     `concurrency` group): two bots on one token would both answer. GitHub
