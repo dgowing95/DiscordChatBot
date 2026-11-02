@@ -3633,7 +3633,10 @@ async def test_a_run_with_no_server_says_so_and_not_try_again_later(clean_inbox)
 
 
 @pytest.mark.asyncio
-async def test_a_failed_run_with_a_lost_workspace_is_not_called_saved(clean_inbox):
+async def test_a_failed_run_after_a_lost_workspace_still_carries_on_from_its_own_files(
+        clean_inbox):
+    """The lost snapshot held earlier runs' files; this run worked in the new
+    container, so a follow-up in the thread does carry on from it."""
     message = MagicMock()
     message.author.id = 1
     result = sandbox_agent.SandboxResult(text="", artifacts=[], ok=False, error="timeout",
@@ -3644,4 +3647,5 @@ async def test_a_failed_run_with_a_lost_workspace_is_not_called_saved(clean_inbo
          patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()):
         out = await prod_tool_functions.run_code_sandbox.on_invoke_tool(
             _tool_context(message), json.dumps({"task": "x"}))
-    assert "WAS saved" not in out and "could not be restored" in out
+    assert "could not be restored" in out and "earlier runs were lost" in out
+    assert "this run's own files are kept" in out and "carries on" in out

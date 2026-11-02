@@ -486,8 +486,8 @@ def _in_job_dir(original_invoke):
     """Wraps exec_command so the model works in its job folder: no `workdir`
     runs there, and a relative `workdir` is taken from there (so `out` is
     jobs/<id>/out and `shared`, a link to ../../shared, the server's kept
-    files). The SDK's own
-    default is the workspace root, which every call in the server shares.
+    files). The SDK's own default is the workspace root, which every call in
+    the server shares.
     A workdir that would leave the workspace is refused as a tool result."""
     async def _invoke(ctx, raw_input):
         context = ctx.context if isinstance(getattr(ctx, "context", None), dict) else {}
@@ -1549,7 +1549,7 @@ async def _run_sandbox_task(
 
     thread/client/requesting_user_id are all optional (default None, which
     reproduces the exact original single-argument behavior: no thread
-    context, no snapshot persistence, and the ask_user/send_preview_to_thread
+    context, a job folder of its own, and the ask_user/send_preview_to_thread
     tools degrade to telling the model to proceed on its own). When given —
     thread is the Discord thread/channel resolved by
     tool_functions.run_code_sandbox via ensure_sandbox_thread, client is the
@@ -1636,8 +1636,9 @@ async def _run_in_workspace(lease, task, progress_hooks, *, thread, client, requ
             await session.exec("ln", "-sT", "../../shared",
                                posixpath.join(job_path, "shared"), shell=False)
         # After the mkdir, so the marker is never older than out/ itself, and
-        # after any snapshot restore (session.start(), above) so every
-        # restored file is older than it. See _mark_run_start.
+        # after any snapshot restore (the manager fills a new container before
+        # handing it over) so every restored file is older than it. See
+        # _mark_run_start.
         marker = await _mark_run_start(session, out_dir)
         given, problems = [], list(input_problems)
         if inputs or input_problems:

@@ -573,7 +573,7 @@ async def _run_claimed_sandbox(wrapper, task, channel, thread_created, in_thread
     # Per-guild toggle (/workspace progress, default off). A config read
     # failure falls back to off — progress is a nice-to-have, not a
     # dependency of the run itself.
-    if await progress_enabled(wrapper.context.get("guild_id")):
+    if await progress_enabled(guild_id):
         # Live progress: one Discord message, edited in place, showing each
         # command the sandbox runs and its output (throttled for Discord's
         # 5-edits/minute limit). start() is exception-safe (swallows send
@@ -637,7 +637,8 @@ async def _run_claimed_sandbox(wrapper, task, channel, thread_created, in_thread
     if result.workspace_lost:
         resume_correction = (
             "\n\n(The server's saved workspace could not be restored, so it started "
-            "empty. Tell the user files kept from earlier runs were lost.)"
+            "empty. Tell the user files kept from earlier runs were lost; this run's "
+            "own files are kept, so a follow-up here carries on from them.)"
         )
         try:
             await channel.send(
@@ -721,8 +722,9 @@ async def _run_claimed_sandbox(wrapper, task, channel, thread_created, in_thread
         result,
         sent_names=sent_names,
         in_thread=in_thread,
-        # A lost workspace took this thread's job folder with it.
-        resumable=in_thread and not result.workspace_lost,
+        # Even after a lost workspace: that loses earlier runs' files, while
+        # this run worked in the new container and its files are kept.
+        resumable=in_thread,
         steering=outcomes,
         resume_correction=resume_correction,
     ) + tool_note(result.inputs, result.input_problems)
