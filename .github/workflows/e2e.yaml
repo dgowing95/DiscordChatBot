@@ -133,15 +133,6 @@ jobs:
       - name: Keep caches and temp files in the runner's temp directory
         run: |
           set -euo pipefail
-          df -h / "$RUNNER_TEMP"
-          # GitHub only guarantees ~14 GB (ubuntu-24.04 had 86 GB free when
-          # this moved here). Fail here with a clear message rather than
-          # mid-install with "No space left on device".
-          avail_kb=$(df -Pk "$RUNNER_TEMP" | awk 'NR==2 {print $4}')
-          if [ "$avail_kb" -lt $((10 * 1024 * 1024)) ]; then
-            echo "Only $((avail_kb / 1024)) MB free for the job, which needs about 10 GB" >&2
-            exit 1
-          fi
           mkdir -p "$RUNNER_TEMP/tmp" "$RUNNER_TEMP/cache"
           {
             echo "TMPDIR=$RUNNER_TEMP/tmp"
@@ -184,6 +175,25 @@ jobs:
           path: ${{ runner.temp }}/cache
           key: e2e-${{ runner.os }}-${{ hashFiles('core/requirements.txt', 'speechservice/requirements.txt', 'diffusionservice/requirements.txt', 'voicesidecar/package-lock.json', 'e2e/start_stack.sh') }}
           restore-keys: e2e-${{ runner.os }}-
+
+      # After the restore, so the restored caches are already counted. The
+      # rest (three fresh venvs under the workspace's .e2e/, CPU torch
+      # included, plus any model not cached yet) needs about 8 GB. GitHub
+      # only guarantees ~14 GB in all (ubuntu-24.04 had 86 GB free when this
+      # moved here); fail here with a clear message rather than mid-install
+      # with "No space left on device".
+      - name: Check free disk space
+        run: |
+          set -euo pipefail
+          df -h "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+          need_kb=$((8 * 1024 * 1024))
+          for dir in "$GITHUB_WORKSPACE" "$RUNNER_TEMP"; do
+            avail_kb=$(df -Pk "$dir" | awk 'NR==2 {print $4}')
+            if [ "$avail_kb" -lt "$need_kb" ]; then
+              echo "Only $((avail_kb / 1024)) MB free under $dir; the job needs about 8 GB more" >&2
+              exit 1
+            fi
+          done
 
       - name: Start the bot and its services
         env:
