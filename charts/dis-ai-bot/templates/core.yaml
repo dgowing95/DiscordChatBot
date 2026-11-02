@@ -14,8 +14,11 @@ spec:
         app: {{ .Release.Name }}-core
     spec:
       # Room for the shutdown save of the server workspaces (bounded by
-      # snapshotTimeout) after SIGTERM, plus the rest of the close.
-      terminationGracePeriodSeconds: {{ add (.Values.brain.workspace.snapshotTimeout | int64) 30 }}
+      # snapshotTimeout, read like core does: under 1 means its default 120)
+      # after SIGTERM, plus the rest of the close.
+      {{- $snapshotTimeout := .Values.brain.workspace.snapshotTimeout | int64 }}
+      {{- if lt $snapshotTimeout 1 }}{{ $snapshotTimeout = 120 }}{{ end }}
+      terminationGracePeriodSeconds: {{ add $snapshotTimeout 30 }}
       containers:
       - name: core
         image: "{{ .Values.image.repository }}:core-{{ .Values.image.tag | default .Chart.AppVersion }}"

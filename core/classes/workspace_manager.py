@@ -403,9 +403,11 @@ class Workspaces:
         finally:
             reset = self.lifecycle.cleaned(guild, self._clock())
             await self._notify()
-        await self._save_record(guild)  # updated_at = last used
-        if reset:
-            await self._wipe(guild)
+            # In the finally, like _stop's: the guild is STOPPING for it now.
+            if reset:
+                await self._wipe(guild)  # a reset was waiting for the last call
+        if not reset:
+            await self._save_record(guild)  # updated_at = last used
 
     async def _kill_leftovers(self, workspace: GuildWorkspace) -> None:
         """Ends everything a call left running (a server, a sleep loop), so
@@ -563,7 +565,6 @@ class Workspaces:
     async def _stop(self, guild: str, *, snapshot: bool = True) -> None:
         """The guild is already STOPPING in the lifecycle."""
         workspace = self._live.pop(guild, None)
-        reset = False
         try:
             if workspace is not None:
                 async with workspace.ops:
@@ -573,12 +574,13 @@ class Workspaces:
                         saved = await self._snapshot_locked(workspace)
                     await self._put_away(guild, workspace.session, saved)
         finally:
-            reset = self.lifecycle.stopped(guild)
+            # In the finally: stopped() has cleared reset_pending and left the
+            # guild STOPPING for it, so a skipped wipe would strand the guild.
+            if self.lifecycle.stopped(guild):
+                await self._wipe(guild)  # asked for while it stopped
             self._gauge()
             await self._notify()
         logger.info(f"Workspace: guild {guild} stopped")
-        if reset:
-            await self._wipe(guild)  # asked for while it stopped
 
     async def _put_away(self, guild: str, session, saved: bool) -> None:
         """Removes a container whose files are safely in the snapshot. One
@@ -703,15 +705,13 @@ class Workspaces:
             running = getattr(container, "status", "running") == "running"
             if (live is None and running and idle_for > self.lifecycle.idle
                     and self.lifecycle.claim_cold(guild)):
-                reset = False
                 try:
                     await self._retire(guild, record)
                     removed += 1
                 finally:
-                    reset = self.lifecycle.stopped(guild)
+                    if self.lifecycle.stopped(guild):
+                        await self._wipe(guild)  # asked for while it was retired
                     await self._notify()
-                if reset:
-                    await self._wipe(guild)
         if removed:
             metrics.inc_workspace_reaped(removed)
             logger.info(f"Workspace: removed {removed} leftover container(s)")

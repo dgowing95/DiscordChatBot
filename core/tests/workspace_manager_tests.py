@@ -690,3 +690,22 @@ async def test_record_writes_for_one_guild_do_not_drop_each_others_fields():
     env.redis.get = slow_get
     await asyncio.gather(manager._save_record("1", a=1), manager._save_record("1", b=2))
     assert env.record()["a"] == 1 and env.record()["b"] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_pending_reset_still_runs_when_the_stop_fails():
+    """stopped() clears reset_pending and leaves the guild STOPPING for the
+    wipe; skipping it on an error would leave every later call waiting."""
+    env = Env()
+    manager = env.manager()
+    await _use(manager)
+    assert manager.lifecycle.begin_stop("1") is True
+    assert await manager.reset("1") == "later"
+
+    async def broken(*_a, **_k):
+        raise RuntimeError("put away failed")
+    manager._put_away = broken
+    with pytest.raises(RuntimeError):
+        await manager._stop("1")
+    assert manager.lifecycle.state("1").phase == "cold"
+    assert env.record() is None and "guild-1" not in env.store.data
