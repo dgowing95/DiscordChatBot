@@ -21,7 +21,7 @@ from openai import BadRequestError, UnprocessableEntityError
 from openai.types.responses import ResponseCreatedEvent, ResponseTextDeltaEvent
 from classes.config_manager import configManager
 from classes.response_filter import extract_reasoning_items, extract_thinking, strip_tool_call_text
-from classes.llm_config import llm_api_key, llm_auth_headers, llm_host, llm_model, parse_temperature
+from classes.llm_config import llm_api_key, llm_auth_headers, llm_extra_headers, llm_host, llm_model, parse_temperature
 from classes.reply_policy import INSTRUCTION as DOUBLE_REPLY_INSTRUCTION
 from classes.side_llm import NO_THINKING
 from classes import voice_policy
@@ -126,6 +126,7 @@ def _get_main_model_client() -> OpenAIChatCompletionsModel:
             openai_client=AsyncOpenAI(
                 base_url=llm_host() + "/v1",
                 api_key=llm_api_key(),
+                default_headers=llm_extra_headers() or None,
             ),
         )
     return _main_model_client

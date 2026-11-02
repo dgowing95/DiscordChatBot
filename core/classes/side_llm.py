@@ -28,6 +28,7 @@ import time
 
 from openai import AsyncOpenAI, BadRequestError, UnprocessableEntityError
 
+from classes.llm_config import extra_headers_for
 from classes.metrics import observe_llm_call, observe_llm_completion_tokens
 
 logger = logging.getLogger(__name__)
@@ -58,10 +59,12 @@ class SideLLM:
 
     def _get_client(self) -> AsyncOpenAI:
         if self._client is None:
+            host = self._host()
             self._client = AsyncOpenAI(
-                base_url=self._host() + "/v1",
+                base_url=host + "/v1",
                 api_key=self._api_key(),
                 timeout=self._timeout(),
+                default_headers=extra_headers_for(host) or None,
             )
         return self._client
 
