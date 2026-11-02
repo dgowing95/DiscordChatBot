@@ -4,17 +4,19 @@
 # e2e/stop_stack.sh stops them. Linux only (the CI runner).
 #
 # Started here: Redis (empty, local), the speech service, the voice sidecar,
-# core itself and, with E2E_LOCAL_DIFFUSION=1, the PR's image service on the
-# CPU with a tiny model. The LLM and (by default) the image service are the
-# real ones at E2E_LLM_HOST / E2E_DIFFUSION_URL: they are what a dependency
-# bump has to keep working with.
+# core itself and, with E2E_LOCAL_DIFFUSION=1 (what CI always uses), the PR's
+# image service on the CPU with a tiny model. The LLM is the real one at
+# E2E_LLM_HOST; an image service of your own can be given as
+# E2E_DIFFUSION_URL instead of the local one.
 #
 # Required: E2E_DISCORD_TOKEN, E2E_LLM_HOST, E2E_MODEL, and E2E_DIFFUSION_URL
 # unless E2E_LOCAL_DIFFUSION=1.
 # Optional: CORE_PYTHON / SPEECH_PYTHON / DIFFUSION_PYTHON (interpreters for
 # each service's venv; default python3), E2E_CACHE (model + package caches),
-# E2E_TINY_IMAGE_MODEL, E2E_LLM_API_KEY (for an LLM server that checks a key,
-# such as Strata; empty = core's placeholder).
+# E2E_TINY_IMAGE_MODEL, E2E_LLM_API_KEY (for an LLM that checks a key, such
+# as a hosted API or Strata; empty = core's placeholder),
+# E2E_LLM_EXTRA_HEADERS (core's LLM_EXTRA_HEADERS: name=value,... sent with
+# every LLM request; OpenCode Go needs a session id).
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -117,6 +119,7 @@ fi
   # Always set, so a LLM_PASS in the caller's environment never reaches the
   # E2E server; empty means core's placeholder.
   export LLM_PASS="$LLM_API_KEY_VALUE"
+  export LLM_EXTRA_HEADERS="${E2E_LLM_EXTRA_HEADERS:-}"
   # A tiny model draws noise, so the vision check would rightly say the
   # picture is missing everything, and the model would then call the tool
   # again. Off on this path only; core PRs test it against the real service.
