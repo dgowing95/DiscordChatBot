@@ -1,10 +1,10 @@
 """Shared Redis clients.
 
-configManager, UserMemory and SandboxSnapshotStore each used to build their
+configManager, UserMemory and the snapshot store each used to build their
 own redis.asyncio.Redis - and so their own connection pool - in __init__.
 They are constructed per message and per tool call (12 sites across the
 codebase: two in TextLLMHandler.__init__ alone, one per memory tool, plus
-four SandboxSnapshotStore() calls in sandbox_agent.py), and nothing ever
+four snapshot-store calls in the sandbox code), and nothing ever
 closed any of them. redis-py only tears a connection down when GC happens to
 collect it, and only when a loop is still running, so the bot churned pools
 and sockets for work that should reuse one.

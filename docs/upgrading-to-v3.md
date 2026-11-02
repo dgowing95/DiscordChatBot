@@ -31,6 +31,13 @@ unless the note says otherwise.
 | `OPENAI_BASE_URL` | `CONTENT_GUARD_BASE_URL` | |
 | `MODERATION_MODEL` | `CONTENT_GUARD_MODEL` | |
 | `MODERATION_CACHE_TTL` | `CONTENT_GUARD_CACHE_TTL_SECONDS` | Default unchanged (600) |
+| `SANDBOX_ENABLED` | removed | **Docker is required now** (see "The server workspace" below): the code sandbox is always on. Delete the line |
+| `SANDBOX_IMAGE` | `WORKSPACE_IMAGE` | Default unchanged (`python:3.14-slim`) |
+| `SANDBOX_MEMORY_LIMIT` | `WORKSPACE_MEMORY_LIMIT` | Now caps each server's long-lived workspace container |
+| `SANDBOX_SNAPSHOT_MAX_BYTES` | `WORKSPACE_SNAPSHOT_MAX_BYTES` | Default unchanged (50 MB), now per server instead of per thread |
+| `SANDBOX_SNAPSHOT_TTL_SECONDS` | `WORKSPACE_SNAPSHOT_TTL_SECONDS` | Default unchanged (7 days) |
+| `SANDBOX_PERSIST_TIMEOUT_SECONDS` | `WORKSPACE_SNAPSHOT_TIMEOUT_SECONDS` | **Default 180 → 120**: the Memory capability that needed the extra time is gone |
+| `SANDBOX_INPUT_MAX_BYTES` | `WORKSPACE_INPUT_MAX_BYTES` | Default unchanged (25 MB) |
 | `LLAMA_ARG_CACHE_TYPE_K` | `LLAMA_CACHE_TYPE_K` | docker compose only; compose passes it on as llama.cpp's own `LLAMA_ARG_CACHE_TYPE_K` |
 | `LLAMA_ARG_CACHE_TYPE_V` | `LLAMA_CACHE_TYPE_V` | docker compose only, as above |
 
@@ -49,6 +56,13 @@ New variables, all optional:
 | `BRAIN_REASONING_EFFORT` | The brain's reasoning effort (default medium) |
 | `LLM_SLOTS` | Slots of a self-hosted server whose `/props` does not report them (default 1). llama.cpp and Strata report them, so it is rarely needed |
 | `LLM_CHAT_RESERVED` | Slots only chat replies may use (default 1) |
+| `WORKSPACE_IDLE_SECONDS` | Seconds a server's workspace stays running after its last task (900) |
+| `WORKSPACE_SNAPSHOT_INTERVAL_SECONDS` | Seconds between saves of a running workspace that changed (1800; 0 = only when it stops) |
+| `WORKSPACE_MAX_WARM` | Workspaces running at once (4) |
+| `WORKSPACE_JOB_RETENTION_HOURS` | Task folders older than this are deleted (72) |
+| `WORKSPACE_CPU_LIMIT` / `WORKSPACE_PIDS_LIMIT` | CPUs (none) and processes (512) per workspace container |
+| `WORKSPACE_INSTANCE` | Label that keeps two bots on one Docker daemon apart (`dcb-dev`; the chart uses `<namespace>-<release name>`) |
+| `WORKSPACE_PREWARM` | Start a server's workspace on its first message (off; not used yet) |
 | `LLAMA_CTX_SIZE` / `LLAMA_PARALLEL` / `LLAMA_CACHE_RAM_MIB` | docker compose only: llama.cpp's total context (80000), slots (1) and prompt cache in MiB (8192). These were fixed in `docker-compose.yaml` before, at the same values |
 
 ### Keys stay with their server
@@ -69,6 +83,30 @@ move there too unless their own `*_LLM_HOST` is set. The image check needs a vis
 `IMAGE_REVIEW_LLM_HOST` back at the bot's own server if the brain's model cannot see pictures. A job
 on the bot's own server asks for `LLM_MODEL` with `LLM_API_KEY`, never for the brain's model, so the host
 alone is enough.
+
+### The server workspace (Docker is required)
+
+The code sandbox used to start a throwaway container for every task and, in a thread, save that
+thread's files when the task ended (up to 3 minutes after the reply). Now each Discord server has
+**one long-lived container**, its workspace, on the same Docker daemon:
+
+- **Docker is required.** The bot checks the daemon at startup (for up to 60 seconds) and refuses to
+  start with a clear error if it cannot reach it. Compose already mounts the socket; the chart now
+  always mounts it (`brain.workspace.dockerSocketPath`). The image is pulled at startup if missing.
+- Every task works in its own folder (`jobs/<id>/`). A follow-up in the same thread finds its files
+  there for `WORKSPACE_JOB_RETENTION_HOURS` (72). Files the server asks to keep go in `shared/`,
+  which every task in that server sees. **Everyone in a server shares one workspace.**
+- The workspace is saved to Redis (`dcb:workspace:v1:*`) every 30 minutes when it changed, before it
+  stops after 15 minutes unused, and when the bot shuts down. A restart re-attaches to the running
+  container, so nothing is lost.
+- Threads' saved workspaces from v2 are **not** carried over: v3 does not read them, and they expire
+  within 7 days (a rollback to v2 within that week still finds them).
+- `/sandbox_progress_updates` is now `/workspace progress on|off`; a server's old setting is carried
+  over the first time it is read. New: `/workspace status` and `/workspace reset` (both need Manage
+  Server; reset deletes every file in the server's workspace).
+- Each container is labelled `dcb.role=workspace`, `dcb.guild` and `dcb.instance`. To remove them by
+  hand: `docker rm -f $(docker ps -aq --filter label=dcb.role=workspace)`.
+- E2E now runs the sandbox too, on the GitHub runner's own Docker.
 
 ### Lanes
 
@@ -102,6 +140,14 @@ time a call waits for a slot does not count toward its `*_CALL_TIMEOUT_SECONDS`.
 | `sandbox.apiKey` | `brain.apiKey` | |
 | `sandbox.requestTimeout` | `brain.callTimeout` | Default 600; see `BRAIN_CALL_TIMEOUT_SECONDS` above |
 | `sandbox.maxRetries` | removed | |
+| `sandbox.enabled` | removed | Docker is required: the socket is always mounted |
+| `sandbox.image` | `brain.workspace.image` | |
+| `sandbox.dockerSocketPath` | `brain.workspace.dockerSocketPath` | |
+| `sandbox.memoryLimit` | `brain.workspace.memoryLimit` | |
+| `sandbox.snapshotMaxBytes` | `brain.workspace.snapshotMaxBytes` | |
+| `sandbox.snapshotTtlSeconds` | `brain.workspace.snapshotTtlSeconds` | |
+| `sandbox.persistTimeout` | `brain.workspace.snapshotTimeout` | Default 180 → 120 |
+| `sandbox.inputMaxBytes` | `brain.workspace.inputMaxBytes` | |
 | `imagePullSecrets`, `podAnnotations`, `podLabels`, `resources` | removed | Chart scaffolding no template ever used; setting them never had an effect. Per-pod resources are `coreResources`, `llamacppResources`, … as before |
 
 New keys: `contentGuard.enabled` (default true) and `contentGuard.debug` (default false) now reach core
@@ -114,6 +160,7 @@ from the chart. Also new:
 | `llamacpp.cacheRamMiB` | empty (llama.cpp's 8192) | llama.cpp's `--cache-ram` |
 | `persona.model`, `persona.llmHost`, `persona.apiKey` | empty (= `llm.*`) | The persona's own LLM; the key goes in the Secret as `PERSONA_LLM_API_KEY` |
 | `brain.reasoningEffort` | medium | `BRAIN_REASONING_EFFORT` |
+| `brain.workspace.idleSeconds`, `snapshotIntervalSeconds`, `maxWarm`, `jobRetentionHours`, `cpuLimit`, `pidsLimit`, `prewarm` | 900, 1800, 4, 72, empty, 512, false | The `WORKSPACE_*` settings above. `WORKSPACE_INSTANCE` is `<namespace>-<release name>`. The core pod's `terminationGracePeriodSeconds` is `snapshotTimeout` + 30, for the shutdown save |
 
 With `llm.engine: strata`, the render now fails when `persona.apiKey`, `brain.apiKey`, `research.apiKey`,
 `diffusion.promptRewrite.apiKey` or `diffusion.review.apiKey` is set without a host to go with it
@@ -142,3 +189,7 @@ unchanged.
 | `discord_bot_llm_slots{host,source}` | New: each self-hosted server's slots, and whether they came from `/props`, `LLM_SLOTS` or the default |
 | `discord_bot_llm_lane_wait_seconds{lane}` | New: seconds a model call waited for a slot. Not part of `discord_bot_llm_call_seconds` |
 | `discord_bot_llm_lane_in_use{host,lane}`, `discord_bot_llm_lane_waiting{host,lane}` | New: slots held and calls waiting, per server and lane |
+| `discord_bot_workspace_starts_total{kind}`, `discord_bot_workspace_start_seconds{kind}` | New: each use of a server's workspace and how long it took to be ready (`cached`, `resumed`, `snapshot`, `fresh`) |
+| `discord_bot_workspaces_warm` | New: workspaces running in this core process |
+| `discord_bot_workspace_snapshot_seconds`, `discord_bot_workspace_snapshot_bytes`, `discord_bot_workspace_snapshot_failures_total{reason}` | New: each save's time and size, and saves that failed (`too_large`, `timeout`, `error`) |
+| `discord_bot_workspace_reaped_total` | New: leftover workspace containers removed |

@@ -77,7 +77,6 @@ from classes.message_queue import (
     unregister_task_run,
 )
 
-from classes.sandbox_agent import sandbox_enabled
 
 from classes.tool_functions import (
     change_personality,
@@ -387,10 +386,9 @@ def agent_tools(automatic: bool = False, voice: bool = False) -> list:
     if image_generation_enabled():
         tools.append(generate_image)
 
-    # Sandbox tool (nested SandboxAgent in a throwaway Docker container);
-    # needs the Docker socket mounted (SANDBOX_ENABLED; chart sandbox.enabled).
-    if sandbox_enabled():
-        tools.append(run_code_sandbox)
+    # Sandbox tool (nested SandboxAgent in the server's workspace container).
+    # Always on: Docker is required (main.py exits at startup without it).
+    tools.append(run_code_sandbox)
     return tools
 
 

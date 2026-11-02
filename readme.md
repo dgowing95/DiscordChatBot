@@ -5,8 +5,9 @@ hosted model provider by default: a llama.cpp server serves a GGUF model on your
 GPU, and Redis stores per-guild settings and per-user memories.
 
 Beyond chat it can search the web, read a URL, generate images, and hand a task to a
-**code sandbox** — a throwaway Docker container with its own agent that writes and
-actually runs code, in a Discord thread you can talk to while it works.
+**code sandbox** — an agent with its own Docker container per server (the server's
+workspace, so Docker is required) that writes and actually runs code, in a Discord
+thread you can talk to while it works.
 
 In Discord, `/help` lists everything it can do. After each release it posts a short
 "What's new" list of the new features once per server (turn off with
@@ -31,8 +32,8 @@ docker-compose stack for local development.
 - Helm.
 - An NVIDIA GPU with the [NVIDIA Container Runtime Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 - A registered Discord bot and its token.
-- For the code sandbox: a Docker daemon on the node, whose socket is mounted into the
-  core pod. Disable with `sandbox.enabled=false`.
+- A Docker daemon on the node, whose socket is mounted into the core pod: each server's
+  code-sandbox workspace is a container there, and core will not start without it.
 
 ## Installing
 

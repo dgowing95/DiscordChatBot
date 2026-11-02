@@ -12,7 +12,7 @@ from PIL import Image
 pillow_heif.register_heif_opener()
 from classes.text_llm_handler import TextLLMHandler, slot_context_tokens
 from classes import attachment_cache, history_policy, reply_policy
-from classes.sandbox_inputs import attachment_note
+from classes.workspace_inputs import attachment_note
 from classes.common import send_with_files
 from classes.history_policy import (
     ANCHORED,

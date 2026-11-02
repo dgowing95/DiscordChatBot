@@ -1,14 +1,14 @@
 """Files from the chat handed to a sandbox run: which ones, the caps, what
 each side is told, and the download / write halves around that.
 
-Run: pytest core/tests/sandbox_inputs_tests.py
+Run: pytest core/tests/workspace_inputs_tests.py
 """
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from classes import sandbox_inputs as si
+from classes import workspace_inputs as si
 
 
 def _c(name, size=10, ref=None):
@@ -58,11 +58,11 @@ def test_caps_on_count_and_total_size():
 
 
 def test_max_input_bytes(monkeypatch):
-    monkeypatch.delenv("SANDBOX_INPUT_MAX_BYTES", raising=False)
+    monkeypatch.delenv("WORKSPACE_INPUT_MAX_BYTES", raising=False)
     assert si.max_input_bytes() == si.DEFAULT_MAX_BYTES
-    monkeypatch.setenv("SANDBOX_INPUT_MAX_BYTES", "500")
+    monkeypatch.setenv("WORKSPACE_INPUT_MAX_BYTES", "500")
     assert si.max_input_bytes() == 500
-    monkeypatch.setenv("SANDBOX_INPUT_MAX_BYTES", "-1")
+    monkeypatch.setenv("WORKSPACE_INPUT_MAX_BYTES", "-1")
     assert si.max_input_bytes() == si.DEFAULT_MAX_BYTES
 
 

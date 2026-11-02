@@ -41,13 +41,13 @@ Rendering:
   (25 fields / 6000 chars of embed text per message) the OLDEST fields
   are dropped first.
 
-This is a per-guild opt-in: the /sandbox_progress_updates slash command
+This is a per-guild opt-in: the /workspace progress slash command
 stores the setting in Redis (configManager, dcb namespace); when it is off
 or unset (the default) the tool only sends the one static run embed and
 no progress hooks are attached.
 
-The pure parts (SandboxTranscript, parse_exec_result,
-sandbox_progress_updates_enabled) are unit-tested in
+The pure parts (SandboxTranscript, parse_exec_result)
+are unit-tested in
 core/tests/sandbox_progress_tests.py.
 """
 import logging
@@ -60,7 +60,7 @@ import discord
 from agents import RunHooks
 
 from classes.sandbox_conversation import GATE_REFUSAL_PREFIX
-from classes.tool_embeds import COLOR_SANDBOX, COLOR_STOPPED, SANDBOX_NEW, sandbox_task_text
+from classes.tool_embeds import COLOR_SANDBOX, COLOR_STOPPED, SANDBOX_STARTING, sandbox_task_text
 
 logger = logging.getLogger(__name__)
 
@@ -117,19 +117,6 @@ def parse_exec_result(result) -> dict:
             text = "\n".join(lines[i + 1:])
             break
     return {"output": text.strip("\n"), "exit_code": exit_code, "process_id": process_id}
-
-
-def sandbox_progress_updates_enabled(raw) -> bool:
-    """Whether a guild's sandbox progress updates are on.
-
-    raw is the value from configManager.get_setting for the
-    sandbox_progress_updates setting (set by the /sandbox_progress_updates
-    slash command): None/False when unset — which DEFAULTS TO OFF —
-    otherwise the stored string ("True"/"False").
-    """
-    if raw in (None, False):
-        return False
-    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _tool_args(context) -> dict:
@@ -206,7 +193,7 @@ class SandboxTranscript:
     queue is bigger, the OLDEST fields are dropped.
     """
 
-    def __init__(self, task: str, *, title: str = SANDBOX_NEW, files=(),
+    def __init__(self, task: str, *, title: str = SANDBOX_STARTING, files=(),
                  footer: str | None = None):
         self._task = " ".join((task or "").split())
         # Whether this run started from an empty workspace or resumed the
@@ -385,7 +372,7 @@ class SandboxProgressHooks(RunHooks):
     run loop, and a raised hook would abort the sandbox run.
     """
 
-    def __init__(self, channel, task: str, *, title: str = SANDBOX_NEW, files=(),
+    def __init__(self, channel, task: str, *, title: str = SANDBOX_STARTING, files=(),
                  footer: str | None = None, edit_interval: float = EDIT_INTERVAL_SECONDS):
         self.channel = channel
         self.transcript = SandboxTranscript(task, title=title, files=files, footer=footer)

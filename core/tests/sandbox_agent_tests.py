@@ -32,41 +32,6 @@ def _no_conversation_record_redis():
         yield store
 
 
-# ---------------------- sandbox_enabled ----------------------
-
-def test_enabled_env_values(monkeypatch):
-    cases = [
-        ("1", True), ("true", True), ("True", True), ("on", True),
-        ("0", False), ("false", False), ("no", False), ("off", False),
-        ("", False),
-    ]
-    for value, expected in cases:
-        monkeypatch.setenv("SANDBOX_ENABLED", value)
-        assert sandbox_agent.sandbox_enabled() is expected, value
-
-
-def test_enabled_defaults_on(monkeypatch):
-    monkeypatch.delenv("SANDBOX_ENABLED", raising=False)
-    assert sandbox_agent.sandbox_enabled() is True
-
-
-def test_enabled_trims_whitespace(monkeypatch):
-    monkeypatch.setenv("SANDBOX_ENABLED", "  0  ")
-    assert sandbox_agent.sandbox_enabled() is False
-
-
-# ---------------------- sandbox_image ----------------------
-
-def test_image_default(monkeypatch):
-    monkeypatch.delenv("SANDBOX_IMAGE", raising=False)
-    assert sandbox_agent.sandbox_image() == "python:3.14-slim"
-
-
-def test_image_override(monkeypatch):
-    monkeypatch.setenv("SANDBOX_IMAGE", "python:3.13-slim")
-    assert sandbox_agent.sandbox_image() == "python:3.13-slim"
-
-
 # ---------------------- sandbox_max_turns / sandbox_timeout ----------------------
 
 def test_max_turns_default(monkeypatch):
@@ -236,7 +201,7 @@ def test_sandbox_instructions_do_not_teach_the_model_to_measure_time():
     # The budget bullet used to hand the model a procedure — run `date +%s`
     # first, re-run it, subtract — which asked a small local model to carry
     # an epoch integer across turns, spent one of as few as 10 turns, and
-    # collided with RESUMED_TASK_PREAMBLE's "run `ls -R .` first". The
+    # collided with the follow-up preamble's "run `ls -R .` first". The
     # elapsed time is injected into every shell result instead
     # (_with_elapsed_note), so the prompt only has to say it is there.
     agent = sandbox_agent.build_sandbox_agent(None)
@@ -433,13 +398,46 @@ def test_select_artifacts_enforces_file_count_cap():
 
 # ---------------------- run_sandbox_task ----------------------
 
-def _patch_session_lifecycle(client=None, session=None, delete=None, out_dir=None):
-    """Patches the client/session creation+teardown helpers so
-    run_sandbox_task tests don't touch Docker. Also patches
-    _sandbox_output_dir (default None, i.e. unresolved) so tests that don't
-    care about the output-path resolution don't need session.exec to
-    understand `pwd`/`mkdir -p`. Returns the patch context managers to use
-    in a `with`."""
+class _FakeLease:
+    """What workspace_manager.Workspaces.acquire yields, for runs that never
+    touch Docker."""
+
+    def __init__(self, session, client, restore_failed=False):
+        self.session, self.sandbox_client = session, client
+        self.root, self.guild_id, self.restore_failed = "/workspace", "1", restore_failed
+
+    def job_dir(self, job_id):
+        return f"jobs/{job_id}"
+
+    def job_path(self, job_id):
+        return f"/workspace/jobs/{job_id}"
+
+
+def _fake_acquire(lease, release=None, seen=None):
+    """A stand-in for sandbox_agent._acquire_workspace: yields lease, and
+    awaits release(client, session) when the run lets go of it."""
+    import contextlib
+
+    @contextlib.asynccontextmanager
+    async def _acquire(guild_id):
+        if seen is not None:
+            seen.append(guild_id)
+        try:
+            yield lease
+        finally:
+            if release is not None:
+                await release(lease.sandbox_client, lease.session)
+    return _acquire
+
+
+def _patch_session_lifecycle(client=None, session=None, delete=None, out_dir=None,
+                             has_files=False, restore_failed=False):
+    """Patches the workspace so run_sandbox_task tests don't touch Docker:
+    _acquire_workspace yields a fake lease (`delete` is awaited when the run
+    releases it), the job folder is empty (has_files), and
+    _sandbox_output_dir answers out_dir (default None, i.e. unresolved) so
+    tests that don't care about it need no `pwd`/`mkdir -p`. Returns the
+    patch context managers to use in a `with`."""
     client = client if client is not None else MagicMock(name="client")
     if session is None:
         session = MagicMock(name="session")
@@ -448,12 +446,12 @@ def _patch_session_lifecycle(client=None, session=None, delete=None, out_dir=Non
         # production code a coroutine (truthy, never awaited) instead of a
         # bool — which is not how a live session behaves.
         session.exec = AsyncMock(return_value=_exec_result(b""))
+    lease = _FakeLease(session, client, restore_failed)
     return (
-        patch.object(prod_sandbox_agent, "build_sandbox_client", return_value=client),
-        patch.object(prod_sandbox_agent, "_create_sandbox_session",
-                     AsyncMock(return_value=(session, False))),
-        patch.object(prod_sandbox_agent, "_delete_sandbox_session",
-                     delete if delete is not None else AsyncMock()),
+        patch.object(prod_sandbox_agent, "_acquire_workspace", _fake_acquire(lease, delete)),
+        patch.object(prod_sandbox_agent, "_job_has_files", AsyncMock(return_value=has_files)),
+        patch.object(prod_sandbox_agent, "SANDBOX_RECOVERY_TIMEOUT_SECONDS",
+                     prod_sandbox_agent.SANDBOX_RECOVERY_TIMEOUT_SECONDS),
         patch.object(prod_sandbox_agent, "_sandbox_output_dir", AsyncMock(return_value=out_dir)),
     )
 
@@ -508,12 +506,15 @@ async def test_run_sandbox_task_resolves_output_dir_before_run(monkeypatch):
          p_client, p_session, p_delete, p_out_dir:
         await prod_sandbox_agent.run_sandbox_task("t")
 
-    # mkdir first, then the run marker beside (never inside) out/ — see
-    # _mark_run_start.
-    assert [c.args for c in session.exec.await_args_list] == [
-        ("mkdir", "-p", "/root/out"),
-        ("touch", "--", "/root/.dcb_run_start"),
-    ]
+    # mkdir first, then the job folder touched (the retention prune goes by
+    # its mtime), shared/ linked to the server's kept files, then the run
+    # marker beside (never inside) out/ — see _mark_run_start.
+    calls = [c.args for c in session.exec.await_args_list]
+    assert calls[0] == ("mkdir", "-p", "/root/out")
+    assert calls[1][:3] == ("touch", "-c", "--") and calls[1][3].startswith("/workspace/jobs/")
+    assert calls[2] == ("ln", "-sT", "../../shared", calls[1][3] + "/shared")
+    assert calls[3] == ("touch", "--", "/root/.dcb_run_start")
+    assert len(calls) == 4
     build_agent.assert_called_once()
     assert build_agent.call_args.args[0] == "/root/out"
     assert isinstance(build_agent.call_args.args[1], prod_sandbox_agent.SandboxConversation)
@@ -675,7 +676,7 @@ async def test_run_sandbox_task_timeout_recovery_is_bounded(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_sandbox_task_deletes_session_on_run_exception(monkeypatch):
+async def test_run_sandbox_task_releases_the_workspace_on_run_exception(monkeypatch):
     runner = MagicMock()
     runner.run = AsyncMock(side_effect=RuntimeError("boom"))
     delete = AsyncMock()
@@ -827,15 +828,6 @@ async def test_run_sandbox_task_forwards_progress_hooks(monkeypatch):
     assert kwargs["hooks"] is hooks
 
 
-@pytest.mark.asyncio
-async def test_delete_sandbox_session_swallows_errors():
-    client = MagicMock()
-    client.delete = AsyncMock(side_effect=RuntimeError("daemon gone"))
-    # must not raise: cleanup failures are logged, never propagated
-    await prod_sandbox_agent._delete_sandbox_session(client, MagicMock())
-    client.delete.assert_awaited_once()
-
-
 def _exec_result(stdout: bytes, ok: bool = True):
     r = MagicMock(stdout=stdout, stderr=b"", exit_code=0 if ok else 1)
     r.ok.return_value = ok
@@ -954,39 +946,6 @@ async def test_collect_artifacts_skip_notes_handle_filenames_with_spaces():
 
 # ---------------------- tool registration in the LLM agent ----------------------
 
-async def _agent_tool_names(monkeypatch, enabled_value):
-    # TextLLMHandler.__init__ needs Redis; skip it and set what get_client()
-    # reads directly.
-    monkeypatch.setenv("SANDBOX_ENABLED", enabled_value)
-    from classes.text_llm_handler import TextLLMHandler
-
-    handler = TextLLMHandler.__new__(TextLLMHandler)
-    handler.messages = []
-    handler.guild_id = 0
-    handler.original_message = MagicMock()
-    handler.config = MagicMock()
-    handler.user_memory = MagicMock()
-    handler.system = "test"
-    handler.model = "qwen3:4b"
-    handler.options = {"temperature": 1.0}
-    await handler.get_client()
-    return [getattr(tool, "name", str(tool)) for tool in handler.agent.tools]
-
-
-@pytest.mark.asyncio
-async def test_run_code_sandbox_tool_registered_when_enabled(monkeypatch):
-    names = await _agent_tool_names(monkeypatch, "1")
-    assert "run_code_sandbox" in names
-    # the other tools are unaffected
-    assert "web_search" in names
-
-
-@pytest.mark.asyncio
-async def test_run_code_sandbox_tool_absent_when_disabled(monkeypatch):
-    names = await _agent_tool_names(monkeypatch, "0")
-    assert "run_code_sandbox" not in names
-    assert "web_search" in names
-
 
 # ---------------------- run_code_sandbox tool behaviour ----------------------
 
@@ -1021,7 +980,7 @@ def _embed_calls(embed):
 
 def _embed_titled(embed, needle):
     """The single embed (as _embed_calls gives it) whose title contains
-    `needle`: the run's own embed is "🐳 Sandbox · ...", the closing one
+    `needle`: the run's own embed is "🐳 Workspace · ...", the closing one
     "✅ Sandbox finished" or "... Sandbox stopped: ..."."""
     matches = [c for c in _embed_calls(embed) if needle in (c.get("title") or "")]
     assert len(matches) == 1, (needle, _embed_calls(embed))
@@ -1134,7 +1093,7 @@ async def test_tool_runs_task_and_streams_progress_when_enabled(monkeypatch):
     instances[0].finalize.assert_awaited_once()
     assert "Done" in instances[0].finalize.await_args.args[0]
     # with progress on, the static embed is not sent (only the closing note)
-    assert not [c for c in _embed_calls(embed) if "Sandbox ·" in (c.get("title") or "")]
+    assert not [c for c in _embed_calls(embed) if "Workspace ·" in (c.get("title") or "")]
 
 
 @pytest.mark.asyncio
@@ -1158,7 +1117,7 @@ async def test_tool_progress_disabled_by_default_sends_embed(monkeypatch):
     # progress is off by default: no hooks, just the static embed
     hook_cls.assert_not_called()
     assert instances == []
-    assert _embed_titled(embed, "Sandbox ·")["description"] == "print 42"
+    assert _embed_titled(embed, "Workspace ·")["description"] == "print 42"
     _assert_ran_with(task_api, "print 42", None)
 
 
@@ -1181,7 +1140,7 @@ async def test_tool_progress_disabled_when_setting_false(monkeypatch):
 
     assert result.startswith("done: 42")
     hook_cls.assert_not_called()
-    assert _embed_titled(embed, "Sandbox ·")
+    assert _embed_titled(embed, "Workspace ·")
     _assert_ran_with(task_api, "print 42", None)
 
 
@@ -1206,7 +1165,7 @@ async def test_tool_progress_falls_back_to_off_on_config_error(monkeypatch):
 
     assert result.startswith("done: 42")  # the run still happens
     hook_cls.assert_not_called()
-    assert _embed_titled(embed, "Sandbox ·")
+    assert _embed_titled(embed, "Workspace ·")
     _assert_ran_with(task_api, "print 42", None)
 
 
@@ -1672,7 +1631,7 @@ async def test_run_sandbox_task_recovers_attachments_after_a_timeout(monkeypatch
 # persistent memory
 # ============================================================
 
-# ---------------------- ensure_sandbox_thread / sandbox_snapshot_id_for ----------------------
+# ---------------------- ensure_sandbox_thread ----------------------
 
 def _thread_mock(thread_id=555):
     thread = MagicMock(spec=discord.Thread)
@@ -1722,18 +1681,6 @@ def test_thread_name_truncates_to_discord_limit():
 
 def test_thread_name_falls_back_when_task_empty():
     assert prod_sandbox_agent._thread_name("") == "🐳 Sandbox"
-
-
-def test_snapshot_id_for_thread_is_its_id():
-    thread = _thread_mock(thread_id=987)
-    assert prod_sandbox_agent.sandbox_snapshot_id_for(thread) == "987"
-
-
-def test_snapshot_id_for_non_thread_channel_is_none():
-    # A plain channel must never be used as a fallback snapshot key — that
-    # would wrongly link unrelated tasks posted in the same channel into one
-    # workspace lineage (see ensure_sandbox_thread's fallback path).
-    assert prod_sandbox_agent.sandbox_snapshot_id_for(MagicMock()) is None
 
 
 # ---------------------- ask_user / sandbox_ask_user_timeout ----------------------
@@ -1931,7 +1878,6 @@ async def test_attach_file_refuses_past_the_file_cap():
     assert "limit" in result
 
 
-
 @pytest.mark.asyncio
 async def test_send_preview_to_thread_sends_the_file():
     thread = _thread_mock()
@@ -1994,37 +1940,6 @@ async def test_send_preview_to_thread_without_context_is_graceful():
     assert "no thread" in result.lower()
 
 
-# ---------------------- Memory capability (persistent memory) ----------------------
-
-def test_build_sandbox_agent_includes_memory_capability_shell_only():
-    from agents.sandbox.capabilities import Memory, Shell
-    agent = sandbox_agent.build_sandbox_agent(None)
-    assert isinstance(agent.capabilities[0], Shell)  # unchanged position (see existing test)
-    assert isinstance(agent.capabilities[1], Memory)
-    memory = agent.capabilities[1]
-    # live_update=False keeps Memory's own requirement at Shell-only — the
-    # default (True) needs Filesystem, which build_sandbox_agent avoids
-    # entirely (apply_patch is unsupported over ChatCompletions).
-    assert memory.read.live_update is False
-    assert memory.required_capability_types() == {"shell"}
-
-
-def test_build_sandbox_agent_memory_uses_the_sandbox_llm_not_hosted_openai(monkeypatch):
-    # Regression: the SDK's Memory defaults point phase-one/phase-two
-    # extraction at hosted OpenAI models ("gpt-5.4-mini"/"gpt-5.5"), which
-    # this self-hosted bot has no chat API key for and must never silently
-    # send sandbox workspace content to.
-    _clear_llm_env(monkeypatch)
-    monkeypatch.setenv("BRAIN_MODEL", "deepseek/deepseek-v4-flash-0731")
-    monkeypatch.setenv("BRAIN_LLM_HOST", "https://openrouter.ai/api")
-    monkeypatch.setenv("BRAIN_LLM_API_KEY", "sk-or-test")
-    agent = sandbox_agent.build_sandbox_agent(None)
-    memory = agent.capabilities[1]
-    assert memory.generate.phase_one_model is agent.model
-    assert memory.generate.phase_two_model is agent.model
-    assert memory.generate.phase_one_model.model == "deepseek/deepseek-v4-flash-0731"
-
-
 def test_build_sandbox_agent_registers_hitl_tools():
     agent = sandbox_agent.build_sandbox_agent(None)
     names = {getattr(t, "name", str(t)) for t in agent.tools}
@@ -2039,18 +1954,6 @@ def test_sandbox_instructions_no_longer_forbid_asking_questions():
     assert "do not ask questions" not in agent.instructions.lower()
     assert "ask_user" in agent.instructions
     assert "send_preview_to_thread" in agent.instructions
-
-
-# ---------------------- sandbox_persist_timeout / _persist_sandbox_snapshot ----------------------
-
-def test_persist_timeout_default(monkeypatch):
-    monkeypatch.delenv("SANDBOX_PERSIST_TIMEOUT_SECONDS", raising=False)
-    assert sandbox_agent.sandbox_persist_timeout() == 180
-
-
-def test_persist_timeout_override(monkeypatch):
-    monkeypatch.setenv("SANDBOX_PERSIST_TIMEOUT_SECONDS", "30")
-    assert sandbox_agent.sandbox_persist_timeout() == 30
 
 
 # ---------------------- the brain's call timeout ----------------------
@@ -2129,251 +2032,6 @@ async def test_model_call_timeout_bounds_a_server_that_dribbles_padding():
     finally:
         server.shutdown()
         server.server_close()
-
-
-@pytest.mark.asyncio
-async def test_persist_sandbox_snapshot_noop_without_snapshot_id():
-    session = MagicMock()
-    session.stop = AsyncMock()
-    await prod_sandbox_agent._persist_sandbox_snapshot(session, None)
-    session.stop.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_persist_sandbox_snapshot_calls_stop_when_snapshot_id_given():
-    session = MagicMock()
-    session.stop = AsyncMock()
-    await prod_sandbox_agent._persist_sandbox_snapshot(session, "123")
-    session.stop.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_persist_sandbox_snapshot_swallows_timeout(monkeypatch):
-    # Must never extend how long a run can pin its worker: bounded by its
-    # own budget, and a slow persist must never block returning the result.
-    monkeypatch.setenv("SANDBOX_PERSIST_TIMEOUT_SECONDS", "1")
-
-    async def slow_stop():
-        await asyncio.sleep(5)
-
-    session = MagicMock()
-    session.stop = slow_stop
-    await prod_sandbox_agent._persist_sandbox_snapshot(session, "123")  # must not raise
-
-
-@pytest.mark.asyncio
-async def test_persist_sandbox_snapshot_swallows_exception():
-    session = MagicMock()
-    session.stop = AsyncMock(side_effect=RuntimeError("redis down"))
-    await prod_sandbox_agent._persist_sandbox_snapshot(session, "123")  # must not raise
-
-
-# ---------------------- _create_sandbox_session snapshot wiring ----------------------
-
-def _uncreated_session():
-    """A session as client.create() would return it: NOT yet started."""
-    session = MagicMock(name="session")
-    session.start = AsyncMock()
-    return session
-
-
-@pytest.mark.asyncio
-async def test_create_sandbox_session_passes_none_snapshot_when_no_thread():
-    # No thread means no snapshot at all — never a fallback keyed on
-    # something else (see sandbox_snapshot_id_for).
-    client = MagicMock()
-    client.create = AsyncMock(return_value=_uncreated_session())
-    session, resumed = await prod_sandbox_agent._create_sandbox_session(client, None)
-    assert client.create.await_args.kwargs["snapshot"] is None
-    assert resumed is False
-
-
-@pytest.mark.asyncio
-async def test_create_sandbox_session_uses_deterministic_remote_snapshot_id():
-    from agents.sandbox.snapshot import RemoteSnapshot
-    client = MagicMock()
-    client.create = AsyncMock(return_value=_uncreated_session())
-    await prod_sandbox_agent._create_sandbox_session(client, "123456")  # noqa: F841
-    snapshot = client.create.await_args.kwargs["snapshot"]
-    assert isinstance(snapshot, RemoteSnapshot)
-    assert snapshot.id == "123456"
-    assert snapshot.client_dependency_key == prod_sandbox_agent.SANDBOX_SNAPSHOT_DEP_KEY
-
-
-@pytest.mark.asyncio
-async def test_create_sandbox_session_starts_the_session_before_returning():
-    # Regression, found via a live check against a real Docker daemon: a
-    # session that is only created() but never started() never materializes
-    # /workspace and never hydrates from a snapshot on create() alone —
-    # session.start() is what performs both, and skipping it silently made
-    # resume (requirement 4) and Memory persistence (requirement 5) no-ops
-    # despite the plumbing otherwise looking correct in every mocked test.
-    client = MagicMock()
-    session = _uncreated_session()
-    client.create = AsyncMock(return_value=session)
-
-    returned, resumed = await prod_sandbox_agent._create_sandbox_session(client, None)
-
-    session.start.assert_awaited_once()
-    assert returned is session
-    assert resumed is False
-
-
-@pytest.mark.asyncio
-async def test_build_sandbox_client_binds_snapshot_store_dependency(monkeypatch):
-    from classes.sandbox_snapshot_store import SandboxSnapshotStore
-
-    monkeypatch.setenv("REDIS_HOST", "localhost")
-    monkeypatch.setattr("redis.asyncio.Redis", MagicMock())
-    with patch("docker.from_env", return_value=MagicMock()):
-        client = prod_sandbox_agent.build_sandbox_client()
-    resolved = await client._dependencies.require(
-        prod_sandbox_agent.SANDBOX_SNAPSHOT_DEP_KEY, consumer="test"
-    )
-    assert isinstance(resolved, SandboxSnapshotStore)
-
-
-# ---------------------- SANDBOX_MEMORY_LIMIT ----------------------
-
-@pytest.mark.parametrize("raw, expected", [
-    ("", None), ("   ", None), ("4g", 4 * 1024**3), (" 512M ", 512 * 1024**2),
-    ("1073741824", 1073741824), ("4gb", 4 * 1024**3), ("512mb", 512 * 1024**2),
-    ("1.5g", int(1.5 * 1024**3)), ("lots", None), ("4t", None), ("-1g", None), ("0", None),
-])
-def test_sandbox_memory_limit_parsing(monkeypatch, raw, expected):
-    monkeypatch.setenv("SANDBOX_MEMORY_LIMIT", raw)
-    assert prod_sandbox_agent.sandbox_memory_limit() == expected
-
-
-def test_sandbox_memory_limit_unset(monkeypatch):
-    monkeypatch.delenv("SANDBOX_MEMORY_LIMIT", raising=False)
-    assert prod_sandbox_agent.sandbox_memory_limit() is None
-
-
-def test_memory_limited_client_caps_created_containers_and_passes_the_rest_through():
-    inner = MagicMock()
-    client = prod_sandbox_agent._MemoryLimitedDockerClient(inner, 4 * 1024**3)
-
-    client.containers.create(image="python:3.14-slim", detach=True)
-    inner.containers.create.assert_called_once_with(
-        image="python:3.14-slim", detach=True, mem_limit=4 * 1024**3, memswap_limit=4 * 1024**3)
-    # Everything else is the real client's, untouched.
-    client.containers.get("abc")
-    inner.containers.get.assert_called_once_with("abc")
-    client.images.pull("python", tag="3.14-slim")
-    inner.images.pull.assert_called_once_with("python", tag="3.14-slim")
-    assert client.volumes is inner.volumes
-
-
-def _client_docker(monkeypatch, limit):
-    from agents.sandbox.sandboxes.docker import DockerSandboxClient
-
-    if limit is None:
-        monkeypatch.delenv("SANDBOX_MEMORY_LIMIT", raising=False)
-    else:
-        monkeypatch.setenv("SANDBOX_MEMORY_LIMIT", limit)
-    monkeypatch.setenv("REDIS_HOST", "localhost")
-    monkeypatch.setattr("redis.asyncio.Redis", MagicMock())
-    raw = MagicMock()
-    with patch("docker.from_env", return_value=raw), \
-         patch.object(DockerSandboxClient, "__init__", return_value=None) as init:
-        prod_sandbox_agent.build_sandbox_client()
-    return raw, init.call_args.args[0]
-
-
-def test_build_sandbox_client_wraps_docker_only_when_capped(monkeypatch):
-    raw, handed = _client_docker(monkeypatch, None)
-    assert handed is raw
-
-    raw, handed = _client_docker(monkeypatch, "2g")
-    assert isinstance(handed, prod_sandbox_agent._MemoryLimitedDockerClient)
-    handed.containers.create(image="x")
-    raw.containers.create.assert_called_once_with(
-        image="x", mem_limit=2 * 1024**3, memswap_limit=2 * 1024**3)
-
-
-# ---------------------- run_sandbox_task: persist-before-delete ordering ----------------------
-
-@pytest.mark.asyncio
-async def test_run_sandbox_task_persists_before_deleting_when_in_a_thread():
-    thread = _thread_mock(thread_id=42)
-    result = MagicMock()
-    result.final_output = "done"
-    runner = MagicMock()
-    runner.run = AsyncMock(return_value=result)
-
-    events = []
-    session = MagicMock(name="session")
-    session.exec = AsyncMock()
-
-    async def _stop():
-        events.append("stop")
-    session.stop = _stop
-
-    async def _delete(sandbox_client, sess):
-        events.append("delete")
-
-    p_client, p_session, p_delete, p_out_dir = _patch_session_lifecycle(
-        session=session, delete=_delete)
-
-    with patch.object(prod_sandbox_agent, "Runner", runner), \
-         patch.object(prod_sandbox_agent, "build_sandbox_agent"), \
-         patch.object(prod_sandbox_agent, "build_sandbox_run_config"), \
-         patch.object(prod_sandbox_agent, "_collect_artifacts", AsyncMock(return_value=([], []))), \
-         p_client, p_session, p_delete, p_out_dir:
-        await prod_sandbox_agent.run_sandbox_task("t", thread=thread)
-
-    assert events == ["stop", "delete"]
-
-
-@pytest.mark.asyncio
-async def test_run_sandbox_task_skips_persist_without_a_thread():
-    result = MagicMock()
-    result.final_output = "done"
-    runner = MagicMock()
-    runner.run = AsyncMock(return_value=result)
-    session = MagicMock(name="session")
-    session.exec = AsyncMock()
-    session.stop = AsyncMock()
-    p_client, p_session, p_delete, p_out_dir = _patch_session_lifecycle(session=session)
-
-    with patch.object(prod_sandbox_agent, "Runner", runner), \
-         patch.object(prod_sandbox_agent, "build_sandbox_agent"), \
-         patch.object(prod_sandbox_agent, "build_sandbox_run_config"), \
-         patch.object(prod_sandbox_agent, "_collect_artifacts", AsyncMock(return_value=([], []))), \
-         p_client, p_session, p_delete, p_out_dir:
-        await prod_sandbox_agent.run_sandbox_task("t")  # no thread kwarg
-
-    session.stop.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_run_sandbox_task_persists_even_on_timeout(monkeypatch):
-    # A partial run's workspace may still be worth resuming from.
-    monkeypatch.setenv("SANDBOX_TIMEOUT", "1")
-    thread = _thread_mock(thread_id=7)
-    session = MagicMock(name="session")
-    session.exec = AsyncMock(return_value=_exec_result(b""))
-    session.stop = AsyncMock()
-
-    async def slow_run(*args, **kwargs):
-        await asyncio.sleep(5)
-
-    runner = MagicMock()
-    runner.run = slow_run
-    p_client, p_session, p_delete, p_out_dir = _patch_session_lifecycle(
-        session=session, out_dir="/root/out")
-
-    with patch.object(prod_sandbox_agent, "Runner", runner), \
-         patch.object(prod_sandbox_agent, "build_sandbox_agent"), \
-         patch.object(prod_sandbox_agent, "build_sandbox_run_config"), \
-         patch.object(prod_sandbox_agent, "_collect_artifacts", AsyncMock(return_value=([], []))), \
-         p_client, p_session, p_delete, p_out_dir:
-        result = await prod_sandbox_agent.run_sandbox_task("sleep forever", thread=thread)
-
-    assert result.ok is False
-    assert result.error == "timeout"
-    session.stop.assert_awaited_once()
 
 
 # ---------------------- run_code_sandbox tool: thread wiring ----------------------
@@ -2502,7 +2160,7 @@ async def test_tool_does_not_notify_when_reusing_an_existing_thread():
     # nothing would route messages from here to the run.
     assert embed.await_count == 2
     assert not [c for c in _embed_calls(embed) if "Sandbox started" in (c.get("title") or "")]
-    assert not _embed_titled(embed, "Sandbox ·").get("footer")
+    assert not _embed_titled(embed, "Workspace ·").get("footer")
 
 
 # ---------------------- workspace origin: fresh vs resumed ----------------------
@@ -2517,171 +2175,10 @@ def clean_inbox():
     prod_inbox._RUNS.clear()
 
 
-@pytest.mark.asyncio
-async def test_snapshot_exists_is_false_without_a_snapshot_id():
-    # no thread means no snapshot id, and must not touch Redis at all
-    with patch("classes.sandbox_snapshot_store.SandboxSnapshotStore") as store:
-        assert await prod_sandbox_agent.sandbox_snapshot_exists(None) is False
-    store.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_snapshot_exists_reports_a_saved_workspace():
-    store = MagicMock()
-    store.exists = AsyncMock(return_value=True)
-    with patch("classes.sandbox_snapshot_store.SandboxSnapshotStore", return_value=store):
-        assert await prod_sandbox_agent.sandbox_snapshot_exists("42") is True
-    store.exists.assert_awaited_once_with("42")
-
-
-@pytest.mark.asyncio
-async def test_snapshot_exists_reports_no_saved_workspace():
-    store = MagicMock()
-    store.exists = AsyncMock(return_value=False)
-    with patch("classes.sandbox_snapshot_store.SandboxSnapshotStore", return_value=store):
-        assert await prod_sandbox_agent.sandbox_snapshot_exists("42") is False
-
-
-@pytest.mark.asyncio
-async def test_snapshot_exists_answers_false_when_redis_is_unreachable():
-    # this only drives a status badge - a wrong badge must never break a run
-    store = MagicMock()
-    store.exists = AsyncMock(side_effect=RuntimeError("redis down"))
-    with patch("classes.sandbox_snapshot_store.SandboxSnapshotStore", return_value=store):
-        assert await prod_sandbox_agent.sandbox_snapshot_exists("42") is False
-
-
-def test_run_title_distinguishes_fresh_from_resumed():
-    fresh = prod_sandbox_agent.sandbox_run_title(False)
-    resumed = prod_sandbox_agent.sandbox_run_title(True)
-    assert fresh != resumed
-    assert "new workspace" in fresh
-    assert "resumed" in resumed
-
-
 # ---------------------- resumed runs tell the nested model ----------------------
-
-@pytest.mark.asyncio
-async def test_run_sandbox_task_prepends_the_resumed_preamble():
-    result = MagicMock()
-    result.final_output = "done"
-    runner = AsyncMock(return_value=result)
-    patches = _patch_session_lifecycle()
-    with patches[0], patches[2], patches[3], \
-         patch.object(prod_sandbox_agent, "_persist_sandbox_snapshot", AsyncMock()), \
-         patch.object(prod_sandbox_agent, "_create_sandbox_session",
-                      AsyncMock(return_value=(MagicMock(exec=AsyncMock()), True))), \
-         patch.object(prod_sandbox_agent, "_collect_artifacts",
-                      AsyncMock(return_value=([], []))), \
-         patch.object(prod_sandbox_agent.Runner, "run", runner):
-        out = await prod_sandbox_agent.run_sandbox_task(
-            "plot it", thread=_thread_mock(), resumed=True)
-
-    sent_task = runner.await_args.args[1]
-    assert sent_task.startswith(prod_sandbox_agent.RESUMED_TASK_PREAMBLE)
-    assert sent_task.endswith("plot it")
-    assert out.resumed is True
-
-
-@pytest.mark.asyncio
-async def test_run_sandbox_task_leaves_the_task_alone_when_not_resumed():
-    result = MagicMock()
-    result.final_output = "done"
-    runner = AsyncMock(return_value=result)
-    patches = _patch_session_lifecycle()
-    with patches[0], patches[1], patches[2], patches[3], \
-         patch.object(prod_sandbox_agent, "_collect_artifacts",
-                      AsyncMock(return_value=([], []))), \
-         patch.object(prod_sandbox_agent.Runner, "run", runner):
-        out = await prod_sandbox_agent.run_sandbox_task("plot it")
-
-    assert runner.await_args.args[1] == "plot it"
-    assert out.resumed is False
 
 
 # ---------------------- unrestorable snapshot recovery ----------------------
-
-@pytest.mark.asyncio
-async def test_create_session_recovers_by_dropping_an_unrestorable_snapshot():
-    # A corrupt snapshot must not brick the thread: the bad key is deleted
-    # and the run retried against the SAME id, so this run starts empty but
-    # still persists a good snapshot back for the next one.
-    from agents.sandbox.snapshot import RemoteSnapshot
-    bad, good = _uncreated_session(), _uncreated_session()
-    bad.start = AsyncMock(side_effect=RuntimeError("tar: unexpected EOF"))
-    client = MagicMock()
-    client.create = AsyncMock(side_effect=[bad, good])
-    delete = AsyncMock()
-
-    with patch.object(prod_sandbox_agent, "_delete_sandbox_session", AsyncMock()) as teardown, \
-         patch.object(prod_sandbox_agent, "_delete_sandbox_snapshot", delete):
-        session, resumed = await prod_sandbox_agent._create_sandbox_session(
-            client, "123456", True)
-
-    assert session is good
-    assert resumed is False
-    delete.assert_awaited_once_with("123456")
-    teardown.assert_awaited_once()
-    # the retry keeps the same snapshot id, so this run's work is saved back
-    # to it on teardown (snapshot=None would make that a silent no-op)
-    retry_snapshot = client.create.await_args_list[1].kwargs["snapshot"]
-    assert isinstance(retry_snapshot, RemoteSnapshot)
-    assert retry_snapshot.id == "123456"
-
-
-@pytest.mark.asyncio
-async def test_create_session_does_not_recover_when_no_restore_was_expected():
-    # Nothing was being restored, so a start() failure is a real infra
-    # problem and must surface rather than being retried away.
-    session = _uncreated_session()
-    session.start = AsyncMock(side_effect=RuntimeError("docker is down"))
-    client = MagicMock()
-    client.create = AsyncMock(return_value=session)
-    delete = AsyncMock()
-
-    with patch.object(prod_sandbox_agent, "_delete_sandbox_snapshot", delete), \
-         pytest.raises(RuntimeError, match="docker is down"):
-        await prod_sandbox_agent._create_sandbox_session(client, "123456", False)
-    delete.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_create_session_propagates_a_failure_on_the_retry():
-    bad, worse = _uncreated_session(), _uncreated_session()
-    bad.start = AsyncMock(side_effect=RuntimeError("tar: unexpected EOF"))
-    worse.start = AsyncMock(side_effect=RuntimeError("docker is down"))
-    client = MagicMock()
-    client.create = AsyncMock(side_effect=[bad, worse])
-
-    with patch.object(prod_sandbox_agent, "_delete_sandbox_session", AsyncMock()), \
-         patch.object(prod_sandbox_agent, "_delete_sandbox_snapshot", AsyncMock()), \
-         pytest.raises(RuntimeError, match="docker is down"):
-        await prod_sandbox_agent._create_sandbox_session(client, "123456", True)
-
-
-@pytest.mark.asyncio
-async def test_create_session_does_not_swallow_a_create_failure():
-    # create() is deliberately outside the guard - a dead Docker daemon must
-    # not be mistaken for a bad snapshot and cost a second container.
-    client = MagicMock()
-    client.create = AsyncMock(side_effect=RuntimeError("docker is down"))
-    with pytest.raises(RuntimeError, match="docker is down"):
-        await prod_sandbox_agent._create_sandbox_session(client, "123456", True)
-
-
-@pytest.mark.asyncio
-async def test_delete_sandbox_snapshot_is_a_no_op_without_an_id():
-    with patch("classes.sandbox_snapshot_store.SandboxSnapshotStore") as store:
-        await prod_sandbox_agent._delete_sandbox_snapshot(None)
-    store.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_delete_sandbox_snapshot_swallows_a_redis_failure():
-    store = MagicMock()
-    store.delete = AsyncMock(side_effect=RuntimeError("redis down"))
-    with patch("classes.sandbox_snapshot_store.SandboxSnapshotStore", return_value=store):
-        await prod_sandbox_agent._delete_sandbox_snapshot("42")  # must not raise
 
 
 # ---------------------- shell tools: gate and checkpoints ----------------------
@@ -2817,19 +2314,11 @@ async def test_a_short_command_is_not_sliced():
     poll_invoke.assert_not_awaited()
 
 
-
-
-
-
-
 # ---------------------- say_in_thread ----------------------
 
 def _nested_tool_context(context):
     from agents.tool_context import ToolContext
     return ToolContext(context=context, tool_name="t", tool_call_id="t1", tool_arguments="{}")
-
-
-
 
 
 @pytest.mark.asyncio
@@ -2885,25 +2374,36 @@ def test_build_sandbox_agent_attaches_the_conversation_hooks():
 
 # ---------------------- run_code_sandbox: origin badge & thread routing ----------------------
 
+def _warm(warm, calls=None):
+    """Patches the server workspaces so is_warm answers `warm` (calls, when
+    given, collects each guild id asked about)."""
+    def _is_warm(guild_id):
+        if calls is not None:
+            calls.append(guild_id)
+        return warm(guild_id) if callable(warm) else warm
+    fake = MagicMock(name="workspaces")
+    fake.is_warm = MagicMock(side_effect=_is_warm)
+    return patch("classes.workspace_manager.workspaces", return_value=fake)
+
+
 def _sandbox_tool_patches(result, *, resumed=False, thread=None, created=False):
     """The common patch set for run_code_sandbox tests that care about the
-    Discord side: content guard open, thread resolution fixed, snapshot
-    lookup fixed, run_sandbox_task stubbed."""
+    Discord side: content guard open, thread resolution fixed, the server
+    workspace warm or not (`resumed`), run_sandbox_task stubbed."""
     thread = thread if thread is not None else _thread_mock(thread_id=555)
     return thread, (
         patch.object(prod_tool_functions, "check_web_request",
                      new=AsyncMock(return_value=(True, ""))),
         patch.object(prod_sandbox_agent, "ensure_sandbox_thread",
                      AsyncMock(return_value=(thread, created))),
-        patch.object(prod_sandbox_agent, "sandbox_snapshot_exists",
-                     AsyncMock(return_value=resumed)),
+        _warm(resumed),
         patch.object(prod_sandbox_agent, "run_sandbox_task",
                      AsyncMock(return_value=result)),
     )
 
 
 @pytest.mark.asyncio
-async def test_tool_marks_a_fresh_sandbox_in_the_static_embed(clean_inbox):
+async def test_tool_marks_a_cold_workspace_in_the_static_embed(clean_inbox):
     message = MagicMock()
     message.author.id = 1
     thread, patches = _sandbox_tool_patches(_text_result("done"), resumed=False)
@@ -2913,13 +2413,13 @@ async def test_tool_marks_a_fresh_sandbox_in_the_static_embed(clean_inbox):
         await prod_tool_functions.run_code_sandbox.on_invoke_tool(
             _tool_context(message), json.dumps({"task": "print 42"}))
 
-    run = _embed_titled(embed, "Sandbox ·")
+    run = _embed_titled(embed, "Workspace ·")
     assert run["title"] == prod_sandbox_agent.sandbox_run_title(False)
     assert run["description"] == "print 42"
 
 
 @pytest.mark.asyncio
-async def test_tool_marks_a_resumed_sandbox_in_the_static_embed(clean_inbox):
+async def test_tool_marks_a_warm_workspace_in_the_static_embed(clean_inbox):
     message = MagicMock()
     message.author.id = 1
     thread, patches = _sandbox_tool_patches(_text_result("done"), resumed=True)
@@ -2929,7 +2429,7 @@ async def test_tool_marks_a_resumed_sandbox_in_the_static_embed(clean_inbox):
         await prod_tool_functions.run_code_sandbox.on_invoke_tool(
             _tool_context(message), json.dumps({"task": "print 42"}))
 
-    assert _embed_titled(embed, "Sandbox ·")["title"] == \
+    assert _embed_titled(embed, "Workspace ·")["title"] == \
         prod_sandbox_agent.sandbox_run_title(True)
 
 
@@ -2945,22 +2445,9 @@ async def test_tool_truncates_a_very_long_task_in_the_static_embed(clean_inbox):
         await prod_tool_functions.run_code_sandbox.on_invoke_tool(
             _tool_context(message), json.dumps({"task": "x" * (DESCRIPTION_CHARS + 500)}))
 
-    description = _embed_titled(embed, "Sandbox ·")["description"]
+    description = _embed_titled(embed, "Workspace ·")["description"]
     assert description.endswith("…")
     assert len(description) <= DESCRIPTION_CHARS
-
-
-@pytest.mark.asyncio
-async def test_tool_tells_the_sandbox_when_the_workspace_was_restored(clean_inbox):
-    message = MagicMock()
-    message.author.id = 1
-    thread, patches = _sandbox_tool_patches(_text_result("done"), resumed=True)
-    with patches[0], patches[1], patches[2], patches[3] as run, \
-         patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()):
-        await prod_tool_functions.run_code_sandbox.on_invoke_tool(
-            _tool_context(message), json.dumps({"task": "print 42"}))
-
-    assert run.await_args.kwargs["resumed"] is True
 
 
 @pytest.mark.asyncio
@@ -3081,12 +2568,11 @@ async def test_tool_claims_the_thread_before_any_other_await(clean_inbox):
     thread, patches = _sandbox_tool_patches(_text_result("done"))
     seen = {}
 
-    async def _exists(snapshot_id):
+    def _is_warm(guild_id):
         seen["claimed"] = clean_inbox.is_run_active(thread.id)
         return False
 
-    with patches[0], patches[1], patches[3], \
-         patch.object(prod_sandbox_agent, "sandbox_snapshot_exists", AsyncMock(side_effect=_exists)), \
+    with patches[0], patches[1], patches[3], _warm(_is_warm), \
          patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()):
         await prod_tool_functions.run_code_sandbox.on_invoke_tool(
             _tool_context(message), json.dumps({"task": "print 42"}))
@@ -3313,138 +2799,7 @@ async def test_tool_reports_steering_on_a_stopped_run_too(clean_inbox):
     assert "make it red" in out
 
 
-@pytest.mark.asyncio
-async def test_tool_corrects_the_badge_when_the_workspace_could_not_be_restored(clean_inbox):
-    # The badge already went out saying "Resumed"; the run reports it
-    # actually started empty, so the record has to be put straight.
-    message = MagicMock()
-    message.author.id = 1
-    result = sandbox_agent.SandboxResult(text="done", artifacts=[], resumed=False)
-    thread, patches = _sandbox_tool_patches(result, resumed=True)
-    thread.send = AsyncMock()
-
-    with patches[0], patches[1], patches[2], patches[3], \
-         patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()):
-        out = await prod_tool_functions.run_code_sandbox.on_invoke_tool(
-            _tool_context(message), json.dumps({"task": "print 42"}))
-
-    posted = [c.args[0] for c in thread.send.await_args_list if c.args]
-    assert any("couldn't be restored" in text for text in posted)
-    assert "could not be restored" in out
-
-
-@pytest.mark.asyncio
-async def test_tool_does_not_correct_the_badge_on_a_normal_resume(clean_inbox):
-    message = MagicMock()
-    message.author.id = 1
-    result = sandbox_agent.SandboxResult(text="done", artifacts=[], resumed=True)
-    thread, patches = _sandbox_tool_patches(result, resumed=True)
-    thread.send = AsyncMock()
-
-    with patches[0], patches[1], patches[2], patches[3], \
-         patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()):
-        out = await prod_tool_functions.run_code_sandbox.on_invoke_tool(
-            _tool_context(message), json.dumps({"task": "print 42"}))
-
-    # "done" (the sandbox's own message) is expected here; a correction is not.
-    posted = [c.args[0] for c in thread.send.await_args_list if c.args]
-    assert not any("couldn't be restored" in text for text in posted)
-    assert "could not be restored" not in out
-
-
-@pytest.mark.asyncio
-async def test_tool_does_not_correct_the_badge_on_a_fresh_run(clean_inbox):
-    message = MagicMock()
-    message.author.id = 1
-    thread, patches = _sandbox_tool_patches(_text_result("done"), resumed=False)
-    thread.send = AsyncMock()
-
-    with patches[0], patches[1], patches[2], patches[3], \
-         patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()):
-        await prod_tool_functions.run_code_sandbox.on_invoke_tool(
-            _tool_context(message), json.dumps({"task": "print 42"}))
-
-    posted = [c.args[0] for c in thread.send.await_args_list if c.args]
-    assert not any("couldn't be restored" in text for text in posted)
-
-
 # ---------------------- closing note ----------------------
-
-@pytest.mark.parametrize("seconds,expected", [
-    (604800, "7 days"),
-    (172800, "2 days"),
-    (172799, "1 day"),
-    (86400, "1 day"),
-    (86399, "23 hours"),
-    (7200, "2 hours"),
-    (3600, "1 hour"),
-    (3599, "59 minutes"),
-    (120, "2 minutes"),
-    (30, "1 minute"),
-])
-def test_resume_window_is_rounded_down_to_one_unit(seconds, expected):
-    # rounding down never over-promises how long a workspace will survive
-    assert prod_sandbox_agent.format_resume_window(seconds) == expected
-
-
-def test_closing_note_states_the_resume_window_and_where_it_works():
-    note = prod_sandbox_agent.sandbox_closing_embed(604800, True)
-    assert note["title"] == "✅ Sandbox finished"
-    assert "7 days" in note["description"]
-    assert "in this thread" in note["description"]
-    # the point of the note: chat is normal again, and a request anywhere
-    # else is guaranteed fresh
-    assert "normal chat" in note["footer"]
-    assert "anywhere else" in note["footer"]
-
-
-def test_closing_note_admits_when_nothing_was_saved():
-    note = prod_sandbox_agent.sandbox_closing_embed(None, True)
-    assert "not** be saved" in note["description"]
-    assert "7 days" not in note["description"]
-
-
-def test_closing_note_claims_no_resume_outside_a_thread():
-    # the no-thread fallback never snapshots, so it must not imply resume
-    note = prod_sandbox_agent.sandbox_closing_embed(None, False)
-    assert "Sandbox finished" in note["title"]
-    assert "thread" not in note["description"]
-    assert note["footer"] is None
-
-
-@pytest.mark.asyncio
-async def test_remaining_seconds_is_none_without_a_snapshot_id():
-    with patch("classes.sandbox_snapshot_store.SandboxSnapshotStore") as store:
-        assert await prod_sandbox_agent.sandbox_snapshot_remaining_seconds(None) is None
-    store.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_remaining_seconds_reports_the_live_redis_ttl():
-    store = MagicMock()
-    store.ttl = AsyncMock(return_value=12345)
-    with patch("classes.sandbox_snapshot_store.SandboxSnapshotStore", return_value=store):
-        assert await prod_sandbox_agent.sandbox_snapshot_remaining_seconds("42") == 12345
-    store.ttl.assert_awaited_once_with("42")
-
-
-@pytest.mark.asyncio
-async def test_remaining_seconds_is_none_when_the_key_is_missing():
-    # Redis answers -2 for a missing key. This is the case that matters:
-    # persisting is best-effort, so the configured TTL would have promised a
-    # resume for a snapshot that was never written.
-    store = MagicMock()
-    store.ttl = AsyncMock(return_value=-2)
-    with patch("classes.sandbox_snapshot_store.SandboxSnapshotStore", return_value=store):
-        assert await prod_sandbox_agent.sandbox_snapshot_remaining_seconds("42") is None
-
-
-@pytest.mark.asyncio
-async def test_remaining_seconds_is_none_when_redis_is_unreachable():
-    store = MagicMock()
-    store.ttl = AsyncMock(side_effect=RuntimeError("redis down"))
-    with patch("classes.sandbox_snapshot_store.SandboxSnapshotStore", return_value=store):
-        assert await prod_sandbox_agent.sandbox_snapshot_remaining_seconds("42") is None
 
 
 @pytest.mark.asyncio
@@ -3453,15 +2808,13 @@ async def test_tool_posts_the_closing_note_after_a_successful_run(clean_inbox):
     message.author.id = 1
     thread, patches = _sandbox_tool_patches(_text_result("done"))
     with patches[0], patches[1], patches[2], patches[3], \
-         patch.object(prod_sandbox_agent, "sandbox_snapshot_remaining_seconds",
-                      AsyncMock(return_value=604800)), \
          patch.object(prod_tool_functions.Common, "send_tool_discord_embed",
                       AsyncMock()) as embed:
         await prod_tool_functions.run_code_sandbox.on_invoke_tool(
             _tool_context(message), json.dumps({"task": "print 42"}))
 
     closing = _closing(embed)
-    assert "7 days" in closing["description"]
+    assert "72 hours" in closing["description"]
     # it must come after the run, not before it
     assert _embed_calls(embed)[-1] == closing
 
@@ -3476,8 +2829,6 @@ async def test_tool_posts_the_closing_note_when_the_sandbox_is_unavailable(clean
     with patches[0], patches[1], patches[2], \
          patch.object(prod_sandbox_agent, "run_sandbox_task",
                       AsyncMock(side_effect=RuntimeError("docker is down"))), \
-         patch.object(prod_sandbox_agent, "sandbox_snapshot_remaining_seconds",
-                      AsyncMock(return_value=None)), \
          patch.object(prod_tool_functions.Common, "send_tool_discord_embed",
                       AsyncMock()) as embed:
         await prod_tool_functions.run_code_sandbox.on_invoke_tool(
@@ -3508,8 +2859,8 @@ async def test_a_closing_note_failure_never_changes_what_the_tool_returns(clean_
     message.author.id = 1
     thread, patches = _sandbox_tool_patches(_text_result("done: 42"))
     with patches[0], patches[1], patches[2], patches[3], \
-         patch.object(prod_sandbox_agent, "sandbox_snapshot_remaining_seconds",
-                      AsyncMock(side_effect=RuntimeError("redis down"))), \
+         patch.object(prod_sandbox_agent, "sandbox_closing_embed",
+                      MagicMock(side_effect=RuntimeError("closing note broke"))), \
          patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()):
         out = await prod_tool_functions.run_code_sandbox.on_invoke_tool(
             _tool_context(message), json.dumps({"task": "print 42"}))
@@ -3556,8 +2907,7 @@ async def test_tool_reuses_the_thread_this_turn_already_opened(clean_inbox):
                       new=AsyncMock(return_value=(True, ""))), \
          patch.object(prod_sandbox_agent, "ensure_sandbox_thread",
                       AsyncMock()) as ensure, \
-         patch.object(prod_sandbox_agent, "sandbox_snapshot_exists",
-                      AsyncMock(return_value=True)) as exists, \
+         _warm(True), \
          patch.object(prod_sandbox_agent, "run_sandbox_task",
                       AsyncMock(return_value=_text_result("done"))), \
          patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()) as embed:
@@ -3565,8 +2915,6 @@ async def test_tool_reuses_the_thread_this_turn_already_opened(clean_inbox):
             ctx, json.dumps({"task": "try again"}))
 
     ensure.assert_not_awaited()
-    # and it is keyed on that thread, so the retry resumes its workspace
-    exists.assert_awaited_once_with("888")
     # no "🧵 Sandbox started" note — nothing new was opened
     assert not [c for c in _embed_calls(embed) if "Sandbox started" in (c.get("title") or "")]
 
@@ -3595,20 +2943,19 @@ async def test_tool_ignores_a_non_thread_left_in_the_context(clean_inbox):
 
 @pytest.mark.parametrize("error", ["timeout", "max_turns", "model_error", "infra_error"])
 def test_closing_note_leads_with_the_outcome_when_a_run_was_stopped(error):
-    note = prod_sandbox_agent.sandbox_closing_embed(604800, True, error)
+    note = prod_sandbox_agent.sandbox_closing_embed(True, error)
     # the title, so it reads as the headline rather than a footnote
     assert note["title"] == prod_sandbox_agent.SANDBOX_STOP_TITLES[error]
-    assert "7 days" in note["description"]
     assert "from where it stopped" in note["description"]
 
 
 def test_closing_note_names_an_unknown_stop_reason_as_stopped():
-    assert prod_sandbox_agent.sandbox_closing_embed(604800, True, "failed")["title"] == \
+    assert prod_sandbox_agent.sandbox_closing_embed(True, "failed")["title"] == \
         "❌ Sandbox stopped"
 
 
 def test_closing_note_puts_the_unresolved_lines_under_the_description():
-    note = prod_sandbox_agent.sandbox_closing_embed(604800, True, None, "\n⚠️ never answered: “x”")
+    note = prod_sandbox_agent.sandbox_closing_embed(True, None, "\n⚠️ never answered: “x”")
     assert note["description"].endswith("\n⚠️ never answered: “x”")
 
 
@@ -3621,8 +2968,6 @@ async def test_tool_puts_the_stop_reason_in_the_closing_embed(clean_inbox):
     message.author.id = 1
     thread, patches = _sandbox_tool_patches(_timeout_result())
     with patches[0], patches[1], patches[2], patches[3], \
-         patch.object(prod_sandbox_agent, "sandbox_snapshot_remaining_seconds",
-                      AsyncMock(return_value=604800)), \
          patch.object(prod_tool_functions.Common, "send_tool_discord_embed",
                       AsyncMock()) as embed:
         out = await prod_tool_functions.run_code_sandbox.on_invoke_tool(
@@ -3635,32 +2980,13 @@ async def test_tool_puts_the_stop_reason_in_the_closing_embed(clean_inbox):
     assert "THIS thread" in out
 
 
-@pytest.mark.asyncio
-async def test_tool_does_not_offer_a_resume_that_was_never_saved(clean_inbox):
-    # Persisting is best-effort. When it did not happen, the model must not
-    # tell the user to carry on in the thread — there is nothing to carry on
-    # from. This keeps the return string in step with the closing embed.
-    message = MagicMock()
-    message.author.id = 1
-    thread, patches = _sandbox_tool_patches(_timeout_result())
-    with patches[0], patches[1], patches[2], patches[3], \
-         patch.object(prod_sandbox_agent, "sandbox_snapshot_remaining_seconds",
-                      AsyncMock(return_value=None)), \
-         patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()):
-        out = await prod_tool_functions.run_code_sandbox.on_invoke_tool(
-            _tool_context(message), json.dumps({"task": "sleep forever"}))
-
-    assert "carries on from where" not in out
-    assert "do not retry the same task unchanged" in out.lower()
-
-
 # ---------------------- elapsed-time marker ----------------------
 #
 # The budget bullet used to teach the model to measure its own elapsed time
 # ("run `date +%s` as your very first command ... re-run it every few turns
 # and subtract"). That asked a 27B Q4 model to carry an epoch integer across
 # turns and do arithmetic on it, spent one of a budget as small as 10 turns,
-# and collided with RESUMED_TASK_PREAMBLE's "run `ls -R .` first". We measure
+# and collided with the follow-up preamble's "run `ls -R .` first". We measure
 # it and tell the model the answer instead, on the same carrier as thread
 # messages and for the same reason.
 
@@ -3708,7 +3034,6 @@ async def test_a_time_marker_failure_never_breaks_a_shell_call():
     exploding = MagicMock()
     type(exploding).context = property(lambda self: (_ for _ in ()).throw(RuntimeError("boom")))
     assert await wrapped(exploding, "{}") == "exit 0"
-
 
 
 @pytest.mark.asyncio
@@ -4008,10 +3333,319 @@ async def test_tool_takes_the_reply_hint_off_the_static_embed_when_the_run_ends(
         await prod_tool_functions.run_code_sandbox.on_invoke_tool(
             _tool_context(message), json.dumps({"task": "print 42"}))
 
-    run = _embed_titled(embed, "Sandbox ·")
+    run = _embed_titled(embed, "Workspace ·")
     assert "Reply in this thread" in run["footer"]
     edit.assert_awaited_once()
     args = edit.await_args.args
     assert args[0] is embed.return_value
     assert args[1:] == (run["description"], run["color"], run["title"])
     assert not edit.await_args.kwargs.get("footer")
+
+
+# ---------------------- the server workspace: job folders ----------------------
+
+def test_thread_record_id_is_the_threads_id_and_none_elsewhere():
+    assert prod_sandbox_agent.thread_record_id(_thread_mock(thread_id=42)) == "42"
+    assert prod_sandbox_agent.thread_record_id(MagicMock()) is None
+
+
+def test_a_thread_keeps_one_job_folder_and_other_runs_get_their_own():
+    thread = _thread_mock(thread_id=42)
+    assert prod_sandbox_agent.job_id_for(thread) == "t42"
+    assert prod_sandbox_agent.job_id_for(thread) == "t42"
+    a, b = prod_sandbox_agent.job_id_for(MagicMock()), prod_sandbox_agent.job_id_for(MagicMock())
+    assert a != b and not a.startswith("t")
+
+
+def test_run_title_says_whether_the_workspace_was_already_running():
+    from classes.tool_embeds import SANDBOX_READY, SANDBOX_STARTING
+    assert prod_sandbox_agent.sandbox_run_title(True) == SANDBOX_READY
+    assert prod_sandbox_agent.sandbox_run_title(False) == SANDBOX_STARTING
+
+
+@pytest.mark.parametrize("workdir, expected", [
+    (None, "jobs/t1"), ("", "jobs/t1"), (".", "jobs/t1"), ("out", "jobs/t1/out"),
+    ("../../shared", "shared"), ("../../shared/data", "shared/data"),
+])
+def test_job_relative_takes_paths_from_the_job_folder(workdir, expected):
+    assert prod_sandbox_agent._job_relative({"job_dir": "jobs/t1"}, workdir) == expected
+
+
+def test_job_relative_refuses_to_leave_the_workspace():
+    assert prod_sandbox_agent._job_relative({"job_dir": "jobs/t1"}, "../../..") is None
+    assert prod_sandbox_agent._job_relative({"job_dir": "jobs/t1"}, "../../../etc") is None
+
+
+def test_job_paths_pass_through_without_a_job_folder():
+    assert prod_sandbox_agent._job_relative({}, "out/a.png") == "out/a.png"
+    assert prod_sandbox_agent._job_path({}, "out/a.png") == "out/a.png"
+    ctx = {"job_dir": "jobs/t1", "workspace_root": "/workspace"}
+    assert prod_sandbox_agent._job_path(ctx, "out/a.png") == "/workspace/jobs/t1/out/a.png"
+
+
+def _shell_ctx(context):
+    return MagicMock(context=context)
+
+
+@pytest.mark.asyncio
+async def test_commands_run_in_the_job_folder():
+    seen = []
+
+    async def _exec(ctx, raw):
+        seen.append(json.loads(raw))
+        return "ok"
+    invoke = prod_sandbox_agent._in_job_dir(_exec)
+    ctx = _shell_ctx({"job_dir": "jobs/t1"})
+    await invoke(ctx, json.dumps({"cmd": "ls"}))
+    await invoke(ctx, json.dumps({"cmd": "ls", "workdir": "out"}))
+    await invoke(ctx, json.dumps({"cmd": "ls", "workdir": "../../shared"}))
+    assert [a["workdir"] for a in seen] == ["jobs/t1", "jobs/t1/out", "shared"]
+    assert all(a["cmd"] == "ls" for a in seen)
+
+
+@pytest.mark.asyncio
+async def test_a_workdir_outside_the_workspace_is_refused_as_a_tool_result():
+    invoke = prod_sandbox_agent._in_job_dir(AsyncMock(return_value="ran"))
+    out = await invoke(_shell_ctx({"job_dir": "jobs/t1"}),
+                       json.dumps({"cmd": "ls", "workdir": "../../../etc"}))
+    assert "outside the workspace" in out
+
+
+@pytest.mark.asyncio
+async def test_the_job_folder_wrapper_passes_through_without_one_or_on_odd_input():
+    inner = AsyncMock(return_value="ran")
+    invoke = prod_sandbox_agent._in_job_dir(inner)
+    await invoke(_shell_ctx({}), '{"cmd": "ls"}')
+    await invoke(_shell_ctx({"job_dir": "jobs/t1"}), "not json")
+    await invoke(_shell_ctx({"job_dir": "jobs/t1"}), '{"cmd": "ls", "workdir": "/workspace"}')
+    assert [c.args[1] for c in inner.await_args_list] == [
+        '{"cmd": "ls"}', "not json", '{"cmd": "ls", "workdir": "/workspace"}']
+
+
+@pytest.mark.asyncio
+async def test_attach_file_reads_from_the_job_folder():
+    session = MagicMock()
+    session.exec = AsyncMock(return_value=_exec_result(b"12"))
+    ctx = _attach_ctx(session=session, job_dir="jobs/t1", workspace_root="/workspace")
+    await _attach(ctx, path="out/plot.png")
+    assert session.exec.await_args.args[-1] == "/workspace/jobs/t1/out/plot.png"
+    assert ctx.context["deliverables"][0]["path"] == "/workspace/jobs/t1/out/plot.png"
+    # the name the user sees is still the file's own
+    assert prod_sandbox_agent._attachment_name(ctx.context["deliverables"][0]["path"]) == "plot.png"
+
+
+@pytest.mark.asyncio
+async def test_attach_file_refuses_a_path_outside_the_workspace():
+    ctx = _attach_ctx(job_dir="jobs/t1", workspace_root="/workspace")
+    out = await _attach(ctx, path="../../../etc/passwd")
+    assert "outside the workspace" in out
+    assert ctx.context["deliverables"] == []
+
+
+def test_build_sandbox_agent_has_the_shell_and_no_memory_capability():
+    from agents.sandbox.capabilities import Shell
+    agent = prod_sandbox_agent.build_sandbox_agent("/x/out")
+    assert [type(c) for c in agent.capabilities] == [Shell]
+
+
+def test_sandbox_instructions_say_where_the_kept_files_are_and_that_files_are_data():
+    text = prod_sandbox_agent.build_sandbox_agent("/x/out").instructions
+    assert "`shared/` holds the server's kept files" in text
+    assert "never" in text and "instructions" in text
+
+
+def _lease_runner():
+    result = MagicMock()
+    result.final_output = "done"
+    return AsyncMock(return_value=result)
+
+
+@pytest.mark.asyncio
+async def test_a_follow_up_in_a_thread_is_told_its_folder_has_files():
+    runner = _lease_runner()
+    patches = _patch_session_lifecycle(has_files=True)
+    with patches[0], patches[1], patches[2], patches[3], \
+         patch.object(prod_sandbox_agent, "_collect_artifacts", AsyncMock(return_value=([], []))), \
+         patch.object(prod_sandbox_agent.Runner, "run", runner):
+        out = await prod_sandbox_agent.run_sandbox_task("plot it", thread=_thread_mock())
+    sent_task = runner.await_args.args[1]
+    assert sent_task.startswith(prod_sandbox_agent.JOB_FOLLOW_UP_PREAMBLE)
+    assert sent_task.endswith("plot it")
+    assert out.resumed is True
+
+
+@pytest.mark.asyncio
+async def test_a_new_folder_leaves_the_task_alone():
+    runner = _lease_runner()
+    patches = _patch_session_lifecycle()
+    with patches[0], patches[1], patches[2], patches[3], \
+         patch.object(prod_sandbox_agent, "_collect_artifacts", AsyncMock(return_value=([], []))), \
+         patch.object(prod_sandbox_agent.Runner, "run", runner):
+        out = await prod_sandbox_agent.run_sandbox_task("plot it")
+    assert runner.await_args.args[1] == "plot it"
+    assert out.resumed is False and out.workspace_lost is False
+
+
+@pytest.mark.asyncio
+async def test_a_lost_workspace_is_reported_on_the_result():
+    patches = _patch_session_lifecycle(restore_failed=True)
+    with patches[0], patches[1], patches[2], patches[3], \
+         patch.object(prod_sandbox_agent, "_collect_artifacts", AsyncMock(return_value=([], []))), \
+         patch.object(prod_sandbox_agent.Runner, "run", _lease_runner()):
+        out = await prod_sandbox_agent.run_sandbox_task("plot it")
+    assert out.workspace_lost is True
+
+
+@pytest.mark.asyncio
+async def test_the_run_uses_its_threads_server_and_job_folder():
+    seen, runner = [], _lease_runner()
+    session = MagicMock(name="session")
+    session.exec = AsyncMock(return_value=_exec_result(b"/workspace\n"))
+    lease = _FakeLease(session, MagicMock())
+    thread = _thread_mock(thread_id=77)
+    thread.guild = MagicMock(id=9)
+    with patch.object(prod_sandbox_agent, "_acquire_workspace", _fake_acquire(lease, seen=seen)), \
+         patch.object(prod_sandbox_agent, "_job_has_files", AsyncMock(return_value=False)), \
+         patch.object(prod_sandbox_agent, "_collect_artifacts", AsyncMock(return_value=([], []))), \
+         patch.object(prod_sandbox_agent.Runner, "run", runner):
+        await prod_sandbox_agent.run_sandbox_task("plot it", thread=thread)
+    assert seen == [9]
+    context = runner.await_args.kwargs["context"]
+    assert context["job_dir"] == "jobs/t77" and context["workspace_root"] == "/workspace"
+    assert context["out_dir"] == "/workspace/jobs/t77/out"
+    # nothing is persisted per run any more
+    session.stop.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_run_with_no_server_is_workspace_unavailable():
+    from classes.workspace_manager import WorkspaceUnavailable
+    with pytest.raises(WorkspaceUnavailable):
+        await prod_sandbox_agent.run_sandbox_task("plot it")
+
+
+def test_closing_note_says_where_a_follow_up_carries_on():
+    note = prod_sandbox_agent.sandbox_closing_embed(True)
+    assert note["title"] == "✅ Sandbox finished"
+    assert "72 hours" in note["description"] and "in this thread" in note["description"]
+    assert "normal chat" in note["footer"] and "anywhere else" in note["footer"]
+    outside = prod_sandbox_agent.sandbox_closing_embed(False)
+    assert "thread" not in outside["description"] and outside["footer"] is None
+
+
+@pytest.mark.asyncio
+async def test_tool_titles_the_run_by_whether_this_servers_workspace_is_warm(clean_inbox):
+    from classes.tool_embeds import SANDBOX_READY
+    message = MagicMock()
+    message.author.id = 1
+    asked = []
+    thread, patches = _sandbox_tool_patches(_text_result("done"))
+    ctx = _tool_context(message)
+    ctx.context["guild_id"] = 5
+    with patches[0], patches[1], _warm(True, calls=asked), patches[3] as run, \
+         patch.object(prod_tool_functions.Common, "send_tool_discord_embed",
+                      AsyncMock()) as embed:
+        await prod_tool_functions.run_code_sandbox.on_invoke_tool(ctx, json.dumps({"task": "x"}))
+    assert asked == [5]
+    assert _embed_titled(embed, "Workspace ·")["title"] == SANDBOX_READY
+    assert run.await_args.kwargs["guild_id"] == 5
+
+
+@pytest.mark.asyncio
+async def test_tool_says_when_the_servers_saved_workspace_was_lost(clean_inbox):
+    message = MagicMock()
+    message.author.id = 1
+    result = sandbox_agent.SandboxResult(text="done", artifacts=[], workspace_lost=True)
+    thread, patches = _sandbox_tool_patches(result)
+    thread.send = AsyncMock()
+    with patches[0], patches[1], patches[2], patches[3], \
+         patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()):
+        out = await prod_tool_functions.run_code_sandbox.on_invoke_tool(
+            _tool_context(message), json.dumps({"task": "x"}))
+    posted = [c.args[0] for c in thread.send.await_args_list if c.args]
+    assert any("couldn't be restored" in text for text in posted)
+    assert "could not be restored" in out
+
+
+@pytest.mark.asyncio
+async def test_tool_says_nothing_about_a_lost_workspace_normally(clean_inbox):
+    message = MagicMock()
+    message.author.id = 1
+    thread, patches = _sandbox_tool_patches(_text_result("done"))
+    thread.send = AsyncMock()
+    with patches[0], patches[1], patches[2], patches[3], \
+         patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()):
+        out = await prod_tool_functions.run_code_sandbox.on_invoke_tool(
+            _tool_context(message), json.dumps({"task": "x"}))
+    posted = [c.args[0] for c in thread.send.await_args_list if c.args]
+    assert not any("couldn't be restored" in text for text in posted)
+    assert "could not be restored" not in out
+
+
+@pytest.mark.asyncio
+async def test_tool_tells_the_model_when_the_workspace_is_unavailable(clean_inbox):
+    from classes.workspace_manager import WorkspaceUnavailable
+    message = MagicMock()
+    message.author.id = 1
+    thread, patches = _sandbox_tool_patches(_text_result("done"))
+    with patches[0], patches[1], patches[2], \
+         patch.object(prod_sandbox_agent, "run_sandbox_task",
+                      AsyncMock(side_effect=WorkspaceUnavailable("busy"))), \
+         patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()):
+        out = await prod_tool_functions.run_code_sandbox.on_invoke_tool(
+            _tool_context(message), json.dumps({"task": "x"}))
+    assert "workspace is unavailable" in out and "do not retry" in out
+
+
+def test_the_sandbox_tool_is_always_offered():
+    from classes.text_llm_handler import agent_tools
+    assert "run_code_sandbox" in {tool.name for tool in agent_tools()}
+
+
+@pytest.mark.asyncio
+async def test_attach_file_messages_never_show_the_absolute_path():
+    """A model handed an absolute path reused it as exec_command's workdir,
+    which the SDK refuses (see SANDBOX_OUTPUT_DIRNAME)."""
+    session = MagicMock()
+    session.exec = AsyncMock(return_value=_exec_result(b"", ok=False))
+    ctx = _attach_ctx(session=session, job_dir="jobs/t1", workspace_root="/workspace")
+    out = await _attach(ctx, path="out/nope.png")
+    assert "'out/nope.png' does not exist" in out and "/workspace" not in out
+    session.exec = AsyncMock(return_value=_exec_result(
+        str(sandbox_agent.MAX_ARTIFACT_BYTES + 1).encode()))
+    out = await _attach(ctx, path="out/huge.bin")
+    assert "too large" in out and "/workspace" not in out
+
+
+@pytest.mark.asyncio
+async def test_a_run_with_no_server_says_so_and_not_try_again_later(clean_inbox):
+    from classes.workspace_manager import NoServerWorkspace
+    message = MagicMock()
+    message.author.id = 1
+    thread, patches = _sandbox_tool_patches(_text_result("done"))
+    with patches[0], patches[1], patches[2], \
+         patch.object(prod_sandbox_agent, "run_sandbox_task",
+                      AsyncMock(side_effect=NoServerWorkspace("no server"))), \
+         patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()):
+        out = await prod_tool_functions.run_code_sandbox.on_invoke_tool(
+            _tool_context(message), json.dumps({"task": "x"}))
+    assert "not in a server" in out and "few minutes" not in out
+
+
+@pytest.mark.asyncio
+async def test_a_failed_run_after_a_lost_workspace_still_carries_on_from_its_own_files(
+        clean_inbox):
+    """The lost snapshot held earlier runs' files; this run worked in the new
+    container, so a follow-up in the thread does carry on from it."""
+    message = MagicMock()
+    message.author.id = 1
+    result = sandbox_agent.SandboxResult(text="", artifacts=[], ok=False, error="timeout",
+                                         workspace_lost=True)
+    thread, patches = _sandbox_tool_patches(result)
+    thread.send = AsyncMock()
+    with patches[0], patches[1], patches[2], patches[3], \
+         patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()):
+        out = await prod_tool_functions.run_code_sandbox.on_invoke_tool(
+            _tool_context(message), json.dumps({"task": "x"}))
+    assert "could not be restored" in out and "earlier runs were lost" in out
+    assert "this run's own files are kept" in out and "carries on" in out

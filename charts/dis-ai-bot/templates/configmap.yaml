@@ -138,24 +138,42 @@ data:
   {{- if .Values.diffusion.review.llmHost }}
   IMAGE_REVIEW_LLM_HOST: {{ .Values.diffusion.review.llmHost }}
   {{- end }}
-  # Code sandbox: core registers the run_code_sandbox tool when SANDBOX_ENABLED
-  # is true; tasks run in throwaway containers on the node via the Docker
-  # socket mounted into the core pod (see core.yaml)
-  SANDBOX_ENABLED: {{ .Values.sandbox.enabled | quote }}
-  SANDBOX_IMAGE: {{ .Values.sandbox.image }}
+  # Code sandbox run limits; the work runs in the server's workspace container
+  # on the node's Docker daemon, through the socket mounted in core.yaml.
   SANDBOX_MAX_TURNS: {{ .Values.sandbox.maxTurns | toString | quote }}
   SANDBOX_TIMEOUT: {{ .Values.sandbox.timeout | toString | quote }}
   SANDBOX_ASK_USER_TIMEOUT: {{ .Values.sandbox.askUserTimeout | toString | quote }}
-  SANDBOX_PERSIST_TIMEOUT_SECONDS: {{ .Values.sandbox.persistTimeout | toString | quote }}
-  SANDBOX_SNAPSHOT_MAX_BYTES: {{ .Values.sandbox.snapshotMaxBytes | toString | quote }}
-  SANDBOX_INPUT_MAX_BYTES: {{ .Values.sandbox.inputMaxBytes | int64 | toString | quote }}
-  SANDBOX_SNAPSHOT_TTL_SECONDS: {{ .Values.sandbox.snapshotTtlSeconds | toString | quote }}
-  {{- with .Values.sandbox.memoryLimit }}
-  {{- /* Refused here: core would otherwise run every sandbox uncapped over a typo */}}
-  {{- if or (not (regexMatch "^[0-9]+([.][0-9]+)?([bkmgBKMG][bB]?)?$" (toString .))) (regexMatch "^[0.]+[a-zA-Z]*$" (toString .)) }}
-  {{- fail (printf "sandbox.memoryLimit must be a size like 4g, 4gb or 512m, not %q" (toString .)) }}
+  {{- with .Values.brain.workspace }}
+  WORKSPACE_IMAGE: {{ .image | quote }}
+  # Namespace + release name: the reaper only removes containers with its own
+  # label, so two same-named releases in different namespaces must not share it.
+  WORKSPACE_INSTANCE: {{ printf "%s-%s" $.Release.Namespace $.Release.Name | quote }}
+  WORKSPACE_IDLE_SECONDS: {{ .idleSeconds | int64 | toString | quote }}
+  WORKSPACE_SNAPSHOT_INTERVAL_SECONDS: {{ .snapshotIntervalSeconds | int64 | toString | quote }}
+  WORKSPACE_MAX_WARM: {{ .maxWarm | int64 | toString | quote }}
+  WORKSPACE_JOB_RETENTION_HOURS: {{ .jobRetentionHours | int64 | toString | quote }}
+  WORKSPACE_PIDS_LIMIT: {{ .pidsLimit | int64 | toString | quote }}
+  WORKSPACE_SNAPSHOT_MAX_BYTES: {{ .snapshotMaxBytes | int64 | toString | quote }}
+  WORKSPACE_SNAPSHOT_TTL_SECONDS: {{ .snapshotTtlSeconds | int64 | toString | quote }}
+  WORKSPACE_SNAPSHOT_TIMEOUT_SECONDS: {{ .snapshotTimeout | int64 | toString | quote }}
+  WORKSPACE_INPUT_MAX_BYTES: {{ .inputMaxBytes | int64 | toString | quote }}
+  WORKSPACE_PREWARM: {{ .prewarm | toString | quote }}
+  {{- /* Compared as text, not with `with`: a numeric 0 would be skipped as
+       empty, and core reads 0 as no cap, so it is refused like a typo */}}
+  {{- $cpu := toString .cpuLimit }}
+  {{- if not (has $cpu (list "" "<nil>")) }}
+  {{- if or (not (regexMatch "^[0-9]+([.][0-9]+)?$" $cpu)) (regexMatch "^[0.]+$" $cpu) }}
+  {{- fail (printf "brain.workspace.cpuLimit must be a number of CPUs greater than 0, like 2 or 0.5, not %q" $cpu) }}
   {{- end }}
-  SANDBOX_MEMORY_LIMIT: {{ . | toString | quote }}
+  WORKSPACE_CPU_LIMIT: {{ $cpu | quote }}
+  {{- end }}
+  {{- with .memoryLimit }}
+  {{- /* Refused here: core would otherwise run every workspace uncapped over a typo */}}
+  {{- if or (not (regexMatch "^[0-9]+([.][0-9]+)?([bkmgBKMG][bB]?)?$" (toString .))) (regexMatch "^[0.]+[a-zA-Z]*$" (toString .)) }}
+  {{- fail (printf "brain.workspace.memoryLimit must be a size like 4g, 4gb or 512m, not %q" (toString .)) }}
+  {{- end }}
+  WORKSPACE_MEMORY_LIMIT: {{ . | toString | quote }}
+  {{- end }}
   {{- end }}
   # The brain's LLM: empty model/host fall back to the bot's own (LLM_*); its
   # key lives in secret.yaml.

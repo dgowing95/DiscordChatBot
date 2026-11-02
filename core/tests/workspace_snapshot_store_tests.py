@@ -1,25 +1,20 @@
-import io
-import os
-import sys
+"""The server workspace's snapshot store (classes/workspace_snapshot_store.py).
 
-# sandbox_snapshot_store is imported as classes.* here and classes.* in
-# production (the app runs with cwd=core/); both resolve as namespace packages.
+Run from the repo root: `pytest core/tests/workspace_snapshot_store_tests.py`
+"""
+import io
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from classes import redis_client
 
-from classes.sandbox_snapshot_store import (
-    SandboxSnapshotStore,
+from classes.workspace_snapshot_store import (
+    WorkspaceSnapshotStore,
     SnapshotTooLargeError,
-    sandbox_snapshot_max_bytes,
-    sandbox_snapshot_ttl_seconds,
+    snapshot_max_bytes,
+    snapshot_ttl_seconds,
 )
-
-# To run this pytest file from the command line, use:
-# PYTHONPATH=$(pwd) pytest core/tests/sandbox_snapshot_store_tests.py
-
 
 @pytest.fixture
 def mock_redis(monkeypatch):
@@ -40,49 +35,49 @@ def mock_redis(monkeypatch):
 # ---------------------- env accessors ----------------------
 
 def test_max_bytes_default(monkeypatch):
-    monkeypatch.delenv("SANDBOX_SNAPSHOT_MAX_BYTES", raising=False)
-    assert sandbox_snapshot_max_bytes() == 50_000_000
+    monkeypatch.delenv("WORKSPACE_SNAPSHOT_MAX_BYTES", raising=False)
+    assert snapshot_max_bytes() == 50_000_000
 
 
 def test_max_bytes_override(monkeypatch):
-    monkeypatch.setenv("SANDBOX_SNAPSHOT_MAX_BYTES", "1000")
-    assert sandbox_snapshot_max_bytes() == 1000
+    monkeypatch.setenv("WORKSPACE_SNAPSHOT_MAX_BYTES", "1000")
+    assert snapshot_max_bytes() == 1000
 
 
 def test_max_bytes_invalid_falls_back(monkeypatch):
     for bad in ("abc", "-1", "0", ""):
-        monkeypatch.setenv("SANDBOX_SNAPSHOT_MAX_BYTES", bad)
-        assert sandbox_snapshot_max_bytes() == 50_000_000, bad
+        monkeypatch.setenv("WORKSPACE_SNAPSHOT_MAX_BYTES", bad)
+        assert snapshot_max_bytes() == 50_000_000, bad
 
 
 def test_ttl_default(monkeypatch):
-    monkeypatch.delenv("SANDBOX_SNAPSHOT_TTL_SECONDS", raising=False)
-    assert sandbox_snapshot_ttl_seconds() == 7 * 24 * 60 * 60
+    monkeypatch.delenv("WORKSPACE_SNAPSHOT_TTL_SECONDS", raising=False)
+    assert snapshot_ttl_seconds() == 7 * 24 * 60 * 60
 
 
 def test_ttl_override(monkeypatch):
-    monkeypatch.setenv("SANDBOX_SNAPSHOT_TTL_SECONDS", "60")
-    assert sandbox_snapshot_ttl_seconds() == 60
+    monkeypatch.setenv("WORKSPACE_SNAPSHOT_TTL_SECONDS", "60")
+    assert snapshot_ttl_seconds() == 60
 
 
 def test_ttl_invalid_falls_back(monkeypatch):
     for bad in ("abc", "-1", "0"):
-        monkeypatch.setenv("SANDBOX_SNAPSHOT_TTL_SECONDS", bad)
-        assert sandbox_snapshot_ttl_seconds() == 7 * 24 * 60 * 60, bad
+        monkeypatch.setenv("WORKSPACE_SNAPSHOT_TTL_SECONDS", bad)
+        assert snapshot_ttl_seconds() == 7 * 24 * 60 * 60, bad
 
 
 # ---------------------- upload ----------------------
 
 @pytest.mark.asyncio
 async def test_upload_stores_raw_bytes_with_ttl(mock_redis):
-    store = SandboxSnapshotStore()
-    await store.upload("thread-1", io.BytesIO(b"tarbytes"))
+    store = WorkspaceSnapshotStore()
+    await store.upload("guild-1", io.BytesIO(b"tarbytes"))
 
     mock_redis.set.assert_awaited_once()
     args, kwargs = mock_redis.set.call_args
-    assert args[0] == "dcb:sandbox_snapshot:thread-1"
+    assert args[0] == "dcb:workspace:v1:snapshot:guild-1"
     assert args[1] == b"tarbytes"
-    assert kwargs["ex"] == sandbox_snapshot_ttl_seconds()
+    assert kwargs["ex"] == snapshot_ttl_seconds()
 
 
 @pytest.mark.asyncio
@@ -93,28 +88,28 @@ async def test_upload_reads_the_stream_via_a_thread(mock_redis):
     data = MagicMock()
     data.read = MagicMock(return_value=b"tarbytes")
 
-    with patch("classes.sandbox_snapshot_store.asyncio.to_thread",
+    with patch("classes.workspace_snapshot_store.asyncio.to_thread",
                AsyncMock(return_value=b"tarbytes")) as to_thread:
-        store = SandboxSnapshotStore()
-        await store.upload("thread-1", data)
+        store = WorkspaceSnapshotStore()
+        await store.upload("guild-1", data)
 
     to_thread.assert_awaited_once_with(data.read)
 
 
 @pytest.mark.asyncio
 async def test_upload_rejects_oversized_payload(mock_redis, monkeypatch):
-    monkeypatch.setenv("SANDBOX_SNAPSHOT_MAX_BYTES", "4")
-    store = SandboxSnapshotStore()
+    monkeypatch.setenv("WORKSPACE_SNAPSHOT_MAX_BYTES", "4")
+    store = WorkspaceSnapshotStore()
     with pytest.raises(SnapshotTooLargeError):
-        await store.upload("thread-1", io.BytesIO(b"too big"))
+        await store.upload("guild-1", io.BytesIO(b"too big"))
     mock_redis.set.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_upload_accepts_payload_at_exactly_the_cap(mock_redis, monkeypatch):
-    monkeypatch.setenv("SANDBOX_SNAPSHOT_MAX_BYTES", "4")
-    store = SandboxSnapshotStore()
-    await store.upload("thread-1", io.BytesIO(b"1234"))
+    monkeypatch.setenv("WORKSPACE_SNAPSHOT_MAX_BYTES", "4")
+    store = WorkspaceSnapshotStore()
+    await store.upload("guild-1", io.BytesIO(b"1234"))
     mock_redis.set.assert_awaited_once()
 
 
@@ -123,18 +118,18 @@ async def test_upload_accepts_payload_at_exactly_the_cap(mock_redis, monkeypatch
 @pytest.mark.asyncio
 async def test_download_wraps_bytes_in_a_readable_stream(mock_redis):
     mock_redis.get.return_value = b"tarbytes"
-    store = SandboxSnapshotStore()
-    result = await store.download("thread-1")
+    store = WorkspaceSnapshotStore()
+    result = await store.download("guild-1")
     assert isinstance(result, io.IOBase)
     assert result.read() == b"tarbytes"
-    mock_redis.get.assert_awaited_once_with("dcb:sandbox_snapshot:thread-1")
+    mock_redis.get.assert_awaited_once_with("dcb:workspace:v1:snapshot:guild-1")
 
 
 @pytest.mark.asyncio
 async def test_download_missing_key_returns_an_empty_stream(mock_redis):
     mock_redis.get.return_value = None
-    store = SandboxSnapshotStore()
-    result = await store.download("thread-1")
+    store = WorkspaceSnapshotStore()
+    result = await store.download("guild-1")
     assert result.read() == b""
 
 
@@ -143,48 +138,44 @@ async def test_download_missing_key_returns_an_empty_stream(mock_redis):
 @pytest.mark.asyncio
 async def test_exists_true_when_key_present(mock_redis):
     mock_redis.exists.return_value = 1
-    store = SandboxSnapshotStore()
-    assert await store.exists("thread-1") is True
-    mock_redis.exists.assert_awaited_once_with("dcb:sandbox_snapshot:thread-1")
+    store = WorkspaceSnapshotStore()
+    assert await store.exists("guild-1") is True
+    mock_redis.exists.assert_awaited_once_with("dcb:workspace:v1:snapshot:guild-1")
 
 
 @pytest.mark.asyncio
 async def test_exists_false_when_key_absent(mock_redis):
     mock_redis.exists.return_value = 0
-    store = SandboxSnapshotStore()
-    assert await store.exists("thread-1") is False
+    store = WorkspaceSnapshotStore()
+    assert await store.exists("guild-1") is False
 
 
 # ---------------------- key namespacing ----------------------
 
-def test_different_threads_get_different_keys(mock_redis):
-    store = SandboxSnapshotStore()
+def test_different_guilds_get_different_keys(mock_redis):
+    store = WorkspaceSnapshotStore()
     assert store._key("1") != store._key("2")
-    assert store._key("1") == "dcb:sandbox_snapshot:1"
+    assert store._key("1") == "dcb:workspace:v1:snapshot:1"
 
 
 # ---------------------- delete ----------------------
 
 @pytest.mark.asyncio
-async def test_delete_removes_the_thread_key(mock_redis):
+async def test_delete_removes_the_key(mock_redis):
     mock_redis.delete = AsyncMock()
-    store = SandboxSnapshotStore()
+    store = WorkspaceSnapshotStore()
     await store.delete("42")
-    mock_redis.delete.assert_awaited_once_with("dcb:sandbox_snapshot:42")
+    mock_redis.delete.assert_awaited_once_with("dcb:workspace:v1:snapshot:42")
 
 
 @pytest.mark.asyncio
-async def test_ttl_reports_the_remaining_seconds(mock_redis):
-    mock_redis.ttl = AsyncMock(return_value=604800)
-    store = SandboxSnapshotStore()
-    assert await store.ttl("42") == 604800
-    mock_redis.ttl.assert_awaited_once_with("dcb:sandbox_snapshot:42")
+async def test_upload_returns_the_size(mock_redis):
+    assert await WorkspaceSnapshotStore().upload("guild-1", io.BytesIO(b"1234")) == 4
 
 
 @pytest.mark.asyncio
-async def test_ttl_passes_through_the_missing_key_sentinel(mock_redis):
-    # Redis answers -2 for a key that does not exist; the caller
-    # (sandbox_snapshot_remaining_seconds) turns that into "nothing saved".
-    mock_redis.ttl = AsyncMock(return_value=-2)
-    store = SandboxSnapshotStore()
-    assert await store.ttl("42") == -2
+async def test_size_is_none_without_a_snapshot(mock_redis):
+    mock_redis.strlen = AsyncMock(return_value=0)
+    assert await WorkspaceSnapshotStore().size("guild-1") is None
+    mock_redis.strlen = AsyncMock(return_value=2048)
+    assert await WorkspaceSnapshotStore().size("guild-1") == 2048

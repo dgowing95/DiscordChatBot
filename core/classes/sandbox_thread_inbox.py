@@ -36,10 +36,9 @@ synchronous: the bot is one asyncio event loop, so a function with no await
 in it is atomic with respect to every other coroutine — which is what makes
 claim_run a real check-and-set rather than the old check, await, register.
 
-This is also the concurrency guard for snapshots. Two runs in one thread would
-both persist to dcb:sandbox_snapshot:{thread_id} on teardown and the last one
-to finish would silently clobber the other, so a thread with a run claimed
-never starts a second one — the new request is forwarded into the running
+This is also the concurrency guard for a thread's job folder. Two runs in one
+thread would work in the same jobs/t<thread id>/ at once and clobber each
+other's files, so a thread with a run claimed never starts a second one — the new request is forwarded into the running
 sandbox instead (main.py returns early; run_code_sandbox has the same guard
 for the paths that bypass on_message).
 

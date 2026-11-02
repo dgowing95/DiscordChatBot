@@ -44,8 +44,10 @@ SAVING_MESSAGES = "🗂️ Saving messages to a file"
 READING_MESSAGES = "📜 Reading messages"
 PERSONALITY = "🎭 Personality updated"
 SANDBOX_STARTED = "🧵 Sandbox started"
-SANDBOX_NEW = "🐳 Sandbox · new workspace"
-SANDBOX_RESUMED = "🐳 Sandbox · resumed"
+# The run embed's title: the server's workspace was already running, or has
+# to start first (sandbox_agent.sandbox_run_title).
+SANDBOX_READY = "🐳 Workspace · ready"
+SANDBOX_STARTING = "🐳 Workspace · starting"
 
 # Under the run's embed, in a thread only: messages there reach the run.
 SANDBOX_REPLY_HINT = ("💬 Reply in this thread to change the task or ask a question. "

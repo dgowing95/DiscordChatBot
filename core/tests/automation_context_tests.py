@@ -8,7 +8,6 @@ from classes.text_llm_handler import TextLLMHandler, agent_tools
 def test_automatic_tool_set_excludes_memory_and_management(monkeypatch):
     monkeypatch.setenv("AUTOMATIONS_ENABLED", "1")
     monkeypatch.setenv("IMAGE_GEN_ENABLED", "1")
-    monkeypatch.setenv("SANDBOX_ENABLED", "1")
     names = {tool.name for tool in agent_tools(automatic=True)}
     assert {"web_search", "fetch_url", "generate_image", "run_code_sandbox", "change_personality"} <= names
     assert not any(name.endswith("memory") or "memories" in name for name in names)
