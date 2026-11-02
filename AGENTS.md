@@ -61,13 +61,19 @@ core/                  # the main bot (the app that runs in production)
     web_research.py        # web_search's I/O: DuckDuckGo, pages via web_reader, the brief
     image_review.py        # vision check of a generated image: what it shows, what's missing
     side_llm.py            # shared client + thinking-off latch for those two side calls
-    sandbox_agent.py       # nested SandboxAgent + run_sandbox_task (throwaway Docker sandbox)
-                           #   + the pure builders for what the outer model is told
-                           #   (sandbox_tool_result and friends)
+    sandbox_agent.py       # nested SandboxAgent + run_sandbox_task (in the server's
+                           #   workspace, its own jobs/<id>/ folder) + the pure builders
+                           #   for what the outer model is told (sandbox_tool_result ...)
     sandbox_progress.py    # streams sandbox commands/output to one edited Discord message
                            #   (single embed: one field per command, state-coloured)
-    sandbox_snapshot_store.py  # Redis-backed workspace snapshots, keyed by thread id
-    sandbox_inputs.py      # PURE (stdlib-only) chat files given to a run (in/): which,
+    workspace_lifecycle.py # PURE (stdlib-only) the server workspace: WORKSPACE_* settings
+                           #   and the per-guild state machine (refcount, idle stop, LRU,
+                           #   reset while busy)
+    workspace_manager.py   # one long-lived Docker container per server: start / resume /
+                           #   snapshot / stop / reset, reaper, check_docker, limits
+    workspace_snapshot_store.py  # Redis-backed workspace snapshots, one per guild
+    workspace_commands.py  # the /workspace slash command group (status, reset, progress)
+    workspace_inputs.py    # PURE (stdlib-only) chat files given to a run (in/): which,
                            #   caps, and what the sandbox / outer model are told
     sandbox_thread_inbox.py    # PURE (stdlib-only) ledger of thread messages to a run in
                                #   flight: staged events, atomic per-thread claim
@@ -140,7 +146,7 @@ charts/dis-ai-bot/     # Helm chart (credentials render into templates/secret.ya
                        #   everything else into templates/configmap.yaml); llm.engine
                        #   picks templates/llamacpp.yaml (default) or templates/strata.yaml
 pyproject.toml         # pytest configuration - why bare `pytest` works from the repo root
-docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PROFILES in .env picks
+docker-compose.yaml    # local dev (core needs the Docker socket): redis + llamacpp or strata (GPU; COMPOSE_PROFILES in .env picks
                        #   one) + diffusion (GPU) + core (mounts ./core)
                        #   + speech + voice (CPU; used when VOICE_ENABLED=1)
 .env / .env.example    # environment configuration (never commit .env)
@@ -327,14 +333,16 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
    makes a picture and then edits it within the same reply).
    Uploaded photos are never edited, which keeps "make him fatter" off photos of
    real people.
-7. Code sandbox: when enabled (`SANDBOX_ENABLED`, from the chart's
-   `sandbox.enabled`), the agent gets a `run_code_sandbox(task)` tool (no slash
-   command). It runs a nested `SandboxAgent` in a THROWAWAY Docker container via
-   `agents.sandbox.DockerSandboxClient` and returns that agent's own report.
-   The core container needs the Docker daemon socket mounted (compose: a bind
-   mount; chart: a hostPath gated on `sandbox.enabled`) plus the `docker` and
-   `websocket-client` packages. Tasks go through the content guard first, and
-   `SANDBOX_MAX_TURNS`/`SANDBOX_TIMEOUT` bound each run.
+7. Code sandbox: the agent always has a `run_code_sandbox(task)` tool. It runs
+   a nested `SandboxAgent` in the SERVER'S WORKSPACE (see "The server
+   workspace" below) and returns that agent's own report. **Docker is
+   required**: core needs the daemon's socket mounted (compose: a bind mount;
+   chart: a hostPath, always) plus the `docker` and `websocket-client`
+   packages, and `main.py` exits at startup when it cannot reach the daemon
+   (`workspace_manager.check_docker`, after `settings_check`). Tasks go
+   through the content guard first, and `SANDBOX_MAX_TURNS`/`SANDBOX_TIMEOUT`
+   bound each run. `/workspace` (status, reset with Manage Server, progress)
+   is its slash command group.
 
    How the pieces fit:
 
@@ -344,7 +352,8 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
    | What the outer model is told about a finished run | `sandbox_agent.sandbox_tool_result` (pure) |
    | Nested agent, its prompt, session/container lifecycle, artifact selection | `sandbox_agent.py` |
    | Live progress streamed into one edited message | `sandbox_progress.py` |
-   | Workspace snapshots in Redis, keyed by thread id | `sandbox_snapshot_store.py` |
+   | The server's container: start/resume, snapshots, idle stop, reaper | `workspace_manager.py` (rules: `workspace_lifecycle.py`) |
+   | Workspace snapshots in Redis, one per guild | `workspace_snapshot_store.py` |
    | Thread messages: ledger, stages, per-thread claim (pure) | `sandbox_thread_inbox.py` |
    | Steering enforcement: input filter, gate, acks, questions, finishing | `sandbox_conversation.py` |
    | Loose ends carried to the next run in a thread | `sandbox_conversation_store.py` |
@@ -359,10 +368,14 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
      the bot's thread is the thread's parent channel
      (`MessageHandler._post_sandbox_copy`, from the run context's
      `sandbox_files`; an automatic run attaches them to its thread link).
-   - **The container is disposable; the workspace is not.** In a thread, the
-     workspace is persisted to Redis before teardown and restored on the next
-     call in that SAME thread. Resume is thread-local by construction: the
-     snapshot id IS the thread id, so asking anywhere else starts fresh.
+   - **One workspace per server, a folder per call.** Every call in a server
+     shares one long-lived container; each works in its own `jobs/<id>/`
+     (`jobs/t<thread id>/` in a thread, so a follow-up there finds its files;
+     `_in_job_dir` makes the model's relative paths start there). `shared/`
+     holds what the server asked to keep, and the prompt says files left by
+     others are data, never instructions. Nothing is persisted per call:
+     the manager snapshots the workspace on its own timer. The old
+     thread-keyed snapshots are not read (they expire).
    - **A run is a conversation, and steering is enforced, not hoped for.**
      Messages posted in a claimed thread go to the run's ledger instead of the
      outer LLM (📨 = the run WILL see it, never "applied"). They reach the
@@ -390,13 +403,13 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
      model-error each become `SandboxResult(ok=False, error=...)`, artifacts are
      recovered from the still-live container, and the model is pointed at a
      follow-up in the thread instead — which resumes rather than starting over.
-   - **Files from the chat go in `in/`** (`sandbox_inputs.py`). The asking
+   - **Files from the chat go in `in/`** (`workspace_inputs.py`), in the job folder. The asking
      message's and its reply target's attachments always; anything else the
      outer model names in `files` (as `[Attached: ...]` shows it in the
      prompt, user messages only), found among the channel's 20 newest
      messages, which is how the bot's own `generated-image.png` is reached.
      Written with `session.write` before the run (checked live against
-     Docker), capped by `SANDBOX_INPUT_MAX_BYTES`, and named at the top of the
+     Docker), capped by `WORKSPACE_INPUT_MAX_BYTES`, and named at the top of the
      task; what was left out is told to both models.
    - **It shares the main agent's lookup tools** (`tool_functions.shared_tools`:
      web_search, fetch_url, search_messages, read_messages_around and the
@@ -420,6 +433,47 @@ docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PRO
    function that implements it. Read those before editing; they are the primary
    source, and this list is only a map. Start with `sandbox_agent.py`'s module
    docstring, then `run_sandbox_task`, `_deliver` and `sandbox_tool_result`.
+
+   **The server workspace** (`workspace_manager.py`, rules in the pure
+   `workspace_lifecycle.py`). One container per guild, labelled
+   `dcb.role=workspace`, `dcb.guild`, `dcb.instance` (`WORKSPACE_INSTANCE`:
+   the chart's release name, `dcb-dev` in compose, `e2e` in E2E), so the
+   reaper only removes its own. Checked live before it was built (the phase 2
+   spike; the docstrings say which check backs what):
+
+   - **Getting it**: warm in this process ("cached"), else the Redis record
+     `dcb:workspace:v1:guild:{id}` holds the SDK's serialised session state
+     and `DockerSandboxClient.resume` re-attaches to the container ("resumed";
+     survives a core restart, and starts a stopped one again), else a new
+     container. Only a NEW container is filled from the guild's snapshot
+     ("snapshot", else "fresh"). The session has **no SDK `RemoteSnapshot`**:
+     with one, `start()` after a resume restores the snapshot OVER the live
+     files whenever they differ, which would throw away everything since the
+     last timed snapshot (seen in the spike). A snapshot that cannot be
+     restored is dropped and the guild starts empty; the run says so.
+   - **Many calls at once** share it (a refcount; two `Runner.run` on one
+     session in their own folders do not mix). Nothing stops or resets it
+     while a call holds it: `WORKSPACE_MAX_WARM` evicts the least recently
+     used idle one, or makes the new call wait (up to 120 s, then
+     "unavailable"); `/workspace reset` while busy runs when the last call
+     ends, and new calls wait for it. When the last call ends, everything it
+     left running is killed (`kill -9 -1`; the container's init survives)
+     before anyone else gets it.
+   - **Snapshots** (`session.persist_workspace()`, which works while commands
+     run) on a timer when it changed (`WORKSPACE_SNAPSHOT_INTERVAL_SECONDS`),
+     before an idle stop (`WORKSPACE_IDLE_SECONDS`), and at core shutdown
+     (containers are left running for the next process). Old job folders
+     and caches are pruned first. One over `WORKSPACE_SNAPSHOT_MAX_BYTES`
+     keeps the previous snapshot, and its container is only **stopped**, not
+     removed, so nothing is lost; the next call resumes it and
+     `/workspace status` says it is too big.
+   - **Limits**: `WORKSPACE_MEMORY_LIMIT`, `WORKSPACE_CPU_LIMIT` and
+     `WORKSPACE_PIDS_LIMIT` go on every container through one wrapper of the
+     docker client's `containers.create` (the SDK has no option for them);
+     containers `resume()` makes go through it too.
+   - **Kubernetes**: core talks to its node's daemon. A core pod that moves
+     node finds its container gone there and starts from the snapshot; the
+     old one is reaped when a core pod runs on that node again.
 
 8. What's New and /help: after the first successful reply in a guild on a
    new version, `main.maybe_announce_whats_new` posts that version's feature
@@ -677,7 +731,7 @@ needs an entry there, gated with `requires` when it can be switched off;
    versions of a rule follows neither reliably. So when adding guidance, edit
    the existing home rather than restating it nearby — the comment block above
    `SANDBOX_INSTRUCTIONS` records which bullets were merged and why.
-   Sizes worth re-measuring before adding: `SANDBOX_INSTRUCTIONS` ~3890 chars
+   Sizes worth re-measuring before adding: `SANDBOX_INSTRUCTIONS` ~3930 chars
    formatted (pinned by a test, ceiling 3950), `run_code_sandbox` ~2000
    including its JSON schema.
 
@@ -771,21 +825,26 @@ something, and that every `values.yaml` key is used by a template.
 | `IMAGE_REVIEW_ENABLED` | `0`/`false` posts generated images unchecked (default: on). Chart: `diffusion.review.enabled` |
 | `IMAGE_REVIEW_RETRIES` | extra attempts when the check finds something asked for missing (default 1, max 2; `0` = check only, so captions stay honest). Each costs a generation plus another check. Chart: `diffusion.review.retries` |
 | `IMAGE_REVIEW_MODEL` / `IMAGE_REVIEW_LLM_HOST` / `IMAGE_REVIEW_LLM_API_KEY` / `IMAGE_REVIEW_TIMEOUT` | the check's own LLM connection — it must be a vision model; each falls back to the brain's (`BRAIN_*`, then `LLM_*`), the key only for the same host (timeout default 60s). Chart: `diffusion.review.*` (the key via secret.yaml) |
-| `SANDBOX_ENABLED` | `0`/`false` removes the `run_code_sandbox` tool from the LLM (default: on). Chart: `sandbox.enabled` also removes the Docker-socket hostPath mount |
-| `SANDBOX_IMAGE` | container image for the sandbox workspace, pulled once onto the daemon (default `python:3.14-slim`). Chart: `sandbox.image` |
 | `SANDBOX_MAX_TURNS` | max model turns for one sandbox task (default 10). Chart: `sandbox.maxTurns` |
-| `SANDBOX_TIMEOUT` | wall-clock seconds before a sandbox task is stopped and its container removed (default 600). Chart: `sandbox.timeout` |
+| `SANDBOX_TIMEOUT` | wall-clock seconds before a sandbox task is stopped (default 600). Chart: `sandbox.timeout` |
+| `WORKSPACE_IMAGE` | the server workspace's container image, pulled at startup if missing (default `python:3.14-slim`). Chart: `brain.workspace.image` |
+| `WORKSPACE_IDLE_SECONDS` | seconds a server's workspace stays running after its last task before it is saved and stopped (default 900). Chart: `brain.workspace.idleSeconds` |
+| `WORKSPACE_SNAPSHOT_INTERVAL_SECONDS` | seconds between saves of a running workspace that changed; `0` = only when it stops (default 1800). Chart: `brain.workspace.snapshotIntervalSeconds` |
+| `WORKSPACE_MAX_WARM` | workspaces running at once in this core process; the least recently used idle one stops first, and a task waits rather than stop a busy one (default 4). Chart: `brain.workspace.maxWarm` |
+| `WORKSPACE_JOB_RETENTION_HOURS` | task folders (`jobs/<id>/`) older than this are deleted before each save (default 72); a thread's run record is kept as long. Chart: `brain.workspace.jobRetentionHours` |
+| `WORKSPACE_MEMORY_LIMIT` / `WORKSPACE_CPU_LIMIT` / `WORKSPACE_PIDS_LIMIT` | per container: memory in Docker notation (`4g`, `512m`; swap capped at the same figure), CPUs (`2`, `0.5`), processes (default 512, `0` = none); empty = no cap. The containers run on the node's Docker daemon, outside Kubernetes accounting. Chart: `brain.workspace.memoryLimit` / `cpuLimit` / `pidsLimit` |
+| `WORKSPACE_INSTANCE` | label on this bot's containers, so two bots on one daemon never remove each other's (default `dcb-dev`). The chart sets the release name |
+| `WORKSPACE_PREWARM` | `1`: start a server's workspace when it gets a message (default off; nothing reads it yet: the trigger comes with the brain). Chart: `brain.workspace.prewarm` |
 | `BRAIN_MODEL` | model id for the brain (the agent in the code sandbox); empty (default) = the bot's `LLM_MODEL`. Chart: `brain.model` |
 | `BRAIN_LLM_HOST` | base URL of the brain's LLM (core appends `/v1`); empty (default) = `LLM_HOST`. E.g. `https://openrouter.ai/api` for OpenRouter. Chart: `brain.llmHost` |
 | `BRAIN_LLM_API_KEY` | API key for the brain's LLM; empty (default) = `LLM_API_KEY`, but only when the brain's host is `LLM_HOST`'s: a brain on another server with no key of its own sends none (startup warns). Chart: `brain.apiKey` (via secret.yaml) |
 | `BRAIN_REASONING_EFFORT` | the brain's `reasoning_effort` (low/medium/high, default medium). Chart: `brain.reasoningEffort` |
 | `SANDBOX_ASK_USER_TIMEOUT` | max seconds the sandbox's `ask_user` tool waits for a reply in its thread before telling the model to proceed on its own (default 300); also clamped to whatever of the run's own `SANDBOX_TIMEOUT` budget remains. Chart: `sandbox.askUserTimeout` |
-| `SANDBOX_PERSIST_TIMEOUT_SECONDS` | seconds allowed to persist a thread's workspace snapshot to Redis on container teardown, after `SANDBOX_TIMEOUT` has already elapsed (default 180 — generous since the `Memory` capability's own extraction runs here too). Chart: `sandbox.persistTimeout` |
+| `WORKSPACE_SNAPSHOT_TIMEOUT_SECONDS` | seconds allowed for one workspace save, and for all of them when core shuts down (default 120). Chart: `brain.workspace.snapshotTimeout` |
 | `BRAIN_CALL_TIMEOUT_SECONDS` | wall-clock seconds ONE brain model call may take, the client's two retries included (default 600), like `PERSONA_CALL_TIMEOUT_SECONDS`; also its per-read timeout. Applied by `LanedModel` after the lane wait; that wall-clock bound is what catches a server that dribbles keep-alive padding (OpenRouter's non-streaming responses), which a per-read timeout never trips. Chart: `brain.callTimeout` |
-| `SANDBOX_SNAPSHOT_MAX_BYTES` | max size of one thread's stored workspace snapshot in Redis (default 50MB). Chart: `sandbox.snapshotMaxBytes` |
-| `SANDBOX_INPUT_MAX_BYTES` | most bytes of chat files copied into a run's `in/`, all together (default 25MB; at most 10 files). Kept under the snapshot cap, since `in/` is saved with the workspace. Chart: `sandbox.inputMaxBytes` |
-| `SANDBOX_SNAPSHOT_TTL_SECONDS` | how long an unused thread's workspace snapshot survives in Redis (default 604800 = 7 days). Chart: `sandbox.snapshotTtlSeconds` |
-| `SANDBOX_MEMORY_LIMIT` | memory cap for each sandbox container, Docker notation (`4g`, `512m`; swap capped at the same figure); empty (default) = no cap. The containers run on the node's Docker daemon, outside Kubernetes accounting. The SDK has no option for it, so `build_sandbox_client` wraps the docker client's `containers.create`. Chart: `sandbox.memoryLimit` |
+| `WORKSPACE_SNAPSHOT_MAX_BYTES` | max size of one server's saved workspace in Redis (default 50MB); over it the previous save is kept and the container is stopped, not removed. Chart: `brain.workspace.snapshotMaxBytes` |
+| `WORKSPACE_INPUT_MAX_BYTES` | most bytes of chat files copied into a task's `in/`, all together (default 25MB; at most 10 files). Kept under the snapshot cap, since `in/` is saved with the workspace. Chart: `brain.workspace.inputMaxBytes` |
+| `WORKSPACE_SNAPSHOT_TTL_SECONDS` | how long an unused server's saved workspace survives in Redis (default 604800 = 7 days). Chart: `brain.workspace.snapshotTtlSeconds` |
 | `VOICE_ENABLED` | `1`/`true` turns voice calls on: `/voice`, the join/leave tools and the bridge to the sidecar (default: off in code; the chart sets it from `voice.enabled`, default true, which also adds the sidecar container and the speech pod/PVC |
 | `VOICE_BRIDGE_URL` | the voice sidecar's WebSocket (default `ws://voice:8765`; the chart sets `ws://127.0.0.1:<voice.bridgePort>`, same pod). The sidecar reads `VOICE_BRIDGE_HOST`/`VOICE_BRIDGE_PORT` to bind it |
 | `VOICE_BRIDGE_TOKEN` | optional shared secret: when set, the sidecar refuses a bridge connection that does not send it (core sends it as a Bearer header). For compose, where the bridge listens on the whole compose network; the chart binds it to localhost in the core pod and leaves it unset |
@@ -933,8 +992,9 @@ curl -sS -X POST "$TEST_WEBHOOK_URL" \
 `speechservice/`, `voicesidecar/`, `diffusionservice/` or `e2e/`. It starts
 the PR's bot from source (`e2e/start_stack.sh`) against a real LLM and its
 own CPU image service and talks to it through a webhook in a private test server
-(`e2e/run_checks.py`): chat, the memory tool, an image, a poll, slash command
-sync, the speech service, and a voice call driven by `VOICE_DEV_INJECT`. It
+(`e2e/run_checks.py`): chat, the memory tool, an image, a poll, a code task
+in the server workspace (on the runner's own Docker), slash command sync, the
+speech service, and a voice call driven by `VOICE_DEV_INJECT`. It
 checks structure (a reply arrived, a fact is in Redis, a PNG was attached),
 never wording. `e2e/README.md` lists every check and its configuration. A
 failure shows in the run's step summary, and the full logs are in its
@@ -969,8 +1029,9 @@ failure shows in the run's step summary, and the full logs are in its
     with `review.yml` by the owner's choice, accepting that a PR (a
     malicious dependency bump included) could read it or spend its quota.
     If one ever does, rotate it in both the Actions and the Dependabot
-    secrets, and consider a key used only here. The code sandbox is still
-    off in E2E.
+    secrets, and consider a key used only here. Core's server workspaces
+    run as containers on the runner's Docker too, which is fine for the
+    same reason.
   - Never switch this to `pull_request_target` to reach secrets.
   - Only one run at a time across the repository (the e2e job's
     `concurrency` group): two bots on one token would both answer. GitHub

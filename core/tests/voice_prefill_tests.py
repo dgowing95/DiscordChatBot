@@ -29,7 +29,6 @@ class Captured(Exception):
 @pytest.fixture
 def captured(monkeypatch):
     monkeypatch.setenv("VOICE_ENABLED", "1")
-    monkeypatch.setenv("SANDBOX_ENABLED", "0")
     monkeypatch.setenv("IMAGE_GEN_ENABLED", "0")
     calls = []
     client = AsyncOpenAI(base_url="http://llm.invalid/v1", api_key="x")

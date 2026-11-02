@@ -27,7 +27,6 @@ def _import_main():
 
 def _all_on(monkeypatch):
     monkeypatch.setenv("IMAGE_GEN_ENABLED", "1")
-    monkeypatch.setenv("SANDBOX_ENABLED", "1")
     monkeypatch.setenv("AUTOMATIONS_ENABLED", "1")
     monkeypatch.setenv("VOICE_ENABLED", "1")
     monkeypatch.setenv("EVENTS_ENABLED", "1")
@@ -73,13 +72,13 @@ def test_every_slash_command_has_help(monkeypatch):
     assert set(trees[0].names) == help_catalog.documented_commands()
 
 
-@pytest.mark.parametrize("image, sandbox", [(True, True), (False, False), (True, False)])
-def test_help_fits_discord_limits(image, sandbox, monkeypatch):
+@pytest.mark.parametrize("image", [True, False])
+def test_help_fits_discord_limits(image, monkeypatch):
     # Every optional entry on, so the longest listing is the one measured.
     monkeypatch.setenv("AUTOMATIONS_ENABLED", "1")
     monkeypatch.setenv("VOICE_ENABLED", "1")
     monkeypatch.setenv("EVENTS_ENABLED", "1")
-    data = help_catalog.help_embed_data(image, sandbox)
+    data = help_catalog.help_embed_data(image)
     for field in data["fields"]:
         assert 0 < len(field["value"]) <= whats_new.MAX_FIELD_VALUE, field["name"]
     total = len(data["title"]) + sum(len(f["name"]) + len(f["value"]) for f in data["fields"])
@@ -89,12 +88,13 @@ def test_help_fits_discord_limits(image, sandbox, monkeypatch):
 
 def test_disabled_features_are_hidden(monkeypatch):
     monkeypatch.setenv("EVENTS_ENABLED", "0")
-    text = str(help_catalog.help_embed_data(False, False))
+    text = str(help_catalog.help_embed_data(False))
     assert "Events" not in text
     assert "/generate_image" not in text and "Make images" not in text
-    assert "/sandbox_progress_updates" not in text and "Run code" not in text
+    # The workspace is always there: Docker is required.
+    assert "/workspace" in text and "Run code" in text
     monkeypatch.setenv("EVENTS_ENABLED", "1")
-    text = str(help_catalog.help_embed_data(True, True))
+    text = str(help_catalog.help_embed_data(True))
     assert "/generate_image" in text and "Run code" in text and "Events" in text
 
 

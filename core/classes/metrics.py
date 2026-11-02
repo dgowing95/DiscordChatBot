@@ -145,6 +145,23 @@ Metrics (scraped by Prometheus from the /metrics HTTP endpoint):
            Extra runner passes started because a run tried to finish with
            thread input unanswered (or outdated files attached).
 
+  Server workspace (classes/workspace_manager.py):
+  Counter  discord_bot_workspace_starts_total{kind}
+  Histogram discord_bot_workspace_start_seconds{kind}
+           Each acquisition of a server's workspace, and how long it took to
+           be ready. kind: cached (already warm here) / resumed (re-attached
+           to its running container) / snapshot (a new container filled from
+           the snapshot) / fresh (a new, empty one).
+  Gauge    discord_bot_workspaces_warm
+           Server workspaces warm in this core process (WORKSPACE_MAX_WARM caps it).
+  Histogram discord_bot_workspace_snapshot_seconds / discord_bot_workspace_snapshot_bytes
+           Each saved snapshot's time and size.
+  Counter  discord_bot_workspace_snapshot_failures_total{reason}
+           Snapshots not saved: too_large (over WORKSPACE_SNAPSHOT_MAX_BYTES;
+           the previous one is kept) / timeout / error.
+  Counter  discord_bot_workspace_reaped_total
+           Workspace containers removed because no live record names them.
+
 Context-window note: this is the PROMPT side, which is what has to fit before
 generation starts. The server-side counterpart is llama.cpp's own
 `llamacpp:n_tokens_max` - "high watermark of the context size observed", which
@@ -498,6 +515,64 @@ sandbox_continuations_total = Counter(
     "discord_bot_sandbox_continuations_total",
     "Extra sandbox runner passes started to account for thread input",
 )
+
+# The server workspace (classes/workspace_manager.py).
+workspace_starts_total = Counter(
+    "discord_bot_workspace_starts_total",
+    "Server workspace acquisitions, by how the workspace was made ready",
+    ["kind"],
+)
+workspace_start_seconds = Histogram(
+    "discord_bot_workspace_start_seconds",
+    "Seconds to make a server workspace ready, by kind",
+    ["kind"],
+    buckets=(0.01, 0.1, 0.5, 1, 2, 5, 10, 30, 60, 120),
+)
+workspaces_warm = Gauge(
+    "discord_bot_workspaces_warm", "Server workspaces warm in this core process",
+)
+workspace_snapshot_seconds = Histogram(
+    "discord_bot_workspace_snapshot_seconds",
+    "Seconds to save one server workspace snapshot",
+    buckets=(0.1, 0.5, 1, 2, 5, 10, 30, 60, 120),
+)
+workspace_snapshot_bytes = Histogram(
+    "discord_bot_workspace_snapshot_bytes",
+    "Size of each saved server workspace snapshot",
+    buckets=(10_000, 100_000, 1_000_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000,
+             100_000_000),
+)
+workspace_snapshot_failures_total = Counter(
+    "discord_bot_workspace_snapshot_failures_total",
+    "Server workspace snapshots that were not saved, by reason",
+    ["reason"],
+)
+workspace_reaped_total = Counter(
+    "discord_bot_workspace_reaped_total",
+    "Workspace containers removed by the reaper (no live record names them)",
+)
+
+
+def observe_workspace_start(kind: str, seconds: float) -> None:
+    workspace_starts_total.labels(kind=kind).inc()
+    workspace_start_seconds.labels(kind=kind).observe(seconds)
+
+
+def set_workspaces_warm(n: int) -> None:
+    workspaces_warm.set(n)
+
+
+def observe_workspace_snapshot(seconds: float, size: int) -> None:
+    workspace_snapshot_seconds.observe(seconds)
+    workspace_snapshot_bytes.observe(size)
+
+
+def inc_workspace_snapshot_failure(reason: str) -> None:
+    workspace_snapshot_failures_total.labels(reason=reason).inc()
+
+
+def inc_workspace_reaped(n: int = 1) -> None:
+    workspace_reaped_total.inc(n)
 
 # ---------------------------------------------------------------------------
 # Convenience helpers (labels are always strings; IDs come in as ints)

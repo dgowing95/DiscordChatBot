@@ -16,7 +16,6 @@ from classes.image_generation import (
     create_image,
     image_generation_enabled,
 )
-from classes.sandbox_agent import sandbox_enabled
 from classes import attachment_cache, help_catalog, sandbox_thread_inbox, settings_check, whats_new
 from classes.common import embed_from_data
 from classes.redis_client import text_client
@@ -80,6 +79,10 @@ class Bot(discord.Client):
         from classes.voice_bridge import get_bridge
         if get_bridge() is not None:
             await get_bridge().close()
+        # Changed workspaces are snapshotted; their containers keep running
+        # for the next process to re-attach to.
+        from classes.workspace_manager import workspaces
+        await workspaces().shutdown()
         await super().close()
 
 
@@ -111,6 +114,8 @@ async def register_commands():
     if voice_settings()["enabled"]:
         from classes.voice_commands import register_voice_commands
         register_voice_commands(command_tree, client)
+    from classes.workspace_commands import register_workspace_commands
+    register_workspace_commands(command_tree)
 
     @command_tree.command(name="system", description="Change the behaviour/personality of the bot")
     async def change_system(ctx, system: str):
@@ -141,7 +146,7 @@ async def register_commands():
     # prompt), and nobody else's channel fills up with a help listing.
     @command_tree.command(name="help", description="See everything the bot can do")
     async def help_cmd(ctx):
-        data = help_catalog.help_embed_data(image_generation_enabled(), sandbox_enabled())
+        data = help_catalog.help_embed_data(image_generation_enabled())
         await ctx.response.send_message(embed=embed_from_data(data), ephemeral=True)
 
     @command_tree.command(name="whats_new", description="See the new features in the current version")
@@ -161,19 +166,6 @@ async def register_commands():
                         "so there are no release notes. Try /help.",
                 ephemeral=True)
 
-    # Only offered when the code sandbox is enabled (SANDBOX_ENABLED; set
-    # from the helm chart's sandbox.enabled). Per-guild toggle, default off:
-    # when true, run_code_sandbox streams the sandbox's commands and output
-    # to the channel in a live-updating message; when false it only sends
-    # the one static run embed.
-    if sandbox_enabled():
-
-        @command_tree.command(name="sandbox_progress_updates",
-                              description="Enable/disable live progress updates (commands & output) for code sandbox runs in this server")
-        async def change_sandbox_progress_updates(ctx, enabled: bool):
-            await config.update_setting("sandbox_progress_updates", str(enabled), ctx.guild.id)
-            await ctx.response.send_message(content=f"Sandbox progress updates are now: \"{enabled}\"")
-    
     # Only offered when the diffusion service is enabled (IMAGE_GEN_ENABLED;
     # set from the helm chart's diffusion.enabled).
     if image_generation_enabled():
@@ -225,6 +217,11 @@ async def on_ready():
     # measured against; the same read publishes each total context gauge.
     if not getattr(client, "background_tasks", None):
         client.background_tasks = [client.loop.create_task(refresh_slot_context_forever())]
+        # The server workspaces' timed snapshots, idle stops and reaper
+        # (classes/workspace_manager.py); the first tick also reaps what an
+        # earlier process left behind.
+        from classes.workspace_manager import workspaces
+        client.background_tasks.append(client.loop.create_task(workspaces().run_forever()))
         if automation_settings()["enabled"]:
             client.background_tasks.append(client.loop.create_task(schedule_forever()))
         if voice_settings()["enabled"]:
@@ -287,9 +284,8 @@ async def on_message(message):
     # A sandbox run in flight in this thread takes the message instead of
     # the outer LLM, so people can steer a run while it happens ("make it
     # blue instead") without an @mention. Returning here is also the
-    # concurrency guard: a second run in the same thread would race the
-    # first to persist dcb:sandbox_snapshot:{thread_id} on teardown and
-    # silently clobber it. Answers to the sandbox's ask_user questions come
+    # concurrency guard: a second run in the same thread would work in the
+    # first one's job folder at the same time and clobber its files. Answers to the sandbox's ask_user questions come
     # through here too — the ledger is the one pipeline for thread input.
     if (message.author != client.user and not message.author.bot
             and sandbox_thread_inbox.is_run_active(message.channel.id)):
@@ -605,5 +601,11 @@ if __name__ == "__main__":
         sys.exit(1)
     for warning in role_warnings():
         logger.warning(warning)
+    # Docker is required: every server's workspace is a container on it.
+    from classes.workspace_manager import check_docker
+    docker_error = check_docker()
+    if docker_error:
+        logger.error(docker_error)
+        sys.exit(1)
     automation_settings()
     client.run(os.environ['DISCORD_TOKEN'])

@@ -7,7 +7,7 @@ CI"); this file covers how it runs.
 
 | File | What it does |
 |---|---|
-| `start_stack.sh` | Starts Redis, the speech service, the voice sidecar, core and (in CI, always) a CPU image service with a tiny model, all from the checked-out source. Logs go to `e2e/logs/`. |
+| `start_stack.sh` | Starts Redis, the speech service, the voice sidecar, core and (in CI, always) a CPU image service with a tiny model, all from the checked-out source. Core's server workspaces run on the runner's own Docker (labelled `dcb.instance=e2e`). Logs go to `e2e/logs/`. |
 | `run_checks.py` | Talks to the bot through a webhook in a private test server and checks the replies through Discord's REST API. |
 | `stop_stack.sh` | Stops everything `start_stack.sh` started. |
 
@@ -18,11 +18,12 @@ Structure, never wording:
 | Check | Passes when |
 |---|---|
 | speech service | A sentence sent to `/speak` and back through `/transcribe` comes back with its words |
-| slash commands | core's log shows `help`, `whats_new`, `system`, `generate_image` (and `voice`) synced |
+| slash commands | core's log shows `help`, `whats_new`, `system`, `generate_image`, `workspace` (and `voice`) synced |
 | chat reply | The bot answers a mention with text, and does not mark it ❌ |
 | memory tool | After "remember my favourite colour is teal", Redis holds a memory with "teal" |
 | image | The reply has a `generated-image.png` PNG attachment |
 | poll | The bot posts a real Discord poll with at least two answers |
+| workspace task | Asked to make a CSV in its code sandbox, the bot used the server workspace (`discord_bot_workspace_starts_total` went up) and replied with a `.csv` attachment |
 | voice call | `!voice_join` joins the voice channel (Discord shows it), the greeting is spoken, a spoken question is answered aloud, and "leave" ends the call |
 | no tracebacks | core's log has no Python traceback |
 

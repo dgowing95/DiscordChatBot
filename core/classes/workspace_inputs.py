@@ -1,4 +1,4 @@
-"""Which chat files a sandbox run is given, and how each side is told (PURE,
+"""Which chat files a workspace run is given, and how each side is told (PURE,
 stdlib only).
 
 The sandbox used to receive nothing but the `task` string, so anything it was
@@ -7,8 +7,8 @@ the outer model (when it could see it at all -- non-image attachments never
 reached the prompt), and a picture the bot had just drawn not at all. So
 "make a GIF from that picture" or "chart this spreadsheet" could not work.
 
-Now run_code_sandbox copies files into the workspace's `in/` folder before the
-run starts:
+Now run_code_sandbox copies files into its job folder's `in/` (jobs/<id>/in/)
+before the run starts:
 
   * always, the attachments of the message that asked and of the message it
     replies to -- the user plainly meant those;
@@ -17,14 +17,14 @@ run starts:
     how the bot's own pictures are reached: every one is called
     image_generation.GENERATED_IMAGE_FILENAME, so naming it gets the newest.
 
-Caps: MAX_INPUT_FILES files, and SANDBOX_INPUT_MAX_BYTES (default 25MB) in
-total, kept well under SANDBOX_SNAPSHOT_MAX_BYTES since `in/` is saved with
-the workspace for the next run in the thread. What was left out, and why, is
+Caps: MAX_INPUT_FILES files, and WORKSPACE_INPUT_MAX_BYTES (default 25MB) in
+total, kept well under WORKSPACE_SNAPSHOT_MAX_BYTES since `in/` is saved with
+the server's workspace (until the job folder is pruned). What was left out, and why, is
 told to both the sandbox model (so it does not go looking) and the outer one
 (so it can tell the user).
 
 tool_functions.py does the downloading and sandbox_agent.run_sandbox_task the
-writing; core/tests/sandbox_inputs_tests.py covers this module.
+writing; core/tests/workspace_inputs_tests.py covers this module.
 """
 import os
 import re
@@ -43,7 +43,7 @@ _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
 def max_input_bytes() -> int:
     try:
-        value = int(os.environ.get("SANDBOX_INPUT_MAX_BYTES", "").strip())
+        value = int(os.environ.get("WORKSPACE_INPUT_MAX_BYTES", "").strip())
     except ValueError:
         return DEFAULT_MAX_BYTES
     return value if value > 0 else DEFAULT_MAX_BYTES

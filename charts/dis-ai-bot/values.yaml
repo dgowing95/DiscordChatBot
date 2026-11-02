@@ -293,43 +293,16 @@ voice:
   ttsConcurrency: 2
   queueSize: 16
 
-# Code sandbox (run_code_sandbox LLM tool): a nested SandboxAgent runs each
-# task in a throwaway Docker container ON THE NODE (agents.sandbox
-# DockerSandboxClient). Requires a Docker daemon on the node: its socket is
-# mounted into the core pod via hostPath (sandbox.dockerSocketPath).
-# enabled: false removes the mount and switches the tool off (SANDBOX_ENABLED=false).
+# Code sandbox (run_code_sandbox LLM tool): its run limits. The work happens
+# in the server's workspace container (brain.workspace below).
 sandbox:
-  enabled: true
-  # Container image for the sandbox workspace (pulled once onto the node)
-  image: python:3.14-slim
   # Max model turns for one sandbox task
   maxTurns: 10
-  # Wall-clock seconds before a sandbox task is stopped (container is removed)
+  # Wall-clock seconds before a sandbox task is stopped
   timeout: 600
   # Max seconds the sandbox's ask_user tool waits for a reply in its Discord
   # thread before telling the model to proceed on its own judgement
   askUserTimeout: 300
-  # Wall-clock seconds allowed to persist a thread's workspace snapshot to
-  # Redis on container teardown (runs AFTER timeout above; generous because,
-  # with the Memory capability, this is also where its own two extra
-  # local-model calls run)
-  persistTimeout: 180
-  # Max size (bytes) of one thread's stored workspace snapshot in Redis
-  snapshotMaxBytes: 50000000
-  # Most bytes of chat files (uploads, the bot's own pictures) copied into a
-  # run's in/ folder, all files together. Keep it well under snapshotMaxBytes:
-  # in/ is saved with the workspace.
-  inputMaxBytes: 25000000
-  # How long an unused thread's workspace snapshot survives in Redis (seconds)
-  snapshotTtlSeconds: 604800
-  # Node path of the Docker socket to mount into the core pod
-  dockerSocketPath: /var/run/docker.sock
-  # Memory cap for each sandbox container, in Docker's notation (e.g. 4g,
-  # 512m); swap is capped at the same figure. Empty = no cap. The containers
-  # run on the node's Docker daemon, outside Kubernetes, so no pod limit or
-  # scheduler accounting covers them: without a cap one heavy task can take
-  # RAM that a pod on the node (Strata's experts, say) was planned around.
-  memoryLimit: ""
 
 # llama.cpp server (replaces Ollama); which model it serves: the `model` value below
 llamacpp:
@@ -509,6 +482,50 @@ brain:
   # included; also its per-read timeout. Bounds a server that keeps the
   # connection alive with padding while it works.
   callTimeout: 600
+  # The server workspace: ONE long-lived Docker container per Discord server,
+  # on the NODE's Docker daemon (its socket is always mounted into the core
+  # pod: Docker is required, and core exits at startup without it). Kept
+  # between tasks and core restarts, saved to Redis on a timer and before it
+  # stops, stopped after idleSeconds unused. Each task gets its own folder;
+  # shared/ holds what the server keeps. Containers are labelled with the
+  # release name, so two releases on one node never remove each other's.
+  workspace:
+    # Container image (pulled onto the node at startup if missing)
+    image: python:3.14-slim
+    # Node path of the Docker socket to mount into the core pod
+    dockerSocketPath: /var/run/docker.sock
+    # Per container. memoryLimit in Docker's notation (4g, 512m; swap capped
+    # at the same figure), cpuLimit in CPUs (e.g. 2 or 0.5), pidsLimit in
+    # processes (0 = none). Empty = no cap. The containers run outside
+    # Kubernetes, so no pod limit or scheduler accounting covers them:
+    # without a cap one heavy task can take RAM that a pod on the node
+    # (Strata's experts, say) was planned around.
+    memoryLimit: ""
+    cpuLimit: ""
+    pidsLimit: 512
+    # Seconds unused before a workspace is saved and stopped
+    idleSeconds: 900
+    # Seconds between saves of a running workspace that changed (0 = only
+    # when it stops)
+    snapshotIntervalSeconds: 1800
+    # Workspaces running at once in this core pod; the least recently used
+    # idle one stops first, and a task waits rather than stop a busy one
+    maxWarm: 4
+    # Task folders older than this many hours are deleted
+    jobRetentionHours: 72
+    # Max size (bytes) of one server's saved workspace in Redis; over it the
+    # previous save is kept and /workspace status says so
+    snapshotMaxBytes: 50000000
+    # How long an unused server's saved workspace survives in Redis (seconds)
+    snapshotTtlSeconds: 604800
+    # Seconds allowed for one save, and for all of them when core shuts down
+    snapshotTimeout: 120
+    # Most bytes of chat files (uploads, the bot's own pictures) copied into a
+    # task's in/ folder, all files together. Keep it well under
+    # snapshotMaxBytes: in/ is saved with the workspace.
+    inputMaxBytes: 25000000
+    # Start a server's workspace as soon as it gets a message (not used yet)
+    prewarm: false
 # Which chat messages go into a prompt (core/classes/history_policy.py).
 #   limit:    messages in a window, the trigger included.
 #   mode:

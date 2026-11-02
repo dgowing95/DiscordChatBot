@@ -10,7 +10,7 @@ from classes import tool_embeds as te
 def test_titles_name_the_action_and_fit_discord():
     titles = [te.WEB_SEARCH, te.READING_PAGE, te.REMEMBERED, te.DRAWING, te.EDITING,
               te.SEARCHING_MESSAGES, te.SAVING_MESSAGES, te.READING_MESSAGES,
-              te.PERSONALITY, te.SANDBOX_STARTED, te.SANDBOX_NEW, te.SANDBOX_RESUMED]
+              te.PERSONALITY, te.SANDBOX_STARTED, te.SANDBOX_READY, te.SANDBOX_STARTING]
     assert "Tool Usage" not in titles
     assert len(set(titles)) == len(titles)
     assert all(len(t) <= 256 for t in titles)

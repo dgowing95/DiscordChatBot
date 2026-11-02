@@ -103,9 +103,10 @@ services:
     build: ./core
     volumes:
       - ./core:/app
-      # Docker socket: the run_code_sandbox tool runs each task in a throwaway
-      # container on the local daemon (agents.sandbox DockerSandboxClient).
-      # To disable the sandbox: SANDBOX_ENABLED=0 in .env (the mount can stay).
+      # Docker socket (required): each Discord server's workspace is a
+      # long-lived container on the local daemon (agents.sandbox
+      # DockerSandboxClient, classes/workspace_manager.py). Core exits at
+      # startup without it. List them: docker ps --filter label=dcb.role=workspace
       - /var/run/docker.sock:/var/run/docker.sock
     # The same file compose read for ${...} above: `docker compose --env-file
     # .env.v3 up` would otherwise still hand core the plain .env. Set

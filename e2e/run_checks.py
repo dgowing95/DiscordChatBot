@@ -9,8 +9,9 @@ API. It is what lets a dependency bump be merged without trying it by hand.
 
 What is checked is STRUCTURE, never wording: the model may phrase a reply
 however it likes, but a reply must arrive, a remembered fact must be in
-Redis, a picture must be a PNG attachment, a poll must be a poll, the call
-must be joined and spoken in. Each case reads the bot's own Prometheus
+Redis, a picture must be a PNG attachment, a poll must be a poll, a code
+task must hand back its file from the server workspace (a container on the
+runner's own Docker), the call must be joined and spoken in. Each case reads the bot's own Prometheus
 metrics to know when the message has been fully handled, and how it ended
 (reply_latency is counted once per message, by outcome), so no case waits
 on a guess.
@@ -50,6 +51,9 @@ WAKE_PHRASE = "hey tester"
 # CPU generation (plus a vision check of it, against a real image service).
 REPLY_TIMEOUT = 300
 IMAGE_TIMEOUT = 420
+# A workspace task: the container may start cold (and its image be pulled),
+# then a brain run of a few model calls.
+WORKSPACE_TIMEOUT = 420
 READY_TIMEOUT = 600
 
 LOG_DIR = Path(os.environ.get("E2E_LOG_DIR", Path(__file__).parent / "logs"))
@@ -268,6 +272,21 @@ class Run:
             raise CheckFailed(f"the poll has fewer than two answers: {answers}")
         return f"{polls[0]['question'].get('text', '')!r} {answers}"
 
+    async def workspace(self):
+        """A code task in the server workspace: the file must come back."""
+        starts = lambda: metric(self.session, "discord_bot_workspace_starts_total")
+        before = await starts()
+        messages = await self.ask(
+            "Use your code sandbox to write a CSV file named squares.csv with the numbers "
+            "1 to 5 and their squares, and send me the file.", WORKSPACE_TIMEOUT)
+        if await starts() <= before:
+            raise CheckFailed("the server workspace was never used (no run_code_sandbox call?)")
+        for message in messages:
+            for attachment in message.get("attachments", []):
+                if attachment["filename"].endswith(".csv") and attachment.get("size", 0) > 0:
+                    return f"{attachment['filename']}, {attachment['size']} bytes"
+        raise CheckFailed("no .csv attachment in the reply")
+
     async def slash_commands(self):
         # From this run's log, not GET /applications/.../commands: the
         # registered set outlives the process, so an earlier run's sync
@@ -275,7 +294,7 @@ class Run:
         synced = await wait_until(
             lambda: set(re.findall(r"Command '([^']+)' synced", core_log())),
             120, "the slash commands to sync")
-        expected = {"help", "whats_new", "system", "generate_image"}
+        expected = {"help", "whats_new", "system", "generate_image", "workspace"}
         if self.voice_channel_id:
             expected.add("voice")
         missing = expected - synced
@@ -400,6 +419,7 @@ async def main() -> int:
             # and the E2E LLM may be a text-only model. (Voice turns use no
             # channel history.)
             await run.case("poll", run.poll)
+            await run.case("workspace task", run.workspace)
             await run.case("image", run.image)
             if voice_channel_id:
                 await run.case("voice call", run.voice)

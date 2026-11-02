@@ -52,8 +52,8 @@ def test_no_preamble_without_loose_ends_or_for_an_unknown_version():
 
 
 @pytest.mark.asyncio
-async def test_save_uses_the_snapshot_ttl_and_trims_to_size(monkeypatch):
-    monkeypatch.setenv("SANDBOX_SNAPSHOT_TTL_SECONDS", "123")
+async def test_save_keeps_it_as_long_as_the_job_folder_and_trims_to_size(monkeypatch):
+    monkeypatch.setenv("WORKSPACE_JOB_RETENTION_HOURS", "2")
     monkeypatch.setattr(store_mod, "MAX_RECORD_BYTES", 400)
     redis = MagicMock(set=AsyncMock())
     record = build_record(_rows(*[("x" * 100, "late") for _ in range(8)]), outcome="ok")
@@ -62,7 +62,7 @@ async def test_save_uses_the_snapshot_ttl_and_trims_to_size(monkeypatch):
 
     key, raw = redis.set.await_args.args
     assert key == "dcb:sandbox_conversation:55"
-    assert redis.set.await_args.kwargs["ex"] == 123
+    assert redis.set.await_args.kwargs["ex"] == 7200
     assert len(raw.encode("utf-8")) <= 400
     assert json.loads(raw)["carry"]  # trimmed from the oldest, not emptied
 

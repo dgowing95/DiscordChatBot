@@ -38,6 +38,14 @@ includes this, so every render runs it. core does the same for env vars
   "apiKey" "brain.apiKey"
   "requestTimeout" "brain.callTimeout"
   "maxRetries" "removed (the brain's client retries twice; brain.callTimeout bounds one call)"
+  "enabled" "removed (Docker is required: the socket is always mounted)"
+  "image" "brain.workspace.image"
+  "dockerSocketPath" "brain.workspace.dockerSocketPath"
+  "memoryLimit" "brain.workspace.memoryLimit"
+  "snapshotMaxBytes" "brain.workspace.snapshotMaxBytes"
+  "snapshotTtlSeconds" "brain.workspace.snapshotTtlSeconds"
+  "persistTimeout" "brain.workspace.snapshotTimeout (default 120)"
+  "inputMaxBytes" "brain.workspace.inputMaxBytes"
 }}
 {{- if kindIs "map" .Values.sandbox }}
 {{- range $old, $new := $sandbox }}

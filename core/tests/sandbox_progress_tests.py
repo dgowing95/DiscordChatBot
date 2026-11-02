@@ -19,9 +19,8 @@ from classes.sandbox_progress import (
     SandboxProgressHooks,
     SandboxTranscript,
     parse_exec_result,
-    sandbox_progress_updates_enabled,
 )
-from classes.tool_embeds import COLOR_SANDBOX, SANDBOX_RESUMED, sandbox_task_text
+from classes.tool_embeds import COLOR_SANDBOX, SANDBOX_READY, sandbox_task_text
 
 # To run this pytest file from the command line, use:
 # PYTHONPATH=$(pwd) pytest core/tests/sandbox_progress_tests.py
@@ -92,23 +91,7 @@ def test_parse_exec_result_non_string():
     assert isinstance(parsed["output"], str)
 
 
-# ---------------------- sandbox_progress_updates_enabled ----------------------
 
-def test_progress_updates_default_off_when_unset():
-    # the /sandbox_progress_updates setting is unset (configManager returns
-    # False) or None: progress is OFF by default
-    for raw in (None, False):
-        assert sandbox_progress_updates_enabled(raw) is False, raw
-
-
-@pytest.mark.parametrize("raw", ["True", "true", " TRUE ", "1", "yes", "on", "On"])
-def test_progress_updates_on_values(raw):
-    assert sandbox_progress_updates_enabled(raw) is True, raw
-
-
-@pytest.mark.parametrize("raw", ["False", "false", "0", "no", "off", "garbage", ""])
-def test_progress_updates_off_values(raw):
-    assert sandbox_progress_updates_enabled(raw) is False, raw
 
 
 # ---------------------- SandboxTranscript ----------------------
@@ -128,7 +111,7 @@ def test_transcript_initial_embed_mirrors_tool_embed():
     # message body
     body, spec = _render(SandboxTranscript("compute 6*7"))
     assert body == ""
-    assert spec.title == "🐳 Sandbox · new workspace"
+    assert spec.title == "🐳 Workspace · starting"
     assert spec.description == "compute 6*7"
     assert spec.color == COLOR_TOOL == COLOR_SANDBOX
     assert spec.fields == []
@@ -321,7 +304,7 @@ async def test_start_sends_initial_embed_like_tool_embed():
     sent = channel.send.await_args
     embeds = sent.kwargs.get("embeds") or []
     assert len(embeds) == 1
-    assert embeds[0].title == "🐳 Sandbox · new workspace"
+    assert embeds[0].title == "🐳 Workspace · starting"
     assert embeds[0].description == "print 42"
     assert embeds[0].color.value == COLOR_TOOL
     assert len(embeds[0].fields) == 0  # no commands yet
@@ -528,9 +511,9 @@ async def test_message_stays_under_discord_limits():
 # ---------------------- title, files and reply hint ----------------------
 
 def test_transcript_shows_the_title_files_and_footer_it_is_given():
-    _, spec = _render(SandboxTranscript("do a thing", title=SANDBOX_RESUMED,
+    _, spec = _render(SandboxTranscript("do a thing", title=SANDBOX_READY,
                                         files=["a.csv", "b.png"], footer="reply here"))
-    assert spec.title == SANDBOX_RESUMED
+    assert spec.title == SANDBOX_READY
     assert spec.description == "do a thing\n📎 a.csv, b.png"
     assert spec.footer == "reply here"
 
@@ -543,11 +526,11 @@ def test_transcript_matches_the_static_embed_text():
 
 def test_hooks_pass_the_title_files_and_footer_into_the_embed():
     channel, _ = _channel_with_message()
-    hooks = SandboxProgressHooks(channel, "do a thing", title=SANDBOX_RESUMED,
+    hooks = SandboxProgressHooks(channel, "do a thing", title=SANDBOX_READY,
                                  files=["a.csv"], footer="reply here")
     _, spec = hooks.transcript.render_message()
     embed = hooks._build_embed(spec)
-    assert embed.title == SANDBOX_RESUMED
+    assert embed.title == SANDBOX_READY
     assert embed.footer.text == "reply here"
 
 

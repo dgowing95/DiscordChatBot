@@ -1,18 +1,18 @@
 """Per-thread conversation record for sandbox runs, kept in Redis.
 
-The workspace snapshot (classes/sandbox_snapshot_store.py) carries a
-thread's FILES from one run to the next. This carries what was SAID that
+The thread's job folder in the server workspace (jobs/t<thread id>/, see
+classes/sandbox_agent.py) carries its FILES from one run to the next. This carries what was SAID that
 still matters: messages that arrived too late to be applied, an unanswered
 question, requests the sandbox accepted but never confirmed finished, and
 how the run ended. Without it, "make it green too" posted as a run was
 finishing was acknowledged with "not applied, ask again" and then forgotten.
 
-Kept separate from the snapshot on purpose: either can fail without the
-other, and each is reported independently. Nothing here implies the
-workspace can be resumed — the resume preamble speaks only about messages.
+Kept separate from the files on purpose: either can be lost without the
+other, and each is reported independently. Nothing here implies the files
+are still there — the resume preamble speaks only about messages.
 
-Same thread scope as the snapshot (the key is the thread id) and the same
-TTL, so the two expire together. Small and versioned: a record from an
+Same thread scope as the job folder (the key is the thread id) and kept as
+long as it is (WORKSPACE_JOB_RETENTION_HOURS), so the two go together. Small and versioned: a record from an
 unknown version is ignored rather than misread. Recovered messages are only
 ever OFFERED to the next run as context; nothing is executed automatically.
 """
@@ -20,7 +20,7 @@ import json
 import logging
 
 from classes.redis_client import text_client
-from classes.sandbox_snapshot_store import sandbox_snapshot_ttl_seconds
+from classes.workspace_lifecycle import job_retention_hours
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +109,7 @@ class SandboxConversationStore:
         while len(raw.encode("utf-8")) > MAX_RECORD_BYTES and record.get("carry"):
             record = dict(record, carry=record["carry"][1:])
             raw = json.dumps(record, ensure_ascii=False)
-        await self.redis.set(_key(thread_id), raw, ex=sandbox_snapshot_ttl_seconds())
+        await self.redis.set(_key(thread_id), raw, ex=job_retention_hours() * 3600)
 
     async def delete(self, thread_id) -> None:
         await self.redis.delete(_key(thread_id))

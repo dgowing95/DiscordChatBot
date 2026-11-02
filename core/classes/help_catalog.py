@@ -7,7 +7,7 @@ going stale, core/tests/help_catalog_tests.py fails when an agent tool
 has no entry here. Adding a tool or command therefore means adding a line.
 
 Entries with `requires` are hidden when that feature is switched off for the
-deployment (IMAGE_GEN_ENABLED / SANDBOX_ENABLED / EVENTS_ENABLED ...), so /help never offers
+deployment (IMAGE_GEN_ENABLED / EVENTS_ENABLED ...), so /help never offers
 something the bot cannot do.
 """
 from dataclasses import dataclass
@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from classes.whats_new import EMBED_COLOR, MAX_FIELD_VALUE
 
 IMAGE = "image"
-SANDBOX = "sandbox"
 AUTOMATIONS = "automations"
 VOICE = "voice"
 EVENTS = "events"
@@ -59,7 +58,7 @@ ASK_ENTRIES = (
     HelpEntry("🐳 Run code", "Ask me to build or run something with code (scripts, charts, "
               "gifs...). I work in a thread: reply there to steer me, or @mention me there "
               "later to carry on.",
-              tools=("run_code_sandbox",), requires=SANDBOX),
+              tools=("run_code_sandbox",)),
     HelpEntry("⏰ Schedules and rules", "Ask me to schedule or follow up on something, or react to a word.",
               tools=("list_schedules", "get_schedule", "create_schedule", "schedule_followup",
                      "update_schedule", "delete_schedule",
@@ -80,8 +79,8 @@ COMMAND_ENTRIES = (
     HelpEntry("/get_chance", "Show that chance.", command="get_chance"),
     HelpEntry("/generate_image", "Make an image straight from a prompt.",
               command="generate_image", requires=IMAGE),
-    HelpEntry("/sandbox_progress_updates", "Turn live progress for code runs on or off.",
-              command="sandbox_progress_updates", requires=SANDBOX),
+    HelpEntry("/workspace", "The server's workspace for code tasks: status, reset (Manage "
+              "Server) and live progress on or off.", command="workspace"),
     HelpEntry("/schedule", "Create, list, view, edit, delete, pause or resume schedules.",
               command="schedule", requires=AUTOMATIONS),
     HelpEntry("/rule", "Create, list, view, edit, delete, pause or resume message rules.",
@@ -99,11 +98,9 @@ TIPS = (
 HELP_TITLE = "🤖 What I can do"
 
 
-def _shown(entry: HelpEntry, image_enabled: bool, sandbox_enabled: bool) -> bool:
+def _shown(entry: HelpEntry, image_enabled: bool) -> bool:
     if entry.requires == IMAGE:
         return image_enabled
-    if entry.requires == SANDBOX:
-        return sandbox_enabled
     if entry.requires == AUTOMATIONS:
         from classes.automation_policy import settings
         return settings()["enabled"]
@@ -131,12 +128,12 @@ def _fields(name: str, lines: list) -> list:
             for i, group in enumerate(groups)]
 
 
-def help_embed_data(image_enabled: bool, sandbox_enabled: bool) -> dict:
+def help_embed_data(image_enabled: bool) -> dict:
     """The /help embed as plain data (see classes.common.embed_from_data).
     One field per group keeps it compact on mobile; a group past Discord's
     field limit carries on in a second field."""
-    ask = [e for e in ASK_ENTRIES if _shown(e, image_enabled, sandbox_enabled)]
-    commands = [e for e in COMMAND_ENTRIES if _shown(e, image_enabled, sandbox_enabled)]
+    ask = [e for e in ASK_ENTRIES if _shown(e, image_enabled)]
+    commands = [e for e in COMMAND_ENTRIES if _shown(e, image_enabled)]
     return {
         "title": HELP_TITLE,
         "color": EMBED_COLOR,

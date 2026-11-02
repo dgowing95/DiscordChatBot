@@ -5,8 +5,9 @@ hosted model provider by default: a llama.cpp server serves a GGUF model on your
 GPU, and Redis stores per-guild settings and per-user memories.
 
 Beyond chat it can search the web, read a URL, generate images, and hand a task to a
-**code sandbox** — a throwaway Docker container with its own agent that writes and
-actually runs code, in a Discord thread you can talk to while it works.
+**code sandbox** — an agent with its own Docker container per server (the server's
+workspace, so Docker is required) that writes and actually runs code, in a Discord
+thread you can talk to while it works.
 
 In Discord, `/help` lists everything it can do. After each release it posts a short
 "What's new" list of the new features once per server (turn off with

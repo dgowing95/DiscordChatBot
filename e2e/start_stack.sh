@@ -131,7 +131,9 @@ fi
   # picture is missing everything, and the model would then call the tool
   # again. Off on this path only; core PRs test it against the real service.
   if [ "${E2E_LOCAL_DIFFUSION:-0}" = 1 ]; then export IMAGE_REVIEW_ENABLED=0; fi
-  export SANDBOX_ENABLED=0 CONTENT_GUARD_ENABLED=0 WHATS_NEW_ENABLED=0
+  # The workspace runs on the runner's own Docker (default socket; core
+  # pulls WORKSPACE_IMAGE at startup), labelled apart from anything else there.
+  export WORKSPACE_INSTANCE=e2e CONTENT_GUARD_ENABLED=0 WHATS_NEW_ENABLED=0
   export DOUBLE_REPLY_CHANCE=0 PERSONA_REASONING_EFFORT=low METRICS_PORT=9464 LOG_LEVEL=INFO
   export VOICE_ENABLED=1 VOICE_DEV_INJECT=1 VOICE_DEBUG=1 VOICE_IDLE_LEAVE_SECONDS=1800
   export VOICE_BRIDGE_URL=ws://127.0.0.1:8765 VOICE_BRIDGE_TOKEN="$BRIDGE_TOKEN"
