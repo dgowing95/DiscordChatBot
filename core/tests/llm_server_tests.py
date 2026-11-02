@@ -51,6 +51,8 @@ def test_auth_header_falls_back_to_placeholder(monkeypatch):
     ("a=x=y", {"a": "x=y"}),
     # Malformed entries are skipped, the rest kept.
     ("novalue, =x, bad name=1, ok=1", {"ok": "1"}),
+    # Values httpx could not encode: a control character, non-ASCII.
+    ("a=line\nbreak, b=“quoted”, c=em—dash, ok=1", {"ok": "1"}),
     # LLM_PASS owns Authorization.
     ("Authorization=Bearer other, ok=1", {"ok": "1"}),
 ])
