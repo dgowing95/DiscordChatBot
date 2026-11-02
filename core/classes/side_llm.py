@@ -20,10 +20,14 @@ They share the awkward parts, which live here:
     runs to hundreds of tokens before the answer starts. Left on, it either
     overruns max_tokens -- an unterminated block, which strip_thinking reduces
     to nothing, so the job falls soft on EVERY call -- or it spends the whole
-    timeout generating reasoning nobody reads. llama.cpp forwards
-    chat_template_kwargs into the chat template, and Qwen3 honours
-    enable_thinking. A backend that rejects the request with the field (a
-    400/422; it is not part of the OpenAI schema) gets one retry without it,
+    timeout generating reasoning nobody reads. Two fields say it, because
+    servers disagree on how: llama.cpp forwards chat_template_kwargs into the
+    chat template (Qwen3 honours enable_thinking) and ignores `reasoning`;
+    OpenRouter ignores chat_template_kwargs and reads `reasoning`. With only
+    the first, DeepSeek on OpenRouter spent all 1024 tokens of the image
+    rewrite and check thinking and returned nothing, so both fell soft on
+    every call. A backend that rejects the request with either field (a
+    400/422; neither is in the OpenAI schema) gets one retry without them,
     and is not asked again;
   * every call is timed into discord_bot_llm_call_seconds{caller=...}, after
     the lane wait (which goes to discord_bot_llm_lane_wait_seconds).
@@ -42,7 +46,10 @@ from classes.metrics import observe_lane_wait, observe_llm_call, observe_llm_com
 
 logger = logging.getLogger(__name__)
 
-NO_THINKING = {"chat_template_kwargs": {"enable_thinking": False}}
+NO_THINKING = {
+    "chat_template_kwargs": {"enable_thinking": False},  # llama.cpp (the chat template)
+    "reasoning": {"enabled": False},  # OpenRouter
+}
 
 
 class SideLLM:
@@ -95,8 +102,8 @@ class SideLLM:
             return await self._complete(messages, temperature, max_tokens, no_thinking)
         except (BadRequestError, UnprocessableEntityError) as e:
             # The server refused the request itself, which is what a backend
-            # that does not accept chat_template_kwargs does (it is not part of
-            # the OpenAI schema). Anything else -- a 5xx, a rate limit, the
+            # that does not accept NO_THINKING's fields does (they are not
+            # part of the OpenAI schema). Anything else -- a 5xx, a rate limit, the
             # backend being down or slow -- says nothing about the option, and
             # a retry that then happened to work would wrongly latch thinking
             # back on for the whole process.

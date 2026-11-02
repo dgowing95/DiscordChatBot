@@ -165,7 +165,7 @@ async def test_build_disables_thinking_on_the_first_try(monkeypatch):
         await image_prompt.build_image_prompt("draw me a fox")
 
     kwargs = client.chat.completions.create.await_args.kwargs
-    assert kwargs["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+    assert kwargs["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}, "reasoning": {"enabled": False}}
 
 
 def _rejected(status=400):
