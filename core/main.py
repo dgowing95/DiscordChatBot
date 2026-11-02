@@ -9,7 +9,7 @@ import io
 import sys
 from classes.message_handler import MessageHandler, close_http_session
 from classes.text_llm_handler import TextLLMHandler
-from classes.llm_config import llm_model
+from classes.llm_roles import PERSONA, role_config, role_warnings
 from classes.config_manager import configManager
 from classes.image_generation import (
     GENERATED_IMAGE_FILENAME,
@@ -220,9 +220,9 @@ async def on_ready():
     logger.info(f'Logged in as {client.user}')
     # Prometheus /metrics endpoint (METRICS_PORT; empty/0 disables).
     start_metrics_server_from_env()
-    # The per-slot context (llama.cpp /props) is what one request can actually
-    # use, and what the history token budget is measured against; the same
-    # read publishes the server's total context gauge.
+    # Every role's server (llama.cpp /props): its slots size its lanes, and
+    # the persona's per-slot context is what the history token budget is
+    # measured against; the same read publishes each total context gauge.
     if not getattr(client, "background_tasks", None):
         client.background_tasks = [client.loop.create_task(refresh_slot_context_forever())]
         if automation_settings()["enabled"]:
@@ -243,7 +243,7 @@ async def on_ready():
     try:
         # Same accessor the bot itself uses, so the readiness check verifies
         # the model that is actually requested.
-        model = llm_model()
+        model = role_config(PERSONA).model
         await TextLLMHandler.check_model_ready(model)
     except Exception as e:
         logger.warning(f"Failed to check model: {e}")
@@ -603,5 +603,7 @@ if __name__ == "__main__":
     if settings_error:
         logger.error(settings_error)
         sys.exit(1)
+    for warning in role_warnings():
+        logger.warning(warning)
     automation_settings()
     client.run(os.environ['DISCORD_TOKEN'])

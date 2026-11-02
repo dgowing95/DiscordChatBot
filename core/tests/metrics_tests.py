@@ -128,11 +128,34 @@ def test_prompt_tokens_histogram():
 
 
 def test_context_window_gauge():
-    m.set_context_window(160000)
-    assert m.llm_context_window_tokens._value.get() == 160000
+    host = "http://llamacpp:8080"
+    m.set_context_window(host, 160000)
+    assert _sample("discord_bot_llm_context_window_tokens", host=host) == 160000
     # A failed /props read must not zero the gauge: it keeps the last value.
-    m.set_context_window(None)
-    assert m.llm_context_window_tokens._value.get() == 160000
+    m.set_context_window(host, None)
+    assert _sample("discord_bot_llm_context_window_tokens", host=host) == 160000
+
+
+def test_slots_gauge_keeps_one_series_per_host():
+    host = "http://slots-test:8080"
+    m.set_llm_slots(host, 1, "default")
+    m.set_llm_slots(host, 4, "props")
+    assert _sample("discord_bot_llm_slots", host=host, source="props") == 4
+    assert REGISTRY.get_sample_value("discord_bot_llm_slots", {"host": host, "source": "default"}) is None
+
+
+def test_lane_gauges_read_the_lanes_at_scrape_time():
+    from classes import llm_lanes
+    llm_lanes.reset()
+    try:
+        lanes = llm_lanes.configure_host("http://lanes-test:8080", 2, 1)
+        lanes._in_use["brain"] = 1
+        assert _sample("discord_bot_llm_lane_in_use", host="http://lanes-test:8080", lane="brain") == 1
+        assert _sample("discord_bot_llm_lane_waiting", host="http://lanes-test:8080", lane="chat") == 0
+    finally:
+        llm_lanes.reset()
+    m.observe_lane_wait("chat", 0.5)
+    assert _sample("discord_bot_llm_lane_wait_seconds_count", lane="chat") >= 1
 
 
 def test_guild_label_defaults():

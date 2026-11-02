@@ -54,6 +54,73 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 The local LLM server this release runs (llm.engine): llamacpp or strata.
 Anything else fails the render rather than quietly running neither.
 */}}
+{{/*
+LLM_SLOTS: llm.slots, else the running engine's parallel. core uses it only
+when the server's /props has no total_slots.
+*/}}
+{{- define "dcb.llmSlots" -}}
+{{- if .Values.llm.slots }}
+{{- .Values.llm.slots | toString }}
+{{- else if eq (include "dcb.llmEngine" .) "strata" }}
+{{- .Values.strata.parallel | toString }}
+{{- else }}
+{{- .Values.llamacpp.parallel | toString }}
+{{- end }}
+{{- end }}
+
+{{/*
+llamacpp.cacheRamMiB as llama.cpp's --cache-ram, or "" to leave its default.
+Empty and null (an override that deletes the default) both mean unset; 0
+(off) and -1 (no limit) are real values, so this is not a plain truthiness
+test. Anything that is not a whole number fails the render.
+*/}}
+{{- define "dcb.cacheRamMiB" -}}
+{{- $v := .Values.llamacpp.cacheRamMiB }}
+{{- if kindIs "string" $v }}
+{{- if $v }}
+{{- if not (regexMatch "^-?[0-9]+$" $v) }}
+{{- fail (printf "llamacpp.cacheRamMiB must be a whole number of MiB (0 = off, -1 = no limit), not %q" $v) }}
+{{- end }}
+{{- $v }}
+{{- end }}
+{{- else if or (kindIs "float64" $v) (kindIs "int" $v) (kindIs "int64" $v) }}
+{{- if ne (float64 $v) (floor $v) }}
+{{- fail (printf "llamacpp.cacheRamMiB must be a whole number of MiB, not %v" $v) }}
+{{- end }}
+{{- int64 $v }}
+{{- else if not (kindIs "invalid" $v) }}
+{{- fail (printf "llamacpp.cacheRamMiB must be a whole number of MiB, not %v" $v) }}
+{{- end }}
+{{- end }}
+
+{{/*
+With engine=strata, core's LLM_API_KEY is Strata's own key (core.yaml). A
+role's or side job's own key with no host of its own would replace it for
+that job (llm_roles prefers the job's key), and Strata refuses every other
+key: say a persona.apiKey left over from a remote persona, and every chat
+reply fails. So such a key fails the render. A side job with no host of
+its own uses the brain's, so it is fine when brain.llmHost is set. The same holds for a server
+outside the chart named by llm.host, but there the operator chose the key.
+*/}}
+{{- define "dcb.checkStrataKeys" -}}
+{{- if eq (include "dcb.llmEngine" .) "strata" }}
+{{- /* name: (the job, the host it falls back to: side jobs use the brain's) */}}
+{{- $jobs := dict
+  "persona" (list .Values.persona "")
+  "brain" (list .Values.brain "")
+  "research" (list .Values.research .Values.brain.llmHost)
+  "diffusion.promptRewrite" (list .Values.diffusion.promptRewrite .Values.brain.llmHost)
+  "diffusion.review" (list .Values.diffusion.review .Values.brain.llmHost)
+}}
+{{- range $name, $pair := $jobs }}
+{{- $job := index $pair 0 }}
+{{- if and $job.apiKey (not (or $job.llmHost (index $pair 1))) }}
+{{- fail (printf "%s.apiKey is set but %s.llmHost is not: with llm.engine strata it would replace Strata's own key for %s, which Strata refuses. Set %s.llmHost to the server the key is for, or remove the key." $name $name $name $name) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+
 {{- define "dcb.llmEngine" -}}
 {{- $engine := .Values.llm.engine | default "llamacpp" }}
 {{- if not (has $engine (list "llamacpp" "strata")) }}

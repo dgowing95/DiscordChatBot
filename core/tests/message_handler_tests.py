@@ -1198,34 +1198,29 @@ async def test_generate_passes_an_explicit_max_turns():
     assert persona_max_turns() > 10
 
 
-def test_llm_call_timeout_default_and_parsing(monkeypatch):
-    from classes.text_llm_handler import DEFAULT_PERSONA_CALL_TIMEOUT, persona_call_timeout
-
-    monkeypatch.delenv("PERSONA_CALL_TIMEOUT_SECONDS", raising=False)
-    assert persona_call_timeout() == DEFAULT_PERSONA_CALL_TIMEOUT == 600.0
-    monkeypatch.setenv("PERSONA_CALL_TIMEOUT_SECONDS", "90")
-    assert persona_call_timeout() == 90.0
-    # ModelSettings.timeout is validated as a finite positive float, so every
-    # unusable value must fall back rather than blow up Agent construction.
-    for junk in ("nope", "", "0", "-5", "inf", "nan"):
-        monkeypatch.setenv("PERSONA_CALL_TIMEOUT_SECONDS", junk)
-        assert persona_call_timeout() == DEFAULT_PERSONA_CALL_TIMEOUT, junk
-
-
 @pytest.mark.asyncio
 async def test_get_client_bounds_each_model_call(monkeypatch):
     """The client's own timeout is per-read, so a server that keeps the
-    connection warm while it works was never bounded; ModelSettings.timeout
-    is the wall-clock bound the runner enforces on the whole call."""
+    connection warm while it works was never bounded. The wall-clock bound is
+    PERSONA_CALL_TIMEOUT_SECONDS, applied by LanedModel after the lane wait;
+    the SDK's own (ModelSettings.timeout) stays unset, since it would count
+    the lane wait too."""
+    from classes import text_llm_handler
+    from classes.laned_model import LanedModel
     from classes.text_llm_handler import TextLLMHandler
 
     monkeypatch.setenv("PERSONA_CALL_TIMEOUT_SECONDS", "45")
+    monkeypatch.setattr(text_llm_handler, "_main_model_client", None)
     handler = TextLLMHandler.__new__(TextLLMHandler)  # __init__ needs Redis
     handler.system = "a bot"
     handler.options = {"temperature": 1.0}
     await handler.get_client()
 
-    assert handler.agent.model_settings.timeout == 45.0
+    assert isinstance(handler.agent.model, LanedModel)
+    assert handler.agent.model.call_timeout == 45.0
+    assert handler.agent.model.lane == "chat"
+    assert handler.agent.model_settings.timeout is None
+    monkeypatch.setattr(text_llm_handler, "_main_model_client", None)
 
 
 @pytest.mark.asyncio

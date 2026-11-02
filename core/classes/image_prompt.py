@@ -25,9 +25,9 @@ degrades to the previous behaviour instead of costing the user their image.
 Environment variables:
     IMAGE_PROMPT_REWRITE_ENABLED  "0"/"false"/"no"/"off" to skip the rewrite
                                   and send the request through as-is
-    IMAGE_PROMPT_MODEL            model id (default: the bot's LLM_MODEL)
-    IMAGE_PROMPT_LLM_HOST         API base, /v1 appended (default: LLM_HOST)
-    IMAGE_PROMPT_LLM_API_KEY      API key (default: LLM_API_KEY)
+    IMAGE_PROMPT_MODEL            model id (default: the brain's, see llm_roles)
+    IMAGE_PROMPT_LLM_HOST         API base, /v1 appended (default: the brain's)
+    IMAGE_PROMPT_LLM_API_KEY      API key (default: the brain's, same server only)
     IMAGE_PROMPT_TIMEOUT          seconds to wait for the rewrite (default 60)
 """
 import json
@@ -35,11 +35,7 @@ import logging
 import os
 import re
 
-from classes.llm_config import (
-    DEFAULT_LLM_API_KEY,
-    DEFAULT_LLM_HOST,
-    env_or,
-)
+from classes.llm_roles import side_job_config
 from classes.response_filter import strip_thinking
 from classes.side_llm import SideLLM
 
@@ -105,39 +101,16 @@ def rewrite_enabled() -> bool:
     return raw.strip().lower() not in {"", "0", "false", "no", "off"}
 
 
-def rewrite_model() -> str:
-    """Model id for the rewrite (IMAGE_PROMPT_MODEL; default: the bot's LLM_MODEL).
-
-    Split out so a deployment can point the rewrite at a different
-    OpenAI-compatible API than the chat model, the way the sandbox agent does.
-    """
-    return env_or("IMAGE_PROMPT_MODEL", "LLM_MODEL", "")
-
-
-def rewrite_llm_host() -> str:
-    """API base for the rewrite (IMAGE_PROMPT_LLM_HOST; default: LLM_HOST).
-    /v1 is appended here, so the value must not include it."""
-    return env_or("IMAGE_PROMPT_LLM_HOST", "LLM_HOST", DEFAULT_LLM_HOST)
-
-
-def rewrite_llm_api_key() -> str:
-    """API key for the rewrite (IMAGE_PROMPT_LLM_API_KEY; default: LLM_API_KEY)."""
-    return env_or("IMAGE_PROMPT_LLM_API_KEY", "LLM_API_KEY", DEFAULT_LLM_API_KEY)
-
-
-def rewrite_timeout() -> float:
-    raw = os.environ.get("IMAGE_PROMPT_TIMEOUT", "").strip()
-    try:
-        value = float(raw)
-    except ValueError:
-        return DEFAULT_TIMEOUT
-    return value if value > 0 else DEFAULT_TIMEOUT
+def rewrite_config():
+    """The rewrite's connection: IMAGE_PROMPT_MODEL / _LLM_HOST / _LLM_API_KEY
+    / _TIMEOUT, each falling back to the brain role's (llm_roles), so a
+    deployment can point the rewrite at a different OpenAI-compatible API."""
+    return side_job_config("IMAGE_PROMPT_", default_timeout=DEFAULT_TIMEOUT)
 
 
 # Its own client and thinking-off latch, separate from image_review's: the two
-# jobs can point at different backends.
-_llm = SideLLM("image_prompt", rewrite_model, rewrite_llm_host,
-               rewrite_llm_api_key, rewrite_timeout)
+# jobs can point at different backends. The caller's lane.
+_llm = SideLLM("image_prompt", rewrite_config)
 
 
 def _content_words(text: str) -> set:

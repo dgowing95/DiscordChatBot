@@ -45,12 +45,24 @@ Metrics (scraped by Prometheus from the /metrics HTTP endpoint):
            observation, because each is a prompt that had to fit in the
            context window. This is the answer to "how much of the configured
            context are we actually using"; divide by the gauge below.
-  Gauge    discord_bot_llm_context_window_tokens
-           The LLM server's TOTAL context (per-slot n_ctx x total_slots from
-           its /props, refreshed with the per-slot gauge below), so a
-           dashboard has the denominator without hard-coding it. With several
-           slots one request only gets its share, so use the per-slot gauge
-           as a request's capacity.
+  Gauge    discord_bot_llm_context_window_tokens{host}
+           Each self-hosted LLM server's TOTAL context (per-slot n_ctx x its
+           slots, from its /props, refreshed with the per-slot gauge below),
+           so a dashboard has the denominator without hard-coding it. With
+           several slots one request only gets its share, so use the
+           per-slot gauge as a request's capacity.
+  Gauge    discord_bot_llm_slots{host,source}
+           Parallel slots core lanes each self-hosted server by: source
+           "props" (its /props total_slots), "env" (LLM_SLOTS) or "default"
+           (1). One series per host; a changed source replaces it.
+  Histogram discord_bot_llm_lane_wait_seconds{lane}
+           Seconds one model call waited for a slot on its server before it
+           was sent (classes/llm_lanes.py). Not part of
+           discord_bot_llm_call_seconds, which stays model time. A remote
+           API has no lanes and records nothing here.
+  Gauge    discord_bot_llm_lane_in_use{host,lane} / discord_bot_llm_lane_waiting{host,lane}
+           Slots held, and calls waiting for one, per server and lane, read
+           at scrape time.
   Gauge    discord_bot_llm_slot_context_tokens
            Per-slot context of the running llama.cpp server, read from its
            /props (default_generation_settings.n_ctx) at startup and every few
@@ -156,7 +168,10 @@ import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from prometheus_client import Counter, Gauge, Histogram, generate_latest
+from prometheus_client import REGISTRY, Counter, Gauge, Histogram, generate_latest
+from prometheus_client.core import GaugeMetricFamily
+
+from classes import llm_lanes
 
 logger = logging.getLogger(__name__)
 
@@ -332,7 +347,14 @@ llm_prompt_tokens = Histogram(
 
 llm_context_window_tokens = Gauge(
     "discord_bot_llm_context_window_tokens",
-    "Total context of the LLM server in tokens (per-slot n_ctx x total_slots, from its /props)",
+    "Total context of a self-hosted LLM server in tokens (per-slot n_ctx x slots, from its /props)",
+    ["host"],
+)
+
+llm_slots = Gauge(
+    "discord_bot_llm_slots",
+    "Parallel slots of a self-hosted LLM server, and where the number came from",
+    ["host", "source"],
 )
 
 llm_slot_context_tokens = Gauge(
@@ -376,6 +398,13 @@ llm_call_seconds = Histogram(
     "discord_bot_llm_call_seconds",
     "Seconds of one model request",
     ["caller", "outcome"],
+    buckets=LATENCY_BUCKETS,
+)
+
+llm_lane_wait_seconds = Histogram(
+    "discord_bot_llm_lane_wait_seconds",
+    "Seconds one model call waited for a slot on its LLM server",
+    ["lane"],
     buckets=LATENCY_BUCKETS,
 )
 
@@ -617,10 +646,52 @@ def inc_web_fetch_failure(reason: str) -> None:
     web_fetch_failures_total.labels(reason=str(reason)).inc()
 
 
-def set_context_window(tokens: int | None) -> None:
-    """Publish the server's total context; None (not read) keeps the last value."""
+def set_context_window(host: str, tokens: int | None) -> None:
+    """Publish a server's total context; None (not read) keeps the last value."""
     if tokens:
-        llm_context_window_tokens.set(tokens)
+        llm_context_window_tokens.labels(host=str(host)).set(tokens)
+
+
+_slot_sources: dict[str, str] = {}
+
+
+def set_llm_slots(host: str, slots: int, source: str) -> None:
+    """Publish a server's slot count; one series per host."""
+    host = str(host)
+    old = _slot_sources.get(host)
+    if old is not None and old != source:
+        try:
+            llm_slots.remove(host, old)
+        except KeyError:
+            pass
+    _slot_sources[host] = source
+    llm_slots.labels(host=host, source=source).set(slots)
+
+
+def observe_lane_wait(lane: str, seconds: float) -> None:
+    llm_lane_wait_seconds.labels(lane=str(lane)).observe(max(0.0, seconds))
+
+
+class _LaneCollector:
+    """In use / waiting per server and lane, read from llm_lanes at scrape
+    time (the scrape runs on the metrics thread; snapshot() only reads ints
+    and deque lengths, so it never iterates a deque the loop is changing)."""
+
+    def collect(self):
+        in_use = GaugeMetricFamily("discord_bot_llm_lane_in_use",
+                                   "LLM slots held, per server and lane", labels=["host", "lane"])
+        waiting = GaugeMetricFamily("discord_bot_llm_lane_waiting",
+                                    "Model calls waiting for an LLM slot, per server and lane",
+                                    labels=["host", "lane"])
+        for host, lanes in llm_lanes.all_lanes().items():
+            for lane, counts in lanes.snapshot().items():
+                in_use.add_metric([host, lane], counts["in_use"])
+                waiting.add_metric([host, lane], counts["waiting"])
+        yield in_use
+        yield waiting
+
+
+REGISTRY.register(_LaneCollector())
 
 
 # ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ import ast
 import re
 from pathlib import Path
 
+from classes import llm_roles
 from classes.settings_check import REMOVED
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -27,6 +28,9 @@ NOT_SETTINGS = {
 READ_ELSEWHERE = {
     "DOCKER_HOST",  # the docker library
 }
+# Read (llm_roles resolves subagents), but documented in phase 5, when
+# something uses them.
+UNDOCUMENTED_UNTIL_USED = {name for name in llm_roles.env_names() if name.startswith("SUBAGENT_")}
 
 
 def _env_name_args(func) -> int:
@@ -59,7 +63,8 @@ def env_names_read_by_core() -> set[str]:
             elif (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute)
                   and node.value.attr == "environ" and isinstance(node.slice, ast.Constant)):
                 names.add(node.slice.value)
-    return names
+    # llm_roles builds its names from prefixes (PERSONA_ + MODEL), so it lists them.
+    return names | llm_roles.env_names()
 
 
 def agents_env_rows() -> set[str]:
@@ -96,7 +101,7 @@ def source_text() -> str:
 
 
 def test_every_env_var_core_reads_is_documented():
-    read = env_names_read_by_core() - NOT_SETTINGS
+    read = env_names_read_by_core() - NOT_SETTINGS - UNDOCUMENTED_UNTIL_USED
     assert read, "the AST walk found nothing: the reader patterns are out of date"
     rows, example = agents_env_rows(), env_example_names()
     assert not read - rows, f"read by core but missing from AGENTS.md's env table: {sorted(read - rows)}"
@@ -105,7 +110,7 @@ def test_every_env_var_core_reads_is_documented():
 
 def test_every_documented_env_var_is_read_somewhere():
     text = source_text()
-    unused = sorted(name for name in agents_env_rows() - READ_ELSEWHERE
+    unused = sorted(name for name in agents_env_rows() - READ_ELSEWHERE - llm_roles.env_names()
                     if not re.search(rf"(?<![A-Z0-9_]){name}(?![A-Z0-9_])", text))
     assert not unused, f"AGENTS.md documents settings nothing reads: {unused}"
 

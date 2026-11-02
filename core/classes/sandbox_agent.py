@@ -22,11 +22,11 @@ Requirements (see docker-compose.yaml / charts/dis-ai-bot):
 The heavy imports (docker SDK, agents.sandbox) stay inside the builder
 functions so the pure helpers below are testable without them.
 """
+import functools
 import logging
 import asyncio
 import io
 import json
-import math
 import os
 import posixpath
 import re
@@ -64,7 +64,9 @@ from classes.sandbox_conversation import (
     SandboxConversation,
     make_agent_hooks,
 )
-from classes.llm_config import DEFAULT_LLM_API_KEY, DEFAULT_LLM_HOST, env_or, extra_headers_for
+from classes import llm_lanes
+from classes.laned_model import LanedModel
+from classes.llm_roles import BRAIN, role_config
 
 # No run is ever uploaded to OpenAI's trace dashboard (why: text_llm_handler.py).
 set_tracing_disabled(True)
@@ -75,7 +77,6 @@ DEFAULT_MAX_TURNS = 10
 DEFAULT_TIMEOUT_SECONDS = 600
 DEFAULT_ASK_USER_TIMEOUT_SECONDS = 300
 DEFAULT_PERSIST_TIMEOUT_SECONDS = 180  # generous: covers Memory's 2 extra model calls on stop()
-DEFAULT_BRAIN_CALL_TIMEOUT_SECONDS = 600.0  # wall-clock bound on one brain model call
 BRAIN_CLIENT_MAX_RETRIES = 2  # the OpenAI client's own default, stated explicitly
 SANDBOX_CONNECT_TIMEOUT_SECONDS = 10.0  # separate, short: a dead host must not eat the whole budget
 SANDBOX_DELETE_TIMEOUT_SECONDS = 30  # bound on tearing down our own container
@@ -266,27 +267,6 @@ def sandbox_image() -> str:
     return os.environ.get("SANDBOX_IMAGE", DEFAULT_PYTHON_SANDBOX_IMAGE)
 
 
-def sandbox_model() -> str:
-    """Model id for the nested sandbox agent (BRAIN_MODEL; default: the
-    main bot's LLM_MODEL — i.e. the local llama.cpp model unless BRAIN_MODEL
-    points the sandbox at a different OpenAI-compatible API, e.g.
-    OpenRouter)."""
-    return env_or("BRAIN_MODEL", "LLM_MODEL", "")
-
-
-def sandbox_llm_host() -> str:
-    """Base URL of the LLM the sandbox agent talks to (BRAIN_LLM_HOST;
-    default: the main bot's LLM_HOST). The core appends /v1 itself, so this
-    must not include it (OpenRouter: https://openrouter.ai/api)."""
-    return env_or("BRAIN_LLM_HOST", "LLM_HOST", DEFAULT_LLM_HOST)
-
-
-def sandbox_llm_api_key() -> str:
-    """API key for the sandbox agent's LLM (BRAIN_LLM_API_KEY; default:
-    the main bot's LLM_API_KEY placeholder)."""
-    return env_or("BRAIN_LLM_API_KEY", "LLM_API_KEY", DEFAULT_LLM_API_KEY)
-
-
 def sandbox_memory_limit() -> int | None:
     """Memory cap in bytes for each sandbox container (SANDBOX_MEMORY_LIMIT,
     in Docker's own notation: "4g", "4gb", "512m", "1.5g" or plain bytes).
@@ -390,28 +370,6 @@ def sandbox_persist_timeout() -> int:
     return _positive_int(
         os.environ.get("SANDBOX_PERSIST_TIMEOUT_SECONDS"), DEFAULT_PERSIST_TIMEOUT_SECONDS
     )
-
-
-def brain_call_timeout() -> float:
-    """Wall-clock seconds one model call of the brain may take, the client's
-    own retries included (BRAIN_CALL_TIMEOUT_SECONDS, default 600), like
-    the persona's PERSONA_CALL_TIMEOUT_SECONDS.
-
-    Applied as ModelSettings.timeout, which the SDK's runner enforces by
-    cancelling the whole call. That is what bounds a server that keeps the
-    connection alive with padding while it works (OpenRouter pads
-    non-streaming responses with whitespace), which the client's per-read
-    timeout cannot: every pad byte resets it. The per-read timeout is the
-    same figure, so a silent server is never cut off sooner. Exceeding it
-    raises agents.ModelTimeoutError, which run_sandbox_task lets propagate
-    like the client's own APITimeoutError: run_code_sandbox reports both as
-    "the sandbox itself failed".
-    """
-    try:
-        value = float(os.environ.get("BRAIN_CALL_TIMEOUT_SECONDS", "").strip())
-    except ValueError:
-        return DEFAULT_BRAIN_CALL_TIMEOUT_SECONDS
-    return value if value > 0 and math.isfinite(value) else DEFAULT_BRAIN_CALL_TIMEOUT_SECONDS
 
 
 def _tolerant_tool_invoke(original_invoke):
@@ -1238,20 +1196,7 @@ def build_sandbox_agent(out_dir: str | None, conversation=None) -> "object":
     budget_bullet = _BUDGET_BULLET.format(
         max_turns=sandbox_max_turns(), timeout_seconds=sandbox_timeout()
     )
-    sandbox_llm = OpenAIChatCompletionsModel(
-        model=sandbox_model(),
-        openai_client=AsyncOpenAI(
-            base_url=sandbox_llm_host() + "/v1",
-            default_headers=extra_headers_for(sandbox_llm_host()) or None,
-            api_key=sandbox_llm_api_key(),
-            # Connect gets its own short budget so an unreachable host fails
-            # fast instead of waiting out the read. The read timeout does not
-            # bound a server that keeps sending keep-alive padding: that is
-            # what ModelSettings.timeout below is for (brain_call_timeout()).
-            timeout=httpx2.Timeout(brain_call_timeout(), connect=SANDBOX_CONNECT_TIMEOUT_SECONDS),
-            max_retries=BRAIN_CLIENT_MAX_RETRIES,
-        ),
-    )
+    sandbox_llm = build_brain_model()
 
     return SandboxAgent(
         name="Code Sandbox",
@@ -1274,9 +1219,42 @@ def build_sandbox_agent(out_dir: str | None, conversation=None) -> "object":
                say_in_thread, *_sandbox_shared_tools(), *_sandbox_only_tools()],
         hooks=make_agent_hooks(conversation) if conversation is not None else None,
         # Slightly cooler than the chat agent: code tasks want determinism.
-        # timeout: the wall-clock bound on each model call that the client's
-        # read timeout above cannot provide (see brain_call_timeout).
-        model_settings=ModelSettings(temperature=0.5, timeout=brain_call_timeout()),
+        # No timeout: LanedModel bounds each call (see build_brain_model).
+        model_settings=ModelSettings(
+            temperature=0.5, reasoning={"effort": role_config(BRAIN).reasoning_effort}),
+    )
+
+
+def build_brain_model() -> LanedModel:
+    """The brain's model (llm_roles BRAIN: BRAIN_MODEL / BRAIN_LLM_HOST /
+    BRAIN_LLM_API_KEY, else the bot's own LLM_*), in the brain lane.
+
+    Each call is bounded by BRAIN_CALL_TIMEOUT_SECONDS (default 600), wall
+    clock, the client's own retries included. LanedModel applies it after
+    the lane wait, so time spent behind chat replies never counts. That bound
+    is what catches a server that keeps the connection alive with padding
+    while it works (OpenRouter pads non-streaming responses), which the
+    client's per-read timeout cannot: every pad byte resets it. The per-read
+    timeout is the same figure, so a silent server is never cut off sooner.
+    Exceeding it raises agents.ModelTimeoutError, which run_sandbox_task lets
+    propagate like the client's own APITimeoutError: run_code_sandbox reports
+    both as "the sandbox itself failed".
+    """
+    config = role_config(BRAIN)
+    return LanedModel(
+        OpenAIChatCompletionsModel(
+            model=config.model,
+            openai_client=AsyncOpenAI(
+                base_url=config.host + "/v1",
+                default_headers=config.extra_headers or None,
+                api_key=config.client_api_key,
+                # Connect gets its own short budget so an unreachable host
+                # fails fast instead of waiting out the read.
+                timeout=httpx2.Timeout(config.call_timeout, connect=SANDBOX_CONNECT_TIMEOUT_SECONDS),
+                max_retries=BRAIN_CLIENT_MAX_RETRIES,
+            ),
+        ),
+        config.host_key, config.call_timeout, lane=llm_lanes.BRAIN,
     )
 
 
@@ -1841,7 +1819,7 @@ async def _deliver(
     return await _collect_artifacts(session, out_dir, marker)
 
 
-async def run_sandbox_task(
+async def _run_sandbox_task(
     task: str,
     progress_hooks=None,
     *,
@@ -2025,6 +2003,19 @@ async def run_sandbox_task(
         conversation.finalize()
         await _persist_sandbox_snapshot(session, snapshot_id)
         await _delete_sandbox_session(sandbox_client, session)
+
+
+@functools.wraps(_run_sandbox_task)
+async def run_sandbox_task(*args, **kwargs) -> SandboxResult:
+    # Brain work: the side calls the run's tools make (a research brief, an
+    # image rewrite) wait in the brain lane, not the chat lane
+    # (llm_lanes.current_lane). Tool tasks copy this context when the SDK
+    # creates them. The docstring (functools.wraps) is _run_sandbox_task's.
+    token = llm_lanes.current_lane.set(llm_lanes.BRAIN)
+    try:
+        return await _run_sandbox_task(*args, **kwargs)
+    finally:
+        llm_lanes.current_lane.reset(token)
 
 
 async def _converse(agent, task, run_config, progress_hooks, nested_context,

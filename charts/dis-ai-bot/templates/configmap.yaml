@@ -1,4 +1,5 @@
 {{- include "dcb.failOnRemoved" . }}
+{{- include "dcb.checkStrataKeys" . }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -11,6 +12,17 @@ data:
   # The key is in secret.yaml (llm.apiKey), or the Strata secret (core.yaml).
   LLM_HOST: {{ include "dcb.llmHost" . }}
   LLM_MODEL: {{ .Values.llm.model | quote }}
+  # Slots: used only when the server's /props does not report them.
+  LLM_SLOTS: {{ include "dcb.llmSlots" . | quote }}
+  LLM_CHAT_RESERVED: {{ .Values.llm.chatReserved | toString | quote }}
+  # The persona's LLM: empty model/host fall back to the bot's own (LLM_*);
+  # its key lives in secret.yaml.
+  {{- if .Values.persona.model }}
+  PERSONA_MODEL: {{ .Values.persona.model | quote }}
+  {{- end }}
+  {{- if .Values.persona.llmHost }}
+  PERSONA_LLM_HOST: {{ .Values.persona.llmHost | quote }}
+  {{- end }}
   PERSONA_REASONING_EFFORT: {{ .Values.persona.reasoningEffort | quote }}
   PERSONA_MAX_TURNS: {{ .Values.persona.maxTurns | toString | quote }}
   PERSONA_CALL_TIMEOUT_SECONDS: {{ .Values.persona.callTimeout | toString | quote }}
@@ -153,6 +165,7 @@ data:
   {{- if .Values.brain.llmHost }}
   BRAIN_LLM_HOST: {{ .Values.brain.llmHost | quote }}
   {{- end }}
+  BRAIN_REASONING_EFFORT: {{ .Values.brain.reasoningEffort | quote }}
   BRAIN_CALL_TIMEOUT_SECONDS: {{ .Values.brain.callTimeout | toString | quote }}
   # Content guard (moderation of web and sandbox input); the key lives in
   # secret.yaml.
