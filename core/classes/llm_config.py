@@ -79,7 +79,11 @@ def llm_extra_headers() -> dict:
             continue
         name, sep, value = entry.partition("=")
         name, value = name.strip(), value.strip()
-        if not sep or not value or not _HEADER_NAME.match(name):
+        # The value must be printable ASCII too: a pasted line break or a
+        # curly quote would otherwise make httpx refuse to encode EVERY
+        # request, failing every reply instead of skipping one header.
+        if (not sep or not value or not _HEADER_NAME.match(name)
+                or not (value.isascii() and value.isprintable())):
             # Only the position: a malformed entry may be a pasted key
             # ("Authorization Bearer sk-..."), which must not reach the logs.
             logger.warning(f"LLM_EXTRA_HEADERS: skipping entry {position}, expected name=value")
