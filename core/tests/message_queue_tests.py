@@ -1,6 +1,6 @@
 """
 Unit tests for the message queue concurrency model:
-  - core/classes/message_queue.py — pure module: env-var sizing (WORKER_COUNT
+  - core/classes/message_queue.py — pure module: env-var sizing (QUEUE_WORKERS
     / QUEUE_MAX_SIZE), the bounded queue factory, the per-channel lock
     registry (no discord/agents imports needed).
   - the queue wiring in core/main.py — the bounded drop policy in
@@ -38,12 +38,12 @@ def test_no_double_module_under_both_import_paths():
 
 
 def test_worker_count_env(monkeypatch):
-    monkeypatch.delenv("WORKER_COUNT", raising=False)
-    assert mq.worker_count() == mq.DEFAULT_WORKER_COUNT == 2
+    monkeypatch.delenv("QUEUE_WORKERS", raising=False)
+    assert mq.queue_workers() == mq.DEFAULT_QUEUE_WORKERS == 2
     for value, expected in [("1", 1), ("4", 4), (" 3 ", 3),
                             ("0", 2), ("-2", 2), ("abc", 2), ("", 2)]:
-        monkeypatch.setenv("WORKER_COUNT", value)
-        assert mq.worker_count() == expected, value
+        monkeypatch.setenv("QUEUE_WORKERS", value)
+        assert mq.queue_workers() == expected, value
 
 
 def test_queue_max_size_env(monkeypatch):

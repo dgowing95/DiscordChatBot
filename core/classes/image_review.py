@@ -20,9 +20,9 @@ Environment variables:
     IMAGE_REVIEW_ENABLED      "0"/"false"/"no"/"off" to post images unchecked
     IMAGE_REVIEW_RETRIES      extra attempts when something asked for is
                               missing (default 1, max 2; 0 = check only)
-    IMAGE_REVIEW_MODEL        model id (default: the bot's MODEL)
+    IMAGE_REVIEW_MODEL        model id (default: the bot's LLM_MODEL)
     IMAGE_REVIEW_LLM_HOST     API base, /v1 appended (default: LLM_HOST)
-    IMAGE_REVIEW_LLM_API_KEY  API key (default: LLM_PASS)
+    IMAGE_REVIEW_LLM_API_KEY  API key (default: LLM_API_KEY)
     IMAGE_REVIEW_TIMEOUT      seconds to wait for the check (default 60)
 """
 import asyncio
@@ -37,7 +37,6 @@ from dataclasses import dataclass
 from classes.llm_config import (
     DEFAULT_LLM_API_KEY,
     DEFAULT_LLM_HOST,
-    DEFAULT_MODEL,
     env_or,
 )
 from classes.metrics import inc_image_review
@@ -112,7 +111,7 @@ def review_retries() -> int:
 
 
 def review_model() -> str:
-    return env_or("IMAGE_REVIEW_MODEL", "MODEL", DEFAULT_MODEL)
+    return env_or("IMAGE_REVIEW_MODEL", "LLM_MODEL", "")
 
 
 def review_llm_host() -> str:
@@ -121,7 +120,7 @@ def review_llm_host() -> str:
 
 
 def review_llm_api_key() -> str:
-    return env_or("IMAGE_REVIEW_LLM_API_KEY", "LLM_PASS", DEFAULT_LLM_API_KEY)
+    return env_or("IMAGE_REVIEW_LLM_API_KEY", "LLM_API_KEY", DEFAULT_LLM_API_KEY)
 
 
 def review_timeout() -> float:

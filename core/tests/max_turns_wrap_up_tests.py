@@ -46,7 +46,7 @@ def _looks(n):
 
 async def _generate(handler, max_turns=2):
     with patch("classes.text_llm_handler.get_current_datetime", AsyncMock(return_value="now")), \
-         patch("classes.text_llm_handler.llm_max_turns", return_value=max_turns), \
+         patch("classes.text_llm_handler.persona_max_turns", return_value=max_turns), \
          patch("classes.text_llm_handler.inc_llm_error", MagicMock()) as errors:
         answer = await handler.generate()
     return answer, errors

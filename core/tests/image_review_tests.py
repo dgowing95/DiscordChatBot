@@ -234,16 +234,16 @@ def test_retries_default_to_one_and_are_clamped(monkeypatch):
 def test_review_settings_fall_back_to_the_bots_own(monkeypatch):
     for name in ("IMAGE_REVIEW_MODEL", "IMAGE_REVIEW_LLM_HOST", "IMAGE_REVIEW_LLM_API_KEY"):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("MODEL", "qwen3:27b")
+    monkeypatch.setenv("LLM_MODEL", "qwen3:27b")
     monkeypatch.setenv("LLM_HOST", "http://llamacpp:8080")
-    monkeypatch.setenv("LLM_PASS", "llamacpp")
+    monkeypatch.setenv("LLM_API_KEY", "llamacpp")
     assert image_review.review_model() == "qwen3:27b"
     assert image_review.review_llm_host() == "http://llamacpp:8080"
     assert image_review.review_llm_api_key() == "llamacpp"
 
 
 def test_review_settings_override_the_bots_own(monkeypatch):
-    monkeypatch.setenv("MODEL", "qwen3:27b")
+    monkeypatch.setenv("LLM_MODEL", "qwen3:27b")
     monkeypatch.setenv("IMAGE_REVIEW_MODEL", "some/vision-model")
     monkeypatch.setenv("IMAGE_REVIEW_LLM_HOST", "https://openrouter.ai/api")
     assert image_review.review_model() == "some/vision-model"

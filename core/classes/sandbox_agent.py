@@ -26,6 +26,7 @@ import logging
 import asyncio
 import io
 import json
+import math
 import os
 import posixpath
 import re
@@ -63,7 +64,7 @@ from classes.sandbox_conversation import (
     SandboxConversation,
     make_agent_hooks,
 )
-from classes.llm_config import DEFAULT_LLM_API_KEY, DEFAULT_LLM_HOST, DEFAULT_MODEL, env_or, extra_headers_for
+from classes.llm_config import DEFAULT_LLM_API_KEY, DEFAULT_LLM_HOST, env_or, extra_headers_for
 
 # No run is ever uploaded to OpenAI's trace dashboard (why: text_llm_handler.py).
 set_tracing_disabled(True)
@@ -74,8 +75,8 @@ DEFAULT_MAX_TURNS = 10
 DEFAULT_TIMEOUT_SECONDS = 600
 DEFAULT_ASK_USER_TIMEOUT_SECONDS = 300
 DEFAULT_PERSIST_TIMEOUT_SECONDS = 180  # generous: covers Memory's 2 extra model calls on stop()
-DEFAULT_REQUEST_TIMEOUT_SECONDS = 180  # per-HTTP-request bound on one sandbox model call
-DEFAULT_MAX_RETRIES = 2  # matches the OpenAI client's own default, but stated explicitly
+DEFAULT_BRAIN_CALL_TIMEOUT_SECONDS = 600.0  # wall-clock bound on one brain model call
+BRAIN_CLIENT_MAX_RETRIES = 2  # the OpenAI client's own default, stated explicitly
 SANDBOX_CONNECT_TIMEOUT_SECONDS = 10.0  # separate, short: a dead host must not eat the whole budget
 SANDBOX_DELETE_TIMEOUT_SECONDS = 30  # bound on tearing down our own container
 SANDBOX_RECOVERY_TIMEOUT_SECONDS = 30  # bound on best-effort artifact recovery after a timeout
@@ -266,24 +267,24 @@ def sandbox_image() -> str:
 
 
 def sandbox_model() -> str:
-    """Model id for the nested sandbox agent (SANDBOX_MODEL; default: the
-    main bot's MODEL — i.e. the local llama.cpp model unless SANDBOX_MODEL
+    """Model id for the nested sandbox agent (BRAIN_MODEL; default: the
+    main bot's LLM_MODEL — i.e. the local llama.cpp model unless BRAIN_MODEL
     points the sandbox at a different OpenAI-compatible API, e.g.
     OpenRouter)."""
-    return env_or("SANDBOX_MODEL", "MODEL", DEFAULT_MODEL)
+    return env_or("BRAIN_MODEL", "LLM_MODEL", "")
 
 
 def sandbox_llm_host() -> str:
-    """Base URL of the LLM the sandbox agent talks to (SANDBOX_LLM_HOST;
+    """Base URL of the LLM the sandbox agent talks to (BRAIN_LLM_HOST;
     default: the main bot's LLM_HOST). The core appends /v1 itself, so this
     must not include it (OpenRouter: https://openrouter.ai/api)."""
-    return env_or("SANDBOX_LLM_HOST", "LLM_HOST", DEFAULT_LLM_HOST)
+    return env_or("BRAIN_LLM_HOST", "LLM_HOST", DEFAULT_LLM_HOST)
 
 
 def sandbox_llm_api_key() -> str:
-    """API key for the sandbox agent's LLM (SANDBOX_LLM_API_KEY; default:
-    the main bot's LLM_PASS placeholder)."""
-    return env_or("SANDBOX_LLM_API_KEY", "LLM_PASS", DEFAULT_LLM_API_KEY)
+    """API key for the sandbox agent's LLM (BRAIN_LLM_API_KEY; default:
+    the main bot's LLM_API_KEY placeholder)."""
+    return env_or("BRAIN_LLM_API_KEY", "LLM_API_KEY", DEFAULT_LLM_API_KEY)
 
 
 def sandbox_memory_limit() -> int | None:
@@ -360,14 +361,6 @@ def _positive_int(raw: str | None, default: int) -> int:
         return default
 
 
-def _non_negative_int(raw: str | None, default: int) -> int:
-    try:
-        value = int(str(raw).strip())
-        return value if value >= 0 else default
-    except (TypeError, ValueError):
-        return default
-
-
 def sandbox_max_turns() -> int:
     """Max model turns for one sandbox task (SANDBOX_MAX_TURNS, default 10)."""
     return _positive_int(os.environ.get("SANDBOX_MAX_TURNS"), DEFAULT_MAX_TURNS)
@@ -399,50 +392,26 @@ def sandbox_persist_timeout() -> int:
     )
 
 
-def sandbox_request_timeout() -> int:
-    """Seconds of silence on one HTTP request to the sandbox's LLM before the
-    client gives up on it (SANDBOX_REQUEST_TIMEOUT_SECONDS, default 180),
-    down from the OpenAI client's unstated 600s default.
-
-    This is the HTTP client's per-read timeout, not a wall-clock bound on the
-    call: it catches a connection that hangs (see
-    SANDBOX_CONNECT_TIMEOUT_SECONDS) and a server that accepts the request
-    then sends nothing, but NOT a server that dribbles keep-alive bytes while
-    it works — OpenRouter pads non-streaming responses with whitespace, and
-    every pad byte resets this timer. That case is caught by the separate
-    wall-clock bound on the whole model call, sandbox_model_call_timeout(),
-    which is derived from this value rather than configured on its own.
-    """
-    return _positive_int(
-        os.environ.get("SANDBOX_REQUEST_TIMEOUT_SECONDS"), DEFAULT_REQUEST_TIMEOUT_SECONDS
-    )
-
-
-def sandbox_model_call_timeout() -> float:
-    """Wall-clock seconds one model call may take in total, all HTTP retries
-    included: (1 + SANDBOX_MAX_RETRIES) x SANDBOX_REQUEST_TIMEOUT_SECONDS.
+def brain_call_timeout() -> float:
+    """Wall-clock seconds one model call of the brain may take, the client's
+    own retries included (BRAIN_CALL_TIMEOUT_SECONDS, default 600), like
+    the persona's PERSONA_CALL_TIMEOUT_SECONDS.
 
     Applied as ModelSettings.timeout, which the SDK's runner enforces by
-    cancelling the whole call (it wraps the OpenAI client's own retry loop,
-    so it does not add to the worst case). It is deliberately the same
-    figure that was already the documented worst case for a silent server,
-    so the only behaviour change is that a server which keeps the read
-    timeout alive with padding is now bounded by it too, instead of only by
-    sandbox_timeout(). Exceeding it raises agents.ModelTimeoutError, which
-    run_sandbox_task lets propagate exactly like the client's own
-    APITimeoutError already did: run_code_sandbox reports both as "the
-    sandbox itself failed".
+    cancelling the whole call. That is what bounds a server that keeps the
+    connection alive with padding while it works (OpenRouter pads
+    non-streaming responses with whitespace), which the client's per-read
+    timeout cannot: every pad byte resets it. The per-read timeout is the
+    same figure, so a silent server is never cut off sooner. Exceeding it
+    raises agents.ModelTimeoutError, which run_sandbox_task lets propagate
+    like the client's own APITimeoutError: run_code_sandbox reports both as
+    "the sandbox itself failed".
     """
-    return float((1 + sandbox_max_retries()) * sandbox_request_timeout())
-
-
-def sandbox_max_retries() -> int:
-    """How many times the sandbox's LLM client retries a failed request
-    (SANDBOX_MAX_RETRIES, default 2). 0 disables retries — which is why this
-    uses _non_negative_int rather than _positive_int: worst-case latency is
-    (1 + retries) x sandbox_request_timeout(), so being able to say "none"
-    is the point."""
-    return _non_negative_int(os.environ.get("SANDBOX_MAX_RETRIES"), DEFAULT_MAX_RETRIES)
+    try:
+        value = float(os.environ.get("BRAIN_CALL_TIMEOUT_SECONDS", "").strip())
+    except ValueError:
+        return DEFAULT_BRAIN_CALL_TIMEOUT_SECONDS
+    return value if value > 0 and math.isfinite(value) else DEFAULT_BRAIN_CALL_TIMEOUT_SECONDS
 
 
 def _tolerant_tool_invoke(original_invoke):
@@ -1219,8 +1188,8 @@ def build_sandbox_agent(out_dir: str | None, conversation=None) -> "object":
     pace itself and save partial output before a forced cutoff — see
     _BUDGET_BULLET.
 
-    Uses the same LLM as the main agent by default (MODEL / LLM_HOST /
-    LLM_PASS); SANDBOX_MODEL / SANDBOX_LLM_HOST / SANDBOX_LLM_API_KEY point
+    Uses the same LLM as the main agent by default (LLM_MODEL / LLM_HOST /
+    LLM_API_KEY); BRAIN_MODEL / BRAIN_LLM_HOST / BRAIN_LLM_API_KEY point
     it at a different OpenAI-compatible API instead (e.g. an OpenRouter
     model — see .env.example / the chart's sandbox.model/llmHost/apiKey).
     No default manifest, so the workspace starts empty.
@@ -1275,18 +1244,12 @@ def build_sandbox_agent(out_dir: str | None, conversation=None) -> "object":
             base_url=sandbox_llm_host() + "/v1",
             default_headers=extra_headers_for(sandbox_llm_host()) or None,
             api_key=sandbox_llm_api_key(),
-            # Both stated rather than left to the client's defaults (600s,
-            # 2 retries), which together let one silent request spend 30
-            # minutes before the run reports anything. Connect gets its own
-            # short budget so an unreachable host fails fast instead of
-            # waiting out the read. Note the read timeout does not bound a
-            # server that keeps sending keep-alive padding — that is what
-            # ModelSettings.timeout below is for; see sandbox_request_timeout()
-            # for what each does and does not catch.
-            timeout=httpx2.Timeout(
-                float(sandbox_request_timeout()), connect=SANDBOX_CONNECT_TIMEOUT_SECONDS
-            ),
-            max_retries=sandbox_max_retries(),
+            # Connect gets its own short budget so an unreachable host fails
+            # fast instead of waiting out the read. The read timeout does not
+            # bound a server that keeps sending keep-alive padding: that is
+            # what ModelSettings.timeout below is for (brain_call_timeout()).
+            timeout=httpx2.Timeout(brain_call_timeout(), connect=SANDBOX_CONNECT_TIMEOUT_SECONDS),
+            max_retries=BRAIN_CLIENT_MAX_RETRIES,
         ),
     )
 
@@ -1312,8 +1275,8 @@ def build_sandbox_agent(out_dir: str | None, conversation=None) -> "object":
         hooks=make_agent_hooks(conversation) if conversation is not None else None,
         # Slightly cooler than the chat agent: code tasks want determinism.
         # timeout: the wall-clock bound on each model call that the client's
-        # read timeout above cannot provide (see sandbox_model_call_timeout).
-        model_settings=ModelSettings(temperature=0.5, timeout=sandbox_model_call_timeout()),
+        # read timeout above cannot provide (see brain_call_timeout).
+        model_settings=ModelSettings(temperature=0.5, timeout=brain_call_timeout()),
     )
 
 

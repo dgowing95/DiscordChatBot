@@ -21,15 +21,15 @@ spec:
         envFrom:
         - configMapRef:
             name: {{ .Release.Name }}-configmap
-        # Credentials (DISCORD_TOKEN, OPENAI_API_KEY, SANDBOX_LLM_API_KEY);
+        # Credentials (DISCORD_TOKEN, LLM_API_KEY, CONTENT_GUARD_API_KEY, BRAIN_LLM_API_KEY, ...);
         # the chart's own Secret unless existingSecret names one
         - secretRef:
             name: {{ .Values.existingSecret | default (printf "%s-secret" .Release.Name) }}
         {{- if eq (include "dcb.llmEngine" .) "strata" }}
-        # Strata checks the key, so core's LLM_PASS is the real one from the
+        # Strata checks the key, so core's LLM_API_KEY is the real one from the
         # Strata secret (an explicit env entry beats the configmap's).
         env:
-        - name: LLM_PASS
+        - name: LLM_API_KEY
           valueFrom:
             secretKeyRef:
               name: {{ include "dcb.strataSecretName" . }}

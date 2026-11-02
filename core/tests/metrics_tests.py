@@ -127,22 +127,12 @@ def test_prompt_tokens_histogram():
     assert label._buckets[bucket].get() == before_bucket + 1
 
 
-def test_context_window_gauge_from_env(monkeypatch):
-    monkeypatch.setenv("LLM_CONTEXT_LENGTH", "80000")
-    m.set_context_window_from_env()
-    assert m.llm_context_window_tokens._value.get() == 80000
-
-    # Unset/garbage must not raise out of startup — the gauge just keeps its
-    # last value (0 on a fresh process).
-    monkeypatch.setenv("LLM_CONTEXT_LENGTH", "")
-    m.set_context_window_from_env()
-    assert m.llm_context_window_tokens._value.get() == 80000
-    monkeypatch.setenv("LLM_CONTEXT_LENGTH", "not-a-number")
-    m.set_context_window_from_env()
-    assert m.llm_context_window_tokens._value.get() == 80000
-    monkeypatch.delenv("LLM_CONTEXT_LENGTH")
-    m.set_context_window_from_env()
-    assert m.llm_context_window_tokens._value.get() == 80000
+def test_context_window_gauge():
+    m.set_context_window(160000)
+    assert m.llm_context_window_tokens._value.get() == 160000
+    # A failed /props read must not zero the gauge: it keeps the last value.
+    m.set_context_window(None)
+    assert m.llm_context_window_tokens._value.get() == 160000
 
 
 def test_guild_label_defaults():

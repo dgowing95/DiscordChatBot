@@ -290,9 +290,9 @@ async def test_build_ignores_an_empty_request(monkeypatch):
 def test_rewrite_settings_fall_back_to_the_bots_own(monkeypatch):
     for name in ("IMAGE_PROMPT_MODEL", "IMAGE_PROMPT_LLM_HOST", "IMAGE_PROMPT_LLM_API_KEY"):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("MODEL", "qwen3:27b")
+    monkeypatch.setenv("LLM_MODEL", "qwen3:27b")
     monkeypatch.setenv("LLM_HOST", "http://llamacpp:8080")
-    monkeypatch.setenv("LLM_PASS", "llamacpp")
+    monkeypatch.setenv("LLM_API_KEY", "llamacpp")
 
     assert image_prompt.rewrite_model() == "qwen3:27b"
     assert image_prompt.rewrite_llm_host() == "http://llamacpp:8080"
@@ -301,8 +301,8 @@ def test_rewrite_settings_fall_back_to_the_bots_own(monkeypatch):
 
 def test_rewrite_settings_override_the_bots_own(monkeypatch):
     """So the rewrite can run on OpenRouter while chat stays local, exactly as
-    SANDBOX_MODEL/SANDBOX_LLM_HOST already allow for the sandbox agent."""
-    monkeypatch.setenv("MODEL", "qwen3:27b")
+    BRAIN_MODEL/BRAIN_LLM_HOST already allow for the sandbox agent."""
+    monkeypatch.setenv("LLM_MODEL", "qwen3:27b")
     monkeypatch.setenv("LLM_HOST", "http://llamacpp:8080")
     monkeypatch.setenv("IMAGE_PROMPT_MODEL", "deepseek/deepseek-v4-flash-0731")
     monkeypatch.setenv("IMAGE_PROMPT_LLM_HOST", "https://openrouter.ai/api")

@@ -18,13 +18,13 @@ services:
     environment:
       # Model cache (the ollama_data volume); GGUF is downloaded once, then cached
       - LLAMA_CACHE=/models
-      # Same value core requests as MODEL; to swap models change it in .env and `docker compose up -d`
-      - LLAMA_ARG_HF_REPO=${MODEL:-ggml-org/Qwen3.8-27B-GGUF:Q4_K_M}
+      # Same value core requests as LLM_MODEL; to swap models change it in .env and `docker compose up -d`
+      - LLAMA_ARG_HF_REPO=${LLM_MODEL:-ggml-org/Qwen3.8-27B-GGUF:Q4_K_M}
       # Keep LLAMA_ARG_PORT in sync with ports: above and LLM_HOST in .env
       - LLAMA_ARG_N_GPU_LAYERS=99
       # KV cache quantization for K/V context (llama.cpp -ctk/-ctv); override in .env
-      - LLAMA_ARG_CACHE_TYPE_K=${LLAMA_ARG_CACHE_TYPE_K:-q4_0}
-      - LLAMA_ARG_CACHE_TYPE_V=${LLAMA_ARG_CACHE_TYPE_V:-q4_0}
+      - LLAMA_ARG_CACHE_TYPE_K=${LLAMA_CACHE_TYPE_K:-q4_0}
+      - LLAMA_ARG_CACHE_TYPE_V=${LLAMA_CACHE_TYPE_V:-q4_0}
       - LLAMA_ARG_CTX_SIZE=80000
       - LLAMA_ARG_PORT=8081
       - LLAMA_ARG_N_PARALLEL=1
@@ -43,7 +43,7 @@ services:
   strata:
     # Strata (COMPOSE_PROFILES=strata): the alternative LLM server for large
     # mixture-of-experts models; settings are its image's env vars (Strata's
-    # docs/DOCKER.md). It always checks a key, so LLM_PASS in .env is the key
+    # docs/DOCKER.md). It always checks a key, so LLM_API_KEY in .env is the key
     # for both sides. Point core at it with LLM_HOST=http://strata:8080.
     profiles: [strata]
     image: ghcr.io/niko1221/strata:${STRATA_IMAGE_TAG:-0.2.3-cuda13}
@@ -53,11 +53,11 @@ services:
     # It also stops at once without a real key (empty, or still the llama.cpp
     # placeholder): Strata would make or use one core does not expect, and
     # every request would then fail with 401.
-    entrypoint: ["sh", "-c", "case \"$${API_KEY:-}\" in ''|llamacpp) echo '[X] Set LLM_PASS in .env to the Strata API key (16+ characters, e.g. openssl rand -hex 24)' >&2; exit 2;; esac; strata launch --delete-preset docker >/dev/null 2>&1 || true; exec /usr/bin/tini -- /opt/strata/entrypoint.sh run"]
+    entrypoint: ["sh", "-c", "case \"$${API_KEY:-}\" in ''|llamacpp) echo '[X] Set LLM_API_KEY in .env to the Strata API key (16+ characters, e.g. openssl rand -hex 24)' >&2; exit 2;; esac; strata launch --delete-preset docker >/dev/null 2>&1 || true; exec /usr/bin/tini -- /opt/strata/entrypoint.sh run"]
     ports:
       - "127.0.0.1:8083:8080"
     environment:
-      - API_KEY=${LLM_PASS:-}
+      - API_KEY=${LLM_API_KEY:-}
       - FAMILY=${STRATA_FAMILY:-qwen}
       - MODEL=${STRATA_MODEL:-IQ3_XXS}
       # GGUF files you already have, inside the container (the strata_models
@@ -95,7 +95,10 @@ services:
       # container on the local daemon (agents.sandbox DockerSandboxClient).
       # To disable the sandbox: SANDBOX_ENABLED=0 in .env (the mount can stay).
       - /var/run/docker.sock:/var/run/docker.sock
-    env_file: .env
+    # The same file compose read for ${...} above: `docker compose --env-file
+    # .env.v3 up` would otherwise still hand core the plain .env. Set
+    # CORE_ENV_FILE in that file to its own name.
+    env_file: ${CORE_ENV_FILE:-.env}
     environment:
       # Voice calls (VOICE_ENABLED=1 in .env turns them on): the sidecar and
       # speech services below, on the compose network.

@@ -30,9 +30,9 @@ Environment variables:
                             (default 6000)
     RESEARCH_FETCH_TIMEOUT  seconds to wait for the pages (default 25);
                             a page not read by then is left out
-    RESEARCH_MODEL          model id (default: the bot's MODEL)
+    RESEARCH_MODEL          model id (default: the bot's LLM_MODEL)
     RESEARCH_LLM_HOST       API base, /v1 appended (default: LLM_HOST)
-    RESEARCH_LLM_API_KEY    API key (default: LLM_PASS)
+    RESEARCH_LLM_API_KEY    API key (default: LLM_API_KEY)
     RESEARCH_TIMEOUT        seconds to wait for the brief (default 90)
 """
 import math
@@ -40,7 +40,7 @@ import os
 from collections import namedtuple
 from urllib.parse import urlsplit
 
-from classes.llm_config import DEFAULT_LLM_API_KEY, DEFAULT_LLM_HOST, DEFAULT_MODEL, env_or
+from classes.llm_config import DEFAULT_LLM_API_KEY, DEFAULT_LLM_HOST, env_or
 
 SEARCH_RESULTS = 5
 MAX_PAGES = 5
@@ -82,7 +82,7 @@ def settings() -> dict:
 
 
 def research_model() -> str:
-    return env_or("RESEARCH_MODEL", "MODEL", DEFAULT_MODEL)
+    return env_or("RESEARCH_MODEL", "LLM_MODEL", "")
 
 
 def research_llm_host() -> str:
@@ -91,7 +91,7 @@ def research_llm_host() -> str:
 
 
 def research_llm_api_key() -> str:
-    return env_or("RESEARCH_LLM_API_KEY", "LLM_PASS", DEFAULT_LLM_API_KEY)
+    return env_or("RESEARCH_LLM_API_KEY", "LLM_API_KEY", DEFAULT_LLM_API_KEY)
 
 
 def research_timeout() -> float:

@@ -33,13 +33,13 @@ STRATA_PROPS = {
 
 
 def test_auth_header_sends_llm_pass(monkeypatch):
-    monkeypatch.setenv("LLM_PASS", "secret-key")
+    monkeypatch.setenv("LLM_API_KEY", "secret-key")
     monkeypatch.delenv("LLM_EXTRA_HEADERS", raising=False)
     assert llm_auth_headers() == {"Authorization": "Bearer secret-key"}
 
 
 def test_auth_header_falls_back_to_placeholder(monkeypatch):
-    monkeypatch.delenv("LLM_PASS", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
     monkeypatch.delenv("LLM_EXTRA_HEADERS", raising=False)
     assert llm_auth_headers() == {"Authorization": "Bearer llamacpp"}
 
@@ -53,7 +53,7 @@ def test_auth_header_falls_back_to_placeholder(monkeypatch):
     ("novalue, =x, bad name=1, ok=1", {"ok": "1"}),
     # Values httpx could not encode: a control character, non-ASCII.
     ("a=line\nbreak, b=“quoted”, c=em—dash, ok=1", {"ok": "1"}),
-    # LLM_PASS owns Authorization.
+    # LLM_API_KEY owns Authorization.
     ("Authorization=Bearer other, ok=1", {"ok": "1"}),
 ])
 def test_extra_headers_parse(monkeypatch, raw, expected):
@@ -70,7 +70,7 @@ def test_malformed_extra_header_is_not_logged(monkeypatch, caplog):
 
 
 def test_extra_headers_go_with_the_auth_header(monkeypatch):
-    monkeypatch.setenv("LLM_PASS", "secret-key")
+    monkeypatch.setenv("LLM_API_KEY", "secret-key")
     monkeypatch.setenv("LLM_EXTRA_HEADERS", "x-opencode-session=s1")
     assert llm_auth_headers() == {"x-opencode-session": "s1", "Authorization": "Bearer secret-key"}
 
@@ -133,7 +133,7 @@ def _session(status=200, body=None):
 
 @pytest.mark.asyncio
 async def test_side_calls_send_the_key(monkeypatch):
-    monkeypatch.setenv("LLM_PASS", "secret-key")
+    monkeypatch.setenv("LLM_API_KEY", "secret-key")
     monkeypatch.setattr(tlh, "_slot_context", None)
     expected = {"Authorization": "Bearer secret-key"}
     for call, body in ((tlh.TextLLMHandler.refresh_slot_context, STRATA_PROPS),

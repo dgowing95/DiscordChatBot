@@ -25,9 +25,9 @@ degrades to the previous behaviour instead of costing the user their image.
 Environment variables:
     IMAGE_PROMPT_REWRITE_ENABLED  "0"/"false"/"no"/"off" to skip the rewrite
                                   and send the request through as-is
-    IMAGE_PROMPT_MODEL            model id (default: the bot's MODEL)
+    IMAGE_PROMPT_MODEL            model id (default: the bot's LLM_MODEL)
     IMAGE_PROMPT_LLM_HOST         API base, /v1 appended (default: LLM_HOST)
-    IMAGE_PROMPT_LLM_API_KEY      API key (default: LLM_PASS)
+    IMAGE_PROMPT_LLM_API_KEY      API key (default: LLM_API_KEY)
     IMAGE_PROMPT_TIMEOUT          seconds to wait for the rewrite (default 60)
 """
 import json
@@ -38,7 +38,6 @@ import re
 from classes.llm_config import (
     DEFAULT_LLM_API_KEY,
     DEFAULT_LLM_HOST,
-    DEFAULT_MODEL,
     env_or,
 )
 from classes.response_filter import strip_thinking
@@ -107,12 +106,12 @@ def rewrite_enabled() -> bool:
 
 
 def rewrite_model() -> str:
-    """Model id for the rewrite (IMAGE_PROMPT_MODEL; default: the bot's MODEL).
+    """Model id for the rewrite (IMAGE_PROMPT_MODEL; default: the bot's LLM_MODEL).
 
     Split out so a deployment can point the rewrite at a different
     OpenAI-compatible API than the chat model, the way the sandbox agent does.
     """
-    return env_or("IMAGE_PROMPT_MODEL", "MODEL", DEFAULT_MODEL)
+    return env_or("IMAGE_PROMPT_MODEL", "LLM_MODEL", "")
 
 
 def rewrite_llm_host() -> str:
@@ -122,8 +121,8 @@ def rewrite_llm_host() -> str:
 
 
 def rewrite_llm_api_key() -> str:
-    """API key for the rewrite (IMAGE_PROMPT_LLM_API_KEY; default: LLM_PASS)."""
-    return env_or("IMAGE_PROMPT_LLM_API_KEY", "LLM_PASS", DEFAULT_LLM_API_KEY)
+    """API key for the rewrite (IMAGE_PROMPT_LLM_API_KEY; default: LLM_API_KEY)."""
+    return env_or("IMAGE_PROMPT_LLM_API_KEY", "LLM_API_KEY", DEFAULT_LLM_API_KEY)
 
 
 def rewrite_timeout() -> float:

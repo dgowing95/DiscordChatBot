@@ -59,7 +59,7 @@ spec:
       interval: {{ .Values.metrics.scrapeInterval }}
 {{- else }}
 ---
-# Strata's own metrics (llmEngine: strata), on its API port like llama.cpp's.
+# Strata's own metrics (llm.engine: strata), on its API port like llama.cpp's.
 # vLLM-style names (vllm:num_requests_running, vllm:prompt_tokens_total,
 # vllm:prefix_cache_hits_total, latency histograms, ...) plus strata:*
 # gauges (live tok/s, RAM and GPU use). /metrics needs the API key, so the

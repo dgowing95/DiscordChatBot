@@ -39,7 +39,7 @@ Dependabot secrets: Dependabot's runs can only see the second store.
 | `E2E_DISCORD_TOKEN` | Token of a bot made only for testing. Never the real bot's. |
 | `E2E_WEBHOOK_URL` | Webhook in the test server's text channel. The server and channel are read from it. |
 | `E2E_VOICE_CHANNEL_ID` | A voice channel in the test server. Empty skips the voice check. |
-| `OPENCODE_API_KEY` | OpenCode Go key for the LLM below, given to `start_stack.sh` as `E2E_LLM_API_KEY` and to core only as `LLM_PASS`. Not test-only: it is also `review.yml`'s key, so the PR code this job runs can read it (see AGENTS.md's security rules). Dependabot's runs need it in the Dependabot store too. |
+| `OPENCODE_API_KEY` | OpenCode Go key for the LLM below, given to `start_stack.sh` as `E2E_LLM_API_KEY` and to core only as `LLM_API_KEY`. Not test-only: it is also `review.yml`'s key, so the PR code this job runs can read it (see AGENTS.md's security rules). Dependabot's runs need it in the Dependabot store too. |
 
 The job runs on a GitHub-hosted runner (`ubuntu-latest`). The rest of its
 settings are plain values in `e2e.yaml`:
