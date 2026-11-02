@@ -9,7 +9,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from classes import text_llm_handler as tlh
-from classes.llm_config import llm_auth_headers
+from classes.llm_config import extra_headers_for, llm_auth_headers, llm_extra_headers
+from classes.side_llm import SideLLM
 from classes.text_llm_handler import parse_slot_context, served_model_names
 
 # Trimmed from real responses.
@@ -33,12 +34,64 @@ STRATA_PROPS = {
 
 def test_auth_header_sends_llm_pass(monkeypatch):
     monkeypatch.setenv("LLM_PASS", "secret-key")
+    monkeypatch.delenv("LLM_EXTRA_HEADERS", raising=False)
     assert llm_auth_headers() == {"Authorization": "Bearer secret-key"}
 
 
 def test_auth_header_falls_back_to_placeholder(monkeypatch):
     monkeypatch.delenv("LLM_PASS", raising=False)
+    monkeypatch.delenv("LLM_EXTRA_HEADERS", raising=False)
     assert llm_auth_headers() == {"Authorization": "Bearer llamacpp"}
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("", {}),
+    ("x-opencode-session=e2e-run-1", {"x-opencode-session": "e2e-run-1"}),
+    (" a=1 , b = two words ,", {"a": "1", "b": "two words"}),
+    ("a=x=y", {"a": "x=y"}),
+    # Malformed entries are skipped, the rest kept.
+    ("novalue, =x, bad name=1, ok=1", {"ok": "1"}),
+    # LLM_PASS owns Authorization.
+    ("Authorization=Bearer other, ok=1", {"ok": "1"}),
+])
+def test_extra_headers_parse(monkeypatch, raw, expected):
+    monkeypatch.setenv("LLM_EXTRA_HEADERS", raw)
+    assert llm_extra_headers() == expected
+
+
+def test_extra_headers_go_with_the_auth_header(monkeypatch):
+    monkeypatch.setenv("LLM_PASS", "secret-key")
+    monkeypatch.setenv("LLM_EXTRA_HEADERS", "x-opencode-session=s1")
+    assert llm_auth_headers() == {"x-opencode-session": "s1", "Authorization": "Bearer secret-key"}
+
+
+def test_extra_headers_only_for_llm_host(monkeypatch):
+    monkeypatch.setenv("LLM_HOST", "https://api.example/zen/go")
+    monkeypatch.setenv("LLM_EXTRA_HEADERS", "x-opencode-session=s1")
+    assert extra_headers_for("https://api.example/zen/go/") == {"x-opencode-session": "s1"}
+    assert extra_headers_for("http://other:8080") == {}
+
+
+def test_clients_send_the_extra_headers(monkeypatch):
+    monkeypatch.setenv("LLM_HOST", "https://api.example/zen/go")
+    monkeypatch.setenv("LLM_EXTRA_HEADERS", "x-opencode-session=s1")
+    monkeypatch.setattr(tlh, "_main_model_client", None)
+    main = tlh._get_main_model_client()._client
+    assert main.default_headers["x-opencode-session"] == "s1"
+    monkeypatch.setattr(tlh, "_main_model_client", None)
+
+    same_host = SideLLM("t", lambda: "m", lambda: "https://api.example/zen/go", lambda: "k", lambda: 5)
+    assert same_host._get_client().default_headers["x-opencode-session"] == "s1"
+    elsewhere = SideLLM("t", lambda: "m", lambda: "http://other:8080", lambda: "k", lambda: 5)
+    assert "x-opencode-session" not in elsewhere._get_client().default_headers
+
+
+def test_no_extra_headers_by_default(monkeypatch):
+    monkeypatch.delenv("LLM_EXTRA_HEADERS", raising=False)
+    monkeypatch.setattr(tlh, "_main_model_client", None)
+    main = tlh._get_main_model_client()._client
+    assert not any(k.lower().startswith("x-opencode") for k in main.default_headers)
+    monkeypatch.setattr(tlh, "_main_model_client", None)
 
 
 def test_strata_props_give_the_per_slot_context():

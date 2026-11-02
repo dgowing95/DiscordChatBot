@@ -13,7 +13,11 @@ so with MODEL unset the bot verified that one model was loaded and then asked
 for a different one; and LLM_PASS defaulted to "ollama" here (a leftover from
 before the llama.cpp switch) while the chart and .env.example use "llamacpp".
 """
+import logging
 import os
+import re
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "qwen3:4b"
 DEFAULT_LLM_HOST = "http://llamacpp:8080"
@@ -53,12 +57,57 @@ def llm_api_key() -> str:
     return os.environ.get("LLM_PASS") or DEFAULT_LLM_API_KEY
 
 
+# An HTTP header name (RFC 9110 token characters).
+_HEADER_NAME = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
+
+
+def llm_extra_headers() -> dict:
+    """Extra headers sent with every request to LLM_HOST (LLM_EXTRA_HEADERS).
+
+    Comma-separated `name=value` pairs, e.g.
+    `LLM_EXTRA_HEADERS=x-opencode-session=my-bot`. For a hosted API that
+    needs more than a key: OpenCode Go refuses every request without an
+    `x-opencode-session` header (400 MissingSessionID), which is what the
+    E2E job runs against. Unset (the default, and llama.cpp/Strata) sends
+    nothing extra. A malformed entry, or an Authorization header (LLM_PASS
+    sets that one), is skipped with a warning rather than failing a reply.
+    """
+    headers = {}
+    for entry in os.environ.get("LLM_EXTRA_HEADERS", "").split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        name, sep, value = entry.partition("=")
+        name, value = name.strip(), value.strip()
+        if not sep or not value or not _HEADER_NAME.match(name):
+            logger.warning(f"LLM_EXTRA_HEADERS: skipping {name or entry!r}, expected name=value")
+            continue
+        if name.lower() == "authorization":
+            logger.warning("LLM_EXTRA_HEADERS: skipping Authorization; LLM_PASS sets it")
+            continue
+        headers[name] = value
+    return headers
+
+
+def extra_headers_for(host: str) -> dict:
+    """llm_extra_headers() for a client of `host`, when that is LLM_HOST.
+
+    The side jobs and the sandbox agent can each be given a server of their
+    own (IMAGE_PROMPT_LLM_HOST, SANDBOX_LLM_HOST, ...). The extra headers
+    belong to LLM_HOST's server, so a job pointed elsewhere sends none; one
+    that falls back to LLM_HOST sends them like the main agent does.
+    """
+    if host.rstrip("/") != llm_host().rstrip("/"):
+        return {}
+    return llm_extra_headers()
+
+
 def llm_auth_headers() -> dict:
     """Headers for core's own HTTP calls to the LLM server (/props,
     /v1/models), which go around the OpenAI client and so would otherwise
-    send no key. A server that checks the key answers them 401 without it;
-    llama.cpp ignores it."""
-    return {"Authorization": f"Bearer {llm_api_key()}"}
+    send no key (or LLM_EXTRA_HEADERS). A server that checks the key answers
+    them 401 without it; llama.cpp ignores it."""
+    return {**llm_extra_headers(), "Authorization": f"Bearer {llm_api_key()}"}
 
 
 def parse_temperature(raw) -> float:

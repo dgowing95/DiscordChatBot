@@ -63,7 +63,7 @@ from classes.sandbox_conversation import (
     SandboxConversation,
     make_agent_hooks,
 )
-from classes.llm_config import DEFAULT_LLM_API_KEY, DEFAULT_LLM_HOST, DEFAULT_MODEL, env_or
+from classes.llm_config import DEFAULT_LLM_API_KEY, DEFAULT_LLM_HOST, DEFAULT_MODEL, env_or, extra_headers_for
 
 # No run is ever uploaded to OpenAI's trace dashboard (why: text_llm_handler.py).
 set_tracing_disabled(True)
@@ -1273,6 +1273,7 @@ def build_sandbox_agent(out_dir: str | None, conversation=None) -> "object":
         model=sandbox_model(),
         openai_client=AsyncOpenAI(
             base_url=sandbox_llm_host() + "/v1",
+            default_headers=extra_headers_for(sandbox_llm_host()) or None,
             api_key=sandbox_llm_api_key(),
             # Both stated rather than left to the client's defaults (600s,
             # 2 retries), which together let one silent request spend 30

@@ -7,7 +7,7 @@ CI"); this file covers how it runs.
 
 | File | What it does |
 |---|---|
-| `start_stack.sh` | Starts Redis, the speech service, the voice sidecar, core and (for image-service PRs) a CPU image service with a tiny model, all from the checked-out source. Logs go to `e2e/logs/`. |
+| `start_stack.sh` | Starts Redis, the speech service, the voice sidecar, core and (in CI, always) a CPU image service with a tiny model, all from the checked-out source. Logs go to `e2e/logs/`. |
 | `run_checks.py` | Talks to the bot through a webhook in a private test server and checks the replies through Discord's REST API. |
 | `stop_stack.sh` | Stops everything `start_stack.sh` started. |
 
@@ -39,16 +39,17 @@ Dependabot secrets: Dependabot's runs can only see the second store.
 | `E2E_DISCORD_TOKEN` | Token of a bot made only for testing. Never the real bot's. |
 | `E2E_WEBHOOK_URL` | Webhook in the test server's text channel. The server and channel are read from it. |
 | `E2E_VOICE_CHANNEL_ID` | A voice channel in the test server. Empty skips the voice check. |
+| `OPENCODE_API_KEY` | OpenCode Go key for the LLM below (the same secret `review.yml` uses), given to `start_stack.sh` as `E2E_LLM_API_KEY` and to core only as `LLM_PASS`. Dependabot's runs need it in the Dependabot store too. |
 
-The runner (label `discordchatbot-e2e`) provides these as environment
-variables, so the endpoints never appear in this repository:
+The job runs on a GitHub-hosted runner (`ubuntu-latest`). The rest of its
+settings are plain values in `e2e.yaml`:
 
 | Variable | What |
 |---|---|
-| `E2E_LLM_HOST` | LLM server (OpenAI-compatible: llama.cpp or Strata) the bot uses, without `/v1` |
-| `E2E_LLM_API_KEY` | Optional: that server's API key (Strata needs one), passed to core only as `LLM_PASS`. Empty = core's placeholder |
-| `E2E_DIFFUSION_URL` | Image service the bot uses (unused when the PR's own runs). Optional: unset = every run starts the local CPU image service, as image-service PRs do (for a deployment with image generation off) |
-| `E2E_MODEL` | Model name to request |
+| `E2E_LLM_HOST` | OpenAI-compatible LLM the bot uses, without `/v1` (OpenCode Go) |
+| `E2E_MODEL` | Model name to request (`deepseek-v4.1-flash`) |
+| `E2E_LLM_EXTRA_HEADERS` | core's `LLM_EXTRA_HEADERS`: OpenCode Go refuses requests without an `x-opencode-session` header, so each run sends its own |
+| `E2E_LOCAL_DIFFUSION` | `1`: start the PR's own image service on CPU with a tiny model. The vision check of the picture is off on this path (a tiny model draws noise); `start_stack.sh` also takes `E2E_DIFFUSION_URL` for a real image service when run by hand |
 
 ## Running it yourself
 

@@ -663,6 +663,7 @@ needs an entry there, gated with `requires` when it can be switched off;
 | `REDIS_HOST` | required; Redis host |
 | `LLM_HOST` | LLM server base URL (OpenAI-compat; core appends `/v1`). docker-compose (dev): the `llamacpp` service on :8081, or `http://strata:8080`. Helm chart: `llm_host`, empty by default = the in-cluster service of `llmEngine`; the in-code fallback is `http://llamacpp:8080` |
 | `LLM_PASS` | the LLM server's API key. A placeholder for llama.cpp, which does not authenticate (the OpenAI client requires a non-empty key); the real key for Strata, which checks it (the chart takes it from `strata.apiKey` / `strata.existingSecret`, key `STRATA_API_KEY`; compose gives the same `.env` value to the `strata` service) |
+| `LLM_EXTRA_HEADERS` | extra headers sent with every request to `LLM_HOST`, as comma-separated `name=value` pairs (default: none). For a hosted API that needs more than a key: OpenCode Go refuses requests without `x-opencode-session` (E2E sets one per run). A side job or the sandbox agent given its own `*_LLM_HOST` sends none; `Authorization` is skipped (`LLM_PASS` sets it) |
 | `MODEL` | the model, single source of truth: the bot requests this name AND the compose `llamacpp` service serves it (as `LLAMA_ARG_HF_REPO`); in the Helm chart the one `model` value feeds both. With Strata it is only the requested name (Strata picks its model from `strata.model`, `STRATA_MODEL` in compose, and answers any name). In-code default `qwen3:4b` |
 | `OPENAI_API_KEY` | API key for the free OpenAI Moderations endpoint (web-tool guard); fail-open if unset. The agents SDK would also upload every run to OpenAI's trace dashboard with it; that is switched off in code (`set_tracing_disabled(True)` in `text_llm_handler.py` and `sandbox_agent.py`), with no setting to turn it back on |
 | `OPENAI_BASE_URL` | moderation API base (default `https://api.openai.com/v1`); any OpenAI-compatible `/v1/moderations` endpoint works. Chart: `openaiBaseUrl` |
@@ -878,8 +879,8 @@ curl -sS -X POST "$TEST_WEBHOOK_URL" \
 
 `.github/workflows/e2e.yaml` runs on every PR that touches `core/`,
 `speechservice/`, `voicesidecar/`, `diffusionservice/` or `e2e/`. It starts
-the PR's bot from source (`e2e/start_stack.sh`) against a real LLM and image
-service and talks to it through a webhook in a private test server
+the PR's bot from source (`e2e/start_stack.sh`) against a real LLM and its
+own CPU image service and talks to it through a webhook in a private test server
 (`e2e/run_checks.py`): chat, the memory tool, an image, a poll, slash command
 sync, the speech service, and a voice call driven by `VOICE_DEV_INJECT`. It
 checks structure (a reply arrived, a fact is in Redis, a PNG was attached),
@@ -887,15 +888,19 @@ never wording. `e2e/README.md` lists every check and its configuration. A
 failure shows in the run's step summary, and the full logs are in its
 `e2e-logs` artifact.
 
-- **Runner.** `runs-on: discordchatbot-e2e` is a self-hosted runner that
-  provides `E2E_LLM_HOST`, `E2E_DIFFUSION_URL` and `E2E_MODEL` (plus
-  `E2E_LLM_API_KEY` when that LLM server checks a key) as environment
-  variables, so no deployment detail lives in this public repository. A
-  `diffusionservice/` PR runs its own image service on CPU with a tiny model
-  instead (`E2E_LOCAL_DIFFUSION`). That covers imports and library skew, never
-  the CUDA/nf4 paths, so those PRs are never auto-merged.
+- **Runner.** `runs-on: ubuntu-latest`: a GitHub-hosted VM per job, deleted
+  afterwards, so the PR's unreviewed dependencies never run on a machine that
+  is kept. The LLM is a hosted API (DeepSeek V4.1 Flash on OpenCode Go, named
+  in `e2e.yaml`), not prod's model. Every run starts the PR's own image
+  service on CPU with a tiny model (`E2E_LOCAL_DIFFUSION`), with the vision
+  check off. That covers the tool, core's client, imports and library skew,
+  never the CUDA/nf4 paths or prod's image model, so `diffusionservice/` PRs
+  are never auto-merged.
 - **Secrets** `E2E_DISCORD_TOKEN`, `E2E_WEBHOOK_URL` and `E2E_VOICE_CHANNEL_ID`
-  belong to a bot and a server made only for testing. Each one goes in **both**
+  belong to a bot and a server made only for testing; `OPENCODE_API_KEY`
+  (also `review.yml`'s) is that LLM's key, and each run sends its own
+  `x-opencode-session` header through `LLM_EXTRA_HEADERS`, which OpenCode Go
+  requires. Each one goes in **both**
   the Actions secrets and the Dependabot secrets: a run started by Dependabot
   sees only the latter.
 - **Security rules.** This repo is public and the job runs a PR's new
@@ -903,11 +908,16 @@ failure shows in the run's step summary, and the full logs are in its
   - Keep "Require approval for all external contributors" on (Settings →
     Actions). A fork edits its own copy of the workflow, so `runs-on:` and
     `if:` are not a boundary.
-  - The runner must stay unprivileged: no Docker socket, no dind, no cluster
-    credentials. That is also why the code sandbox is off in E2E.
+  - The job must stay on GitHub-hosted runners. It has sudo and Docker
+    there, which is fine only because the VM is thrown away; never move it
+    to a self-hosted machine that is kept. Everything the job can read (the
+    test bot's token, the LLM key) is readable by the PR's code, so keep
+    both made for testing only. The code sandbox is still off in E2E.
   - Never switch this to `pull_request_target` to reach secrets.
-  - Only one run at a time (the runner pool has one runner): two bots on one
-    token would both answer.
+  - Only one run at a time across the repository (the e2e job's
+    `concurrency` group): two bots on one token would both answer. GitHub
+    keeps one run waiting and cancels it when a third arrives; a cancelled
+    `e2e` blocks that PR until it is re-run (or Dependabot rebases it).
 - **Required checks.** Both `e2e` and `e2e-changes` are required in
   "Protect main". `e2e` alone would not be enough: if `e2e-changes` fails, `e2e` is
   skipped, and GitHub counts a skipped job as passing.
