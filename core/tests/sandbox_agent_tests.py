@@ -109,41 +109,12 @@ def _clear_llm_env(monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
 
-def test_sandbox_llm_defaults_to_main_llm(monkeypatch):
+def test_build_brain_model_is_laned_as_brain(monkeypatch):
     _clear_llm_env(monkeypatch)
-    monkeypatch.setenv("LLM_MODEL", "orcarouter/Qwen3.8-27B-Uncensored-GGUF:Q4_K_M")
-    monkeypatch.setenv("LLM_HOST", "http://llamacpp:8080")
-    monkeypatch.setenv("LLM_API_KEY", "llamacpp")
-    assert sandbox_agent.sandbox_model() == "orcarouter/Qwen3.8-27B-Uncensored-GGUF:Q4_K_M"
-    assert sandbox_agent.sandbox_llm_host() == "http://llamacpp:8080"
-    assert sandbox_agent.sandbox_llm_api_key() == "llamacpp"
-
-
-def test_sandbox_llm_falls_back_to_incode_defaults(monkeypatch):
-    # LLM_MODEL has no code default (startup requires it); host and key do.
-    _clear_llm_env(monkeypatch)
-    assert sandbox_agent.sandbox_model() == ""
-    assert sandbox_agent.sandbox_llm_host() == "http://llamacpp:8080"
-    assert sandbox_agent.sandbox_llm_api_key() == "llamacpp"
-
-
-def test_sandbox_llm_openrouter_override(monkeypatch):
-    _clear_llm_env(monkeypatch)
-    monkeypatch.setenv("LLM_MODEL", "some/local-model")
-    monkeypatch.setenv("BRAIN_MODEL", "deepseek/deepseek-v4-flash-0731")
-    monkeypatch.setenv("BRAIN_LLM_HOST", "https://openrouter.ai/api")
-    monkeypatch.setenv("BRAIN_LLM_API_KEY", "sk-or-test")
-    assert sandbox_agent.sandbox_model() == "deepseek/deepseek-v4-flash-0731"
-    assert sandbox_agent.sandbox_llm_host() == "https://openrouter.ai/api"
-    assert sandbox_agent.sandbox_llm_api_key() == "sk-or-test"
-
-
-def test_sandbox_llm_empty_override_falls_back(monkeypatch):
-    _clear_llm_env(monkeypatch)
-    monkeypatch.setenv("LLM_MODEL", "some/local-model")
-    for empty in ("", "  "):
-        monkeypatch.setenv("BRAIN_MODEL", empty)
-        assert sandbox_agent.sandbox_model() == "some/local-model", repr(empty)
+    model = sandbox_agent.build_brain_model()
+    assert model.lane == "brain"
+    assert model.host_key == "http://llamacpp:8080"
+    assert model.call_timeout == 600.0
 
 
 def test_build_sandbox_agent_uses_configured_llm(monkeypatch):
@@ -2082,27 +2053,17 @@ def test_persist_timeout_override(monkeypatch):
     assert sandbox_agent.sandbox_persist_timeout() == 30
 
 
-# ---------------------- brain_call_timeout ----------------------
-
-def test_brain_call_timeout_default(monkeypatch):
-    monkeypatch.delenv("BRAIN_CALL_TIMEOUT_SECONDS", raising=False)
-    assert sandbox_agent.brain_call_timeout() == 600.0
-
-
-def test_brain_call_timeout_override_and_junk(monkeypatch):
-    monkeypatch.setenv("BRAIN_CALL_TIMEOUT_SECONDS", "45")
-    assert sandbox_agent.brain_call_timeout() == 45.0
-    for junk in ("nope", "0", "-5", "inf", "nan", ""):
-        monkeypatch.setenv("BRAIN_CALL_TIMEOUT_SECONDS", junk)
-        assert sandbox_agent.brain_call_timeout() == 600.0, junk
-
+# ---------------------- the brain's call timeout ----------------------
 
 def test_build_sandbox_agent_bounds_each_model_call(monkeypatch):
     _clear_llm_env(monkeypatch)
     monkeypatch.setenv("BRAIN_CALL_TIMEOUT_SECONDS", "100")
     agent = sandbox_agent.build_sandbox_agent(None)
 
-    assert agent.model_settings.timeout == 100.0
+    # LanedModel applies it after the lane wait; the SDK's own stays unset,
+    # since it would count the lane wait too.
+    assert agent.model.call_timeout == 100.0
+    assert agent.model_settings.timeout is None
     # Regression: openai>=3 talks HTTPX2 and stores a legacy httpx.Timeout as
     # one opaque object in every phase of the underlying client's timeout
     # instead of translating it. The per-phase budgets must be plain floats.
@@ -2115,15 +2076,16 @@ def test_build_sandbox_agent_bounds_each_model_call(monkeypatch):
 async def test_model_call_timeout_bounds_a_server_that_dribbles_padding():
     """The case the read timeout cannot catch (OpenRouter pads non-streaming
     responses with whitespace, resetting the read timer on every byte) is
-    exactly what ModelSettings.timeout is here for. Pinned against a real
-    chat-completions call so an SDK release that quietly made the timeout
-    Responses-only would fail here rather than in prod."""
+    exactly what LanedModel's call timeout is here for. Pinned against a
+    real chat-completions call through the real Runner."""
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     import httpx2
-    from agents import (Agent, AsyncOpenAI, ModelSettings, ModelTimeoutError,
+    from agents import (Agent, AsyncOpenAI, ModelTimeoutError,
                         OpenAIChatCompletionsModel, RunConfig, Runner)
+
+    from classes.laned_model import LanedModel
 
     class Dribble(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -2154,8 +2116,8 @@ async def test_model_call_timeout_bounds_a_server_that_dribbles_padding():
                 timeout=httpx2.Timeout(0.3, connect=1.0), max_retries=0,
             ),
         )
-        agent = Agent(name="a", instructions="", model=model,
-                      model_settings=ModelSettings(timeout=0.6))
+        agent = Agent(name="a", instructions="",
+                      model=LanedModel(model, "http://127.0.0.1:0", call_timeout=0.6))
         started = time.monotonic()
         with pytest.raises(ModelTimeoutError):
             await asyncio.wait_for(

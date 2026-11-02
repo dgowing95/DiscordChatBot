@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import math
 import os,aiohttp, discord, io, time
 from classes.user_memory import UserMemory
 from classes.metrics import (
@@ -12,6 +11,7 @@ from classes.metrics import (
     observe_llm_prompt_tokens,
     observe_tool_duration,
     set_context_window,
+    set_llm_slots,
     set_slot_context,
 )
 from agents import Agent, Runner, OpenAIChatCompletionsModel, AsyncOpenAI, FunctionTool, function_tool, RunContextWrapper, ModelSettings, RunHooks, set_tracing_disabled
@@ -22,7 +22,9 @@ from openai import BadRequestError, UnprocessableEntityError
 from openai.types.responses import ResponseCreatedEvent, ResponseTextDeltaEvent
 from classes.config_manager import configManager
 from classes.response_filter import extract_reasoning_items, extract_thinking, strip_tool_call_text
-from classes.llm_config import llm_api_key, llm_auth_headers, llm_extra_headers, llm_host, llm_model, parse_temperature
+from classes import llm_lanes
+from classes.laned_model import LanedModel
+from classes.llm_roles import PERSONA, distinct_hosts, parse_temperature, role_config
 from classes.reply_policy import INSTRUCTION as DOUBLE_REPLY_INSTRUCTION
 from classes.side_llm import NO_THINKING
 from classes import voice_policy
@@ -64,27 +66,6 @@ WRAP_UP_INSTRUCTION = (
 )
 
 
-# Wall-clock seconds ONE model call (one turn's request, the OpenAI client's
-# own retries included) may take before the run is abandoned. Applied as
-# ModelSettings.timeout, which the SDK's runner enforces by cancelling the
-# call. The client's own timeout is a per-read timeout: it catches a server
-# that goes silent, but a server that keeps the connection warm while it
-# works (OpenRouter pads non-streaming responses) resets it forever, and
-# until now nothing bounded that at all. The default matches the client's
-# 600s so a slow local generation is no more likely to be cut off than
-# before; it only closes the unbounded case.
-DEFAULT_PERSONA_CALL_TIMEOUT = 600.0
-
-
-def persona_call_timeout() -> float:
-    """Wall-clock seconds per model call (PERSONA_CALL_TIMEOUT_SECONDS, default 600)."""
-    try:
-        value = float(str(os.environ.get("PERSONA_CALL_TIMEOUT_SECONDS")).strip())
-        # ModelSettings.timeout is validated as a finite positive float.
-        return value if value > 0 and math.isfinite(value) else DEFAULT_PERSONA_CALL_TIMEOUT
-    except (TypeError, ValueError):
-        return DEFAULT_PERSONA_CALL_TIMEOUT
-
 
 
 from classes.image_generation import image_generation_enabled
@@ -112,24 +93,39 @@ from classes.tool_functions import (
 logger = logging.getLogger(__name__)
 
 
-# The LLM host/model/key never change at runtime, so the AsyncOpenAI client
-# (its own httpx connection pool) is built once and reused across every
+# The persona's host/model/key never change at runtime, so the AsyncOpenAI
+# client (its own httpx connection pool) is built once and reused across every
 # message instead of per-message. Safe without locking: no `await` between
 # the check and the set, so no race is possible even with concurrent worker
 # tasks (the event loop is single-threaded).
 _main_model_client = None
 
 
-def _get_main_model_client() -> OpenAIChatCompletionsModel:
+def _get_main_model_client() -> LanedModel:
+    """The persona's model, in the chat lane of its server.
+
+    Every call is bounded by PERSONA_CALL_TIMEOUT_SECONDS (wall clock, the
+    client's own retries included), applied by LanedModel once a slot is
+    taken, so waiting behind other work never counts toward it. The client's
+    own timeout is per-read: it catches a server that goes silent, but one
+    that keeps the connection warm while it works (OpenRouter pads
+    non-streaming responses) resets it forever, which only the wall-clock
+    bound catches.
+    """
     global _main_model_client
     if _main_model_client is None:
-        _main_model_client = OpenAIChatCompletionsModel(
-            model=llm_model(),
-            openai_client=AsyncOpenAI(
-                base_url=llm_host() + "/v1",
-                api_key=llm_api_key(),
-                default_headers=llm_extra_headers() or None,
+        config = role_config(PERSONA)
+        _main_model_client = LanedModel(
+            OpenAIChatCompletionsModel(
+                model=config.model,
+                openai_client=AsyncOpenAI(
+                    base_url=config.host + "/v1",
+                    api_key=config.client_api_key,
+                    timeout=config.call_timeout,
+                    default_headers=config.extra_headers or None,
+                ),
             ),
+            config.host_key, config.call_timeout, lane=llm_lanes.CHAT,
         )
     return _main_model_client
 
@@ -167,6 +163,42 @@ def parse_total_slots(props) -> int | None:
     except (KeyError, TypeError, ValueError):
         return None
     return value if value > 0 else None
+
+
+def _key_names(config) -> str:
+    """The settings that give `config`'s role its key, for a log line."""
+    if config.role == PERSONA:
+        return "LLM_API_KEY (or PERSONA_LLM_API_KEY)"
+    return f"{config.role.upper()}_LLM_API_KEY (or LLM_API_KEY)"
+
+
+async def _read_props(config) -> dict | None:
+    """One server's /props, with its role's key, or None (never raises).
+
+    Only a body shaped like llama.cpp's (which Strata copies) counts: a
+    remote API that answers 200 with something else is not self-hosted.
+    """
+    url = config.host + "/props"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=config.auth_headers(),
+                                   timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status == 200:
+                    props = await response.json()
+                    if isinstance(props, dict) and ("total_slots" in props
+                                                    or "default_generation_settings" in props):
+                        return props
+                    logger.info(f"LLM server {config.host}: /props is not llama.cpp's; not laned")
+                elif response.status in (401, 403):
+                    # Not a slow start: the key is wrong, and (for the persona's
+                    # server) the history budget stops trimming until it is fixed.
+                    logger.warning(f"LLM server /props rejected the API key ({response.status}); "
+                                   f"{_key_names(config)} must be the server's key")
+                else:
+                    logger.info(f"LLM server {config.host} /props returned {response.status}")
+    except Exception as e:
+        logger.info(f"Could not read LLM server /props at {url}: {e}")
+    return None
 
 
 def served_model_names(body) -> list[str]:
@@ -232,7 +264,7 @@ class ToolMetricsHooks(RunHooks):
         try:
             started, self._llm_started = self._llm_started, None
             if started is not None:
-                observe_llm_call("main", "ok", time.monotonic() - started)
+                observe_llm_call("main", "ok", self._model_seconds(started))
             usage = getattr(response, "usage", None)
             observe_llm_completion_tokens("main", getattr(usage, "output_tokens", None))
         except Exception as e:
@@ -243,9 +275,16 @@ class ToolMetricsHooks(RunHooks):
         try:
             started, self._llm_started = self._llm_started, None
             if started is not None:
-                observe_llm_call("main", outcome, time.monotonic() - started)
+                observe_llm_call("main", outcome, self._model_seconds(started))
         except Exception as e:
             logger.warning(f"Metrics llm abandon failed: {e}")
+
+    @staticmethod
+    def _model_seconds(started: float) -> float:
+        """Seconds since on_llm_start minus the call's lane wait (which
+        on_llm_start precedes, and which has its own metric). A call
+        cancelled while still waiting counts its wait."""
+        return max(0.0, time.monotonic() - started - llm_lanes.last_wait.get())
 
     def _key(self, context, tool) -> str:
         # ToolContext carries a tool_call_id; several concurrent calls of the
@@ -418,13 +457,14 @@ class TextLLMHandler:
         # llama.cpp has no pull endpoint: the llamacpp container downloads the model
         # on boot (LLAMA_ARG_HF_REPO into the LLAMA_CACHE volume). We only check that
         # the configured model is loaded (fail-soft: it may still be downloading).
-        url = llm_host() + "/v1/models"
+        config = role_config(PERSONA)
+        url = config.host + "/v1/models"
         logger.info(f"Checking model {model} on LLM host ({url})")
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=llm_auth_headers()) as response:
+                async with session.get(url, headers=config.auth_headers()) as response:
                     if response.status in (401, 403):
-                        logger.warning(f"LLM server rejected the API key ({response.status}); LLM_API_KEY must be the server's key")
+                        logger.warning(f"LLM server rejected the API key ({response.status}); {_key_names(config)} must be the server's key")
                         return
                     if response.status != 200:
                         logger.warning(f"LLM server not ready yet ({response.status}); model may still be downloading")
@@ -443,33 +483,35 @@ class TextLLMHandler:
       
     @staticmethod
     async def refresh_slot_context() -> int | None:
-        """Re-read the per-slot context from {LLM_HOST}/props (never raises).
+        """Re-read /props from every role's server (never raises); returns
+        the persona's per-slot context.
 
-        On failure the last value is kept for the token budget but the gauge
-        is marked unavailable, so a dashboard can tell stale from measured.
-        The same read publishes the server's total context (per-slot x
-        total_slots), which replaced the hand-set LLM_CONTEXT_LENGTH.
+        A server whose /props answers is self-hosted: it gets lanes
+        (classes/llm_lanes.py) sized by its total_slots, else LLM_SLOTS, else
+        1, and its total context (per-slot x slots) is published. A server
+        that never answers (a remote API) is not laned; one that answered
+        before keeps its lanes and last slot count through a failed read.
+
+        The persona's per-slot context drives the history token budget. On
+        failure the last value is kept for the budget but the gauge is marked
+        unavailable, so a dashboard can tell stale from measured.
         """
         global _slot_context
-        url = llm_host() + "/props"
         value = None
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=llm_auth_headers(),
-                                       timeout=aiohttp.ClientTimeout(total=10)) as response:
-                    if response.status == 200:
-                        props = await response.json()
-                        value = parse_slot_context(props)
-                        slots = parse_total_slots(props)
-                        set_context_window(value * slots if value and slots else None)
-                    elif response.status in (401, 403):
-                        # Not a slow start: the key is wrong, and the history
-                        # budget stops trimming until it is fixed.
-                        logger.warning(f"LLM server /props rejected the API key ({response.status}); LLM_API_KEY must be the server's key")
-                    else:
-                        logger.info(f"LLM server /props returned {response.status}")
-        except Exception as e:
-            logger.info(f"Could not read LLM server /props at {url}: {e}")
+        for index, config in enumerate(distinct_hosts()):
+            props = await _read_props(config)
+            if props is None:
+                continue
+            per_slot = parse_slot_context(props)
+            if index == 0:  # distinct_hosts() lists the persona's server first
+                value = per_slot
+            slots, source = llm_lanes.resolve_slots(parse_total_slots(props))
+            lanes = llm_lanes.lanes_for(config.host_key)
+            if lanes is None or lanes.slots != slots:
+                logger.info(f"LLM server {config.host}: {slots} slot(s) ({source}), lanes on")
+            llm_lanes.configure_host(config.host_key, slots, llm_lanes.chat_reserved())
+            set_llm_slots(config.host_key, slots, source)
+            set_context_window(config.host_key, per_slot * slots if per_slot else None)
         if value is None:
             set_slot_context(None)
             return _slot_context
@@ -481,7 +523,7 @@ class TextLLMHandler:
 
     async def get_settings(self):
         self.system = await self.config.get_setting("system", self.guild_id) or "An AI Story Teller"
-        self.model = llm_model()
+        self.model = role_config(PERSONA).model
         # parse_temperature, not `float(...) or 1.0`: 0.0 is falsy, so the
         # original turned a deliberate /temperature 0 back into 1.0.
         self.options = {
@@ -520,7 +562,8 @@ class TextLLMHandler:
             # list_events, an id, a name) came out mangled - "2026-10-23T21:00
             # +08:35 UTC+8?" - in about a third of calls.
             top_p=1.0,
-            timeout=persona_call_timeout(),
+            # No timeout here: LanedModel applies PERSONA_CALL_TIMEOUT_SECONDS
+            # after the lane wait, which the SDK's own would include.
         )
         if getattr(self, "voice", False) and no_thinking:
             # Off, not merely "low": a spoken reply waits for every reasoning
@@ -528,7 +571,7 @@ class TextLLMHandler:
             # use (side_llm.NO_THINKING).
             settings["extra_body"] = NO_THINKING
         else:
-            settings["reasoning"] = {"effort": os.environ.get("PERSONA_REASONING_EFFORT", "medium")}
+            settings["reasoning"] = {"effort": role_config(PERSONA).reasoning_effort}
         return ModelSettings(**settings)
 
     async def _prepare(self) -> dict:

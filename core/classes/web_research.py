@@ -16,8 +16,8 @@ from classes.side_llm import SideLLM
 
 logger = logging.getLogger(__name__)
 
-_llm = SideLLM("web_research", rf.research_model, rf.research_llm_host,
-               rf.research_llm_api_key, rf.research_timeout)
+# The caller's lane: chat inside a reply, brain inside a sandbox run.
+_llm = SideLLM("web_research", rf.research_config)
 
 
 async def search(query: str) -> list:

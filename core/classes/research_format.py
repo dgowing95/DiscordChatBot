@@ -40,7 +40,7 @@ import os
 from collections import namedtuple
 from urllib.parse import urlsplit
 
-from classes.llm_config import DEFAULT_LLM_API_KEY, DEFAULT_LLM_HOST, env_or
+from classes.llm_roles import side_job_config
 
 SEARCH_RESULTS = 5
 MAX_PAGES = 5
@@ -81,21 +81,10 @@ def settings() -> dict:
     }
 
 
-def research_model() -> str:
-    return env_or("RESEARCH_MODEL", "LLM_MODEL", "")
-
-
-def research_llm_host() -> str:
-    """/v1 is appended by the client, so the value must not include it."""
-    return env_or("RESEARCH_LLM_HOST", "LLM_HOST", DEFAULT_LLM_HOST)
-
-
-def research_llm_api_key() -> str:
-    return env_or("RESEARCH_LLM_API_KEY", "LLM_API_KEY", DEFAULT_LLM_API_KEY)
-
-
-def research_timeout() -> float:
-    return settings()["timeout"]
+def research_config():
+    """The brief's connection: RESEARCH_MODEL / _LLM_HOST / _LLM_API_KEY, each
+    falling back to the brain role's (llm_roles), and RESEARCH_TIMEOUT."""
+    return side_job_config("RESEARCH_", default_timeout=settings()["timeout"])
 
 
 def clean_results(raw) -> list:

@@ -41,7 +41,10 @@ import discord
 
 from classes import voice_gate, voice_policy
 from classes.config_manager import configManager
-from classes.llm_config import llm_api_key, llm_host, llm_model
+import dataclasses
+
+from classes import llm_lanes
+from classes.llm_roles import PERSONA, role_config
 from classes.metrics import (
     inc_voice_turn,
     inc_voice_utterance,
@@ -76,8 +79,16 @@ HOLD_ON_TIMEOUT_SECONDS = 8
 # A busy notice is spoken at most this often.
 BUSY_NOTICE_SECONDS = 10
 
-_hold_on_llm = SideLLM("voice_hold_on", llm_model, llm_host, llm_api_key, lambda: HOLD_ON_TIMEOUT_SECONDS)
-_greeting_llm = SideLLM("voice_greeting", llm_model, llm_host, llm_api_key, lambda: HOLD_ON_TIMEOUT_SECONDS)
+
+
+def _voice_line_config():
+    """The persona's connection, with the short wait a spoken line allows."""
+    return dataclasses.replace(role_config(PERSONA), call_timeout=HOLD_ON_TIMEOUT_SECONDS)
+
+
+# The persona's own side calls: chat lane.
+_hold_on_llm = SideLLM("voice_hold_on", _voice_line_config, lane=llm_lanes.CHAT)
+_greeting_llm = SideLLM("voice_greeting", _voice_line_config, lane=llm_lanes.CHAT)
 
 
 class VoiceError(Exception):

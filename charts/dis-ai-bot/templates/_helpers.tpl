@@ -54,6 +54,20 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 The local LLM server this release runs (llm.engine): llamacpp or strata.
 Anything else fails the render rather than quietly running neither.
 */}}
+{{/*
+LLM_SLOTS: llm.slots, else the running engine's parallel. core uses it only
+when the server's /props has no total_slots.
+*/}}
+{{- define "dcb.llmSlots" -}}
+{{- if .Values.llm.slots }}
+{{- .Values.llm.slots | toString }}
+{{- else if eq (include "dcb.llmEngine" .) "strata" }}
+{{- .Values.strata.parallel | toString }}
+{{- else }}
+{{- .Values.llamacpp.parallel | toString }}
+{{- end }}
+{{- end }}
+
 {{- define "dcb.llmEngine" -}}
 {{- $engine := .Values.llm.engine | default "llamacpp" }}
 {{- if not (has $engine (list "llamacpp" "strata")) }}

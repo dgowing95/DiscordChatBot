@@ -34,11 +34,7 @@ import os
 import re
 from dataclasses import dataclass
 
-from classes.llm_config import (
-    DEFAULT_LLM_API_KEY,
-    DEFAULT_LLM_HOST,
-    env_or,
-)
+from classes.llm_roles import side_job_config
 from classes.metrics import inc_image_review
 from classes.response_filter import strip_thinking
 from classes.side_llm import SideLLM
@@ -110,30 +106,14 @@ def review_retries() -> int:
     return max(0, min(MAX_RETRIES, value))
 
 
-def review_model() -> str:
-    return env_or("IMAGE_REVIEW_MODEL", "LLM_MODEL", "")
+def review_config():
+    """The check's connection: IMAGE_REVIEW_MODEL / _LLM_HOST / _LLM_API_KEY
+    / _TIMEOUT, each falling back to the brain role's (llm_roles). It must be
+    a vision model."""
+    return side_job_config("IMAGE_REVIEW_", default_timeout=DEFAULT_TIMEOUT)
 
 
-def review_llm_host() -> str:
-    """/v1 is appended here, so the value must not include it."""
-    return env_or("IMAGE_REVIEW_LLM_HOST", "LLM_HOST", DEFAULT_LLM_HOST)
-
-
-def review_llm_api_key() -> str:
-    return env_or("IMAGE_REVIEW_LLM_API_KEY", "LLM_API_KEY", DEFAULT_LLM_API_KEY)
-
-
-def review_timeout() -> float:
-    raw = os.environ.get("IMAGE_REVIEW_TIMEOUT", "").strip()
-    try:
-        value = float(raw)
-    except ValueError:
-        return DEFAULT_TIMEOUT
-    return value if value > 0 else DEFAULT_TIMEOUT
-
-
-_llm = SideLLM("image_review", review_model, review_llm_host,
-               review_llm_api_key, review_timeout)
+_llm = SideLLM("image_review", review_config)
 
 
 def encode_for_review(png: bytes) -> str:

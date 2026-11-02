@@ -231,28 +231,36 @@ def test_retries_default_to_one_and_are_clamped(monkeypatch):
         assert image_review.review_retries() == expected, raw
 
 
-def test_review_settings_fall_back_to_the_bots_own(monkeypatch):
-    for name in ("IMAGE_REVIEW_MODEL", "IMAGE_REVIEW_LLM_HOST", "IMAGE_REVIEW_LLM_API_KEY"):
+def _clear_roles(monkeypatch):
+    for name in ("IMAGE_REVIEW_MODEL", "IMAGE_REVIEW_LLM_HOST", "IMAGE_REVIEW_LLM_API_KEY",
+                 "BRAIN_MODEL", "BRAIN_LLM_HOST", "BRAIN_LLM_API_KEY"):
         monkeypatch.delenv(name, raising=False)
+
+
+def test_review_settings_fall_back_to_the_bots_own(monkeypatch):
+    _clear_roles(monkeypatch)
     monkeypatch.setenv("LLM_MODEL", "qwen3:27b")
     monkeypatch.setenv("LLM_HOST", "http://llamacpp:8080")
     monkeypatch.setenv("LLM_API_KEY", "llamacpp")
-    assert image_review.review_model() == "qwen3:27b"
-    assert image_review.review_llm_host() == "http://llamacpp:8080"
-    assert image_review.review_llm_api_key() == "llamacpp"
+    config = image_review.review_config()
+    assert (config.model, config.host, config.api_key) == ("qwen3:27b", "http://llamacpp:8080", "llamacpp")
 
 
 def test_review_settings_override_the_bots_own(monkeypatch):
+    _clear_roles(monkeypatch)
     monkeypatch.setenv("LLM_MODEL", "qwen3:27b")
+    monkeypatch.setenv("LLM_API_KEY", "local-key")
     monkeypatch.setenv("IMAGE_REVIEW_MODEL", "some/vision-model")
     monkeypatch.setenv("IMAGE_REVIEW_LLM_HOST", "https://openrouter.ai/api")
-    assert image_review.review_model() == "some/vision-model"
-    assert image_review.review_llm_host() == "https://openrouter.ai/api"
+    config = image_review.review_config()
+    assert (config.model, config.host) == ("some/vision-model", "https://openrouter.ai/api")
+    # Another server with no key of its own gets none, never the local one.
+    assert config.api_key == ""
 
 
 def test_review_timeout_falls_back_on_junk(monkeypatch):
     monkeypatch.setenv("IMAGE_REVIEW_TIMEOUT", "45")
-    assert image_review.review_timeout() == 45
+    assert image_review.review_config().call_timeout == 45
     for bad in ("", "nope", "0", "-1"):
         monkeypatch.setenv("IMAGE_REVIEW_TIMEOUT", bad)
-        assert image_review.review_timeout() == image_review.DEFAULT_TIMEOUT
+        assert image_review.review_config().call_timeout == image_review.DEFAULT_TIMEOUT
