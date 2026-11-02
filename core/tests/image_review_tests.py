@@ -135,7 +135,7 @@ async def test_review_sends_the_image_and_returns_the_verdict(monkeypatch):
     assert parts[0]["type"] == "text" and "draw a fox" in parts[0]["text"]
     assert parts[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
     # thinking off, like the rewrite: a reasoning model would spend the budget first
-    assert kwargs["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+    assert kwargs["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}, "reasoning": {"enabled": False}}
 
 
 def _sizes(parts):

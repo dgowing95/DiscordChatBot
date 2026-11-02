@@ -81,7 +81,7 @@ async def test_voice_turns_ask_for_no_thinking(captured):
     with pytest.raises(Captured):
         await _handler().prefill()
     request = captured[0]
-    assert request["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+    assert request["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}, "reasoning": {"enabled": False}}
     # Not sent at all (the client's omit marker), rather than "low".
     assert not isinstance(request.get("reasoning_effort"), str)
     system = request["messages"][0]["content"]
@@ -125,6 +125,6 @@ async def test_a_failed_retry_leaves_thinking_off(captured, monkeypatch):
         assert await _handler(request_text="hi").generate_streamed(
             AsyncMock(), AsyncMock(), AsyncMock()) == "Error"
     assert len(sent) == 2
-    assert sent[0]["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+    assert sent[0]["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}, "reasoning": {"enabled": False}}
     assert not sent[1].get("extra_body")
     assert text_llm_handler._voice_latch["send_no_thinking"] is True
