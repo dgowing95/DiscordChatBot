@@ -85,7 +85,7 @@ spec:
           value: {{ .Values.llamacpp.cacheTypeK | quote }}
         - name: LLAMA_ARG_CACHE_TYPE_V
           value: {{ .Values.llamacpp.cacheTypeV | quote }}
-        {{- with .Values.llamacpp.cacheRamMiB | toString }}
+        {{- with include "dcb.cacheRamMiB" . }}
         - name: LLAMA_ARG_CACHE_RAM
           value: {{ . | quote }}
         {{- end }}

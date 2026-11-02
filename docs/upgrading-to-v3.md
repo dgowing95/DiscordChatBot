@@ -115,6 +115,11 @@ from the chart. Also new:
 | `persona.model`, `persona.llmHost`, `persona.apiKey` | empty (= `llm.*`) | The persona's own LLM; the key goes in the Secret as `PERSONA_LLM_API_KEY` |
 | `brain.reasoningEffort` | medium | `BRAIN_REASONING_EFFORT` |
 
+With `llm.engine: strata`, the render now fails when `persona.apiKey`, `brain.apiKey`, `research.apiKey`,
+`diffusion.promptRewrite.apiKey` or `diffusion.review.apiKey` is set without a host to go with it
+(the job's own `llmHost`, or for the last three `brain.llmHost`). Such a key would replace Strata's own
+key for that job, and Strata refuses any other key. Remove the key, or set the host it is for.
+
 ## Secret key names
 
 If you bring your own Secret (`existingSecret`), rename its keys:

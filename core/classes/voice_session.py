@@ -32,6 +32,7 @@ prefill), so a turn's prompt is already processed up to its last few tokens
 when the wake phrase is heard.
 """
 import asyncio
+import dataclasses
 import json
 import logging
 import time
@@ -41,8 +42,6 @@ import discord
 
 from classes import voice_gate, voice_policy
 from classes.config_manager import configManager
-import dataclasses
-
 from classes import llm_lanes
 from classes.llm_roles import PERSONA, role_config
 from classes.metrics import (
@@ -78,7 +77,6 @@ GOODBYE_WAIT_SECONDS = 15
 HOLD_ON_TIMEOUT_SECONDS = 8
 # A busy notice is spoken at most this often.
 BUSY_NOTICE_SECONDS = 10
-
 
 
 def _voice_line_config():

@@ -16,12 +16,13 @@ image:
 discordToken: ""
 # Name of a Secret you manage yourself (e.g. via External Secrets Operator or
 # sealed-secrets) holding the core credentials, instead of the one this chart
-# renders from discordToken / llm.apiKey / contentGuard.apiKey / brain.apiKey /
-# diffusion.promptRewrite.apiKey / diffusion.review.apiKey / research.apiKey
-# (all ignored when this is set). Keys are the env var names: DISCORD_TOKEN
-# (required), LLM_API_KEY, CONTENT_GUARD_API_KEY, BRAIN_LLM_API_KEY,
-# IMAGE_PROMPT_LLM_API_KEY, IMAGE_REVIEW_LLM_API_KEY, RESEARCH_LLM_API_KEY
-# (each optional - omit rather than leave empty).
+# renders from discordToken / llm.apiKey / persona.apiKey / contentGuard.apiKey /
+# brain.apiKey / diffusion.promptRewrite.apiKey / diffusion.review.apiKey /
+# research.apiKey (all ignored when this is set). Keys are the env var names:
+# DISCORD_TOKEN (required), LLM_API_KEY, PERSONA_LLM_API_KEY,
+# CONTENT_GUARD_API_KEY, BRAIN_LLM_API_KEY, IMAGE_PROMPT_LLM_API_KEY,
+# IMAGE_REVIEW_LLM_API_KEY, RESEARCH_LLM_API_KEY (each optional - omit rather
+# than leave empty).
 existingSecret: ""
 redisHost: "dchatbot-redis-service.dchatbot.svc.cluster.local"
 # The bot's own LLM server, run by this chart, and the model it serves. The
