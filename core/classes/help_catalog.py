@@ -79,8 +79,8 @@ COMMAND_ENTRIES = (
     HelpEntry("/get_chance", "Show that chance.", command="get_chance"),
     HelpEntry("/generate_image", "Make an image straight from a prompt.",
               command="generate_image", requires=IMAGE),
-    HelpEntry("/workspace", "The server's workspace for code tasks: status, reset (Manage "
-              "Server) and live progress on or off.", command="workspace"),
+    HelpEntry("/workspace", "The server's workspace for code tasks: status and reset (both "
+              "need Manage Server), and live progress on or off.", command="workspace"),
     HelpEntry("/schedule", "Create, list, view, edit, delete, pause or resume schedules.",
               command="schedule", requires=AUTOMATIONS),
     HelpEntry("/rule", "Create, list, view, edit, delete, pause or resume message rules.",

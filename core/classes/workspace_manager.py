@@ -40,7 +40,6 @@ import asyncio
 import contextlib
 import json
 import logging
-import os
 import posixpath
 import time
 from dataclasses import dataclass, field
@@ -62,6 +61,10 @@ DOCKER_WAIT_SECONDS = 60
 class WorkspaceUnavailable(Exception):
     """The server's workspace could not be got: Docker is down, or every
     warm workspace stayed busy for the caller's whole timeout."""
+
+
+class NoServerWorkspace(WorkspaceUnavailable):
+    """A run with no server (a DM): there is never a workspace for it."""
 
 
 # --- Docker client and limits -------------------------------------------------
@@ -251,7 +254,10 @@ class Workspaces:
             max_warm=wl.max_warm(env))
         self._live: dict[str, GuildWorkspace] = {}
         self._changed = asyncio.Condition()
-        self._snapshot_failed: dict[str, bool] = {}
+        # Record writes are load-merge-set, so one guild's are serialized:
+        # a release and a timed snapshot could otherwise drop each other's
+        # fields.
+        self._record_locks: dict[str, asyncio.Lock] = {}
 
     # --- wiring -------------------------------------------------------------
 
@@ -301,18 +307,23 @@ class Workspaces:
             logger.warning(f"Workspace: could not read guild {guild}'s record: {e}")
             return None
 
+    def _record_lock(self, guild: str) -> asyncio.Lock:
+        return self._record_locks.setdefault(guild, asyncio.Lock())
+
     async def _save_record(self, guild: str, **changes) -> None:
         """Merges changes into the guild's record (best-effort)."""
         try:
-            record = await self._load_record(guild) or {}
-            record.update(changes, instance=self._instance(), updated_at=time.time())
-            await self.redis.set(RECORD_KEY.format(guild), json.dumps(record))
+            async with self._record_lock(guild):
+                record = await self._load_record(guild) or {}
+                record.update(changes, instance=self._instance(), updated_at=time.time())
+                await self.redis.set(RECORD_KEY.format(guild), json.dumps(record))
         except Exception as e:
             logger.warning(f"Workspace: could not save guild {guild}'s record: {e}")
 
     async def _delete_record(self, guild: str) -> None:
         try:
-            await self.redis.delete(RECORD_KEY.format(guild))
+            async with self._record_lock(guild):
+                await self.redis.delete(RECORD_KEY.format(guild))
         except Exception as e:
             logger.warning(f"Workspace: could not delete guild {guild}'s record: {e}")
 
@@ -351,7 +362,8 @@ class Workspaces:
                 try:
                     workspace, kind, restore_failed = await self._start(guild)
                 except BaseException as e:
-                    self.lifecycle.start_failed(guild)
+                    if self.lifecycle.start_failed(guild):
+                        await self._wipe(guild)  # a reset asked for while it started
                     await self._notify()
                     if isinstance(e, Exception):
                         logger.warning(f"Workspace: could not start guild {guild}'s workspace: {e}")
@@ -551,6 +563,7 @@ class Workspaces:
     async def _stop(self, guild: str, *, snapshot: bool = True) -> None:
         """The guild is already STOPPING in the lifecycle."""
         workspace = self._live.pop(guild, None)
+        reset = False
         try:
             if workspace is not None:
                 async with workspace.ops:
@@ -560,10 +573,12 @@ class Workspaces:
                         saved = await self._snapshot_locked(workspace)
                     await self._put_away(guild, workspace.session, saved)
         finally:
-            self.lifecycle.stopped(guild)
+            reset = self.lifecycle.stopped(guild)
             self._gauge()
             await self._notify()
         logger.info(f"Workspace: guild {guild} stopped")
+        if reset:
+            await self._wipe(guild)  # asked for while it stopped
 
     async def _put_away(self, guild: str, session, saved: bool) -> None:
         """Removes a container whose files are safely in the snapshot. One
@@ -616,7 +631,7 @@ class Workspaces:
             with contextlib.suppress(Exception):
                 await self.store.delete(wl.snapshot_id(guild))
         finally:
-            self.lifecycle.stopped(guild)
+            self.lifecycle.stopped(guild, wiped=True)
             self._gauge()
             await self._notify()
         logger.info(f"Workspace: guild {guild} reset")
@@ -673,6 +688,10 @@ class Workspaces:
             live = self._live.get(guild) if guild else None
             if live is not None and live.container_id == container.id:
                 continue
+            # Being started or stopped here right now: a new container is in
+            # no record until its start finishes, so it would look orphaned.
+            if guild and self.lifecycle.state(guild).phase in (wl.STARTING, wl.STOPPING):
+                continue
             record = await self._load_record(guild) if guild else None
             if not record or record.get("container_id") != container.id:
                 if await self._remove_container_id(container.id):
@@ -684,12 +703,15 @@ class Workspaces:
             running = getattr(container, "status", "running") == "running"
             if (live is None and running and idle_for > self.lifecycle.idle
                     and self.lifecycle.claim_cold(guild)):
+                reset = False
                 try:
                     await self._retire(guild, record)
                     removed += 1
                 finally:
-                    self.lifecycle.stopped(guild)
+                    reset = self.lifecycle.stopped(guild)
                     await self._notify()
+                if reset:
+                    await self._wipe(guild)
         if removed:
             metrics.inc_workspace_reaped(removed)
             logger.info(f"Workspace: removed {removed} leftover container(s)")

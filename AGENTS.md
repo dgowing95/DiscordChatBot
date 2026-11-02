@@ -437,7 +437,7 @@ docker-compose.yaml    # local dev (core needs the Docker socket): redis + llama
    **The server workspace** (`workspace_manager.py`, rules in the pure
    `workspace_lifecycle.py`). One container per guild, labelled
    `dcb.role=workspace`, `dcb.guild`, `dcb.instance` (`WORKSPACE_INSTANCE`:
-   the chart's release name, `dcb-dev` in compose, `e2e` in E2E), so the
+   `<namespace>-<release>` in the chart, `dcb-dev` in compose, `e2e` in E2E), so the
    reaper only removes its own. Checked live before it was built (the phase 2
    spike; the docstrings say which check backs what):
 
@@ -833,7 +833,7 @@ something, and that every `values.yaml` key is used by a template.
 | `WORKSPACE_MAX_WARM` | workspaces running at once in this core process; the least recently used idle one stops first, and a task waits rather than stop a busy one (default 4). Chart: `brain.workspace.maxWarm` |
 | `WORKSPACE_JOB_RETENTION_HOURS` | task folders (`jobs/<id>/`) older than this are deleted before each save (default 72); a thread's run record is kept as long. Chart: `brain.workspace.jobRetentionHours` |
 | `WORKSPACE_MEMORY_LIMIT` / `WORKSPACE_CPU_LIMIT` / `WORKSPACE_PIDS_LIMIT` | per container: memory in Docker notation (`4g`, `512m`; swap capped at the same figure), CPUs (`2`, `0.5`), processes (default 512, `0` = none); empty = no cap. The containers run on the node's Docker daemon, outside Kubernetes accounting. Chart: `brain.workspace.memoryLimit` / `cpuLimit` / `pidsLimit` |
-| `WORKSPACE_INSTANCE` | label on this bot's containers, so two bots on one daemon never remove each other's (default `dcb-dev`). The chart sets the release name |
+| `WORKSPACE_INSTANCE` | label on this bot's containers, so two bots on one daemon never remove each other's (default `dcb-dev`). The chart sets `<namespace>-<release name>` |
 | `WORKSPACE_PREWARM` | `1`: start a server's workspace when it gets a message (default off; nothing reads it yet: the trigger comes with the brain). Chart: `brain.workspace.prewarm` |
 | `BRAIN_MODEL` | model id for the brain (the agent in the code sandbox); empty (default) = the bot's `LLM_MODEL`. Chart: `brain.model` |
 | `BRAIN_LLM_HOST` | base URL of the brain's LLM (core appends `/v1`); empty (default) = `LLM_HOST`. E.g. `https://openrouter.ai/api` for OpenRouter. Chart: `brain.llmHost` |

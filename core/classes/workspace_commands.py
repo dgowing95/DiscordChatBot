@@ -111,7 +111,7 @@ class _ResetConfirm(discord.ui.View):
         await ctx.edit_original_response(content=(
             "🧹 The workspace was reset: its files are gone and the next task starts empty."
             if when == "now" else
-            "🧹 Tasks are using the workspace now, so it resets as soon as they finish. "
+            "🧹 The workspace is busy right now, so it resets as soon as it is free. "
             "New tasks wait for it."))
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)

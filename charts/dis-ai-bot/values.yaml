@@ -488,7 +488,8 @@ brain:
   # between tasks and core restarts, saved to Redis on a timer and before it
   # stops, stopped after idleSeconds unused. Each task gets its own folder;
   # shared/ holds what the server keeps. Containers are labelled with the
-  # release name, so two releases on one node never remove each other's.
+  # namespace and release name, so two releases on one node never remove
+  # each other's.
   workspace:
     # Container image (pulled onto the node at startup if missing)
     image: python:3.14-slim

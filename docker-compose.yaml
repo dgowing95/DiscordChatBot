@@ -112,6 +112,9 @@ services:
     # .env.v3 up` would otherwise still hand core the plain .env. Set
     # CORE_ENV_FILE in that file to its own name.
     env_file: ${CORE_ENV_FILE:-.env}
+    # Room for the shutdown save of the server workspaces
+    # (WORKSPACE_SNAPSHOT_TIMEOUT_SECONDS, default 120) after SIGTERM.
+    stop_grace_period: 150s
     environment:
       # Voice calls (VOICE_ENABLED=1 in .env turns them on): the sidecar and
       # speech services below, on the compose network.

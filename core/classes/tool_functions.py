@@ -516,7 +516,6 @@ async def _run_claimed_sandbox(wrapper, task, channel, thread_created, in_thread
     claimed: announce, run, deliver, close. Split out only so the claim's
     release can sit in one `finally` around all of it."""
     from classes.workspace_inputs import tool_note
-    from classes.config_manager import configManager
     from classes.sandbox_agent import (
         run_sandbox_task,
         sandbox_outcome_note,
@@ -526,7 +525,7 @@ async def _run_claimed_sandbox(wrapper, task, channel, thread_created, in_thread
         thread_record_id,
     )
     from classes.workspace_commands import progress_enabled
-    from classes.workspace_manager import WorkspaceUnavailable, workspaces
+    from classes.workspace_manager import NoServerWorkspace, WorkspaceUnavailable, workspaces
     from classes.sandbox_conversation_store import SandboxConversationStore, resume_preamble
     from classes.sandbox_progress import DESCRIPTION_CHARS, SandboxProgressHooks
     from classes.tool_embeds import (
@@ -621,6 +620,9 @@ async def _run_claimed_sandbox(wrapper, task, channel, thread_created, in_thread
         await _send_sandbox_closing_note(
             channel, in_thread, "infra_error", sandbox_unresolved_note(outcomes, in_thread))
         await _save_conversation_record(record_id, outcomes, "infra_error", ledger)
+        if isinstance(e, NoServerWorkspace):
+            return ("Code tasks run in a server's workspace, and this conversation is not in a "
+                    "server. Tell the user to ask in a server channel, and do not retry here.")
         if isinstance(e, WorkspaceUnavailable):
             return ("The server's workspace is unavailable right now, so the task was not "
                     "run. Tell the user to try again in a few minutes, and do not retry now.")
@@ -719,7 +721,8 @@ async def _run_claimed_sandbox(wrapper, task, channel, thread_created, in_thread
         result,
         sent_names=sent_names,
         in_thread=in_thread,
-        resumable=in_thread,
+        # A lost workspace took this thread's job folder with it.
+        resumable=in_thread and not result.workspace_lost,
         steering=outcomes,
         resume_correction=resume_correction,
     ) + tool_note(result.inputs, result.input_problems)

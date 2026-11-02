@@ -68,6 +68,14 @@ class Bot(discord.Client):
         install_sigterm_handler(self, asyncio.get_running_loop())
 
     async def close(self):
+        # super().close() always runs: if our own shutdown raised, the gateway
+        # would stay open and client.run() would never return.
+        try:
+            await self._shut_down()
+        finally:
+            await super().close()
+
+    async def _shut_down(self):
         for task in getattr(self, "background_tasks", []):
             task.cancel()
         if getattr(self, "background_tasks", None):
@@ -87,7 +95,6 @@ class Bot(discord.Client):
         # for the next process to re-attach to.
         from classes.workspace_manager import workspaces
         await workspaces().shutdown()
-        await super().close()
 
 
 def install_sigterm_handler(bot, loop) -> bool:
@@ -101,10 +108,16 @@ def install_sigterm_handler(bot, loop) -> bool:
     signal support (Windows)."""
     closing = []
 
+    async def _close():
+        try:
+            await bot.close()
+        except Exception:
+            logger.exception("SIGTERM: closing the bot failed")
+
     def _on_sigterm():
         if not closing:
             logger.info("SIGTERM: closing")
-            closing.append(asyncio.ensure_future(bot.close()))
+            closing.append(asyncio.ensure_future(_close()))
 
     try:
         loop.add_signal_handler(signal.SIGTERM, _on_sigterm)

@@ -224,8 +224,10 @@ class Lifecycle:
         s.phase = WARM
         s.started_at = now
 
-    def start_failed(self, guild: str) -> None:
-        self.guilds[str(guild)] = GuildState()
+    def start_failed(self, guild: str) -> bool:
+        """Back to COLD. True when a reset was asked for while it started:
+        the guild is left STOPPING and the manager runs the reset now."""
+        return self._to_cold(guild)
 
     def release(self, guild: str, now: float) -> bool:
         """One call is done. True when it was the last one: the manager then
@@ -257,7 +259,9 @@ class Lifecycle:
         """"now" (the guild is idle or cold; it is marked STOPPING) or "later"
         (calls are running; it runs when the last one ends)."""
         s = self.state(guild)
-        if s.refcount > 0 or s.cleaning or s.phase == STARTING:
+        # STOPPING too: an idle stop or the reaper is still saving it, and a
+        # wipe now would race that save, which would then put the files back.
+        if s.refcount > 0 or s.cleaning or s.phase in (STARTING, STOPPING):
             s.reset_pending = True
             return "later"
         s.phase = STOPPING
@@ -280,8 +284,18 @@ class Lifecycle:
         s.phase = STOPPING
         return True
 
-    def stopped(self, guild: str) -> None:
+    def stopped(self, guild: str, *, wiped: bool = False) -> bool:
+        """Back to COLD. True when a reset was asked for while it stopped
+        (and this stop was not that reset): the guild is left STOPPING and
+        the manager runs the reset now."""
+        return self._to_cold(guild, wiped)
+
+    def _to_cold(self, guild: str, wiped: bool = False) -> bool:
+        reset = self.state(guild).reset_pending and not wiped
         self.guilds[str(guild)] = GuildState()
+        if reset:
+            self.guilds[str(guild)].phase = STOPPING
+        return reset
 
     def snapshotted(self, guild: str, now: float, ok: bool) -> None:
         s = self.state(guild)

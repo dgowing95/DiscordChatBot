@@ -511,3 +511,26 @@ async def test_sigterm_closes_the_bot_once():
 def test_sigterm_handler_is_skipped_without_signal_support():
     m = _import_main()
     assert m.install_sigterm_handler(MagicMock(), _SignalLoop(supported=False)) is False
+
+
+@pytest.mark.asyncio
+async def test_a_failing_close_on_sigterm_is_logged(caplog):
+    import signal
+    m = _import_main()
+    bot = MagicMock(close=AsyncMock(side_effect=RuntimeError("boom")))
+    loop = _SignalLoop()
+    m.install_sigterm_handler(bot, loop)
+    loop.handlers[signal.SIGTERM]()
+    for _ in range(3):
+        await asyncio.sleep(0)
+    assert "closing the bot failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_the_gateway_closes_even_when_our_shutdown_raises():
+    m = _import_main()
+    with patch.object(m, "close_http_session", AsyncMock(side_effect=RuntimeError("x"))), \
+            patch("discord.Client.close", AsyncMock()) as parent_close:
+        with pytest.raises(RuntimeError):
+            await m.client.close()
+    parent_close.assert_awaited_once()

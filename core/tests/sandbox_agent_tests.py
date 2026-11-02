@@ -3600,3 +3600,48 @@ async def test_tool_tells_the_model_when_the_workspace_is_unavailable(clean_inbo
 def test_the_sandbox_tool_is_always_offered():
     from classes.text_llm_handler import agent_tools
     assert "run_code_sandbox" in {tool.name for tool in agent_tools()}
+
+
+@pytest.mark.asyncio
+async def test_attach_file_messages_never_show_the_absolute_path():
+    """A model handed an absolute path reused it as exec_command's workdir,
+    which the SDK refuses (see SANDBOX_OUTPUT_DIRNAME)."""
+    session = MagicMock()
+    session.exec = AsyncMock(return_value=_exec_result(b"", ok=False))
+    ctx = _attach_ctx(session=session, job_dir="jobs/t1", workspace_root="/workspace")
+    out = await _attach(ctx, path="out/nope.png")
+    assert "'out/nope.png' does not exist" in out and "/workspace" not in out
+    session.exec = AsyncMock(return_value=_exec_result(
+        str(sandbox_agent.MAX_ARTIFACT_BYTES + 1).encode()))
+    out = await _attach(ctx, path="out/huge.bin")
+    assert "too large" in out and "/workspace" not in out
+
+
+@pytest.mark.asyncio
+async def test_a_run_with_no_server_says_so_and_not_try_again_later(clean_inbox):
+    from classes.workspace_manager import NoServerWorkspace
+    message = MagicMock()
+    message.author.id = 1
+    thread, patches = _sandbox_tool_patches(_text_result("done"))
+    with patches[0], patches[1], patches[2], \
+         patch.object(prod_sandbox_agent, "run_sandbox_task",
+                      AsyncMock(side_effect=NoServerWorkspace("no server"))), \
+         patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()):
+        out = await prod_tool_functions.run_code_sandbox.on_invoke_tool(
+            _tool_context(message), json.dumps({"task": "x"}))
+    assert "not in a server" in out and "few minutes" not in out
+
+
+@pytest.mark.asyncio
+async def test_a_failed_run_with_a_lost_workspace_is_not_called_saved(clean_inbox):
+    message = MagicMock()
+    message.author.id = 1
+    result = sandbox_agent.SandboxResult(text="", artifacts=[], ok=False, error="timeout",
+                                         workspace_lost=True)
+    thread, patches = _sandbox_tool_patches(result)
+    thread.send = AsyncMock()
+    with patches[0], patches[1], patches[2], patches[3], \
+         patch.object(prod_tool_functions.Common, "send_tool_discord_embed", AsyncMock()):
+        out = await prod_tool_functions.run_code_sandbox.on_invoke_tool(
+            _tool_context(message), json.dumps({"task": "x"}))
+    assert "WAS saved" not in out and "could not be restored" in out

@@ -848,7 +848,10 @@ async def attach_file(
     if path.startswith("/"):
         return "Use a path relative to your working directory, not an absolute one."
     # Kept absolute from here on: _collect_deliverables reads it with our own
-    # session.exec, whose working directory is the workspace root.
+    # session.exec, whose working directory is the workspace root. The
+    # messages below use the model's own relative name: it must never be
+    # handed an absolute path (see SANDBOX_OUTPUT_DIRNAME).
+    relative = path
     path = _job_path(ctx, path)
     if path is None:
         return "That path is outside the workspace. Use one relative to your working directory."
@@ -872,19 +875,19 @@ async def attach_file(
         result = await session.exec("stat", "-c", "%s", "--", path, shell=False)
     except Exception as e:
         logger.warning(f"Sandbox attach_file: stat failed for {path!r}: {e}")
-        return f"Could not check {path!r}. Verify it exists with `ls`, then attach it again."
+        return f"Could not check {relative!r}. Verify it exists with `ls`, then attach it again."
     if not result.ok():
         return (
-            f"{path!r} does not exist, so it was NOT attached. Check the path "
+            f"{relative!r} does not exist, so it was NOT attached. Check the path "
             "with `ls` — nothing is sent to the user unless it is attached."
         )
     try:
         size = int(result.stdout.decode("utf-8", errors="replace").strip())
     except ValueError:
-        return f"Could not read the size of {path!r}. Verify it with `ls -l` and try again."
+        return f"Could not read the size of {relative!r}. Verify it with `ls -l` and try again."
     if size > MAX_ARTIFACT_BYTES:
         return (
-            f"{path!r} is too large to send ({size} bytes, over the "
+            f"{relative!r} is too large to send ({size} bytes, over the "
             f"{MAX_ARTIFACT_BYTES}-byte limit). Produce a smaller file and attach that."
         )
 
@@ -1601,9 +1604,9 @@ async def _run_sandbox_task(
 
 def _acquire_workspace(guild_id):
     """The server's workspace for one run (the seam the tests replace)."""
-    from classes.workspace_manager import WorkspaceUnavailable, workspaces
+    from classes.workspace_manager import NoServerWorkspace, workspaces
     if guild_id is None:
-        raise WorkspaceUnavailable("the workspace belongs to a server, and this run has none")
+        raise NoServerWorkspace("the workspace belongs to a server, and this run has none")
     return workspaces().acquire(guild_id, timeout=WORKSPACE_ACQUIRE_TIMEOUT_SECONDS)
 
 

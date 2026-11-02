@@ -13,6 +13,9 @@ spec:
       labels:
         app: {{ .Release.Name }}-core
     spec:
+      # Room for the shutdown save of the server workspaces (bounded by
+      # snapshotTimeout) after SIGTERM, plus the rest of the close.
+      terminationGracePeriodSeconds: {{ add (.Values.brain.workspace.snapshotTimeout | int64) 30 }}
       containers:
       - name: core
         image: "{{ .Values.image.repository }}:core-{{ .Values.image.tag | default .Chart.AppVersion }}"

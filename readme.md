@@ -32,8 +32,8 @@ docker-compose stack for local development.
 - Helm.
 - An NVIDIA GPU with the [NVIDIA Container Runtime Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 - A registered Discord bot and its token.
-- For the code sandbox: a Docker daemon on the node, whose socket is mounted into the
-  core pod. Disable with `sandbox.enabled=false`.
+- A Docker daemon on the node, whose socket is mounted into the core pod: each server's
+  code-sandbox workspace is a container there, and core will not start without it.
 
 ## Installing
 

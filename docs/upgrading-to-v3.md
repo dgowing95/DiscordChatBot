@@ -61,7 +61,7 @@ New variables, all optional:
 | `WORKSPACE_MAX_WARM` | Workspaces running at once (4) |
 | `WORKSPACE_JOB_RETENTION_HOURS` | Task folders older than this are deleted (72) |
 | `WORKSPACE_CPU_LIMIT` / `WORKSPACE_PIDS_LIMIT` | CPUs (none) and processes (512) per workspace container |
-| `WORKSPACE_INSTANCE` | Label that keeps two bots on one Docker daemon apart (`dcb-dev`; the chart uses the release name) |
+| `WORKSPACE_INSTANCE` | Label that keeps two bots on one Docker daemon apart (`dcb-dev`; the chart uses `<namespace>-<release name>`) |
 | `WORKSPACE_PREWARM` | Start a server's workspace on its first message (off; not used yet) |
 | `LLAMA_CTX_SIZE` / `LLAMA_PARALLEL` / `LLAMA_CACHE_RAM_MIB` | docker compose only: llama.cpp's total context (80000), slots (1) and prompt cache in MiB (8192). These were fixed in `docker-compose.yaml` before, at the same values |
 
@@ -160,7 +160,7 @@ from the chart. Also new:
 | `llamacpp.cacheRamMiB` | empty (llama.cpp's 8192) | llama.cpp's `--cache-ram` |
 | `persona.model`, `persona.llmHost`, `persona.apiKey` | empty (= `llm.*`) | The persona's own LLM; the key goes in the Secret as `PERSONA_LLM_API_KEY` |
 | `brain.reasoningEffort` | medium | `BRAIN_REASONING_EFFORT` |
-| `brain.workspace.idleSeconds`, `snapshotIntervalSeconds`, `maxWarm`, `jobRetentionHours`, `cpuLimit`, `pidsLimit`, `prewarm` | 900, 1800, 4, 72, empty, 512, false | The `WORKSPACE_*` settings above. `WORKSPACE_INSTANCE` is the release name |
+| `brain.workspace.idleSeconds`, `snapshotIntervalSeconds`, `maxWarm`, `jobRetentionHours`, `cpuLimit`, `pidsLimit`, `prewarm` | 900, 1800, 4, 72, empty, 512, false | The `WORKSPACE_*` settings above. `WORKSPACE_INSTANCE` is `<namespace>-<release name>`. The core pod's `terminationGracePeriodSeconds` is `snapshotTimeout` + 30, for the shutdown save |
 
 With `llm.engine: strata`, the render now fails when `persona.apiKey`, `brain.apiKey`, `research.apiKey`,
 `diffusion.promptRewrite.apiKey` or `diffusion.review.apiKey` is set without a host to go with it

@@ -244,3 +244,36 @@ def test_claim_cold_only_takes_a_guild_nobody_here_is_using():
     lc.stopped("g")
     _warm(lc, "g")
     assert lc.claim_cold("g") is False
+
+
+def test_reset_while_stopping_waits_for_the_stop_and_then_runs():
+    lc = _lc()
+    _warm(lc, "g")
+    lc.release("g", 1)
+    lc.cleaned("g", 1)
+    assert lc.begin_stop("g") is True
+    assert lc.request_reset("g") == "later"
+    assert lc.stopped("g") is True  # the reset runs now
+    assert lc.state("g").phase == STOPPING
+    assert lc.acquire("g", 2).action == WAIT
+    assert lc.stopped("g", wiped=True) is False
+    assert lc.state("g").phase == COLD
+
+
+def test_reset_asked_for_while_starting_survives_a_failed_start():
+    lc = _lc()
+    assert lc.acquire("g", 0).action == START
+    assert lc.request_reset("g") == "later"
+    assert lc.start_failed("g") is True
+    assert lc.state("g").phase == STOPPING
+
+
+def test_a_plain_stop_or_failed_start_has_no_reset():
+    lc = _lc()
+    _warm(lc, "g")
+    lc.release("g", 1)
+    lc.cleaned("g", 1)
+    lc.begin_stop("g")
+    assert lc.stopped("g") is False and lc.state("g").phase == COLD
+    assert lc.acquire("g", 2).action == START
+    assert lc.start_failed("g") is False and lc.state("g").phase == COLD

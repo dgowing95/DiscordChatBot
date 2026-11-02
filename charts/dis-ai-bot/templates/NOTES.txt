@@ -26,4 +26,4 @@
    (brain.workspace.dockerSocketPath, default /var/run/docker.sock), and the
    core pod will not start without it. Core pulls the image
    (brain.workspace.image) at startup if it is missing. List the containers:
-   docker ps --filter label=dcb.instance={{ .Release.Name }}
+   docker ps --filter label=dcb.instance={{ .Release.Namespace }}-{{ .Release.Name }}

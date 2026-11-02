@@ -650,3 +650,43 @@ def test_limited_client_adds_limits_to_create_and_passes_the_rest_through():
     assert created == [{"image": "x", "mem_limit": 5, "pids_limit": 512}]  # the caller's own wins
     assert client.containers.get("c1") == "got c1"
     assert client.ping() == "pong"
+
+
+@pytest.mark.asyncio
+async def test_reset_during_an_idle_stop_wipes_after_the_stop_saves():
+    """A wipe racing the stop's save would let the save put the files back."""
+    env = Env()
+    manager = env.manager()
+    lease = await _use(manager)
+    assert manager.lifecycle.begin_stop("1") is True
+    assert await manager.reset("1") == "later"
+    await manager._stop("1")
+    assert lease.session.state.container_id not in env.daemon.containers
+    assert env.record() is None and "guild-1" not in env.store.data
+    assert (await _use(manager)).kind == "fresh"
+
+
+@pytest.mark.asyncio
+async def test_reaper_leaves_a_container_that_is_still_starting():
+    env = Env()
+    manager = env.manager()
+    assert manager.lifecycle.acquire("2", env.clock.now).action == "start"
+    env.daemon.containers["new"] = {"labels": {"dcb.role": "workspace", "dcb.guild": "2",
+                                               "dcb.instance": "test"}, "status": "running"}
+    assert await manager.reap() == 0
+    assert "new" in env.daemon.containers
+
+
+@pytest.mark.asyncio
+async def test_record_writes_for_one_guild_do_not_drop_each_others_fields():
+    env = Env()
+    manager = env.manager()
+    real_get = env.redis.get
+
+    async def slow_get(key):
+        value = await real_get(key)
+        await asyncio.sleep(0)  # let the other write interleave
+        return value
+    env.redis.get = slow_get
+    await asyncio.gather(manager._save_record("1", a=1), manager._save_record("1", b=2))
+    assert env.record()["a"] == 1 and env.record()["b"] == 2

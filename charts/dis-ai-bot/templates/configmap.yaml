@@ -145,8 +145,9 @@ data:
   SANDBOX_ASK_USER_TIMEOUT: {{ .Values.sandbox.askUserTimeout | toString | quote }}
   {{- with .Values.brain.workspace }}
   WORKSPACE_IMAGE: {{ .image | quote }}
-  # The release name: the reaper only removes containers with its own label.
-  WORKSPACE_INSTANCE: {{ $.Release.Name | quote }}
+  # Namespace + release name: the reaper only removes containers with its own
+  # label, so two same-named releases in different namespaces must not share it.
+  WORKSPACE_INSTANCE: {{ printf "%s-%s" $.Release.Namespace $.Release.Name | quote }}
   WORKSPACE_IDLE_SECONDS: {{ .idleSeconds | int64 | toString | quote }}
   WORKSPACE_SNAPSHOT_INTERVAL_SECONDS: {{ .snapshotIntervalSeconds | int64 | toString | quote }}
   WORKSPACE_MAX_WARM: {{ .maxWarm | int64 | toString | quote }}
@@ -157,11 +158,14 @@ data:
   WORKSPACE_SNAPSHOT_TIMEOUT_SECONDS: {{ .snapshotTimeout | int64 | toString | quote }}
   WORKSPACE_INPUT_MAX_BYTES: {{ .inputMaxBytes | int64 | toString | quote }}
   WORKSPACE_PREWARM: {{ .prewarm | toString | quote }}
-  {{- with .cpuLimit }}
-  {{- if not (regexMatch "^[0-9]+([.][0-9]+)?$" (toString .)) }}
-  {{- fail (printf "brain.workspace.cpuLimit must be a number of CPUs like 2 or 0.5, not %q" (toString .)) }}
+  {{- /* Compared as text, not with `with`: a numeric 0 would be skipped as
+       empty, and core reads 0 as no cap, so it is refused like a typo */}}
+  {{- $cpu := toString .cpuLimit }}
+  {{- if not (has $cpu (list "" "<nil>")) }}
+  {{- if or (not (regexMatch "^[0-9]+([.][0-9]+)?$" $cpu)) (regexMatch "^[0.]+$" $cpu) }}
+  {{- fail (printf "brain.workspace.cpuLimit must be a number of CPUs greater than 0, like 2 or 0.5, not %q" $cpu) }}
   {{- end }}
-  WORKSPACE_CPU_LIMIT: {{ . | toString | quote }}
+  WORKSPACE_CPU_LIMIT: {{ $cpu | quote }}
   {{- end }}
   {{- with .memoryLimit }}
   {{- /* Refused here: core would otherwise run every workspace uncapped over a typo */}}
