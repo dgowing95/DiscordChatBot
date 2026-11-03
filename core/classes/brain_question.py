@@ -103,11 +103,13 @@ class QuestionView(discord.ui.View):
         else:
             outcome = brain_inbox.deliver(self.question_id, interaction.user.id, answer)
         if outcome == brain_inbox.ACCEPTED:
-            self.closed = True
             self.stop()
             content = getattr(interaction.message, "content", "") or ""
             await interaction.response.edit_message(
                 content=closed_content(content, ANSWERED.format(answer=shown[:200])), view=None)
+            # Only once the edit worked: otherwise close() (in ask_user)
+            # still takes the dead buttons off.
+            self.closed = True
         elif outcome == brain_inbox.EMPTY:
             await interaction.response.send_message("I need an answer in words, please.",
                                                     ephemeral=True)
