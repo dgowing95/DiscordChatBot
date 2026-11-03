@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 MAX_OPTIONS = 4
 OPTION_CHARS = 80  # Discord's button label limit
 ANSWER_CHARS = 1000
+MAX_QUESTION_CHARS = 1800  # leaves room for a mention and the closing line
 YOU_DECIDE = "You decide"
 # What the "You decide" button hands the brain (classes/brain.py maps it).
 YOU_DECIDE_ANSWER = "(you decide)"
@@ -47,7 +48,10 @@ def clean_options(options) -> list[str]:
 
 
 def closed_content(content: str, line: str) -> str:
-    return f"{content}\n-# {line}"[:2000]
+    """The question with its closing line under it, cut from the question's
+    end (never the line) to fit Discord's 2000 characters."""
+    tail = f"\n-# {line}"[:400]
+    return content[:2000 - len(tail)] + tail
 
 
 class AnswerModal(discord.ui.Modal, title="Your answer"):
@@ -70,6 +74,11 @@ class QuestionView(discord.ui.View):
         self.user_id = int(user_id)
         self.question_id = None
         self.closed = False
+        # A button or the box is being handled: close() (run by ask_user the
+        # moment the answer arrives) waits for it instead of editing the
+        # message at the same time with a different line.
+        self.handling = asyncio.Event()
+        self.handled = False
         for label in clean_options(options):
             self.add_item(self._button(label, discord.ButtonStyle.primary, self._choose(label)))
         self.add_item(self._button("Answer…", discord.ButtonStyle.secondary, self._open_box))
@@ -98,6 +107,13 @@ class QuestionView(discord.ui.View):
         return False
 
     async def answer(self, interaction: discord.Interaction, answer: str, shown: str) -> None:
+        self.handled = True
+        try:
+            await self._answer(interaction, answer, shown)
+        finally:
+            self.handling.set()
+
+    async def _answer(self, interaction: discord.Interaction, answer: str, shown: str) -> None:
         if self.question_id is None:
             outcome = brain_inbox.NO_WAITER
         else:
@@ -121,6 +137,7 @@ async def post(ctx: dict, text: str, options, timeout: float):
     """Posts the question (a reply to the request, or a mention when there is
     no source message). Returns (message, view), or (None, None)."""
     view = QuestionView(ctx["user_id"], options, timeout)
+    text = str(text)[:MAX_QUESTION_CHARS]
     message = ctx.get("original_message")
     try:
         if message is not None:
@@ -145,6 +162,12 @@ async def close(message, view: QuestionView, line: str) -> None:
     """Takes the buttons off a question that ended without a button press
     (a Reply, a voice answer, no answer, replaced). Fail-soft."""
     view.stop()
+    if view.handled and not view.closed:
+        # An answer is being shown by its own interaction: let it finish.
+        try:
+            await asyncio.wait_for(view.handling.wait(), 5)
+        except asyncio.TimeoutError:
+            pass
     if view.closed:
         return
     view.closed = True

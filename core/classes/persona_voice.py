@@ -59,4 +59,4 @@ async def voice_question(guild_id, question: str) -> str:
             return text[:1500]
     except Exception as e:
         logger.info(f"Brain question: rewording failed ({e}); asking it as written")
-    return question
+    return question[:1500]
