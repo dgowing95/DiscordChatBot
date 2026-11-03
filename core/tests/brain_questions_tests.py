@@ -192,7 +192,7 @@ def _ctx(**extra):
     sent.edit = AsyncMock()
     channel.send = AsyncMock(return_value=sent)
     message = MagicMock()
-    message.reply = AsyncMock(return_value=sent)
+    message.to_reference = MagicMock(return_value="ref")
     ctx = {"guild_id": 1, "user_id": 5, "channel": channel, "original_message": message,
            "automatic": False, "voice": False, "unprompted": False,
            "brain_deadline": time.monotonic() + 600}
@@ -230,7 +230,8 @@ async def test_no_one_to_ask_answers_at_once(extra, plain_voice):
     ctx, _sent = _ctx(**extra)
     assert await _ask(ctx) == brain.NO_ONE_TO_ASK
     assert _count("skipped") == before + 1
-    ctx["original_message"].reply.assert_not_awaited()
+    if ctx.get("channel") is not None:
+        ctx["channel"].send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -239,8 +240,11 @@ async def test_the_question_is_a_reply_with_buttons_and_the_answer_is_returned(p
     ctx, sent = _ctx()
     task = asyncio.create_task(_ask(ctx, options=["Bar", "Line"]))
     await _until(lambda: brain_inbox.waiting(QUESTION_ID))
-    reply = ctx["original_message"].reply.await_args
+    reply = ctx["channel"].send.await_args
     assert reply.args[0] == "Bar or line chart?"
+    # A reply to the request, posted even if the request was deleted.
+    assert reply.kwargs["reference"] == "ref"
+    ctx["original_message"].to_reference.assert_called_once_with(fail_if_not_exists=False)
     assert _labels(reply.kwargs["view"]) == ["Bar", "Line", "Answer…", "You decide"]
     assert reply.kwargs["view"].question_id == QUESTION_ID
     brain_inbox.deliver(QUESTION_ID, 5, "line please")
@@ -321,7 +325,7 @@ async def test_a_replaced_question_tells_the_brain_to_assume(plain_voice):
 @pytest.mark.asyncio
 async def test_a_failed_post_asks_nothing(plain_voice):
     ctx, _sent = _ctx()
-    ctx["original_message"].reply.side_effect = RuntimeError("no permission")
+    ctx["channel"].send.side_effect = RuntimeError("no permission")
     assert await _ask(ctx) == brain.NO_ONE_TO_ASK
     assert not brain_inbox.waiting(QUESTION_ID)
 
@@ -428,7 +432,8 @@ def _main():
     return main
 
 
-def _message(author_id=5, content="line please", reply_to=QUESTION_ID):
+def _message(author_id=5, content="line please", reply_to=QUESTION_ID, forward=False,
+             reference_channel=77):
     message = MagicMock()
     message.id = 9001
     message.content = content
@@ -436,7 +441,10 @@ def _message(author_id=5, content="line please", reply_to=QUESTION_ID):
     message.guild = MagicMock(id=1)
     message.channel = MagicMock(id=77)
     message.mentions = []
-    message.reference = SimpleNamespace(message_id=reply_to) if reply_to else None
+    import discord
+    kind = discord.MessageReferenceType.forward if forward else discord.MessageReferenceType.default
+    message.reference = (SimpleNamespace(message_id=reply_to, channel_id=reference_channel, type=kind)
+                         if reply_to else None)
     message.add_reaction = AsyncMock()
     message.reply = AsyncMock()
     return message
@@ -484,6 +492,19 @@ async def test_a_reply_to_some_other_message_is_not_the_answer():
     future = brain_inbox.ask(QUESTION_ID, 77, 5)
     handle = await _on_message(_message(reply_to=QUESTION_ID + 7))
     assert not future.done()
+    handle.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kwargs", [{"forward": True}, {"reference_channel": 78}])
+async def test_a_forward_of_the_question_is_not_the_answer(kwargs):
+    # A forward also points at the question's message id; only a Reply in
+    # the question's channel answers it.
+    future = brain_inbox.ask(QUESTION_ID, 77, 5)
+    message = _message(content="", **kwargs)
+    handle = await _on_message(message)
+    assert not future.done()
+    message.reply.assert_not_awaited()
     handle.assert_awaited_once()
 
 

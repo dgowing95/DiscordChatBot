@@ -124,8 +124,12 @@ async def post(ctx: dict, text: str, options, timeout: float):
     message = ctx.get("original_message")
     try:
         if message is not None:
-            sent = await message.reply(text, view=view, mention_author=True,
-                                       allowed_mentions=MENTIONS)
+            # A request deleted meanwhile still gets its question, just
+            # without the reply link (Discord refuses a reply to a missing
+            # message by default).
+            sent = await ctx["channel"].send(
+                text, view=view, mention_author=True, allowed_mentions=MENTIONS,
+                reference=message.to_reference(fail_if_not_exists=False))
         else:
             sent = await ctx["channel"].send(f"<@{ctx['user_id']}> {text}", view=view,
                                              allowed_mentions=MENTIONS)

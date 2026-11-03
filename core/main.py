@@ -392,9 +392,13 @@ async def on_message(message):
 
 
 def _answers_brain_question(message) -> bool:
+    """A Reply (not a forward, which also points at the message) in the
+    question's own channel, by the person it asked."""
     reference = getattr(message, "reference", None)
     question_id = getattr(reference, "message_id", None)
     return (question_id is not None and message.guild is not None
+            and getattr(reference, "type", None) != discord.MessageReferenceType.forward
+            and getattr(reference, "channel_id", None) == message.channel.id
             and brain_inbox.requester(question_id) == message.author.id)
 
 
