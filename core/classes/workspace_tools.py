@@ -966,10 +966,11 @@ async def _collect_deliverables(
             logger.warning(f"Sandbox: failed to read attached file {path}: exit {read_result.exit_code}")
             continue
         size = len(read_result.stdout)
-        if size > MAX_ARTIFACT_BYTES or total + size > MAX_ARTIFACT_BYTES:
+        if total + size > MAX_ARTIFACT_BYTES:  # total >= 0, so this covers one big file too
             name = _attachment_name(path)
-            skip_notes.append(f"{name} (skipped: grew past the {MAX_ARTIFACT_BYTES}-byte limit)")
-            logger.info(f"Sandbox: {name} grew past the size limit while it was being sent")
+            which = "" if size > MAX_ARTIFACT_BYTES else " total"
+            skip_notes.append(f"{name} (skipped: grew past the {MAX_ARTIFACT_BYTES}-byte{which} limit)")
+            logger.info(f"Sandbox: {name} grew past the{which} size limit while it was being sent")
             continue
         total += size
         artifacts.append(SandboxArtifact(
@@ -987,8 +988,8 @@ async def _current_size(session, entry: dict) -> int:
         result = await session.exec("stat", "-c", "%s", "--", entry["path"], shell=False)
         if result.ok():
             return int(result.stdout.decode("utf-8", errors="replace").strip())
-    except Exception:
-        pass
+    except Exception as e:
+        logger.info(f"Sandbox: could not stat attached file {entry.get('path')!r}: {e}")
     return int(entry.get("size") or 0)
 
 

@@ -765,7 +765,8 @@ async def test_files_that_grew_are_held_to_the_total_too():
     session.exec = AsyncMock(side_effect=exec_)
     entries = [{"path": f"/w/out/{n}.png", "size": 10, "caption": ""} for n in ("a", "b")]
     artifacts, notes = await prod_sandbox_agent._collect_deliverables(session, entries)
-    assert [a.name for a in artifacts] == ["a.png"] and "b.png" in notes[0]
+    assert [a.name for a in artifacts] == ["a.png"]
+    assert "b.png" in notes[0] and "total limit" in notes[0]
 
 
 @pytest.mark.asyncio
