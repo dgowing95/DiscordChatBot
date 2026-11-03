@@ -244,3 +244,34 @@ async def test_the_model_time_metric_leaves_the_lane_wait_out():
     assert (await asyncio.wait_for(run, 5)).final_output == "hello"
     assert total("discord_bot_llm_lane_wait_seconds_sum", lane="brain") - before_wait >= 0.25
     assert total("discord_bot_llm_call_seconds_sum", caller="main", outcome="ok") - before_call < 0.2
+
+
+_EMPTY = ("Chat Completions response terminated with finish_reason='length' "
+          "but produced no assistant text, tool call, or refusal.")
+
+
+@pytest.mark.asyncio
+async def test_a_reply_cut_off_before_saying_anything_is_asked_for_once_more():
+    from agents import ModelBehaviorError
+    inner = ScriptedModel([ModelStep(error=ModelBehaviorError(_EMPTY)),
+                           ModelStep(output=[assistant_message("hello", item_id="m1")])])
+    agent = Agent(name="a", instructions="", model=LanedModel(inner, HOST, 30, lane=llm_lanes.BRAIN))
+    lanes = llm_lanes.configure_host(HOST, 1, 0)
+    assert (await Runner.run(agent, "hi", run_config=_run_config())).final_output == "hello"
+    assert len(inner.calls) == 2
+    assert lanes.snapshot()[llm_lanes.BRAIN]["in_use"] == 0
+
+
+@pytest.mark.asyncio
+async def test_only_one_retry_and_only_for_that_error():
+    from agents import ModelBehaviorError
+    twice = ScriptedModel([ModelStep(error=ModelBehaviorError(_EMPTY)),
+                           ModelStep(error=ModelBehaviorError(_EMPTY))])
+    with pytest.raises(ModelBehaviorError):
+        await LanedModel(twice, "https://remote.example", 30).get_response(**_call_args())
+    assert len(twice.calls) == 2
+    other = ScriptedModel([ModelStep(error=ModelBehaviorError("bad tool json")),
+                           ModelStep(output=[assistant_message("hello", item_id="m1")])])
+    with pytest.raises(ModelBehaviorError):
+        await LanedModel(other, "https://remote.example", 30).get_response(**_call_args())
+    assert len(other.calls) == 1
