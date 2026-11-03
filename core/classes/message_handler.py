@@ -54,7 +54,7 @@ from classes.metrics import (
     observe_stage,
     set_attachment_cache_bytes,
 )
-from classes.message_queue import get_channel_lock, in_flight_hint
+from classes.message_queue import get_channel_lock, in_flight_hint, pop_unprompted
 
 logger = logging.getLogger(__name__)
 
@@ -531,6 +531,8 @@ class MessageHandler:
         ollama = TextLLMHandler(
             self.messages, self.message.guild.id, self.message,
             client=self.client,
+            # Let in by the reply chance, not a mention (main.on_message).
+            unprompted=pop_unprompted(self.message.id),
         )
         ollama.allow_double_reply = allow_double_reply
         response = await ollama.generate()

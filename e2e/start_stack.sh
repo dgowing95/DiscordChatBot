@@ -135,6 +135,9 @@ fi
   # pulls WORKSPACE_IMAGE at startup), labelled apart from anything else there.
   export WORKSPACE_INSTANCE=e2e CONTENT_GUARD_ENABLED=0 WHATS_NEW_ENABLED=0
   export DOUBLE_REPLY_CHANCE=0 PERSONA_REASONING_EFFORT=low METRICS_PORT=9464 LOG_LEVEL=INFO
+  # No check answers the brain's questions (ask_user), so one it asks anyway
+  # only delays that check; kept short. (15 s is the least ask_user waits.)
+  export BRAIN_ASK_TIMEOUT=20
   export VOICE_ENABLED=1 VOICE_DEV_INJECT=1 VOICE_DEBUG=1 VOICE_IDLE_LEAVE_SECONDS=1800
   export VOICE_BRIDGE_URL=ws://127.0.0.1:8765 VOICE_BRIDGE_TOKEN="$BRIDGE_TOKEN"
   export SPEECH_URL=http://127.0.0.1:8002

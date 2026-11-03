@@ -398,7 +398,7 @@ class TextLLMHandler:
 
     def __init__(self, messages, guild_id, original_message, client=None,
                  actor_id=None, channel=None, automatic=False, voice=False, request_text=None,
-                 bot_name=None, followup=False):
+                 bot_name=None, followup=False, unprompted=False):
         self.original_message = original_message
         self.messages = messages
         self.guild_id = guild_id
@@ -415,6 +415,9 @@ class TextLLMHandler:
         # A follow-up run (automation_runner): the event tools then skip the
         # requester's own permission check (event_tools._checks_requester).
         self.followup = followup
+        # A reply the bot was not asked for (the random reply chance): the
+        # brain gets tighter limits and asks no questions (brain_policy).
+        self.unprompted = unprompted
         # A turn in a voice call: spoken instructions, thinking off, and no
         # source message (original_message is None; request_text is what the
         # speaker said, for tools that compare their result against it).
@@ -596,6 +599,7 @@ class TextLLMHandler:
         "channel": self.channel if hasattr(self, "channel") else self.original_message.channel,
         "automatic": getattr(self, "automatic", False),
         "followup": getattr(self, "followup", False),
+        "unprompted": getattr(self, "unprompted", False),
         "discord_client": self.client,
         "redis_save_tool_calls": 0,
         "personality_tool_calls": 0,
