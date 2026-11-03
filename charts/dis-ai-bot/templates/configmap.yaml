@@ -192,6 +192,15 @@ data:
   BRAIN_ASK_TIMEOUT: {{ .Values.brain.askTimeout | toString | quote }}
   BRAIN_MAX_CONCURRENT: {{ .Values.brain.maxConcurrent | toString | quote }}
   BRAIN_QUEUE_WAIT: {{ .Values.brain.queueWait | toString | quote }}
+  SKILLS_ENABLED: {{ .Values.skills.enabled | quote }}
+  SKILLS_MAX_PER_GUILD: {{ .Values.skills.maxPerGuild | toString | quote }}
+  SKILLS_MAX_VERSIONS: {{ .Values.skills.maxVersions | toString | quote }}
+  SKILLS_MAX_BYTES: {{ .Values.skills.maxBytes | toString | quote }}
+  SKILLS_MAX_BODY_CHARS: {{ .Values.skills.maxBodyChars | toString | quote }}
+  SKILLS_MAX_FILES: {{ .Values.skills.maxFiles | toString | quote }}
+  SKILLS_INDEX_MAX: {{ .Values.skills.indexMax | toString | quote }}
+  SKILLS_REFLECTION_ENABLED: {{ .Values.skills.reflection.enabled | quote }}
+  SKILLS_REFLECTION_MIN_TOOL_CALLS: {{ .Values.skills.reflection.minToolCalls | toString | quote }}
   # Content guard (moderation of web and sandbox input); the key lives in
   # secret.yaml.
   CONTENT_GUARD_ENABLED: {{ .Values.contentGuard.enabled | quote }}

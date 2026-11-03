@@ -297,7 +297,8 @@ async def ask_brain(wrapper: RunContextWrapper[dict], request: str,
     """Hands a job to your brain, which has the tools: the web and links,
     saving and forgetting what is known about people, your own personality,
     pictures, polls, events, reminders, this server's messages, voice calls,
-    and a computer for code, files and charts (it keeps its earlier work).
+    and a computer for code, files and charts (it keeps its earlier work
+    and this server's saved skills).
     You cannot open links, see its files, change yourself or act later, so
     use it for anything beyond talking. For example:
     "what's the weather in Oslo?" -> request="Look up today's weather in Oslo";
@@ -305,7 +306,8 @@ async def ask_brain(wrapper: RunContextWrapper[dict], request: str,
     "in an hour, check the score" -> request="In an hour, check the score";
     "remember I'm vegan" -> request="Remember that they are vegan";
     "be a pirate from now on" -> request="Change the personality to a pirate";
-    "send the script for that chart" -> request="Send the script that made the last chart".
+    "send the script for that chart" -> request="Send the script that made the last chart";
+    "use the weekly-chart skill" -> request="Use the weekly-chart skill".
     Not for chat, opinions or jokes, or what the chat or what is saved
     about the person (shown below it) already answers.
     Its result lists facts to keep exact and what it already posted.

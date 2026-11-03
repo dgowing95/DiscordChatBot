@@ -97,7 +97,7 @@ MEMORY_CHARS = 1500
 # the persona's own run keeps holds a released workspace.
 _BRAIN_KEYS = ("session", "out_dir", "job_dir", "workspace_root", "deliverables",
                "delivery_chosen", "brain_request", "brain_report_args", "brain_guard", "requester",
-               "brain_deadline", "brain_questions")
+               "brain_deadline", "brain_questions", "skills_used", "skill_saved")
 
 # The brain's instructions. ONE home per concept (AGENTS.md "Prompt
 # surface"): if something here needs saying again, edit the existing bullet.
@@ -147,6 +147,21 @@ receive a REQUEST plus the recent conversation, not a specification.
   "https://example.com/core-one"])`. Use status "partial" or "failed" when
   that is the truth. Never say work is still in progress: nothing you do
   after `report` reaches anyone."""
+
+# Added to the brain's instructions when skills are on (SKILLS_ENABLED, a
+# process-wide setting, so the prompt is still byte-stable between calls).
+# Skills' one home in the prompt, as a positive example.
+SKILLS_INSTRUCTIONS = """
+- Did this take several steps you would repeat next time, like "turn the
+  tracker bot's embeds into a weekly chart"? Save it with `save_skill`: the
+  steps in order, and the script that did the work in `files`. If a listed
+  skill fits the request, `use_skill` it first."""
+
+
+def instructions() -> str:
+    """The brain's system prompt: BRAIN_INSTRUCTIONS, plus the skills bullet."""
+    from classes import skill_format
+    return BRAIN_INSTRUCTIONS + (SKILLS_INSTRUCTIONS if skill_format.enabled() else "")
 
 
 def build_brain_model() -> LanedModel:
@@ -454,7 +469,7 @@ def build_brain_agent(*, automatic: bool = False, voice: bool = False):
     return SandboxAgent(
         name="Brain",
         model=build_brain_model(),
-        instructions=BRAIN_INSTRUCTIONS,
+        instructions=instructions(),
         base_instructions="",
         capabilities=[Shell(configure_tools=_configure_brain_shell)],
         tools=brain_tools(automatic=automatic, voice=voice),
@@ -590,7 +605,7 @@ def memory_lines(memories, count: int = MEMORY_COUNT, chars: int = MEMORY_CHARS)
 
 
 def build_task(ctx: dict, request: str, *, job_dir: str, earlier_jobs=(), inputs_preamble: str = "",
-               datetime: str = "") -> str:
+               datetime: str = "", skills_index: str = "") -> str:
     """The brain's first user message (D20), in order: the conversation, the
     request, who asked and what is saved about them, the folder, the input
     files, the time. Everything that changes per call is here, not in the
@@ -608,6 +623,8 @@ def build_task(ctx: dict, request: str, *, job_dir: str, earlier_jobs=(), inputs
         if memories:
             line += "\nSaved about them:\n" + "\n".join(f"- {m}" for m in memories)
         parts.append(line)
+    if skills_index:
+        parts.append(skills_index)
     # "already open": the brain once ran `cd jobs/<its folder>/` from inside
     # it, which failed and cost a turn.
     folder = f"Your folder (the working directory, already open): {job_dir}/"
@@ -806,6 +823,9 @@ async def _run_in_workspace(ctx, lease, request, inputs, problems, hooks_box) ->
         # existing shared/ folder.
         await session.exec("ln", "-sT", "../../shared", posixpath.join(job_path, "shared"),
                            shell=False)
+        # skills/ the same way, so use_skill's skills/<name>/ works from here.
+        await session.exec("ln", "-sT", "../../skills", posixpath.join(job_path, "skills"),
+                           shell=False)
     # After the mkdir, so the marker is never older than out/ itself (see
     # workspace_tools._mark_run_start).
     marker = await _mark_run_start(session, out_dir)
@@ -814,7 +834,8 @@ async def _run_in_workspace(ctx, lease, request, inputs, problems, hooks_box) ->
         preamble, given, problems = await _write_inputs(session, out_dir, inputs, problems)
 
     task = build_task(ctx, request, job_dir=job_dir, earlier_jobs=earlier,
-                      inputs_preamble=preamble, datetime=await get_current_datetime())
+                      inputs_preamble=preamble, datetime=await get_current_datetime(),
+                      skills_index=await _skills_index(ctx.get("guild_id")))
     # The event tools check the requester's own permission; without a source
     # message (voice, automatic runs) they need them as a Member, and the bot
     # has no members intent, so the cache usually misses them.
@@ -832,6 +853,8 @@ async def _run_in_workspace(ctx, lease, request, inputs, problems, hooks_box) ->
         "brain_report_args": None,
         "brain_guard": None,
         "requester": requester,
+        "skills_used": [],
+        "skill_saved": False,
     })
     before = _counters(ctx)
     guild_id = ctx.get("guild_id")
@@ -943,9 +966,78 @@ async def _run_and_deliver(ctx, lease, agent, task, run_config, hooks, progress,
     if note:
         notes.append(note)
     out.note = " ".join(notes)
+    if out.status == brain_result.DONE:
+        await _record_skill_successes(ctx)
+    if stopped is None:
+        await _queue_skill_review(ctx, out, hooks, task, result)
     await progress.finalize(ok=out.status == brain_result.DONE,
                             note=None if stopped is None else f"⚠️ {stopped}")
     return out
+
+
+async def _skills_index(guild_id) -> str:
+    """The saved skills as the brain's task shows them ('' when there are
+    none or skills are off). Fail-soft: a Redis problem costs the index, not
+    the call."""
+    from classes import skill_format
+    if not guild_id or not skill_format.enabled():
+        return ""
+    try:
+        from classes.skill_store import SkillStore
+        skills = await SkillStore().list(guild_id)
+        return skill_format.render_index(skills, skill_format.settings()["index_max"], time.time())
+    except Exception as e:
+        logger.warning(f"Brain: could not read the skills index: {e}")
+        return ""
+
+
+async def _queue_skill_review(ctx: dict, out, hooks, request_task: str, result) -> None:
+    """After a long job, leaves a skill review on the persona's run context;
+    the message handler starts it once the reply is out
+    (classes/skill_reflection.py). Fail-soft."""
+    from classes import skill_reflection
+    try:
+        if not skill_reflection.should_reflect(status=out.status, tool_calls=hooks.tool_calls,
+                                               skill_saved=bool(ctx.get("skill_saved"))):
+            return
+        guild = ctx.get("guild_id")
+        if not guild:
+            return
+        from classes.skill_store import SkillStore
+        store = SkillStore()
+        existing = [s["name"] for s in await store.list(guild)]
+        used = list(ctx.get("skills_used") or [])
+        bodies = {}
+        for name in used:
+            skill = await store.get(guild, name)
+            if skill:
+                bodies[name] = skill["body"]
+        review = skill_reflection.build_review(
+            request=ctx.get("brain_request") or "", status=out.status, facts=out.facts,
+            transcript=skill_reflection.condense(getattr(result, "new_items", None)),
+            skills_used=used, used_bodies=bodies, existing_names=existing,
+            channel=ctx.get("channel"), guild_id=guild, user_id=ctx.get("user_id"),
+            job_id=posixpath.basename(ctx.get("job_dir") or ""))
+        ctx.setdefault("skill_reviews", []).append(review)
+    except Exception as e:
+        logger.warning(f"Brain: could not prepare a skill review: {e}")
+
+
+async def _record_skill_successes(ctx: dict) -> None:
+    """A call that used a skill and ended `done` counts a success for each
+    (it is what ranks the index). Fail-soft."""
+    used = ctx.get("skills_used") or []
+    if not used or not ctx.get("guild_id"):
+        return
+    try:
+        from classes import metrics
+        from classes.skill_store import SkillStore
+        store = SkillStore()
+        for name in used:
+            await store.record_success(ctx["guild_id"], name)
+            metrics.inc_skill_success()
+    except Exception as e:
+        logger.warning(f"Brain: could not record a skill's success: {e}")
 
 
 async def _post_files(channel, artifacts) -> list[str]:

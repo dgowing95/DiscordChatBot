@@ -15,6 +15,7 @@ Which tools a call gets depends on what kind of run it is:
 | join voice (VOICE_ENABLED)                              | yes  | no        | no    |
 | leave voice (VOICE_ENABLED)                             | no   | no        | yes   |
 | generate_image (IMAGE_GEN_ENABLED)                      | yes  | yes       | yes   |
+| skills: use_skill, save_skill, search_skills (SKILLS_ENABLED)           | yes  | yes       | yes   |
 | workspace: attach_file, save_messages_to_file, ask_user, report (+ Shell) | yes | yes | yes |
 
 An automatic run (a schedule, a rule or a follow-up) has no personal memory
@@ -32,7 +33,7 @@ tool_functions imports nothing from here.
 
 
 def brain_tools(*, automatic: bool = False, voice: bool = False) -> list:
-    from classes import voice_policy
+    from classes import skill_format, voice_policy
     from classes.automation_tools import automation_tools
     from classes.brain import ask_user, report
     from classes.event_tools import event_tools
@@ -51,6 +52,7 @@ def brain_tools(*, automatic: bool = False, voice: bool = False) -> list:
         store_memory,
         web_search,
     )
+    from classes.skill_tools import skill_tools
     from classes.workspace_tools import attach_file
 
     tools = [web_search, fetch_url, *message_search_tools(), check_polls, create_poll,
@@ -62,5 +64,8 @@ def brain_tools(*, automatic: bool = False, voice: bool = False) -> list:
             tools.append(leave_voice_channel if voice else join_voice_channel)
     if image_generation_enabled():
         tools.append(generate_image)
-    tools.extend((attach_file, save_messages_to_file, ask_user, report))
+    tools.extend((attach_file, save_messages_to_file, ask_user))
+    if skill_format.enabled():
+        tools.extend(skill_tools())
+    tools.append(report)
     return tools
