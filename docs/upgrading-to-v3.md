@@ -260,7 +260,7 @@ unchanged.
 | `discord_bot_workspaces_warm` | New: workspaces running in this core process |
 | `discord_bot_workspace_snapshot_seconds`, `discord_bot_workspace_snapshot_bytes`, `discord_bot_workspace_snapshot_failures_total{reason}` | New: each save's time and size, and saves that failed (`too_large`, `timeout`, `error`) |
 | `discord_bot_workspace_reaped_total` | New: leftover workspace containers removed |
-| `discord_bot_brain_calls_total{tier,status}`, `discord_bot_brain_call_seconds{tier,status}` | New: each brain call and how long it took (`done`, `partial`, `needs_input`, `failed`) |
+| `discord_bot_brain_calls_total{tier,status}`, `discord_bot_brain_call_seconds{tier,status}` | New: each brain call and how long it took (`done`, `partial`, `needs_input`, `failed`, `started_workflow`) |
 | `discord_bot_brain_turns`, `discord_bot_brain_tool_calls` | New: model turns and tool calls per brain call |
 | `discord_bot_brain_loop_stops_total{kind}` | New: brain calls the loop guard stopped (`repeat`, `stale`) |
 | `discord_bot_brain_facts_dropped_total` | New: facts the brain marked must-keep that the persona's reply left out |

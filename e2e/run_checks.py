@@ -54,6 +54,9 @@ IMAGE_TIMEOUT = 420
 # A workspace task: the container may start cold (and its image be pulled),
 # then a brain run of a few model calls.
 WORKSPACE_TIMEOUT = 420
+# A whole Tier 3 workflow: plan, the approval wait (WORKFLOW_PLAN_APPROVAL_SECONDS
+# is short here), its steps and the reply. start_stack.sh caps it with WORKFLOW_TIMEOUT.
+WORKFLOW_TIMEOUT = 1200
 READY_TIMEOUT = 600
 
 LOG_DIR = Path(os.environ.get("E2E_LOG_DIR", Path(__file__).parent / "logs"))
@@ -304,6 +307,29 @@ class Run:
                     return f"{attachment['filename']}, {attachment['size']} bytes"
         raise CheckFailed("no .csv attachment in the reply")
 
+    async def workflow(self):
+        """A Tier 3 workflow, by structure only: the brain hands the job over,
+        the plan is posted, no one presses Approve (a webhook cannot), so it
+        starts after the short approval wait, and the end is posted."""
+        ended = lambda: metric(self.session, "discord_bot_workflows_total")
+        before = await ended()
+        messages = await self.ask(
+            "Start a workflow for this big job: research the diameters of Jupiter's four "
+            "largest moons from two sources each, then write a moons.md report with a table.")
+        reply = " ".join(m["content"] for m in messages)
+        await wait_until(lambda: _gt(ended(), before), WORKFLOW_TIMEOUT, "the workflow to end")
+        posted = await self.discord.request(
+            "GET", f"/channels/{self.thread_id}/messages", params={"after": messages[0]["id"],
+                                                                   "limit": 100})
+        titles = [e.get("title", "") for m in posted if m["author"]["id"] == self.bot_id
+                  for e in m.get("embeds", [])]
+        if not any(t.startswith("🧵 Plan") for t in titles):
+            raise CheckFailed(f"no plan embed was posted (embeds: {titles})")
+        closing = [t for t in titles if t.startswith("🧵 Workflow")]
+        if not closing:
+            raise CheckFailed(f"no closing embed was posted (embeds: {titles})")
+        return f"{closing[-1]}; reply: {_quote(reply, 80)}"
+
     async def slash_commands(self):
         # From this run's log, not GET /applications/.../commands: the
         # registered set outlives the process, so an earlier run's sync
@@ -311,7 +337,7 @@ class Run:
         synced = await wait_until(
             lambda: set(re.findall(r"Command '([^']+)' synced", core_log())),
             120, "the slash commands to sync")
-        expected = {"help", "whats_new", "system", "generate_image", "workspace"}
+        expected = {"help", "whats_new", "system", "generate_image", "workspace", "task"}
         if self.voice_channel_id:
             expected.add("voice")
         missing = expected - synced
@@ -438,6 +464,7 @@ async def main() -> int:
             # channel history.)
             await run.case("poll", run.poll)
             await run.case("workspace task", run.workspace)
+            await run.case("workflow", run.workflow)
             await run.case("image", run.image)
             if voice_channel_id:
                 await run.case("voice call", run.voice)

@@ -599,3 +599,32 @@ async def test_a_message_during_the_last_step_is_still_answered(env):
     await _finish(wf)
     assert wf.ledger.events[0].outcome == "answered"
     assert wf.record["state"] == wp.DONE
+
+
+@pytest.mark.asyncio
+async def test_new_steps_may_build_on_a_done_step_and_later_helpers_hear_the_thread(env):
+    thread_id = env.thread.id
+
+    @function_tool
+    async def look() -> str:
+        """Look."""
+        thread_inbox.deliver(thread_id, 9300, 5, "Ana", "add Elegoo too")
+        return "ok"
+
+    env.subagent_tools = [look]
+    env.model = LaneModel([
+        _plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"])),
+        ModelStep(output=[function_call("look", {}, call_id="l")]), _report(call_id="a"),
+        ModelStep(output=[function_call("submit_review", {
+            "replies": [{"id": 1, "reply": "Adding Elegoo."}],
+            "steps": [{"id": "s3", "role": "researcher", "brief": "Elegoo", "depends_on": ["s1"]},
+                      {"id": "s4", "role": "implementer", "brief": "Write it",
+                       "depends_on": ["s1", "s3"]}]}, call_id="rv")]),
+        _report(call_id="b"), _report(call_id="c"), _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    assert list(wf.results) == ["s1", "s3", "s4"]
+    assert wf.step_states["s2"] == "skipped"
+    later = json.dumps(env.model.calls[4].input)
+    assert "Ana: add Elegoo too (reply: Adding Elegoo.)" in later
+    assert wf.record["state"] == wp.DONE

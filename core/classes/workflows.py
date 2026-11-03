@@ -185,6 +185,8 @@ class Workflow:
     results: dict = field(default_factory=dict)
     artifacts: list = field(default_factory=list)
     revisions: int = 0
+    # What was said in the thread and the manager's replies, for later helpers.
+    said: list = field(default_factory=list)
 
     @property
     def id(self) -> str:
@@ -751,12 +753,12 @@ async def _approve(wf: Workflow) -> bool:
         if action == "approve":
             metrics.inc_workflow_plan_approval("approved" if not wf.revisions else "edited")
             await _set_state(wf, "approve")
-            await _update_plan_message(wf)
+            await _update_plan_message(wf, content="✅ Approved. Working on it.")
             return True
         if action == "timeout":
             metrics.inc_workflow_plan_approval("timeout")
             await _set_state(wf, "approve")
-            await _update_plan_message(wf)
+            await _update_plan_message(wf, content="⌛ Started without an answer.")
             await _post(wf.thread, content=f"No answer in {_minutes(seconds)}, so I've started. "
                                            "Cancel is on the plan above.")
             return True
@@ -805,15 +807,18 @@ async def _remove_buttons(wf: Workflow) -> None:
         logger.info(f"Workflow {wf.id}: could not take the buttons off: {e}")
 
 
-async def _update_plan_message(wf: Workflow, final: bool = False) -> None:
+async def _update_plan_message(wf: Workflow, final: bool = False, content: str | None = None) -> None:
     """The plan embed with each step's state; Cancel stays on it while the
-    workflow runs."""
+    workflow runs. `content` replaces the question above it once answered."""
     from classes import workflow_views
     if wf.plan_message is None or wf.plan is None:
         return
     try:
         view = None if final else workflow_views.running_view(wf.id)
-        await wf.plan_message.edit(embed=_plan_embed(wf), view=view)
+        changes = {"embed": _plan_embed(wf), "view": view}
+        if content is not None:
+            changes["content"] = content
+        await wf.plan_message.edit(**changes)
     except Exception as e:
         logger.info(f"Workflow {wf.id}: could not update the plan: {e}")
 
@@ -882,6 +887,9 @@ async def _step_attempt(wf: Workflow, step: wp.Step, progress, answer) -> tuple[
              f"Your step: {step.id} [{step.role}]: {step.brief}"]
     if wf.results:
         parts.append("What the earlier steps reported:\n" + _results_text(wf))
+    if wf.said:
+        parts.append("Said in the thread while the job ran (follow it where it applies to "
+                     "your step):\n" + "\n".join(f"- {line}" for line in wf.said[-10:]))
     if answer is not None:
         parts.append(f"You asked the requester: {answer[0]}\nThey answered: {answer[1]}\n"
                      "Your files from before are still in your folder: carry on from there.")
@@ -973,6 +981,8 @@ async def _review(wf: Workflow, queue: list) -> list:
     for event in pending:
         reply = replies.get(event.seq, "")
         ledger.record_decision([event.seq], "answered" if reply else "noted", reply)
+        wf.said.append(f"{event.author_name}: {event.text[:300]}"
+                       + (f" (reply: {reply[:200]})" if reply else ""))
         if reply:
             posted.append(f"> {event.text[:150]}\n{reply[:400]}")
     if posted:
@@ -982,14 +992,23 @@ async def _review(wf: Workflow, queue: list) -> list:
         return []
     if args.get("steps") and queue:
         done = [s for s in wf.plan.steps if s.id in wf.results]
+        # A new step may build on one already done: those ids count as met
+        # (taken off before the check, which only knows the new steps).
+        steps = []
+        for item in args["steps"] if isinstance(args["steps"], list) else []:
+            if isinstance(item, dict):
+                item = dict(item)
+                deps = item.get("depends_on")
+                deps = deps if isinstance(deps, list) else [deps] if deps else []
+                item["depends_on"] = [d for d in deps if str(d).strip() not in wf.results]
+            steps.append(item)
         plan, problems = wp.validate_plan(
-            {"goal": wf.plan.goal, "steps": args["steps"], "deliverables": wf.plan.deliverables,
+            {"goal": wf.plan.goal, "steps": steps, "deliverables": wf.plan.deliverables,
              "notes": wf.plan.notes},
             max_steps=max(1, wp.max_steps() - len(done)), request=wf.record["request"])
-        if plan is not None and not any(s.id in wf.results for s in plan.steps):
-            # A new step may build on one already done: those ids count as met.
-            for step in plan.steps:
-                step.depends_on = [d for d in step.depends_on if d not in wf.results]
+        if plan is not None and any(s.id in wf.results for s in plan.steps):
+            plan, problems = None, ["a new step reuses the id of one already done"]
+        if plan is not None:
             wf.plan = wp.Plan(goal=wf.plan.goal, steps=done + plan.steps,
                               deliverables=wf.plan.deliverables, notes=wf.plan.notes)
             _store_plan(wf, wf.plan)

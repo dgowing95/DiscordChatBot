@@ -70,9 +70,16 @@ core/                    # the bot (what runs in production)
     workspace_manager.py   # one Docker container per server: start, resume, snapshot, stop, reap
     workspace_snapshot_store.py    # workspace snapshots in Redis, one per guild
     workspace_commands.py  # /workspace (status, reset, progress)
-    thread_inbox.py        # P thread-message ledger    | kept for Tier 3,
-    workflow_conversation.py        # thread steering, ask_user   | unused until then
-    workflow_conversation_store.py  # per-thread loose ends       |
+    # Tier 3 workflows (runtime item 13)
+    workflows.py           # start, plan, approval, steps, finish, the completion reply
+    workflow_policy.py     # P plans, step order, states, WORKFLOW_* / SUBAGENT_* settings
+    workflow_store.py      # records and each server's running slot, in Redis
+    workflow_tools.py      # start_workflow (brain), submit_plan / submit_review (manager)
+    workflow_views.py      # the plan's Approve / Edit / Cancel buttons (work across restarts)
+    task_commands.py       # /task
+    thread_inbox.py        # P thread-message ledger (a workflow claims its thread's)
+    workflow_conversation.py        # thread steering with a gate      | for 5b's steering
+    workflow_conversation_store.py  # per-thread loose ends            | into a running helper
     # tools and features
     image_generation.py    # create_image: prompt, generate, check, retry; which image to edit
     image_prompt.py        # request -> SDXL prompt + negative prompt
@@ -208,7 +215,7 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
    | Status embed, live command output | `brain_progress.py` |
    | Shell wrappers, `attach_file`, delivery, `in/` files | `workspace_tools.py` |
    | The server's container | `workspace_manager.py` (rules: `workspace_lifecycle.py`) |
-   | Thread steering, kept for Tier 3 | `thread_inbox.py`, `workflow_conversation*.py` |
+   | Handing a big job to a workflow (`start_workflow`) | `workflow_tools.py`, `workflows.py` (item 13) |
 
    Which tools a brain call gets, in a fixed order so its tool schemas stay a cached prefix:
 
@@ -219,6 +226,7 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
    | `join_voice_channel` / `leave_voice_channel` (`VOICE_ENABLED`) | join | no | leave |
    | `generate_image` (`IMAGE_GEN_ENABLED`) | yes | yes | yes |
    | `use_skill`, `save_skill`, `search_skills` (`SKILLS_ENABLED`) | yes | yes | yes |
+   | `start_workflow` (`WORKFLOW_ENABLED`; never in a reply nobody asked for) | yes | with `WORKFLOW_FROM_AUTOMATIONS` | no |
    | `attach_file`, `save_messages_to_file`, `ask_user`, `report`, the Shell tools | yes | yes | yes |
 
    - **It works inline, in the channel**, not in a thread: each tool posts its own embed, attached files
@@ -362,6 +370,45 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
       Messages endpoint (not wrapped by discord.py; a 202 means not indexed yet) and the messages around
       one link. Both read what the bot can see, in this server only. `save_messages_to_file` writes every
       match (up to 10000, 20 MB) as JSON lines into the brain's `in/`, so code can count or chart them.
+13. **Tier 3 workflows** (`docs/workflows.md`, `workflows.py`; off with `WORKFLOW_ENABLED=0`). A job too
+    big for one brain call runs in its own thread. The brain hands it over with `start_workflow` (which
+    ends its run like `report`; the persona is told `started_workflow` and the thread link), or a person
+    uses `/task`. One per server (`WORKFLOW_MAX_PER_GUILD`, `workflow_store.py`).
+
+    | Phase | What runs | Lane / role | Ends at |
+    |---|---|---|---|
+    | Plan | the manager (a plain Agent, `MANAGER_INSTRUCTIONS`, `brain_tools(mode="manager")`) | brain | `submit_plan` |
+    | Approval | the plan embed with Approve / Edit / Cancel (`workflow_views.py`), requester only | - | a button, a thread message (a change), or `WORKFLOW_PLAN_APPROVAL_SECONDS` |
+    | Steps, one at a time | a helper per step (a SandboxAgent, `SUBAGENT_INSTRUCTIONS`, mode researcher / implementer) | subagent | `report` |
+    | Between steps | the manager answers waiting thread messages, may change the remaining steps | brain | `submit_review` |
+    | Finish | the manager's final report; files echoed in the origin channel | brain | `report` |
+    | Reply | `WorkflowDone` on the queue; the persona with NO tools, in the origin channel | chat | - |
+
+    - **Its own run context**, built once (`_run_context`): the thread is `channel`, there is no source
+      message, and `image_cap` is `workflow_policy.MAX_IMAGES`. D19 (the persona's dict) cannot hold:
+      the reply ends long before the workflow does.
+    - **Started from an empty `contextvars.Context`**, and every agent run sets its lane, so nothing of
+      the `ask_brain` call that started it leaks in.
+    - **No brain slot** (`BRAIN_MAX_CONCURRENT`): a workflow may run for hours. It holds the server's
+      workspace lease the whole time, so the workspace is never stopped or reset under it.
+    - **Steering**: the workflow claims the thread's ledger (`thread_inbox.claim_run`, inside its own
+      task), so `on_message` routes thread messages to it (📨). A bare "stop" from the requester, or
+      Cancel, cancels at once (`request_cancel`: a running helper's task is cancelled, files kept);
+      while the plan waits, the requester's message is a change to it; everything else waits for the
+      review between steps (and once more after the last step), which records an outcome per message.
+      Helpers never see thread messages (5b).
+    - A helper that reports `needs_input` makes the workflow ask the requester in the thread
+      (`_ask_in_thread`, `WORKFLOW_ASK_TIMEOUT`); the step runs once more with the answer.
+    - **Folders** `jobs/c<thread id>-w<id>-<step>/`: each helper is told the earlier steps' folders, and
+      a later brain call in the thread finds them as that channel's earlier jobs.
+    - **Limits are loop guards**: `WORKFLOW_TIMEOUT` and `WORKFLOW_MAX_TURNS` (every agent's turns
+      together) stop it with what exists (PARTIAL); `SUBAGENT_MAX_TURNS` per helper.
+    - **Restarts**: resume is out of scope. A workflow cancelled at shutdown stays live in Redis, and
+      at startup `interrupt_all` marks this instance's live ones INTERRUPTED and posts a note in their
+      threads. The buttons are `DynamicItem`s registered once, so an old one answers "This workflow has
+      stopped" instead of failing.
+    - A completion reply for a guild in a voice call waits for the call to end (`defer_done`); a full
+      queue is retried, then a plain note is posted.
 
 ### What's New notes (write these in every feature PR)
 
@@ -408,12 +455,15 @@ are the ones that actually change behaviour). The persona's *system* prompt is n
 - **Prefer a positive example over a list of prohibitions.** A model given a list of things not to
   choose went on to choose items straight off the list. The prompts show the shape instead
   (`ask_brain`'s examples, the `report(...)` call in `BRAIN_INSTRUCTIONS`).
-- Sizes are pinned by `brain_tests.py`: `BRAIN_INSTRUCTIONS` ~2230 characters (ceiling 2300),
+- Sizes are pinned by `brain_tests.py`: `BRAIN_INSTRUCTIONS` ~2430 characters (ceiling 2450),
   `ask_brain` ~1670 including its JSON schema (ceiling 1700). Re-measure before adding. Skills have
   their own homes, pinned by `skill_tools_tests.py`: `SKILLS_INSTRUCTIONS` ~270 characters (ceiling
   400, added to the brain's prompt only when skills are on), `REFLECTION_PROMPT` ~730 (ceiling
   1000, the one prompt of the after-job review) and `CURATOR_PROMPT` ~860 (ceiling 1000, the
-  tidy-up's).
+  tidy-up's). Workflows' are pinned by `workflows_tests.py`: `MANAGER_INSTRUCTIONS` ~1200 (ceiling
+  1400; every manager run: plan, review, finish) and `SUBAGENT_INSTRUCTIONS` ~1170 (ceiling 1400,
+  plus one `ROLE_LINES` line per helper). The workflow tools' docstrings (`workflow_tools.py`) and
+  the tasks `workflows.py` builds are the rest of their surface.
 
 ### Environment variables
 
@@ -680,8 +730,9 @@ in the `e2e-logs` artifact.
 ## Conventions & gotchas
 
 - Docker is a hard requirement (runtime item 7); there is no fallback without it.
-- `thread_inbox.py` (kept for Tier 3): keep every mutating function free of `await`; that is
-  what makes `claim_run` / `deliver` / `finalize` atomic on the one event loop.
+- `thread_inbox.py`: keep every mutating function free of `await`; that is what makes
+  `claim_run` / `deliver` / `finalize` atomic on the one event loop. `claim_run` records the
+  claiming task as the owner, so a workflow claims its thread from inside its own task.
 - The free OpenAI Moderations endpoint rate-limits hard (429): `content_guard.py` retries with backoff,
   caches verdicts and fails open.
 - llama.cpp has no pull API: the `llamacpp` container downloads `LLM_MODEL` on boot into its cache
