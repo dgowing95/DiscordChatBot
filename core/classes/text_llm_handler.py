@@ -436,6 +436,8 @@ class TextLLMHandler:
         self.reasoning = ""
         # Filled in by generate(): whether this reply called the brain.
         self.used_brain = False
+        # Skill reviews of long brain jobs, started after the reply is sent.
+        self.skill_reviews = []
 
     def _after_run(self, user_info, reply) -> None:
         """Records whether the reply called the brain, and checks the reply
@@ -444,6 +446,7 @@ class TextLLMHandler:
         try:
             reports = user_info.get("brain_reports") or []
             self.used_brain = bool(reports)
+            self.skill_reviews = list(user_info.get("skill_reviews") or [])
             failed = not isinstance(reply, str) or reply == "Error"
             # A run that failed before calling the brain answered nothing, so
             # counting it as "answered" would skew the routing metric.

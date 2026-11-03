@@ -31,6 +31,7 @@ COLOR_BRAIN = 0x1ABC9C     # teal: the brain at work in the server's workspace
 COLOR_PERSONA = 0x9B59B6   # purple: the bot's personality
 COLOR_DONE = 0x99AAB5      # grey: brain work that is over
 COLOR_STOPPED = 0xED4245   # red: brain work that was stopped
+COLOR_SKILL = 0xF1C40F     # amber: a skill saved, used or changed
 
 WEB_SEARCH = "🔎 Web search"
 READING_PAGE = "🌐 Reading a page"
@@ -43,6 +44,16 @@ READING_MESSAGES = "📜 Reading messages"
 PERSONALITY = "🎭 Personality updated"
 # The brain's status embed, posted only once it uses the workspace (a
 # command or a file): a search or a poll shows only its own embed.
+SKILL_SAVED = "📘 Skill saved"
+SKILL_UPDATED = "📗 Skill updated"
+SKILL_USED = "📖 Using a skill"
+SKILL_DELETED = "🗑️ Skill deleted"
+SKILL_RETIRED = "🗑️ Skill retired"
+SKILL_RESTORED = "♻️ Skill restored"
+SKILL_REVERTED = "⏪ Skill reverted"
+SKILL_FOOTER_REFLECTION = "after reviewing the last job"
+SKILL_FOOTER_CURATOR = "tidy-up"
+
 BRAIN_WORKING = "🧠 Working on it"
 BRAIN_DONE = "🧠 Done"
 BRAIN_STOPPED = "🧠 Stopped"
@@ -120,3 +131,11 @@ def work_task_text(task: str, files=(), limit: int = 1000) -> str:
     if files:
         text += "\n📎 " + ", ".join(files)
     return text
+
+
+def skill_line(name: str, detail: str = "", limit: int = 200) -> str:
+    """A skill embed's description: the name, then what is worth saying
+    (its description, "v3: note", "→ v2"). Self-contained, since the bot's
+    own embeds come back to the model as history."""
+    detail = trim(detail, limit)
+    return f"**{name}** — {detail}" if detail else f"**{name}**"

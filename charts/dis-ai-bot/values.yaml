@@ -462,6 +462,23 @@ persona:
   # the connection warm while it works (OpenRouter pads non-streaming
   # responses) is bounded only by this.
   callTimeout: 600
+# Skills: how the brain solved a recurring job, saved per server in Redis and
+# reused next time. Anyone in the server sees and manages them (/skills); every
+# change is a new version and a delete can be undone.
+skills:
+  enabled: true
+  maxPerGuild: 100      # live skills per server
+  maxVersions: 50       # versions kept per skill (the oldest go first)
+  maxBytes: 65536       # one skill, steps and files together
+  maxBodyChars: 8000    # the steps
+  maxFiles: 10          # files kept with one skill
+  indexMax: 20          # skills named in the brain's task; the rest are found by search
+  reflection:
+    # After a long brain job, one background call decides whether it is
+    # worth saving as a skill.
+    enabled: true
+    minToolCalls: 6
+
 # The brain: the agent that does the work in the code sandbox. Its LLM is the
 # bot's own (llm.*) unless these name another. To use a hosted
 # OpenAI-compatible API instead (e.g. OpenRouter), set all three:

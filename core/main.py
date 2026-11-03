@@ -169,6 +169,10 @@ async def register_commands():
         register_voice_commands(command_tree, client)
     from classes.workspace_commands import register_workspace_commands
     register_workspace_commands(command_tree)
+    from classes import skill_format
+    if skill_format.enabled():
+        from classes.skill_commands import register_skill_commands
+        register_skill_commands(command_tree)
 
     @command_tree.command(name="system", description="Change the behaviour/personality of the bot")
     async def change_system(ctx, system: str):

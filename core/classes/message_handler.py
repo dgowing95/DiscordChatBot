@@ -587,4 +587,8 @@ class MessageHandler:
                 if thinking:
                     await self.handle_thinking_send(thinking, channel=target_channel)
                 self._observe_stage("send", started)
+        if response != "Error":
+            # After the reply: a long brain job may be worth keeping as a skill.
+            from classes import skill_reflection
+            skill_reflection.start(getattr(ollama, "skill_reviews", None))
         observe_response_generation(self.message.guild.id, time.monotonic() - start)

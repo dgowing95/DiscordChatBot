@@ -55,7 +55,12 @@ core/                    # the bot (what runs in production)
     brain_inbox.py         # P questions the brain is waiting on, one per question message
     brain_question.py      # the question in Discord: choice / Answer… / You decide buttons
     persona_voice.py       # the brain's question reworded in the persona's voice
-    loop_guard.py          # P stops a brain run that repeats itself
+    skill_format.py        # P skills: SKILLS_* settings, name/limit checks, SKILL.md, the index and its ranking
+    skill_store.py         # skills in Redis: every version kept, soft delete, revert, export
+    skill_tools.py         # the brain's use_skill / save_skill / search_skills, and every skill embed
+    skill_commands.py      # the /skills group (list, show, history, edit, delete, restore, revert, export)
+    skill_reflection.py    # after a long job, one background call decides whether to save a skill
+    loop_guard.py          # P stops a brain run that repeats itself that repeats itself
     context_trim.py        # P cuts old tool outputs in a long brain run
     brain_progress.py      # the "Working on it" status embed and live command output
     workspace_tools.py     # shell wrappers, attach_file and delivery, in/ files, thread tools
@@ -212,6 +217,7 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
    | memory, schedules / rules / follow-ups | yes | no | yes |
    | `join_voice_channel` / `leave_voice_channel` (`VOICE_ENABLED`) | join | no | leave |
    | `generate_image` (`IMAGE_GEN_ENABLED`) | yes | yes | yes |
+   | `use_skill`, `save_skill`, `search_skills` (`SKILLS_ENABLED`) | yes | yes | yes |
    | `attach_file`, `save_messages_to_file`, `ask_user`, `report`, the Shell tools | yes | yes | yes |
 
    - **It works inline, in the channel**, not in a thread: each tool posts its own embed, attached files
@@ -246,6 +252,21 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
      stays a new request. In a call it is spoken too, and the speaker's next words answer it
      (`VoiceSession.heard`). At most 3 per call, each up to `BRAIN_ASK_TIMEOUT`; automatic runs and
      unprompted replies are told to assume.
+
+   - **Skills** (`docs/skills.md`): how the brain solved a recurring job, kept per server in Redis
+     (`skill_store.py`: one record per skill, every version kept, a delete is soft), so a workspace
+     reset never loses one. The task names them (`skill_format.render_index`, best-ranked first, at
+     most `SKILLS_INDEX_MAX`, after the request so the cached prefix stays stable); `use_skill`
+     writes the skill into `skills/<name>/` FRESH FROM THE STORE every time, so a file edited in the
+     container never becomes the skill. A `done` call that used one counts a success, which ranks it.
+     `save_skill` is the brain's own choice, from the one example in `SKILLS_INSTRUCTIONS`
+     (`brain.instructions()` adds it when skills are on); when a job with
+     `SKILLS_REFLECTION_MIN_TOOL_CALLS`+ tool calls ends without one, a review is left on the
+     persona's run context and `MessageHandler` starts it AFTER the reply is sent
+     (`skill_reflection.py`, background lane). Chat replies only: voice and automatic runs are not
+     reviewed. Anyone in the server manages skills with `/skills` (no permission check by decision,
+     since every change is a version and a delete is undoable). Every event posts its own embed
+     (`tool_embeds`: 📘 saved, 📗 updated, 📖 used, 🗑️ deleted, ♻️ restored, ⏪ reverted).
 
    Before editing, read `brain.py`'s module docstring, then `run_brain`, `workspace_tools._deliver` and
    `brain_result.tool_result_for_persona`.
@@ -376,7 +397,10 @@ are the ones that actually change behaviour). The persona's *system* prompt is n
   choose went on to choose items straight off the list. The prompts show the shape instead
   (`ask_brain`'s examples, the `report(...)` call in `BRAIN_INSTRUCTIONS`).
 - Sizes are pinned by `brain_tests.py`: `BRAIN_INSTRUCTIONS` ~2230 characters (ceiling 2300),
-  `ask_brain` ~1570 including its JSON schema (ceiling 1600). Re-measure before adding.
+  `ask_brain` ~1570 including its JSON schema (ceiling 1600). Re-measure before adding. Skills have
+  their own homes, pinned by `skill_tools_tests.py`: `SKILLS_INSTRUCTIONS` ~270 characters (ceiling
+  400, added to the brain's prompt only when skills are on) and `REFLECTION_PROMPT` ~730 (ceiling
+  1000, the one prompt of the after-job review).
 
 ### Environment variables
 
@@ -463,6 +487,11 @@ reads has a row here and a line in `.env.example`, that every row is read by som
 | `BRAIN_REPEAT_LIMIT` | loop guard: the same call this many times in a row, or eight calls that bring nothing new, warns; a second time stops the call [3, min 2]. Chart: `brain.repeatLimit` |
 | `BRAIN_UNPROMPTED_MAX_TURNS` / `BRAIN_UNPROMPTED_TIMEOUT` | backstops for a brain call in a reply the bot was not asked for (the random reply chance): nobody is waiting on it [40 / 180]. Chart: `brain.unprompted.maxTurns` / `timeout` |
 | `BRAIN_ASK_TIMEOUT` | seconds `ask_user` waits for the requester's answer in the channel, cut to what the call has left [120]. Chart: `brain.askTimeout` |
+| `SKILLS_ENABLED` | `0`/`false` turns skills off: no skill tools for the brain, no `/skills`, no index in its task; saved skills are kept (default: on). Chart: `skills.enabled` |
+| `SKILLS_MAX_PER_GUILD` / `SKILLS_MAX_VERSIONS` | live skills per server (default 100; deleted ones do not count), and versions kept per skill (default 50; past it the oldest goes). Chart: `skills.maxPerGuild` / `maxVersions` |
+| `SKILLS_MAX_BYTES` / `SKILLS_MAX_BODY_CHARS` / `SKILLS_MAX_FILES` | limits on one skill: all its text together (default 65536), its steps (8000 characters), files kept with it (10). Chart: `skills.maxBytes` / `maxBodyChars` / `maxFiles` |
+| `SKILLS_INDEX_MAX` | skills named in the brain's task (default 20, best ranked first); the rest are found with `search_skills`. Chart: `skills.indexMax` |
+| `SKILLS_REFLECTION_ENABLED` / `SKILLS_REFLECTION_MIN_TOOL_CALLS` | after a brain job with at least this many tool calls (default 6) that ended done or partial without saving a skill, one background call decides whether to save one (default: on). Chart: `skills.reflection.enabled` / `minToolCalls` |
 | `BRAIN_MAX_CONCURRENT` / `BRAIN_QUEUE_WAIT` | brain calls at once (each on a queue worker starts a spare worker), and seconds a call waits for a slot before it is told the bot is busy [3 / 120]. Chart: `brain.maxConcurrent` / `queueWait` |
 | `BRAIN_TRIM_KEEP_RECENT` | tool outputs kept whole in a long brain call; older ones are cut to their first and last 400 characters [6]. Chart: `brain.trimKeepRecent` |
 | `WORKSPACE_IMAGE` | the workspace's container image, pulled at startup if missing [`python:3.14-slim`]. Chart: `brain.workspace.image` |

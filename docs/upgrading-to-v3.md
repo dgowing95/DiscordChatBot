@@ -71,6 +71,10 @@ New variables, all optional:
 | `BRAIN_TRIM_KEEP_RECENT` | Tool outputs kept whole in a long brain call's prompt; older ones are cut to their first and last 400 characters (6) |
 | `BRAIN_UNPROMPTED_MAX_TURNS` / `BRAIN_UNPROMPTED_TIMEOUT` | Backstops for a brain call in a reply the bot was not asked for (the random reply chance): 40 turns, 180 seconds |
 | `BRAIN_ASK_TIMEOUT` | Seconds the brain waits for the requester to answer its question (120) |
+| `SKILLS_ENABLED` | New: `0` turns skills off (on by default). Saved skills are kept |
+| `SKILLS_MAX_PER_GUILD` / `SKILLS_MAX_VERSIONS` / `SKILLS_MAX_BYTES` / `SKILLS_MAX_BODY_CHARS` / `SKILLS_MAX_FILES` | New: limits on skills: 100 per server, 50 versions each, 64 KB, 8,000 characters of steps, 10 files |
+| `SKILLS_INDEX_MAX` | New: skills named in the brain's task (20); the rest are found by search |
+| `SKILLS_REFLECTION_ENABLED` / `SKILLS_REFLECTION_MIN_TOOL_CALLS` | New: after a long brain job, a background call decides whether to save a skill (on, 6 tool calls) |
 | `BRAIN_MAX_CONCURRENT` / `BRAIN_QUEUE_WAIT` | Brain calls at once (3), and seconds a call waits for a free one before the bot says it is busy (120) |
 | `LLAMA_CTX_SIZE` / `LLAMA_PARALLEL` / `LLAMA_CACHE_RAM_MIB` | docker compose only: llama.cpp's total context (80000), slots (1) and prompt cache in MiB (8192). These were fixed in `docker-compose.yaml` before, at the same values |
 
@@ -142,6 +146,11 @@ persona to put in its own words. What users notice:
   ask, and get much shorter limits.
 - **Chat keeps working while the brain does.** Each running brain call gets a spare queue worker, so
   `QUEUE_WORKERS` stay free for new messages.
+- **The bot learns skills.** When a job takes several steps worth repeating (say, turning a tracker
+  bot's embeds into a weekly chart), the brain saves how it did it as a skill, per server, and uses
+  it next time (📘 / 📖 embeds say so). Anyone can see and manage them with `/skills` (list, show,
+  history, edit, delete, restore, revert, export); every change is a new version and a delete can
+  be undone. Skills live in Redis, so a `/workspace reset` or a restart never loses one.
 - `/help` describes the brain's tools; the "Run code" entry is now "Code, files and charts".
 - A brain call runs in the server's workspace, so **every tool request now needs Docker**, not just
   code tasks. With Docker down the bot still chats but cannot search, remember or draw.
@@ -202,6 +211,7 @@ from the chart. Also new:
 | `brain.reasoningEffort` | medium | `BRAIN_REASONING_EFFORT` |
 | `brain.repeatLimit`, `brain.trimKeepRecent` | 3, 6 | `BRAIN_REPEAT_LIMIT`, `BRAIN_TRIM_KEEP_RECENT` |
 | `brain.unprompted.maxTurns`, `brain.unprompted.timeout`, `brain.askTimeout`, `brain.maxConcurrent`, `brain.queueWait` | 40, 180, 120, 3, 120 | `BRAIN_UNPROMPTED_*`, `BRAIN_ASK_TIMEOUT`, `BRAIN_MAX_CONCURRENT`, `BRAIN_QUEUE_WAIT` |
+| `skills.enabled`, `skills.maxPerGuild`, `skills.maxVersions`, `skills.maxBytes`, `skills.maxBodyChars`, `skills.maxFiles`, `skills.indexMax`, `skills.reflection.enabled`, `skills.reflection.minToolCalls` | true, 100, 50, 65536, 8000, 10, 20, true, 6 | The `SKILLS_*` settings above |
 | `persona.maxTurns` | **4** (was 20 as `llmMaxTurns`) | `PERSONA_MAX_TURNS` |
 | `brain.workspace.idleSeconds`, `snapshotIntervalSeconds`, `maxWarm`, `jobRetentionHours`, `cpuLimit`, `pidsLimit`, `prewarm` | 900, 1800, 4, 72, empty, 512, true | The `WORKSPACE_*` settings above. `WORKSPACE_INSTANCE` is `<namespace>-<release name>`. The core pod's `terminationGracePeriodSeconds` is `snapshotTimeout` + 30, for the shutdown save |
 
@@ -243,5 +253,7 @@ unchanged.
 | `discord_bot_persona_escalations_total{result}` | New: persona replies that called the brain (`brain`) or answered alone (`answered`) |
 | `discord_bot_brain_questions_total{outcome}` | New: the brain's questions to the requester (`answered`, `timeout`, `skipped`) |
 | `discord_bot_brain_slot_wait_seconds` | New: seconds a brain call waited for one of `BRAIN_MAX_CONCURRENT` slots |
+| `discord_bot_skills_saved_total{source,result}`, `discord_bot_skills_used_total`, `discord_bot_skill_success_total` | New: skills saved (by the brain, a review, a command, a revert; `created`, `updated`, `unchanged`), opened with `use_skill`, and brain calls that used one and ended done |
+| `discord_bot_skill_reflection_total{action}` | New: reviews of finished jobs (`none`, `create`, `update`, `failed`) |
 | `discord_bot_queue_workers` | New: queue workers running, spares for brain calls included |
 | `discord_bot_llm_call_seconds{caller="brain"}` | New caller: the brain's model calls (the persona's stay `main`) |

@@ -183,6 +183,10 @@ Metrics (scraped by Prometheus from the /metrics HTTP endpoint):
            Persona replies that called the brain (brain) or answered alone
            (answered).
   Counter  discord_bot_brain_questions_total{outcome}
+  Counter  discord_bot_skills_saved_total{source,result}
+  Counter  discord_bot_skills_used_total
+  Counter  discord_bot_skill_success_total
+  Counter  discord_bot_skill_reflection_total{action}
            The brain's ask_user: answered / timeout (no answer in time) /
            skipped (no one to ask: automatic runs, unprompted replies, or
            the per-call cap).
@@ -625,6 +629,17 @@ brain_questions_total = Counter(
     "Questions the brain asked the requester, by outcome",
     ["outcome"],
 )
+skills_saved_total = Counter(
+    "discord_bot_skills_saved_total",
+    "Skill saves, by who made them (brain, reflection, command, curator, revert) and result",
+    ["source", "result"],
+)
+skills_used_total = Counter("discord_bot_skills_used_total", "use_skill calls that found a skill")
+skill_success_total = Counter(
+    "discord_bot_skill_success_total", "Brain calls that used a skill and ended done")
+skill_reflection_total = Counter(
+    "discord_bot_skill_reflection_total",
+    "Reviews of a finished job, by what they decided (none, create, update, failed)", ["action"])
 brain_slot_wait_seconds = Histogram(
     "discord_bot_brain_slot_wait_seconds",
     "Seconds a brain call waited for a brain slot",
@@ -658,6 +673,22 @@ def inc_persona_escalation(result: str) -> None:
 
 def inc_brain_question(outcome: str) -> None:
     brain_questions_total.labels(outcome=str(outcome)).inc()
+
+
+def inc_skill_saved(source: str, result: str) -> None:
+    skills_saved_total.labels(source=str(source), result=str(result)).inc()
+
+
+def inc_skill_used() -> None:
+    skills_used_total.inc()
+
+
+def inc_skill_success() -> None:
+    skill_success_total.inc()
+
+
+def inc_skill_reflection(action: str) -> None:
+    skill_reflection_total.labels(action=str(action)).inc()
 
 
 def observe_brain_slot_wait(seconds: float) -> None:
