@@ -525,7 +525,6 @@ class SandboxConversation:
             await asyncio.sleep(5)
 
 
-
 def record_exit_metrics(ledger: inbox.RunLedger) -> None:
     """Counts what a run left unresolved. Called when the claim is released,
     after delivery, so messages that arrived as it finished are included."""

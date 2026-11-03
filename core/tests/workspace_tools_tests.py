@@ -744,6 +744,30 @@ async def test_send_preview_to_thread_checks_the_size_before_reading():
 
 
 @pytest.mark.asyncio
+async def test_a_file_that_grew_after_it_was_attached_is_not_sent():
+    session = MagicMock()
+    session.exec = AsyncMock(return_value=_exec_result(b"x" * (sandbox_agent.MAX_ARTIFACT_BYTES + 1)))
+    entries = [{"path": "/workspace/jobs/t1/out/plot.png", "size": 10, "caption": ""}]
+    artifacts, notes = await prod_sandbox_agent._collect_deliverables(session, entries)
+    assert artifacts == [] and "grew past" in notes[0]
+
+
+@pytest.mark.asyncio
+async def test_removing_every_attachment_sends_nothing_rather_than_sweeping():
+    session = MagicMock()
+    session.exec = AsyncMock(return_value=_exec_result(b"12"))
+    ctx = _attach_ctx(session=session, job_dir="jobs/t1", workspace_root="/workspace")
+    await _attach(ctx, path="out/plot.png")
+    await _attach(ctx, path="out/plot.png", remove=True)
+    assert ctx.context["delivery_chosen"] is True
+    sweep = AsyncMock(return_value=(["swept"], []))
+    with patch.object(prod_sandbox_agent, "_collect_artifacts", sweep):
+        assert await prod_sandbox_agent._deliver(session, [], "/w/out", None, chosen=True) == ([], [])
+        sweep.assert_not_awaited()
+        assert (await prod_sandbox_agent._deliver(session, [], "/w/out", None))[0] == ["swept"]
+
+
+@pytest.mark.asyncio
 async def test_send_preview_to_thread_without_context_is_graceful():
     ctx = _preview_ctx(thread=None, session=None)
     result = await prod_sandbox_agent.send_preview_to_thread.on_invoke_tool(
@@ -1111,9 +1135,16 @@ async def test_the_job_folder_wrapper_passes_through_without_one_or_on_odd_input
     invoke = prod_sandbox_agent._in_job_dir(inner)
     await invoke(_shell_ctx({}), '{"cmd": "ls"}')
     await invoke(_shell_ctx({"job_dir": "jobs/t1"}), "not json")
-    await invoke(_shell_ctx({"job_dir": "jobs/t1"}), '{"cmd": "ls", "workdir": "/workspace"}')
-    assert [c.args[1] for c in inner.await_args_list] == [
-        '{"cmd": "ls"}', "not json", '{"cmd": "ls", "workdir": "/workspace"}']
+    assert [c.args[1] for c in inner.await_args_list] == ['{"cmd": "ls"}', "not json"]
+
+
+@pytest.mark.asyncio
+async def test_an_absolute_workdir_is_refused_as_a_result_not_an_error():
+    # The SDK raises InvalidManifestPathError for it, which would end the run.
+    inner = AsyncMock(return_value="ran")
+    invoke = prod_sandbox_agent._in_job_dir(inner)
+    out = await invoke(_shell_ctx({"job_dir": "jobs/t1"}), '{"cmd": "ls", "workdir": "/workspace"}')
+    assert "relative" in out and not inner.await_count
 
 
 @pytest.mark.asyncio

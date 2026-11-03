@@ -737,9 +737,19 @@ async def test_a_lost_snapshot_found_by_a_prewarm_is_told_to_the_next_call():
     manager.prewarm(1)
     await asyncio.gather(*manager._prewarm_tasks)
     assert manager.lifecycle.state("1").dirty is False  # the pre-warm changed nothing
-    lease = await _use(manager)
-    assert lease.kind == "cached" and lease.restore_failed is True
+    async with manager.acquire("1") as lease:
+        assert lease.kind == "cached" and lease.restore_failed is True
+        lease.restore_reported = True
     assert (await _use(manager)).restore_failed is False  # told once
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_never_reports_a_lost_snapshot_leaves_it_for_the_next():
+    env = Env()
+    env.store.data["guild-1"] = b"corrupt"
+    manager = env.manager()
+    assert (await _use(manager)).restore_failed is True  # failed before telling anyone
+    assert (await _use(manager)).restore_failed is True
 
 
 @pytest.mark.asyncio

@@ -483,8 +483,6 @@ class MessageHandler:
                 await asyncio.sleep(1)
 
 
-
-
     def _prewarm_workspace(self) -> None:
         try:
             from classes.workspace_manager import workspaces

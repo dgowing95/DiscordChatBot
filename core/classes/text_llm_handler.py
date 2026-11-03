@@ -441,7 +441,11 @@ class TextLLMHandler:
         try:
             reports = user_info.get("brain_reports") or []
             self.used_brain = bool(reports)
-            inc_persona_escalation("brain" if reports else "answered")
+            failed = not isinstance(reply, str) or reply == "Error"
+            # A run that failed before calling the brain answered nothing, so
+            # counting it as "answered" would skew the routing metric.
+            if reports or not failed:
+                inc_persona_escalation("brain" if reports else "answered")
             # A spoken reply says "8 degrees", never "8°C" or a URL, so the
             # exact-token check would count every voice turn as dropping facts.
             if not isinstance(reply, str) or reply == "Error" or user_info.get("voice"):

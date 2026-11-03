@@ -214,6 +214,10 @@ class Lease:
     workspace: GuildWorkspace
     kind: str
     restore_failed: bool = False
+    # Set by the call once it has told the user about restore_failed. A call
+    # that ends without doing so (an error, a cancel) gives it back, so the
+    # next call tells them instead.
+    restore_reported: bool = False
 
     @property
     def session(self):
@@ -372,7 +376,8 @@ class Workspaces:
         """The guild's workspace for one call, as a Lease. Waits (up to
         timeout) while it starts, stops or resets, or while every warm slot
         is busy. Raises WorkspaceUnavailable. A pre-warm's lease never takes
-        the lost-snapshot notice (the next real call does) and its release
+        the lost-snapshot notice (the next real call does; one that ends
+        without reporting it gives it back) and its release
         does not count as a change (no snapshot for it)."""
         lease = await self._acquire(str(guild_id), timeout)
         if not prewarm and lease.workspace.restore_failed_untold:
@@ -381,6 +386,8 @@ class Workspaces:
         try:
             yield lease
         finally:
+            if lease.restore_failed and not lease.restore_reported:
+                lease.workspace.restore_failed_untold = True
             await self._release(str(guild_id), changed=not prewarm)
 
     async def _acquire(self, guild: str, timeout: float | None) -> Lease:

@@ -134,3 +134,13 @@ def test_a_spoken_reply_is_not_checked_for_exact_facts():
         handler._after_run(info, "About 8 degrees.")
     dropped.assert_not_called()
     assert handler.used_brain is True
+
+
+def test_a_failed_run_without_the_brain_is_not_counted_as_answered():
+    handler = TextLLMHandler.__new__(TextLLMHandler)
+    with patch.object(tlh, "inc_persona_escalation") as inc:
+        handler._after_run({}, None)
+        handler._after_run({}, "Error")
+        inc.assert_not_called()
+        handler._after_run({}, "Hi there")
+        inc.assert_called_once_with("answered")

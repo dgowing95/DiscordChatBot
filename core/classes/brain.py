@@ -93,7 +93,7 @@ MEMORY_CHARS = 1500
 # it is done: a second ask_brain in the same reply starts clean, and nothing
 # the persona's own run keeps holds a released workspace.
 _BRAIN_KEYS = ("session", "out_dir", "job_dir", "workspace_root", "deliverables",
-               "brain_request", "brain_report_args", "brain_guard", "requester")
+               "delivery_chosen", "brain_request", "brain_report_args", "brain_guard", "requester")
 
 # The brain's instructions. ONE home per concept (AGENTS.md "Prompt
 # surface"): if something here needs saying again, edit the existing bullet.
@@ -674,6 +674,7 @@ async def _run_in_workspace(ctx, lease, request, inputs, problems, hooks_box) ->
         "job_dir": job_dir,
         "workspace_root": lease.root,
         "deliverables": [],
+        "delivery_chosen": False,
         "brain_request": request,
         "brain_report_args": None,
         "brain_guard": None,
@@ -762,7 +763,8 @@ async def _run_and_deliver(ctx, lease, agent, task, run_config, hooks, progress,
     # during this call), posted in the channel before the persona replies.
     try:
         artifacts, skips = await asyncio.wait_for(
-            _deliver(session, ctx.get("deliverables") or [], out_dir, marker),
+            _deliver(session, ctx.get("deliverables") or [], out_dir, marker,
+                     chosen=bool(ctx.get("delivery_chosen"))),
             timeout=RECOVERY_TIMEOUT_SECONDS)
     except Exception as e:
         logger.warning(f"Brain: could not read back its files: {e}")
@@ -772,6 +774,7 @@ async def _run_and_deliver(ctx, lease, agent, task, run_config, hooks, progress,
     if skips:
         notes.append("Not sent (over the size or count limit): " + ", ".join(skips) + ".")
     if lease.restore_failed:
+        lease.restore_reported = True
         notes.append("The server's saved workspace could not be restored, so it started "
                      "empty: files kept from earlier requests were lost. Tell the user.")
         try:

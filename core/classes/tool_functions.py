@@ -333,24 +333,6 @@ async def ask_brain(wrapper: RunContextWrapper[dict], request: str,
     return tool_result_for_persona(report)
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 @function_tool
 async def change_personality(wrapper: RunContextWrapper[dict], personality: str) -> bool:
     """Changes the personality of the bot. Returns True if successful, False otherwise.
@@ -470,8 +452,6 @@ async def check_polls(wrapper: RunContextWrapper[dict]) -> str:
     if not found:
         return "There have been no polls in this channel in the last week."
     return "Polls in this channel, newest first:\n\n" + "\n\n".join(found)
-
-
 
 
 @function_tool

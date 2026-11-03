@@ -22,7 +22,6 @@ The heavy imports (docker SDK, agents.sandbox) stay inside functions so the
 pure helpers below are testable without them.
 """
 import logging
-import asyncio
 import io
 import json
 import os
@@ -306,7 +305,10 @@ def _in_job_dir(original_invoke):
         if workdir is not None and not isinstance(workdir, str):
             return await original_invoke(ctx, raw_input)
         if workdir and workdir.startswith("/"):
-            return await original_invoke(ctx, raw_input)  # the SDK's own refusal says why
+            # Refused here, as a result the model can act on: the SDK's own
+            # InvalidManifestPathError is raised, not returned.
+            return ("Tool call rejected: use a workdir relative to your working directory "
+                    "(e.g. \"out\"), not an absolute path.")
         resolved = _job_relative(context, workdir or ".")
         if resolved is None:
             return "Tool call rejected: that workdir is outside the workspace. Use a relative path."
@@ -606,6 +608,9 @@ async def attach_file(
         deliverables[:] = [entry for entry in deliverables if entry["path"] != path]
         if len(deliverables) == before:
             return f"{name!r} was not attached, so there was nothing to remove."
+        # Removing the last one is a choice too: without this, an empty list
+        # reads as "chose nothing" and the sweep sends the file just removed.
+        ctx["delivery_chosen"] = True
         return f"Removed {name!r}; it will not be sent."
 
     # stat, not `test -f` then `wc -c`: one call answers both "does it exist"
@@ -936,7 +941,8 @@ async def _collect_deliverables(
     _collect_artifacts (session.read() enforces a manifest root we don't use;
     exec_command truncates to a token budget) — it just reads a list the agent
     curated instead of everything it happened to leave lying around. Sizes
-    were recorded at attach time, so the caps are applied without re-statting.
+    were recorded at attach time, so the caps are applied without re-statting;
+    a file rewritten bigger since then is caught after the read.
     """
     kept, skip_notes = _select_deliverables(entries)
     for note in skip_notes:
@@ -952,6 +958,13 @@ async def _collect_deliverables(
             continue
         if not read_result.ok():
             logger.warning(f"Sandbox: failed to read attached file {path}: exit {read_result.exit_code}")
+            continue
+        # The size was taken at attach time; the file may have been rewritten
+        # bigger since (a chart re-rendered without attaching it again).
+        if len(read_result.stdout) > MAX_ARTIFACT_BYTES:
+            name = _attachment_name(path)
+            skip_notes.append(f"{name} (skipped: grew past the {MAX_ARTIFACT_BYTES}-byte limit)")
+            logger.info(f"Sandbox: {name} grew past the size limit after it was attached")
             continue
         artifacts.append(SandboxArtifact(
             name=_attachment_name(path),
@@ -1015,6 +1028,7 @@ async def _write_inputs(session, out_dir: str | None, inputs, problems):
 
 async def _deliver(
     session, deliverables: list[dict], out_dir: str | None, marker: str | None,
+    chosen: bool = False,
 ) -> tuple[list[SandboxArtifact], list[str]]:
     """What the user actually receives: the files the agent attached, or —
     only when it attached none — a swept fallback from out/.
@@ -1027,6 +1041,8 @@ async def _deliver(
     """
     if deliverables:
         return await _collect_deliverables(session, deliverables)
+    if chosen:  # it attached files and removed them all: send nothing
+        return [], []
     return await _collect_artifacts(session, out_dir, marker)
 
 
