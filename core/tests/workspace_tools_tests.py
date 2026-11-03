@@ -403,7 +403,9 @@ async def test_collect_deliverables_reads_only_what_was_attached():
     assert [(a.name, a.data, a.caption) for a in artifacts] == [
         ("final.png", b"PNGDATA", "here you go")
     ]
-    session.exec.assert_awaited_once_with("cat", "--", "out/final.png", shell=False)
+    # its size is taken again (stat), then it is read (cat)
+    assert [c.args[0] for c in session.exec.await_args_list] == ["stat", "cat"]
+    session.exec.assert_awaited_with("cat", "--", "out/final.png", shell=False)
 
 
 @pytest.mark.asyncio
@@ -744,12 +746,26 @@ async def test_send_preview_to_thread_checks_the_size_before_reading():
 
 
 @pytest.mark.asyncio
-async def test_a_file_that_grew_after_it_was_attached_is_not_sent():
+async def test_a_file_that_grew_after_it_was_attached_is_not_read_or_sent():
     session = MagicMock()
-    session.exec = AsyncMock(return_value=_exec_result(b"x" * (sandbox_agent.MAX_ARTIFACT_BYTES + 1)))
+    big = str(sandbox_agent.MAX_ARTIFACT_BYTES + 1).encode()
+    session.exec = AsyncMock(return_value=_exec_result(big))  # stat says it is too big now
     entries = [{"path": "/workspace/jobs/t1/out/plot.png", "size": 10, "caption": ""}]
     artifacts, notes = await prod_sandbox_agent._collect_deliverables(session, entries)
-    assert artifacts == [] and "grew past" in notes[0]
+    assert artifacts == [] and "limit" in notes[0]
+    assert [c.args[0] for c in session.exec.await_args_list] == ["stat"]  # never read
+
+
+@pytest.mark.asyncio
+async def test_files_that_grew_are_held_to_the_total_too():
+    half = sandbox_agent.MAX_ARTIFACT_BYTES // 2 + 1  # each fits alone, not both
+    async def exec_(cmd, *args, shell=False):
+        return _exec_result(str(half).encode() if cmd == "stat" else b"x" * half)
+    session = MagicMock()
+    session.exec = AsyncMock(side_effect=exec_)
+    entries = [{"path": f"/w/out/{n}.png", "size": 10, "caption": ""} for n in ("a", "b")]
+    artifacts, notes = await prod_sandbox_agent._collect_deliverables(session, entries)
+    assert [a.name for a in artifacts] == ["a.png"] and "b.png" in notes[0]
 
 
 @pytest.mark.asyncio

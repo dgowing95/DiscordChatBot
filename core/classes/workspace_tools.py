@@ -940,15 +940,21 @@ async def _collect_deliverables(
     Same `exec("cat", ...)` primitive and the same reasons as
     _collect_artifacts (session.read() enforces a manifest root we don't use;
     exec_command truncates to a token budget) — it just reads a list the agent
-    curated instead of everything it happened to leave lying around. Sizes
-    were recorded at attach time, so the caps are applied without re-statting;
-    a file rewritten bigger since then is caught after the read.
+    curated instead of everything it happened to leave lying around.
+
+    Sizes are taken again first (one stat each, at most MAX_ARTIFACT_FILES):
+    the file may have been rewritten bigger since it was attached (a chart
+    re-rendered without attaching it again), and the caps, the running total
+    included, must see its size now, before anything is read into core. The
+    check after the read stays as the backstop: it may still grow between.
     """
-    kept, skip_notes = _select_deliverables(entries)
+    current = [dict(entry, size=await _current_size(session, entry)) for entry in entries]
+    kept, skip_notes = _select_deliverables(current)
     for note in skip_notes:
         logger.info(f"Sandbox: {note}")
 
     artifacts: list[SandboxArtifact] = []
+    total = 0
     for entry in kept:
         path = entry["path"]
         try:
@@ -959,19 +965,31 @@ async def _collect_deliverables(
         if not read_result.ok():
             logger.warning(f"Sandbox: failed to read attached file {path}: exit {read_result.exit_code}")
             continue
-        # The size was taken at attach time; the file may have been rewritten
-        # bigger since (a chart re-rendered without attaching it again).
-        if len(read_result.stdout) > MAX_ARTIFACT_BYTES:
+        size = len(read_result.stdout)
+        if size > MAX_ARTIFACT_BYTES or total + size > MAX_ARTIFACT_BYTES:
             name = _attachment_name(path)
             skip_notes.append(f"{name} (skipped: grew past the {MAX_ARTIFACT_BYTES}-byte limit)")
-            logger.info(f"Sandbox: {name} grew past the size limit after it was attached")
+            logger.info(f"Sandbox: {name} grew past the size limit while it was being sent")
             continue
+        total += size
         artifacts.append(SandboxArtifact(
             name=_attachment_name(path),
             data=read_result.stdout,
             caption=entry.get("caption") or "",
         ))
     return artifacts, skip_notes
+
+
+async def _current_size(session, entry: dict) -> int:
+    """The attached file's size now, or the one recorded at attach time
+    when it can't be read (the read after it then decides)."""
+    try:
+        result = await session.exec("stat", "-c", "%s", "--", entry["path"], shell=False)
+        if result.ok():
+            return int(result.stdout.decode("utf-8", errors="replace").strip())
+    except Exception:
+        pass
+    return int(entry.get("size") or 0)
 
 
 async def _mark_run_start(session, out_dir: str | None) -> str | None:
