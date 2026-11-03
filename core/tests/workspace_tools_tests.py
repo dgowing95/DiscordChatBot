@@ -731,6 +731,19 @@ async def test_send_preview_to_thread_enforces_size_cap():
 
 
 @pytest.mark.asyncio
+async def test_send_preview_to_thread_checks_the_size_before_reading():
+    session = MagicMock()
+    size = str(sandbox_agent.MAX_ARTIFACT_BYTES + 1).encode()
+    session.exec = AsyncMock(return_value=_exec_result(size))
+    ctx = _preview_ctx(session=session)
+    result = await prod_sandbox_agent.send_preview_to_thread.on_invoke_tool(
+        ctx, json.dumps({"path": "out/huge.bin"})
+    )
+    assert "too large" in result.lower()
+    assert session.exec.await_count == 1  # stat only: the file is never read
+
+
+@pytest.mark.asyncio
 async def test_send_preview_to_thread_without_context_is_graceful():
     ctx = _preview_ctx(thread=None, session=None)
     result = await prod_sandbox_agent.send_preview_to_thread.on_invoke_tool(

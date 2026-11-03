@@ -531,6 +531,16 @@ async def send_preview_to_thread(
     if where is None:
         return "That path is outside the workspace. Use one relative to your working directory."
 
+    # Size first, as attach_file does, so a huge file is never read into
+    # core only to be refused (the check after the read stays: it may grow).
+    try:
+        stat = await session.exec("stat", "-c", "%s", "--", where, shell=False)
+        size = int(stat.stdout.decode("utf-8", errors="replace").strip()) if stat.ok() else None
+    except Exception:
+        size = None
+    if size is not None and size > MAX_ARTIFACT_BYTES:
+        return (f"{path!r} is too large to preview ({size} bytes, over the "
+                f"{MAX_ARTIFACT_BYTES}-byte limit).")
     try:
         result = await session.exec("cat", "--", where, shell=False)
     except Exception as e:
