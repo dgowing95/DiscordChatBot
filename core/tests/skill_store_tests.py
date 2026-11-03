@@ -77,6 +77,19 @@ class FakeRedis:
     async def get(self, key):
         return self.data.get(key)
 
+    async def set(self, key, value, nx=False, ex=None):
+        if nx and key in self.data:
+            return None
+        self.apply("set", key, value)
+        return True
+
+    async def eval(self, script, numkeys, key, token):
+        # Only the compare-and-delete release script is used.
+        if self.data.get(key) == token:
+            del self.data[key]
+            return 1
+        return 0
+
     async def mget(self, keys):
         self.mgets = getattr(self, "mgets", 0) + 1
         return [self.data.get(k) for k in keys]

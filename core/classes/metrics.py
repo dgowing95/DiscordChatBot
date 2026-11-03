@@ -640,6 +640,10 @@ skill_success_total = Counter(
 skill_reflection_total = Counter(
     "discord_bot_skill_reflection_total",
     "Reviews of a finished job, by what they decided (none, create, update, failed)", ["action"])
+skill_curator_changes_total = Counter(
+    "discord_bot_skill_curator_changes_total",
+    "The daily tidy-up's changes to skills, by kind (merge, retire, describe, refused)", ["kind"])
+skills_live_gauge = Gauge("discord_bot_skills_live", "Live skills, every server together")
 brain_slot_wait_seconds = Histogram(
     "discord_bot_brain_slot_wait_seconds",
     "Seconds a brain call waited for a brain slot",
@@ -689,6 +693,14 @@ def inc_skill_success() -> None:
 
 def inc_skill_reflection(action: str) -> None:
     skill_reflection_total.labels(action=str(action)).inc()
+
+
+def inc_skill_curator_change(kind: str) -> None:
+    skill_curator_changes_total.labels(kind=str(kind)).inc()
+
+
+def set_skills_live(count: int) -> None:
+    skills_live_gauge.set(max(0, int(count)))
 
 
 def observe_brain_slot_wait(seconds: float) -> None:

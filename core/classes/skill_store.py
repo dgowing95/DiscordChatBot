@@ -47,6 +47,10 @@ class QuotaError(SkillError):
     pass
 
 
+class VersionError(SkillError):
+    """The skill is no longer at the version the caller expected."""
+
+
 def _names(guild):
     return f"{PREFIX}:{guild}:names"
 
@@ -57,6 +61,13 @@ def _live(guild):
 
 def _key(guild, name):
     return f"{PREFIX}:{guild}:skill:{name}"
+
+
+def _check_version(doc, name, expected) -> None:
+    if expected is None:
+        return
+    if not doc or doc.get("deleted") or doc["versions"][-1]["v"] != expected:
+        raise VersionError(f"{name} changed since v{expected}; left as it is.")
 
 
 def _summary(doc: dict) -> dict:
@@ -77,6 +88,7 @@ def _summary(doc: dict) -> dict:
         "updated_by": current.get("author_id"),
         "updated_at": current["created_at"],
         "source": current.get("source"),
+        "restored_at": doc.get("restored_at"),
     }
 
 
@@ -195,10 +207,17 @@ class SkillStore:
         return out
 
     async def save(self, guild, name, description, body, files=None, *, author_id,
-                   source="brain", job_id="", note="") -> str:
+                   source="brain", job_id="", note="", channel_id=None,
+                   expect_version: int | None = None) -> str:
         """Creates or updates a skill. Returns CREATED, UPDATED or UNCHANGED
         (the same text again makes no new version). Raises SkillError with the
-        problems, or QuotaError when the server is full."""
+        problems, or QuotaError when the server is full.
+
+        channel_id: where it was saved; kept as the skill's channel until a
+        use sets one, so a skill never used still has somewhere for the
+        curator's embeds. expect_version: refuse unless the live skill is
+        still at this version (the curator's changes lose to a person's edit
+        made while it was thinking)."""
         name = skill_format.clean_name(name)
         description = skill_format.one_line(description, 10_000)
         files = dict(files or {})
@@ -213,6 +232,7 @@ class SkillStore:
 
         def build(doc, live):
             was_live = bool(doc) and not doc.get("deleted")
+            _check_version(doc, name, expect_version)
             if doc:
                 current = doc["versions"][-1]
                 if (was_live and current["description"] == description and current["body"] == body
@@ -224,15 +244,19 @@ class SkillStore:
             version = {"description": description, "body": body, "files": files,
                        "author_id": author_id, "source": source, "job_id": job_id,
                        "created_at": self.clock(), "note": note}
-            return self._append(doc, name, version), (UPDATED if doc else CREATED)
+            out = self._append(doc, name, version)
+            if channel_id is not None and not out.get("last_channel_id"):
+                out["last_channel_id"] = channel_id
+            return out, (UPDATED if doc else CREATED)
         result = await self._change(guild, name, build)
         _count_save(source, result)
         return result
 
-    async def delete(self, guild, name, actor) -> None:
+    async def delete(self, guild, name, actor, expect_version: int | None = None) -> None:
         def build(doc, live):
             if not doc or doc.get("deleted"):
                 raise SkillError(f"No skill named {name} in this server.")
+            _check_version(doc, name, expect_version)
             out = dict(doc)
             out["deleted"] = True
             out["deleted_by"] = actor
@@ -249,6 +273,10 @@ class SkillStore:
                 raise QuotaError(f"This server already has {live} skills; delete one first.")
             out = dict(doc)
             out["deleted"] = False
+            # A person's undo: the tidy-up leaves the skill alone for a while
+            # (skill_curator.protected).
+            out["restored_at"] = self.clock()
+            out["restored_by"] = actor
             return out, None
         await self._change(guild, name, build)
 

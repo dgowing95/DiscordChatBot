@@ -32,6 +32,21 @@ You can also just ask: "save that as a skill", "use the weekly chart skill".
 Each change posts a message in the channel (📗 updated, 🗑️ deleted, ♻️ restored, ⏪ reverted), so
 everyone can see what changed.
 
+## The daily tidy-up
+
+Once a day, in a server with 5 or more skills, the bot looks over them all and may make up to three
+changes:
+
+- **Merge** two skills that do the same job into one. The other is deleted.
+- **Retire** a skill nobody has used or changed in 60 days.
+- **Sharpen** a description that does not say what the skill is for.
+
+Each shows as a message with "tidy-up" under it, in the channel where the skill was last used (📗
+updated, 🗑️ retired). Nothing is lost: `/skills restore` brings back a retired or merged skill, and
+`/skills revert` undoes a change, and the bot then leaves that skill alone for 60 days. A skill
+someone edited with `/skills edit` is left alone the same way. If someone edits a skill while the
+bot is deciding, their edit wins. Most days it changes nothing.
+
 ## Limits
 
 Each server keeps up to 100 skills. A skill's steps can be up to 8,000 characters, with up to 10
@@ -40,6 +55,7 @@ small text files, 64 KB in all. The last 50 versions of each are kept.
 ## For the person running the bot
 
 Settings are `SKILLS_*` (see `docs/upgrading-to-v3.md`, chart values `skills.*`).
-`SKILLS_ENABLED=0` turns it all off (saved skills are kept). Skills live in Redis, not in the
+`SKILLS_ENABLED=0` turns it all off (saved skills are kept); `SKILLS_CURATOR_ENABLED=0` turns off only
+the tidy-up. Skills live in Redis, not in the
 workspace container: the copy in the container (`skills/<name>/`, read-only) is rewritten from Redis
 every time a skill is used, so changing it there never changes the skill.

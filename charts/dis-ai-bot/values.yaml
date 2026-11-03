@@ -478,6 +478,14 @@ skills:
     # worth saving as a skill.
     enabled: true
     minToolCalls: 6
+  curator:
+    # Once a day per server with minSkills+ skills: merge overlapping ones,
+    # retire ones unused for retireDays, sharpen descriptions. Every change
+    # is a version or a soft delete, so it can be undone with /skills.
+    enabled: true
+    intervalHours: 24
+    minSkills: 5
+    retireDays: 60
 
 # The brain: the agent that does the work in the code sandbox. Its LLM is the
 # bot's own (llm.*) unless these name another. To use a hosted

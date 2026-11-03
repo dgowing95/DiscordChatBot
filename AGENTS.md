@@ -60,7 +60,8 @@ core/                    # the bot (what runs in production)
     skill_tools.py         # the brain's use_skill / save_skill / search_skills, and every skill embed
     skill_commands.py      # the /skills group (list, show, history, edit, delete, restore, revert, export)
     skill_reflection.py    # after a long job, one background call decides whether to save a skill
-    loop_guard.py          # P stops a brain run that repeats itself that repeats itself
+    skill_curator.py       # the daily tidy-up: merge, retire, describe (its rules are pure)
+    loop_guard.py          # P stops a brain run that repeats itself
     context_trim.py        # P cuts old tool outputs in a long brain run
     brain_progress.py      # the "Working on it" status embed and live command output
     workspace_tools.py     # shell wrappers, attach_file and delivery, in/ files, thread tools
@@ -267,6 +268,17 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
      reviewed. Anyone in the server manages skills with `/skills` (no permission check by decision,
      since every change is a version and a delete is undoable). Every event posts its own embed
      (`tool_embeds`: 📘 saved, 📗 updated, 📖 used, 🗑️ deleted, ♻️ restored, ⏪ reverted).
+     **The tidy-up** (`skill_curator.py`, a loop started in `on_ready`): every
+     `SKILLS_CURATOR_INTERVAL_HOURS`, one background call per server with
+     `SKILLS_CURATOR_MIN_SKILLS`+ skills proposes at most 3 merges, retires or clearer descriptions.
+     The model only proposes: code decides which skills are stale (`SKILLS_RETIRE_DAYS`), drops
+     anything else, and makes each change only if the skill is still at the version it read
+     (`expect_version`), so a person's edit made meanwhile wins. An undo sticks: a skill a person
+     restored, reverted or edited with `/skills` within `SKILLS_RETIRE_DAYS` is `protected` and never
+     changed, or the next pass would retire again what was just restored. When a pass is due is kept in Redis
+     (`...:curator`, with a signature of what it saw, taken after its own changes), and a lock per
+     server keeps two processes from running one twice. Its embeds (🗑️ retired, 📗 updated, footer
+     "tidy-up") go to the skill's last channel, used or saved.
 
    Before editing, read `brain.py`'s module docstring, then `run_brain`, `workspace_tools._deliver` and
    `brain_result.tool_result_for_persona`.
@@ -399,8 +411,9 @@ are the ones that actually change behaviour). The persona's *system* prompt is n
 - Sizes are pinned by `brain_tests.py`: `BRAIN_INSTRUCTIONS` ~2230 characters (ceiling 2300),
   `ask_brain` ~1670 including its JSON schema (ceiling 1700). Re-measure before adding. Skills have
   their own homes, pinned by `skill_tools_tests.py`: `SKILLS_INSTRUCTIONS` ~270 characters (ceiling
-  400, added to the brain's prompt only when skills are on) and `REFLECTION_PROMPT` ~730 (ceiling
-  1000, the one prompt of the after-job review).
+  400, added to the brain's prompt only when skills are on), `REFLECTION_PROMPT` ~730 (ceiling
+  1000, the one prompt of the after-job review) and `CURATOR_PROMPT` ~860 (ceiling 1000, the
+  tidy-up's).
 
 ### Environment variables
 
@@ -492,6 +505,8 @@ reads has a row here and a line in `.env.example`, that every row is read by som
 | `SKILLS_MAX_BYTES` / `SKILLS_MAX_BODY_CHARS` / `SKILLS_MAX_FILES` | limits on one skill: all its text together (default 65536), its steps (8000 characters), files kept with it (10). Chart: `skills.maxBytes` / `maxBodyChars` / `maxFiles` |
 | `SKILLS_INDEX_MAX` | skills named in the brain's task (default 20, best ranked first); the rest are found with `search_skills`. Chart: `skills.indexMax` |
 | `SKILLS_REFLECTION_ENABLED` / `SKILLS_REFLECTION_MIN_TOOL_CALLS` | after a brain job with at least this many tool calls (default 6) that ended done or partial without saving a skill, one background call decides whether to save one (default: on). Chart: `skills.reflection.enabled` / `minToolCalls` |
+| `SKILLS_CURATOR_ENABLED` / `SKILLS_CURATOR_INTERVAL_HOURS` / `SKILLS_CURATOR_MIN_SKILLS` | the tidy-up: on [default], hours between passes per server [24, min 1], and live skills a server needs for one [5, min 2]. A server with no change since its last pass gets no model call. Chart: `skills.curator.enabled` / `intervalHours` / `minSkills` |
+| `SKILLS_RETIRE_DAYS` | a skill neither used nor changed for this many days may be retired by the tidy-up [60, min 1]; nothing else can be. Chart: `skills.curator.retireDays` |
 | `BRAIN_MAX_CONCURRENT` / `BRAIN_QUEUE_WAIT` | brain calls at once (each on a queue worker starts a spare worker), and seconds a call waits for a slot before it is told the bot is busy [3 / 120]. Chart: `brain.maxConcurrent` / `queueWait` |
 | `BRAIN_TRIM_KEEP_RECENT` | tool outputs kept whole in a long brain call; older ones are cut to their first and last 400 characters [6]. Chart: `brain.trimKeepRecent` |
 | `WORKSPACE_IMAGE` | the workspace's container image, pulled at startup if missing [`python:3.14-slim`]. Chart: `brain.workspace.image` |
