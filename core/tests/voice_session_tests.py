@@ -194,7 +194,7 @@ async def test_a_silent_tool_call_gets_a_written_line_before_the_answer(monkeypa
 @pytest.mark.asyncio
 async def test_a_failed_hold_on_line_falls_back_to_a_plain_one(monkeypatch, fake_llm):
     session, bridge = _session(monkeypatch)
-    fake_llm.script = [("model",), ("tool", "generate_image", '{"prompt": "a cat"}'), ("model",),
+    fake_llm.script = [("model",), ("tool", "ask_brain", '{"request": "draw a cat"}'), ("model",),
                        ("text", "Done, it's in the thread.")]
     fake_llm.answer = "Done, it's in the thread."
     with patch.object(voice_session._hold_on_llm, "complete", AsyncMock(side_effect=RuntimeError("down"))), \
@@ -203,7 +203,7 @@ async def test_a_failed_hold_on_line_falls_back_to_a_plain_one(monkeypatch, fake
         await session.heard(7, "Ana", "hey sparky draw a cat")
         await _settle(session)
         await asyncio.sleep(0.05)
-    assert bridge.spoken() == ["Hold on, I'm making a picture.", "Done, it's in the thread."]
+    assert bridge.spoken() == ["Hold on, I'm looking into that.", "Done, it's in the thread."]
     session._worker.cancel()
 
 

@@ -19,7 +19,7 @@ ARG APP_VERSION=""
 ENV APP_VERSION=$APP_VERSION
 
 # Deliberately still runs as root. Dropping to a non-root user needs that user
-# to be in the group owning the mounted /var/run/docker.sock, or run_code_sandbox
+# to be in the group owning the mounted /var/run/docker.sock, or the brain
 # loses access to the daemon entirely - and that GID is a property of the host,
 # so it belongs in the chart's securityContext (supplementalGroups), not in a
 # blind useradd here.

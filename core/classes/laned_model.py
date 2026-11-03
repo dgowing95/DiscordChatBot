@@ -13,7 +13,7 @@ call's timeout, and a chat reply busy for ten minutes would time out a brain
 call that never started. So agents built on a LanedModel leave
 ModelSettings.timeout unset, and a call that runs past call_timeout raises
 agents.ModelTimeoutError, the same error the SDK raises. Lane wait does count
-toward a run's own wall clock (SANDBOX_TIMEOUT): that one is a loop guard.
+toward a run's own wall clock (BRAIN_TIMEOUT): that one is a loop guard.
 
 A slot is held for one model call, never across a tool, so a side call made
 inside a tool (a research brief) cannot deadlock against its own parent run.

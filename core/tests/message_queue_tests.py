@@ -534,3 +534,31 @@ async def test_the_gateway_closes_even_when_our_shutdown_raises():
         with pytest.raises(RuntimeError):
             await m.client.close()
     parent_close.assert_awaited_once()
+
+
+
+# --------------------------- servers only ---------------------------
+
+@pytest.mark.asyncio
+async def test_a_direct_message_is_never_answered():
+    # The bot works only in servers: even a mention in a DM is ignored.
+    main_mod = _import_main()
+    bot = MagicMock()
+    queue = asyncio.Queue(maxsize=2)
+    with patch.object(main_mod, "client", bot), \
+         patch.object(main_mod, "message_queue", queue):
+        msg = _message(mentions=[bot.user])
+        msg.guild = None
+        assert await main_mod.should_handle_message(msg) is False
+        await main_mod.on_message(msg)
+    assert queue.qsize() == 0
+    msg.reply.assert_not_awaited()
+
+
+def test_slash_commands_are_offered_in_servers_only():
+    main_mod = _import_main()
+    with patch.object(main_mod.discord.app_commands, "CommandTree") as tree_cls:
+        main_mod.make_command_tree()
+    contexts = tree_cls.call_args.kwargs["allowed_contexts"]
+    assert contexts.guild is True
+    assert contexts.dm_channel is False and contexts.private_channel is False

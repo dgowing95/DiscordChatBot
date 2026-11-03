@@ -23,7 +23,8 @@ Rules worth knowing before changing them:
     the workspace with tar while commands run (checked live, spike check 4).
     The manager serialises it with the cleanup and the stop.
   * `dirty` is set by every release and cleared by a snapshot, so an idle
-    workspace nobody changed is never snapshotted twice.
+    workspace nobody changed is never snapshotted twice. A pre-warm's
+    release (changed=False) leaves it: it only started the container.
 """
 import os
 from dataclasses import dataclass
@@ -115,9 +116,13 @@ def instance(env=None) -> str:
 
 
 def prewarm(env=None) -> bool:
-    """WORKSPACE_PREWARM: start a server's workspace when it gets a message
-    (off by default; phase 3 wires the trigger)."""
-    return _env_str("WORKSPACE_PREWARM", env).lower() in {"1", "true", "yes", "on"}
+    """WORKSPACE_PREWARM: start a server's workspace when the bot is about to
+    answer a message there (on by default). Every brain call needs the
+    workspace (the SDK's SandboxAgent binds its container before the first
+    model call), so starting it while the persona is still thinking keeps a
+    cold start off most replies."""
+    raw = _env_str("WORKSPACE_PREWARM", env).lower()
+    return raw in {"1", "true", "yes", "on"} if raw else True
 
 
 def job_dir(job_id: str) -> str:
@@ -229,14 +234,16 @@ class Lifecycle:
         the guild is left STOPPING and the manager runs the reset now."""
         return self._to_cold(guild)
 
-    def release(self, guild: str, now: float) -> bool:
+    def release(self, guild: str, now: float, changed: bool = True) -> bool:
         """One call is done. True when it was the last one: the manager then
-        cleans up leftover processes and calls cleaned()."""
+        cleans up leftover processes and calls cleaned(). changed=False (a
+        pre-warm, which ran nothing) leaves `dirty` as it was."""
         s = self.state(guild)
         if s.refcount <= 0:
             return False
         s.refcount -= 1
-        s.dirty = True
+        if changed:
+            s.dirty = True
         s.last_used = now
         if s.refcount == 0:
             s.cleaning = True

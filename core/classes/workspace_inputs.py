@@ -1,18 +1,18 @@
 """Which chat files a workspace run is given, and how each side is told (PURE,
 stdlib only).
 
-The sandbox used to receive nothing but the `task` string, so anything it was
+The old sandbox received nothing but its `task` string, so anything it was
 meant to work ON had to be squeezed through text: an uploaded CSV pasted in by
-the outer model (when it could see it at all -- non-image attachments never
+the persona (when it could see it at all -- non-image attachments never
 reached the prompt), and a picture the bot had just drawn not at all. So
 "make a GIF from that picture" or "chart this spreadsheet" could not work.
 
-Now run_code_sandbox copies files into its job folder's `in/` (jobs/<id>/in/)
-before the run starts:
+Now a brain call copies files into its job folder's `in/` (jobs/<id>/in/)
+before it starts:
 
   * always, the attachments of the message that asked and of the message it
     replies to -- the user plainly meant those;
-  * any other file the outer model names in the tool's `files` argument,
+  * any other file the persona names in ask_brain's `files` argument,
     found by name among the channel's recent messages (newest first). That is
     how the bot's own pictures are reached: every one is called
     image_generation.GENERATED_IMAGE_FILENAME, so naming it gets the newest.
@@ -20,10 +20,10 @@ before the run starts:
 Caps: MAX_INPUT_FILES files, and WORKSPACE_INPUT_MAX_BYTES (default 25MB) in
 total, kept well under WORKSPACE_SNAPSHOT_MAX_BYTES since `in/` is saved with
 the server's workspace (until the job folder is pruned). What was left out, and why, is
-told to both the sandbox model (so it does not go looking) and the outer one
-(so it can tell the user).
+told to both the brain (so it does not go looking) and the persona (so it can
+tell the user).
 
-tool_functions.py does the downloading and sandbox_agent.run_sandbox_task the
+brain.chat_input_files does the downloading and brain.run_brain the
 writing; core/tests/workspace_inputs_tests.py covers this module.
 """
 import os
@@ -136,10 +136,10 @@ def task_preamble(written, problems) -> str:
 
 
 def tool_note(names, problems) -> str:
-    """Added to what the outer model is told about the run."""
+    """Added to what the persona is told about a brain call."""
     parts = []
     if names:
-        parts.append("Files given to the sandbox: " + ", ".join(names) + ".")
+        parts.append("Files given to the brain: " + ", ".join(names) + ".")
     if problems:
         parts.append("Not given (tell the user): " + "; ".join(problems) + ".")
     return ("\n\n" + " ".join(parts)) if parts else ""

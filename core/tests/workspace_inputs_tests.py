@@ -1,4 +1,4 @@
-"""Files from the chat handed to a sandbox run: which ones, the caps, what
+"""Files from the chat handed to a brain call: which ones, the caps, what
 each side is told, and the download / write halves around that.
 
 Run: pytest core/tests/workspace_inputs_tests.py
@@ -73,7 +73,7 @@ def test_what_each_side_is_told():
         "Asked for but not provided: b.png (not found in the chat).\n\n")
     assert si.tool_note([], []) == ""
     assert si.tool_note(["a.csv"], ["b.png (x)"]) == (
-        "\n\nFiles given to the sandbox: a.csv. Not given (tell the user): b.png (x).")
+        "\n\nFiles given to the brain: a.csv. Not given (tell the user): b.png (x).")
 
 
 def test_attachment_note():
@@ -106,7 +106,7 @@ class _Channel:
 
 @pytest.mark.asyncio
 async def test_input_files_take_the_trigger_its_reply_and_named_ones():
-    from classes.tool_functions import _sandbox_input_files
+    from classes.brain import chat_input_files
 
     reply = SimpleNamespace(attachments=[_attachment("photo.png", b"P")])
     trigger = SimpleNamespace(attachments=[_attachment("data.csv", b"C")],
@@ -115,8 +115,8 @@ async def test_input_files_take_the_trigger_its_reply_and_named_ones():
     wrapper = SimpleNamespace(context={"original_message": trigger,
                                        "channel": _Channel([bot_image])})
 
-    inputs, problems, names = await _sandbox_input_files(
-        wrapper, ["generated-image.png", "missing.txt"])
+    inputs, problems, names = await chat_input_files(
+        wrapper.context, ["generated-image.png", "missing.txt"])
     assert inputs == [("data.csv", b"C"), ("photo.png", b"P"), ("generated-image.png", b"G")]
     assert names == ["data.csv", "photo.png", "generated-image.png"]
     assert problems == ["missing.txt (not found in the chat)"]
@@ -124,7 +124,7 @@ async def test_input_files_take_the_trigger_its_reply_and_named_ones():
 
 @pytest.mark.asyncio
 async def test_input_files_fetch_an_unresolved_reply_and_report_failed_downloads():
-    from classes.tool_functions import _sandbox_input_files
+    from classes.brain import chat_input_files
 
     fetched = SimpleNamespace(attachments=[_attachment("broken.zip", fail=True)])
     trigger = SimpleNamespace(attachments=[],
@@ -132,7 +132,7 @@ async def test_input_files_fetch_an_unresolved_reply_and_report_failed_downloads
     channel = _Channel(fetched=fetched)
     wrapper = SimpleNamespace(context={"original_message": trigger, "channel": channel})
 
-    inputs, problems, names = await _sandbox_input_files(wrapper, None)
+    inputs, problems, names = await chat_input_files(wrapper.context, None)
     channel.fetch_message.assert_awaited_once_with(5)
     assert inputs == [] and names == []
     assert problems == ["broken.zip (could not be downloaded)"]
@@ -140,13 +140,13 @@ async def test_input_files_fetch_an_unresolved_reply_and_report_failed_downloads
 
 @pytest.mark.asyncio
 async def test_no_message_and_no_names_gives_nothing():
-    from classes.tool_functions import _sandbox_input_files
+    from classes.brain import chat_input_files
 
     wrapper = SimpleNamespace(context={"original_message": None, "channel": _Channel()})
-    assert await _sandbox_input_files(wrapper, []) == ([], [], [])
+    assert await chat_input_files(wrapper.context, []) == ([], [], [])
 
 
-# --------------------------- write (sandbox_agent) ---------------------------
+# --------------------------- write (workspace_tools) ---------------------------
 
 def _session(mkdir_ok=True, write_error=None):
     session = MagicMock()
@@ -157,7 +157,7 @@ def _session(mkdir_ok=True, write_error=None):
 
 @pytest.mark.asyncio
 async def test_write_inputs_puts_files_beside_out_and_names_them():
-    from classes.sandbox_agent import _write_inputs
+    from classes.workspace_tools import _write_inputs
 
     session = _session()
     preamble, given, problems = await _write_inputs(
@@ -175,7 +175,7 @@ async def test_write_inputs_puts_files_beside_out_and_names_them():
     (None, _session()), ("/workspace/out", _session(mkdir_ok=False)),
     ("/workspace/out", _session(write_error=RuntimeError("denied")))])
 async def test_a_file_that_cannot_be_written_is_named_as_not_provided(out_dir, session):
-    from classes.sandbox_agent import _write_inputs
+    from classes.workspace_tools import _write_inputs
 
     preamble, given, problems = await _write_inputs(session, out_dir, [("a.csv", b"1")], [])
     assert preamble == "Asked for but not provided: a.csv (could not be copied in).\n\n"

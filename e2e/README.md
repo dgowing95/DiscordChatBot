@@ -20,10 +20,11 @@ Structure, never wording:
 | speech service | A sentence sent to `/speak` and back through `/transcribe` comes back with its words |
 | slash commands | core's log shows `help`, `whats_new`, `system`, `generate_image`, `workspace` (and `voice`) synced |
 | chat reply | The bot answers a mention with text, and does not mark it ❌ |
-| memory tool | After "remember my favourite colour is teal", Redis holds a memory with "teal" |
+| memory tool | After "remember my favourite colour is teal" (a brain call), Redis holds a memory with "teal" |
+| memory recall | After `!reset_history` (so the history no longer has it), asked "what is my favourite colour?", the reply says teal and `discord_bot_brain_calls_total` did not go up: saved memories are in the persona's prompt |
 | image | The reply has a `generated-image.png` PNG attachment |
 | poll | The bot posts a real Discord poll with at least two answers |
-| workspace task | Asked to make a CSV in its code sandbox, the bot used the server workspace (`discord_bot_workspace_starts_total` went up) and replied with a `.csv` attachment |
+| workspace task | Asked to make a CSV, the bot asked the brain (`discord_bot_brain_calls_total` went up), which posted a `.csv` attachment in the channel |
 | voice call | `!voice_join` joins the voice channel (Discord shows it), the greeting is spoken, a spoken question is answered aloud, and "leave" ends the call |
 | no tracebacks | core's log has no Python traceback |
 

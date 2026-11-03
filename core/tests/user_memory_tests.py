@@ -44,3 +44,10 @@ async def test_get_returns_empty_set_when_empty_list(mock_redis):
 
 # To run this pytest file from the command line, use:
 # PYTHONPATH=$(pwd) pytest core/tests/user_memory_tests.py
+
+
+@pytest.mark.asyncio
+async def test_get_keeps_the_order_memories_were_saved_in(mock_redis):
+    # The persona is shown the NEWEST memories, so the order matters.
+    mock_redis.get.return_value = json.dumps(["old", "mid", "old", "new"])
+    assert await UserMemory(user_id=1, guild_id=2).get() == ["old", "mid", "new"]

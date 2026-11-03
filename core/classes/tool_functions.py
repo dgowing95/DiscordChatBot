@@ -286,483 +286,69 @@ async def generate_image(wrapper: RunContextWrapper[dict], prompt: str,
     except Exception as e:
         logger.warning(f"Image generated but failed to send to Discord: {e}")
         return "The image was generated but could not be sent to the channel."
+    # Counted only once sent: the brain's report lists it as already posted.
+    context["images_posted"] = context.get("images_posted", 0) + 1
     return tool_result_text(result)
 
 
-async def _send_sandbox_closing_note(
-    channel, in_thread: bool, error: str | None = None, details: str = "",
-) -> None:
-    """Posts the sandbox's closing embed: how the run ended, and (in a thread)
-    that a follow-up here carries on from its files.
-
-    Without it the only signal that a run has ended is the ABSENCE of a
-    delivery reaction on your next message, which you cannot see until after
-    you've sent one — so people can't tell whether they're steering a live
-    sandbox or talking to the bot again.
-
-    Exception-safe and posted on every path where the run's embed already
-    went out: a failure to post this must never change what the tool
-    returns to the model.
-    """
-    from classes.sandbox_agent import sandbox_closing_embed
-
-    try:
-        note = sandbox_closing_embed(in_thread, error, details)
-        await Common.send_tool_discord_embed(
-            channel, note["description"], note["color"], note["title"], note["footer"])
-    except Exception as e:
-        logger.warning(f"Sandbox: failed to post the closing note: {e}")
-
-
 @function_tool
-async def run_code_sandbox(wrapper: RunContextWrapper[dict], task: str,
-                           files: list[str] | None = None) -> str:
-    """Hands a request to a code-sandbox agent: a Linux container (Python +
-    shell) with its own model, which writes and actually runs code. Use it
-    when the answer depends on running something rather than reasoning about
-    it — writing or debugging a program, computing a value, processing data,
-    generating or converting files. Not for questions you can answer
-    directly.
-
-    The sandbox agent designs it, not you — it can run code and look at the
-    output, you can't. Pass the user's request in their own words, plus only
-    what the sandbox cannot see for itself: results or filenames from earlier
-    runs in this thread, facts you looked up, and constraints the user
-    actually stated. Nothing else. For "can you make me a gif of a cow doing
-    a backflip", the whole task is `Generate a gif of a cow doing a backflip.`
-
-    Usually runs in a Discord thread and sends any files it produces there
-    itself; a call from inside an existing sandbox thread carries on in that
-    thread's folder, so follow-ups build on earlier work. Files the server
-    asked to keep are there for every run.
-
-    This call is fully synchronous: by the time it returns, the sandbox run
-    is already completely finished (whether it succeeded, partially
-    succeeded, or failed) and any file it produced has already been sent to
-    the thread — there is no follow-up after this. Never tell the user to
-    wait, that a file is still being generated, or that it will "pop up" or
-    "arrive shortly".
+async def ask_brain(wrapper: RunContextWrapper[dict], request: str,
+                    files: list[str] | None = None) -> str:
+    """Hands a job to your brain, which has the tools: the web and links,
+    saving and forgetting what is known about people, your own personality,
+    pictures, polls, events, reminders, this server's messages, voice calls,
+    and a computer for code, files and charts (it keeps its earlier work).
+    You cannot open links, see its files, change yourself or act later, so
+    use it for anything beyond talking. For example:
+    "what's the weather in Oslo?" -> request="Look up today's weather in Oslo";
+    "summarise that" (a link) -> request="Summarise https://...";
+    "in an hour, check the score" -> request="In an hour, check the score";
+    "remember I'm vegan" -> request="Remember that they are vegan";
+    "be a pirate from now on" -> request="Change the personality to a pirate";
+    "send the script for that chart" -> request="Send the script that made the last chart".
+    Not for chat, opinions or jokes, or what the chat or what is saved
+    about the person (shown below it) already answers.
+    Its result lists facts to keep exact and what it already posted.
 
     Args:
-        task: The user's request in their own words, plus context from this
-            conversation the sandbox cannot see. Short, and with no
-            implementation details of your own.
-        files: Files from the chat to work on, by the name shown in
-            [Attached: ...]. A picture you made is "generated-image.png"
-            (the newest is used). Files on the message asking are always
-            given.
+        request: What the user wants, in their words (timing too), plus
+            anything from the chat it needs (links, names, quoted text).
+        files: Chat files to work on, by the name shown in [Attached: ...].
+            A picture you made is "generated-image.png".
     """
-    logger.info(f"Running sandbox task: {task}")
+    from classes.brain import run_brain
+    from classes.brain_result import tool_result_for_persona
 
-    allowed, reason = await check_web_request(task)
-    if not allowed:
-        logger.warning(f"Sandbox task blocked by content guard: {reason}")
-        return ("I can't run that in the sandbox — it was blocked by the safety "
-                "guard. Please rephrase with a safe, non-harmful task.")
-
-    from classes.sandbox_agent import ensure_sandbox_thread
-    from classes import sandbox_thread_inbox
-
-    original_message = wrapper.context.get("original_message")
-    if original_message is None:
-        original_message = await wrapper.context["channel"].send("🐳 Starting code sandbox…")
-        wrapper.context["original_message"] = original_message
-    requesting_user_id = wrapper.context.get("user_id")
-    # A sandbox thread this outer turn already resolved. The context dict is
-    # one object for the whole Runner.run (text_llm_handler builds it once),
-    # so a second call in the same turn — the outer model retrying a run that
-    # was stopped — finds the thread the first one opened. Without this it
-    # would ask ensure_sandbox_thread for a thread off a message that already
-    # has one, be refused by Discord, and run in the PARENT CHANNEL instead:
-    # away from the work it meant to continue, in a new job folder, so the
-    # files the stopped run left are silently abandoned.
-    previous = wrapper.context.get("sandbox_thread")
-    if isinstance(previous, discord.Thread):
-        channel, thread_created = previous, False
-    else:
-        channel, thread_created = await ensure_sandbox_thread(original_message, task)
-    # The outer agent's own final reply is sent by MessageHandler after this
-    # tool returns, to self.message.channel by default — which would post it
-    # outside the thread the sandbox's output actually lives in. Recording
-    # the resolved channel back onto the shared run context (read by
-    # TextLLMHandler.generate() after Runner.run returns) lets the caller
-    # redirect that final reply into the same thread.
-    wrapper.context["sandbox_thread"] = channel
-    in_thread = isinstance(channel, discord.Thread)
-    # Claimed immediately after the thread is resolved and BEFORE any other
-    # await: the old check-then-register had several awaits in between
-    # (config read, embeds), so two runs could both pass the check. Two paths
-    # reach this with a run already claimed: queue lag (two mentions land
-    # before either worker starts) and the outer model emitting two
-    # run_code_sandbox calls in a single turn. Either way two runs would work
-    # in the same thread's job folder at once — so the task is forwarded into
-    # the run already in flight instead of starting a second.
-    ledger = None
-    if in_thread:
-        ledger = sandbox_thread_inbox.claim_run(channel.id, requesting_user_id)
-        if ledger is None:
-            return _forward_to_running_sandbox(channel, original_message, task,
-                                               actor_id=requesting_user_id if wrapper.context.get("automatic") else None)
-    try:
-        return await _run_claimed_sandbox(
-            wrapper, task, channel, thread_created, in_thread, ledger, files)
-    finally:
-        # Held through artifact delivery and the closing note, not just the
-        # run: the claim used to end before delivery, so a message posted
-        # while files were still uploading went to the outer LLM instead and
-        # was answered out of context. release_run only drops THIS ledger,
-        # so a stale caller cannot end somebody else's run.
-        if ledger is not None:
-            from classes.sandbox_conversation import record_exit_metrics
-            record_exit_metrics(ledger)
-            sandbox_thread_inbox.release_run(channel.id, ledger)
+    logger.info(f"Asking the brain: {request}")
+    context = wrapper.context
+    # One brain call at a time per reply: the SDK runs one response's tool
+    # calls concurrently, and every brain call shares (and cleans up) the
+    # persona's context dict, so two at once would trample each other's
+    # session, files and report.
+    async with context.setdefault("brain_lock", asyncio.Lock()):
+        report = await run_brain(context, request, files)
+    # Kept for the check after the reply (TextLLMHandler: must-keep facts the
+    # reply left out are logged and counted).
+    context.setdefault("brain_reports", []).append(report)
+    return tool_result_for_persona(report)
 
 
-def _forward_to_running_sandbox(channel, original_message, task: str, actor_id=None) -> str:
-    """Hands a second run_code_sandbox call to the run already claimed in
-    this thread, and tells the outer model honestly whether that worked."""
-    from classes import sandbox_thread_inbox
-
-    author = getattr(original_message, "author", None)
-    outcome = sandbox_thread_inbox.deliver(
-        channel.id,
-        getattr(original_message, "id", None),
-        actor_id if actor_id is not None else getattr(author, "id", None),
-        getattr(author, "display_name", "the user"),
-        task,
-    )
-    if outcome in (sandbox_thread_inbox.ACCEPTED, sandbox_thread_inbox.DUPLICATE):
-        return ("A sandbox is already running in this thread, so this request was "
-                "handed to the run in progress instead of starting a second one. "
-                "Tell the user it was passed along to the sandbox that's already "
-                "working, and do not retry.")
-    if outcome == sandbox_thread_inbox.FINISHING:
-        return ("A sandbox run in this thread is finishing, so this request could not "
-                "be applied to it; it has been noted for the next run here. Tell the "
-                "user to @mention you in this thread once it has closed to carry on "
-                "with it, and do not retry now.")
-    return ("A sandbox is already running in this thread and could not take this "
-            "request (it is too long, or the run already has too many unread "
-            "messages). Tell the user to ask again in the thread once it has "
-            "finished, and do not retry now.")
 
 
-# How far back run_code_sandbox's `files` names are looked for, like
-# image_generation.EDIT_LOOKBACK_MESSAGES: the newest messages, since the file
-# is often one the bot posted earlier in this same reply.
-SANDBOX_FILE_LOOKBACK_MESSAGES = 20
-SANDBOX_FILE_DOWNLOAD_TIMEOUT = 60
 
 
-async def _replied_to(message, channel):
-    reply = getattr(message, "reference", None)
-    if reply is None or not getattr(reply, "message_id", None):
-        return None
-    resolved = getattr(reply, "resolved", None)
-    # A deleted original resolves to a stand-in with no attachments.
-    if getattr(resolved, "attachments", None) is not None:
-        return resolved
-    try:
-        return await channel.fetch_message(reply.message_id)
-    except Exception as e:
-        logger.info(f"Could not fetch the replied-to message ({e!r})")
-        return None
 
 
-async def _sandbox_input_files(wrapper, requested) -> tuple[list, list, list]:
-    """(inputs, problems, names) for a sandbox run: the files it is given
-    (see classes/workspace_inputs.py for which, and why), downloaded."""
-    from classes import workspace_inputs as si
-
-    def _candidates(message):
-        return [si.Candidate(a.filename, a.size, a) for a in getattr(message, "attachments", None) or []]
-
-    channel = wrapper.context.get("channel")
-    message = wrapper.context.get("original_message")
-    given = []
-    if message is not None:
-        given = _candidates(message) + _candidates(await _replied_to(message, channel))
-    requested = [name for name in requested or [] if isinstance(name, str)]
-    recent = []
-    if requested and channel is not None:
-        try:
-            async for older in channel.history(limit=SANDBOX_FILE_LOOKBACK_MESSAGES):
-                recent.extend(_candidates(older))
-        except Exception as e:
-            logger.warning(f"Sandbox: could not read the channel for files ({e!r})")
-    chosen, missing, problems = si.select(given, recent, requested, si.max_input_bytes())
-    problems = [f"{name} (not found in the chat)" for name in missing] + problems
-
-    async def _download(candidate):
-        try:
-            return await asyncio.wait_for(candidate.ref.read(), SANDBOX_FILE_DOWNLOAD_TIMEOUT)
-        except Exception as e:
-            logger.warning(f"Sandbox: could not download {candidate.name}: {e!r}")
-            return None
-
-    inputs = []
-    data = await asyncio.gather(*(_download(c) for c in chosen))
-    for name, candidate, content in zip(si.unique_names(c.name for c in chosen), chosen, data):
-        if content is None:
-            problems.append(f"{candidate.name} (could not be downloaded)")
-        else:
-            inputs.append((name, content))
-    return inputs, problems, [name for name, _ in inputs]
 
 
-async def _run_claimed_sandbox(wrapper, task, channel, thread_created, in_thread, ledger,
-                               files=None) -> str:
-    """run_code_sandbox after the thread has been resolved and (in a thread)
-    claimed: announce, run, deliver, close. Split out only so the claim's
-    release can sit in one `finally` around all of it."""
-    from classes.workspace_inputs import tool_note
-    from classes.sandbox_agent import (
-        run_sandbox_task,
-        sandbox_outcome_note,
-        sandbox_tool_result,
-        sandbox_run_title,
-        sandbox_unresolved_note,
-        thread_record_id,
-    )
-    from classes.workspace_commands import progress_enabled
-    from classes.workspace_manager import NoServerWorkspace, WorkspaceUnavailable, workspaces
-    from classes.sandbox_conversation_store import SandboxConversationStore, resume_preamble
-    from classes.sandbox_progress import DESCRIPTION_CHARS, SandboxProgressHooks
-    from classes.tool_embeds import (
-        COLOR_SANDBOX,
-        SANDBOX_REPLY_HINT,
-        SANDBOX_STARTED,
-        sandbox_task_text,
-    )
-
-    original_message = wrapper.context.get("original_message")
-    discord_client = wrapper.context.get("discord_client")
-    requesting_user_id = wrapper.context.get("user_id")
-    if thread_created:
-        try:
-            await Common.send_tool_discord_embed(
-                original_message.channel, f"Follow along in {channel.mention}",
-                COLOR_SANDBOX, SANDBOX_STARTED)
-        except Exception as e:
-            logger.warning(f"Sandbox: failed to notify the original channel of the new thread: {e}")
-    # Whether the server's workspace is already running (ready at once) or
-    # has to start first, for the embed below.
-    guild_id = wrapper.context.get("guild_id") or getattr(getattr(channel, "guild", None), "id", None)
-    record_id = thread_record_id(channel)
-    title = sandbox_run_title(guild_id is not None and workspaces().is_warm(guild_id))
-    inputs, input_problems, input_names = await _sandbox_input_files(wrapper, files)
-    # The reply hint, only in a real thread, where a run is claimed and
-    # main.py routes messages to it: in the parent channel (the
-    # thread-creation-failed fallback) it would promise a conversation
-    # nothing would pick up. It sits in the run's own embed, static or live
-    # progress, so it shows whatever the progress setting.
-    footer = SANDBOX_REPLY_HINT if in_thread else None
-    # Loose ends the previous run in this thread left behind (messages that
-    # arrived too late, an unanswered question). Offered to this run as
-    # context — a follow-up in the thread IS the explicit resume — and
-    # replaced by this run's own record at the end. Independent of the
-    # job folder: either can be missing without the other.
-    run_task = task
-    if record_id is not None:
-        try:
-            run_task = resume_preamble(await SandboxConversationStore().load(record_id)) + task
-        except Exception as e:
-            logger.warning(f"Sandbox: could not load this thread's conversation record: {e}")
-
-    progress = None
-    # Per-guild toggle (/workspace progress, default off). A config read
-    # failure falls back to off — progress is a nice-to-have, not a
-    # dependency of the run itself.
-    if await progress_enabled(guild_id):
-        # Live progress: one Discord message, edited in place, showing each
-        # command the sandbox runs and its output (throttled for Discord's
-        # 5-edits/minute limit). start() is exception-safe (swallows send
-        # failures), so a progress problem never blocks the run.
-        progress = SandboxProgressHooks(channel, task, title=title, files=input_names,
-                                        footer=footer)
-        await progress.start()
-    run_embed = None
-    run_text = sandbox_task_text(task, input_names, DESCRIPTION_CHARS)
-    if progress is None:
-        # The same description the live-progress embed renders (the task
-        # capped at DESCRIPTION_CHARS), so the thread looks alike either way.
-        run_embed = await Common.send_tool_discord_embed(
-            channel, run_text, COLOR_SANDBOX, title, footer)
-
-    async def end_run_embed(note):
-        # The reply hint is true only while the run is live: left on, it sits
-        # just above the closing embed's "normal chat again" and invites a
-        # reply that would no longer steer anything. finalize drops it from
-        # the live-progress embed; the static one is edited without it.
-        if progress is not None:
-            await progress.finalize(note)
-        elif run_embed is not None and footer:
-            await Common.edit_tool_discord_embed(run_embed, run_text, COLOR_SANDBOX, title)
-
-    try:
-        result = await run_sandbox_task(
-            run_task,
-            progress,
-            thread=channel,
-            client=discord_client,
-            requesting_user_id=requesting_user_id,
-            guild_id=guild_id,
-            ledger=ledger,
-            inputs=inputs,
-            input_problems=input_problems,
-        )
-    except Exception as e:
-        logger.warning(f"Sandbox task failed: {e}")
-        await end_run_embed(sandbox_outcome_note("infra_error"))
-        # The run's embed already went out, so this path needs a closing
-        # note too or the thread is left looking mid-run forever.
-        outcomes = ledger.outcomes() if ledger is not None else []
-        await _send_sandbox_closing_note(
-            channel, in_thread, "infra_error", sandbox_unresolved_note(outcomes, in_thread))
-        await _save_conversation_record(record_id, outcomes, "infra_error", ledger)
-        if isinstance(e, NoServerWorkspace):
-            return ("Code tasks run in a server's workspace, and this conversation is not in a "
-                    "server. Tell the user to ask in a server channel, and do not retry here.")
-        if isinstance(e, WorkspaceUnavailable):
-            return ("The server's workspace is unavailable right now, so the task was not "
-                    "run. Tell the user to try again in a few minutes, and do not retry now.")
-        return ("The sandbox task failed (the code sandbox may be unavailable). "
-                "Tell the user the sandbox is not working right now and do "
-                "not retry the same task.")
-
-    # The server's saved workspace could not be restored, so it started
-    # empty (workspace_manager drops the bad snapshot): say so, or the
-    # earlier files just vanish without a word.
-    resume_correction = ""
-    if result.workspace_lost:
-        resume_correction = (
-            "\n\n(The server's saved workspace could not be restored, so it started "
-            "empty. Tell the user files kept from earlier runs were lost; this run's "
-            "own files are kept, so a follow-up here carries on from them.)"
-        )
-        try:
-            await channel.send(
-                "⚠️ This server's saved workspace couldn't be restored, so it started "
-                "empty. Files kept from earlier runs are gone."
-            )
-        except Exception as e:
-            logger.warning(f"Sandbox: failed to post the lost-workspace notice: {e}")
-
-    # give the live message its final state (it would otherwise sit on the
-    # last "still running" / thinking snapshot)
-    await end_run_embed("✅ Done." if result.ok else sandbox_outcome_note(result.error))
-
-    # Acknowledgements the sandbox wrote while Discord was refusing sends.
-    # Posted now, before the result, so the thread reads in order.
-    for reply in getattr(result, "unsent_replies", None) or []:
-        try:
-            await channel.send(reply[:1900])
-        except Exception as e:
-            logger.warning(f"Sandbox: failed to post a delayed reply: {e}")
-
-    # The sandbox agent's own closing message, written FOR the user (see
-    # SANDBOX_INSTRUCTIONS' final bullet). It rides on the first file so the
-    # user gets one message — summary plus image — the way a preview already
-    # arrives, and because the agent is the only party that knows what it
-    # actually did: the outer model, which used to be the sole author of this
-    # message, cannot see the run. Clamped to Discord's per-message limit
-    # rather than chunked — this is a short note beside a file, and a report
-    # long enough to need chunking would bury the file it belongs to.
-    lead = result.text.strip()[:1900] if (result.ok and result.text) else ""
-    sent_names = []
-    for artifact in result.artifacts:
-        content = lead or (artifact.caption.strip()[:1900] or None)
-        try:
-            await channel.send(
-                content=content,
-                file=discord.File(io.BytesIO(artifact.data), filename=artifact.name),
-            )
-            logger.info(f"Sandbox artifact sent to channel: {artifact.name} ({len(artifact.data)} bytes)")
-            sent_names.append(artifact.name)
-            # Kept for the reply: MessageHandler posts it, with these files,
-            # in the channel the request came from as well as the thread,
-            # so the result is where it was asked for. Extended, not set:
-            # one reply can make more than one sandbox call.
-            wrapper.context.setdefault("sandbox_files", []).append((artifact.name, artifact.data))
-            # Only now: a failed send carried the message with it, so keeping
-            # `lead` set is what lets the fallback below still deliver it.
-            lead = ""
-        except Exception as e:
-            logger.warning(f"Sandbox artifact {artifact.name} generated but failed to send: {e}")
-    if lead:
-        # No files, or every send failed: the message still has to reach the
-        # user, or the run's own account of itself is lost and only the outer
-        # model's second-hand version survives.
-        try:
-            await channel.send(lead)
-        except Exception as e:
-            logger.warning(f"Sandbox: failed to post the agent's closing message: {e}")
-
-    # What happened to each thread message. Read from the live ledger rather
-    # than the result, which was built before delivery: anything posted while
-    # the files were uploading was filed as a follow-up in the meantime.
-    outcomes = ledger.outcomes() if ledger is not None else list(getattr(result, "conversation", None) or [])
-
-    # After the artifacts, before the return: the thread's "here is how the run
-    # ended, and how to carry on" marker; a run that did NOT finish normally
-    # says why in its title. Posted on every path where the run's embed
-    # already went out, and never on the early returns (content guard,
-    # forwarded-to-a-running-run) where nothing opened.
-    await _send_sandbox_closing_note(
-        channel, in_thread, None if result.ok else (result.error or "failed"),
-        sandbox_unresolved_note(outcomes, in_thread))
-    await _save_conversation_record(
-        record_id, outcomes, "ok" if result.ok else (result.error or "failed"), ledger)
-
-    # Everything the outer model is told is built by sandbox_tool_result
-    # (sandbox_agent.py) — pure, and unit-tested without a Discord channel.
-    # A follow-up in a thread always carries on in its job folder, which is
-    # what the closing note just told the user too.
-    return sandbox_tool_result(
-        result,
-        sent_names=sent_names,
-        in_thread=in_thread,
-        # Even after a lost workspace: that loses earlier runs' files, while
-        # this run worked in the new container and its files are kept.
-        resumable=in_thread,
-        steering=outcomes,
-        resume_correction=resume_correction,
-    ) + tool_note(result.inputs, result.input_problems)
 
 
-_CONVERSATION_SAVE_ATTEMPTS = 5
 
 
-async def _save_conversation_record(record_id, outcomes, outcome: str, ledger) -> None:
-    """Persists this run's loose ends for the next run in the thread (see
-    classes/sandbox_conversation_store.py). Best-effort and independent of
-    the workspace; a failure is logged, never raised."""
-    if record_id is None:
-        return
-    from classes.sandbox_conversation_store import SandboxConversationStore, build_record
 
-    def _current():
-        if ledger is None:
-            return outcomes, None
-        return ledger.outcomes(), (ledger.question.text if ledger.question is not None else None)
 
-    # Read at save time, and again after each save: the claim is held through
-    # the closing note, so a message can land in ledger.follow_ups after the
-    # caller took its snapshot OR while the save itself is awaiting Redis —
-    # and it was promised it would be kept. Follow-ups are capped
-    # (MAX_FOLLOW_UPS), so this settles; the attempt cap is only a backstop.
-    saved = None
-    try:
-        for _ in range(_CONVERSATION_SAVE_ATTEMPTS):
-            current = _current()
-            if current == saved:
-                break
-            rows, question = current
-            await SandboxConversationStore().save(
-                record_id, build_record(rows, outcome=outcome, open_question=question))
-            saved = current
-    except Exception as e:
-        logger.warning(f"Sandbox: could not save this thread's conversation record: {e}")
+
+
 
 
 @function_tool
@@ -886,28 +472,6 @@ async def check_polls(wrapper: RunContextWrapper[dict]) -> str:
     return "Polls in this channel, newest first:\n\n" + "\n\n".join(found)
 
 
-def shared_tools() -> list:
-    """The tools the main agent AND the sandbox agent get: looking things up
-    (web, links, this server's messages, polls, events) plus posting a poll
-    and making or moving an event. The sandbox gets only those on
-    sandbox_agent._SANDBOX_SHARED_TOOLS (no poll tools): the read-only ones
-    as these same objects, the two event tools as gated copies. So never
-    change one of these in place for the sandbox; it would change the main
-    agent's too.
-
-    One list so the two cannot drift apart. The tools read "channel",
-    "discord_client" and "user_id" from their run context; the sandbox
-    puts its thread, the client and the requester there (run_sandbox_task),
-    so their code needs no sandbox version. Each tool is a fixed piece of code:
-    the model picks a tool and its arguments, never what is done with the
-    client.
-
-    The event and search tools are imported here, not at the top: both
-    modules import from this one."""
-    from classes.event_tools import event_tools
-    from classes.message_search_tools import message_search_tools
-    return [web_search, fetch_url, create_poll, check_polls,
-            *event_tools(), *message_search_tools()]
 
 
 @function_tool

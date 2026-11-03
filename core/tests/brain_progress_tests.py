@@ -2,13 +2,13 @@ import json
 import os
 import sys
 
-# sandbox_progress is imported as classes.* here and classes.* in
-# production (the app runs with cwd=core/); both resolve as namespace packages.
+# brain_progress is imported as classes.* here and in production (the app
+# runs with cwd=core/).
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from classes.sandbox_progress import (
+from classes.brain_progress import (
     COLOR_FAIL,
     COLOR_RUNNING,
     COLOR_TOOL,
@@ -16,14 +16,16 @@ from classes.sandbox_progress import (
     EMBED_CHAR_BUDGET,
     FIELD_VALUE_CHARS,
     MAX_FIELDS,
-    SandboxProgressHooks,
+    BrainProgressHooks,
     SandboxTranscript,
     parse_exec_result,
 )
-from classes.tool_embeds import COLOR_SANDBOX, SANDBOX_READY, sandbox_task_text
+from classes.tool_embeds import (
+    BRAIN_DONE, BRAIN_STOPPED, BRAIN_WORKING, COLOR_BRAIN, COLOR_DONE, COLOR_STOPPED, work_task_text,
+)
 
 # To run this pytest file from the command line, use:
-# PYTHONPATH=$(pwd) pytest core/tests/sandbox_progress_tests.py
+# pytest core/tests/brain_progress_tests.py
 
 
 # ---------------------- parse_exec_result ----------------------
@@ -111,9 +113,9 @@ def test_transcript_initial_embed_mirrors_tool_embed():
     # message body
     body, spec = _render(SandboxTranscript("compute 6*7"))
     assert body == ""
-    assert spec.title == "🐳 Workspace · starting"
+    assert spec.title == BRAIN_WORKING
     assert spec.description == "compute 6*7"
-    assert spec.color == COLOR_TOOL == COLOR_SANDBOX
+    assert spec.color == COLOR_TOOL == COLOR_BRAIN
     assert spec.fields == []
     assert spec.footer is None
 
@@ -265,7 +267,7 @@ def test_transcript_long_task_truncated_in_description():
     assert spec.description.endswith("word…")
 
 
-# ---------------------- SandboxProgressHooks ----------------------
+# ---------------------- BrainProgressHooks ----------------------
 
 def _tool(name: str):
     tool = MagicMock()
@@ -277,6 +279,11 @@ def _ctx(tool_arguments: str):
     ctx = MagicMock()
     ctx.tool_arguments = tool_arguments
     return ctx
+
+
+async def _begin(hooks):
+    """The first workspace action, which is what posts the status embed."""
+    await hooks.on_tool_start(_ctx("{}"), None, _tool("attach_file"))
 
 
 def _channel_with_message():
@@ -296,29 +303,66 @@ def _last_flush(message):
 
 
 @pytest.mark.asyncio
-async def test_start_sends_initial_embed_like_tool_embed():
+async def test_nothing_is_posted_until_the_workspace_is_used():
+    # D18: a call that only searches or posts a poll shows only that tool's
+    # own embed.
     channel, message = _channel_with_message()
-    hooks = SandboxProgressHooks(channel, "print 42", edit_interval=0)
-    await hooks.start()
+    hooks = BrainProgressHooks(channel, "find the weather", stream=True, edit_interval=0)
+    await hooks.on_llm_start(None, None, "sys", [])
+    await hooks.on_tool_start(_ctx("{}"), None, _tool("web_search"))
+    await hooks.on_tool_end(_ctx("{}"), None, _tool("web_search"), "results")
+    await hooks.on_llm_end(None, None, "resp")
+    await hooks.finalize(ok=True, note="done")
+    channel.send.assert_not_awaited()
+    assert hooks.started is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["exec_command", "attach_file", "save_messages_to_file"])
+async def test_the_first_workspace_action_posts_the_embed(tool):
+    channel, message = _channel_with_message()
+    hooks = BrainProgressHooks(channel, "print 42", edit_interval=0)
+    await hooks.on_tool_start(_ctx(json.dumps({"cmd": "ls"})), None, _tool(tool))
     channel.send.assert_awaited_once()
-    sent = channel.send.await_args
-    embeds = sent.kwargs.get("embeds") or []
+    embeds = channel.send.await_args.kwargs.get("embeds") or []
     assert len(embeds) == 1
-    assert embeds[0].title == "🐳 Workspace · starting"
+    assert embeds[0].title == BRAIN_WORKING
     assert embeds[0].description == "print 42"
     assert embeds[0].color.value == COLOR_TOOL
-    assert len(embeds[0].fields) == 0  # no commands yet
-    content = sent.args[0]
-    assert "starting container…" in content
-    # the header lives in the embed now, not as cut-off emoji text
-    assert "🐳" not in content
+    assert hooks.started is True
+
+
+@pytest.mark.asyncio
+async def test_without_streaming_the_embed_shows_no_commands_and_is_retitled_at_the_end():
+    channel, message = _channel_with_message()
+    hooks = BrainProgressHooks(channel, "chart it", stream=False, edit_interval=0)
+    args = _ctx(json.dumps({"cmd": "python plot.py"}))
+    await hooks.on_tool_start(args, None, _tool("exec_command"))
+    await hooks.on_tool_end(args, None, _tool("exec_command"),
+                            "Chunk ID: x\nProcess exited with code 0\nOutput:\nok")
+    assert len(channel.send.await_args.kwargs["embeds"][0].fields) == 0
+    await hooks.finalize(ok=True)
+    _, embed = _last_flush(message)
+    assert embed.title == BRAIN_DONE and embed.color.value == COLOR_DONE
+    assert len(embed.fields) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_call_is_titled_and_coloured_as_stopped():
+    channel, message = _channel_with_message()
+    hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
+    await _begin(hooks)
+    await hooks.finalize(ok=False, note="⚠️ It ran out of time.")
+    content, embed = _last_flush(message)
+    assert embed.title == BRAIN_STOPPED and embed.color.value == COLOR_STOPPED
+    assert "ran out of time" in content
 
 
 @pytest.mark.asyncio
 async def test_tool_start_end_stream_command_and_output():
     channel, message = _channel_with_message()
-    hooks = SandboxProgressHooks(channel, "t", edit_interval=0)
-    await hooks.start()
+    hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
+    await _begin(hooks)
     message.edit.reset_mock()
 
     await hooks.on_tool_start(
@@ -329,7 +373,6 @@ async def test_tool_start_end_stream_command_and_output():
 
     assert message.edit.await_count >= 1
     content, embed = _last_flush(message)
-    assert content
     assert len(embed.fields) == 1
     assert embed.fields[0].name == "$ echo hi"
     assert "hi" in embed.fields[0].value
@@ -340,15 +383,15 @@ async def test_tool_start_end_stream_command_and_output():
 @pytest.mark.asyncio
 async def test_throttle_delays_edits_until_finalize():
     channel, message = _channel_with_message()
-    hooks = SandboxProgressHooks(channel, "t", edit_interval=3600)  # never due
-    await hooks.start()
+    hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=3600)  # never due
+    await _begin(hooks)
     message.edit.reset_mock()
 
     await hooks.on_tool_start(
         _ctx(json.dumps({"cmd": "echo a"})), None, _tool("exec_command"))
     message.edit.assert_not_awaited()  # still throttled
 
-    await hooks.finalize("done")  # the final flush bypasses the throttle
+    await hooks.finalize(note="done")  # the final flush bypasses the throttle
     content, embed = _last_flush(message)
     assert embed.fields[0].name == "$ echo a"
     assert "done" in content
@@ -357,20 +400,20 @@ async def test_throttle_delays_edits_until_finalize():
 @pytest.mark.asyncio
 async def test_finalize_is_idempotent():
     channel, message = _channel_with_message()
-    hooks = SandboxProgressHooks(channel, "t", edit_interval=0)
-    await hooks.start()
+    hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
+    await _begin(hooks)
     message.edit.reset_mock()
-    await hooks.finalize("done")
+    await hooks.finalize(note="done")
     count_after_first = message.edit.await_count
-    await hooks.finalize("again")
+    await hooks.finalize(note="again")
     assert message.edit.await_count == count_after_first
 
 
 @pytest.mark.asyncio
 async def test_write_stdin_poll_without_output_is_skipped():
     channel, message = _channel_with_message()
-    hooks = SandboxProgressHooks(channel, "t", edit_interval=0)
-    await hooks.start()
+    hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
+    await _begin(hooks)
     message.edit.reset_mock()
 
     await hooks.on_tool_end(
@@ -383,8 +426,8 @@ async def test_write_stdin_poll_without_output_is_skipped():
 @pytest.mark.asyncio
 async def test_write_stdin_with_output_is_appended():
     channel, message = _channel_with_message()
-    hooks = SandboxProgressHooks(channel, "t", edit_interval=0)
-    await hooks.start()
+    hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
+    await _begin(hooks)
 
     await hooks.on_tool_end(
         _ctx(json.dumps({"session_id": 3, "chars": ""})), None,
@@ -403,8 +446,8 @@ async def test_write_stdin_with_output_is_appended():
 @pytest.mark.asyncio
 async def test_write_stdin_chars_shown_as_input():
     channel, message = _channel_with_message()
-    hooks = SandboxProgressHooks(channel, "t", edit_interval=0)
-    await hooks.start()
+    hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
+    await _begin(hooks)
 
     await hooks.on_tool_start(
         _ctx(json.dumps({"session_id": 3, "chars": "y\n"})), None,
@@ -417,8 +460,8 @@ async def test_write_stdin_chars_shown_as_input():
 @pytest.mark.asyncio
 async def test_unrelated_tools_are_ignored():
     channel, message = _channel_with_message()
-    hooks = SandboxProgressHooks(channel, "t", edit_interval=0)
-    await hooks.start()
+    hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
+    await _begin(hooks)
     message.edit.reset_mock()
 
     await hooks.on_tool_start(_ctx("{}"), None, _tool("web_search"))
@@ -430,13 +473,13 @@ async def test_unrelated_tools_are_ignored():
 async def test_failed_edit_backs_off_and_run_continues():
     channel, message = _channel_with_message()
     message.edit = AsyncMock(side_effect=Exception("rate limited"))
-    hooks = SandboxProgressHooks(channel, "t", edit_interval=0)
-    await hooks.start()
+    hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
+    await _begin(hooks)
 
     # must not raise, even though every edit fails
     await hooks.on_tool_start(
         _ctx(json.dumps({"cmd": "echo a"})), None, _tool("exec_command"))
-    await hooks.finalize("done")  # force-flush still attempted, still safe
+    await hooks.finalize(note="done")  # force-flush still attempted, still safe
 
 
 @pytest.mark.asyncio
@@ -445,12 +488,12 @@ async def test_deleted_message_falls_back_to_send():
     channel, message = _channel_with_message()
     not_found = discord.NotFound(MagicMock(status=404), "deleted")
     message.edit = AsyncMock(side_effect=not_found)
-    hooks = SandboxProgressHooks(channel, "t", edit_interval=0)
-    await hooks.start()
+    hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
+    await _begin(hooks)
 
     await hooks.on_tool_start(
         _ctx(json.dumps({"cmd": "echo a"})), None, _tool("exec_command"))
-    await hooks.finalize("done")
+    await hooks.finalize(note="done")
 
     assert channel.send.await_count == 2  # initial + resend after deletion
     last = channel.send.await_args
@@ -464,32 +507,32 @@ async def test_deleted_message_falls_back_to_send():
 async def test_send_failure_on_start_does_not_break_hooks():
     channel = MagicMock()
     channel.send = AsyncMock(side_effect=Exception("no permissions"))
-    hooks = SandboxProgressHooks(channel, "t", edit_interval=0)
-    await hooks.start()  # must not raise
+    hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
+    await _begin(hooks)  # must not raise
 
     await hooks.on_tool_start(
         _ctx(json.dumps({"cmd": "echo a"})), None, _tool("exec_command"))
-    await hooks.finalize("done")  # must not raise
+    await hooks.finalize(note="done")  # must not raise
 
 
 @pytest.mark.asyncio
 async def test_hooks_never_raise_on_garbage():
     channel, _ = _channel_with_message()
-    hooks = SandboxProgressHooks(channel, "t", edit_interval=0)
+    hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
     await hooks.on_tool_start(_ctx("not json"), None, _tool("exec_command"))
     await hooks.on_tool_start(_ctx("{}"), None, _tool("exec_command"))  # no cmd
     await hooks.on_tool_end(_ctx("{}"), None, _tool("exec_command"), 12345)
     await hooks.on_tool_start(None, None, _tool("web_search"))
     await hooks.on_llm_start(None, None, "sys", [])
     await hooks.on_llm_end(None, None, "resp")
-    await hooks.finalize("done")
+    await hooks.finalize(note="done")
 
 
 @pytest.mark.asyncio
 async def test_message_stays_under_discord_limits():
     channel, message = _channel_with_message()
-    hooks = SandboxProgressHooks(channel, "task " * 100, edit_interval=0)
-    await hooks.start()
+    hooks = BrainProgressHooks(channel, "task " * 100, stream=True, edit_interval=0)
+    await _begin(hooks)
     for i in range(30):
         await hooks.on_tool_start(
             _ctx(json.dumps({"cmd": f"echo line-{i} " + "x" * 50})), None,
@@ -511,27 +554,25 @@ async def test_message_stays_under_discord_limits():
 # ---------------------- title, files and reply hint ----------------------
 
 def test_transcript_shows_the_title_files_and_footer_it_is_given():
-    _, spec = _render(SandboxTranscript("do a thing", title=SANDBOX_READY,
+    _, spec = _render(SandboxTranscript("do a thing", title=BRAIN_WORKING,
                                         files=["a.csv", "b.png"], footer="reply here"))
-    assert spec.title == SANDBOX_READY
+    assert spec.title == BRAIN_WORKING
     assert spec.description == "do a thing\n📎 a.csv, b.png"
     assert spec.footer == "reply here"
 
 
 def test_transcript_matches_the_static_embed_text():
-    # the thread looks the same whether live progress is on or off
     _, spec = _render(SandboxTranscript("do a thing", files=["a.csv"]))
-    assert spec.description == sandbox_task_text("do a thing", ["a.csv"], DESCRIPTION_CHARS)
+    assert spec.description == work_task_text("do a thing", ["a.csv"], DESCRIPTION_CHARS)
 
 
-def test_hooks_pass_the_title_files_and_footer_into_the_embed():
+def test_hooks_pass_the_files_into_the_embed():
     channel, _ = _channel_with_message()
-    hooks = SandboxProgressHooks(channel, "do a thing", title=SANDBOX_READY,
-                                 files=["a.csv"], footer="reply here")
+    hooks = BrainProgressHooks(channel, "do a thing", files=["a.csv"])
     _, spec = hooks.transcript.render_message()
     embed = hooks._build_embed(spec)
-    assert embed.title == SANDBOX_READY
-    assert embed.footer.text == "reply here"
+    assert embed.title == BRAIN_WORKING
+    assert embed.description.endswith("a.csv")
 
 
 def test_the_footer_counts_against_the_embed_budget():
@@ -549,8 +590,8 @@ async def test_a_command_the_gate_refused_is_shown_as_held_not_running():
     # A refused command never ran; left as-is it would sit in the embed as
     # "… still running" with the running colour until the run ended.
     channel, message = _channel_with_message()
-    hooks = SandboxProgressHooks(channel, "t", edit_interval=0)
-    await hooks.start()
+    hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
+    await _begin(hooks)
 
     args = _ctx(json.dumps({"cmd": "make red.png"}))
     await hooks.on_tool_start(args, None, _tool("exec_command"))
@@ -575,8 +616,8 @@ async def test_a_refusal_marks_its_own_command_not_the_latest_one():
     # runs and finishes, then A is refused. The finished B must keep its
     # exit code and A must show as held.
     channel, message = _channel_with_message()
-    hooks = SandboxProgressHooks(channel, "t", edit_interval=0)
-    await hooks.start()
+    hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
+    await _begin(hooks)
     a, b = _call_ctx("ca", "make a"), _call_ctx("cb", "make b")
     await hooks.on_tool_start(a, None, _tool("exec_command"))
     await hooks.on_tool_start(b, None, _tool("exec_command"))
@@ -598,15 +639,3 @@ def test_a_block_that_ran_is_never_marked_held():
     t.add_output("out", exit_code=0, block=block)
     t.mark_held(block)
     assert block.held is False
-
-
-@pytest.mark.asyncio
-async def test_finalize_drops_the_reply_hint():
-    # once the run is over, replying no longer steers it
-    channel, message = _channel_with_message()
-    hooks = SandboxProgressHooks(channel, "t", footer="reply here", edit_interval=0)
-    await hooks.start()
-    assert channel.send.await_args.kwargs["embeds"][0].footer.text == "reply here"
-    await hooks.finalize("✅ Done.")
-    _, embed = _last_flush(message)
-    assert embed.footer.text is None

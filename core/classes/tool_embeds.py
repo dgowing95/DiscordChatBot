@@ -12,14 +12,12 @@ and the sentence buried the part worth reading. So now:
 The description stays self-contained on purpose: MessageHandler._format_group
 sends the bot's own embeds back to the model as JSON in later prompts (minus
 any fields), and the description is what tells it which tool it used on what.
-Footers cost prompt tokens on every history message, so only the sandbox's
-embeds have one.
+Footers cost prompt tokens on every history message, so tools rarely have
+one.
 
 Titles never carry user text, links or mentions: Discord renders none of those
-in a title, and caps it at 256 characters. The sandbox run embed's titles and
-reply hint live here; its closing embed (how a run ended, whether it can be
-resumed) is built in sandbox_agent (sandbox_closing_embed, SANDBOX_STOP_TITLES),
-beside the rules it reports on.
+in a title, and caps it at 256 characters. The brain's status embed titles
+live here too (classes/brain_progress.py posts it).
 """
 import re
 from urllib.parse import urlsplit
@@ -29,10 +27,10 @@ COLOR_WEB = 0x00B0F4       # cyan: searching and reading the web
 COLOR_IMAGE = 0xEB459E     # pink: drawing
 COLOR_MEMORY = 0x57F287    # green: remembering about a person
 COLOR_MESSAGES = 0x5865F2  # blurple: reading this server's messages
-COLOR_SANDBOX = 0x1ABC9C   # teal: the code sandbox at work
+COLOR_BRAIN = 0x1ABC9C     # teal: the brain at work in the server's workspace
 COLOR_PERSONA = 0x9B59B6   # purple: the bot's personality
-COLOR_DONE = 0x99AAB5      # grey: a sandbox run that is over
-COLOR_STOPPED = 0xED4245   # red: a sandbox run that was stopped
+COLOR_DONE = 0x99AAB5      # grey: brain work that is over
+COLOR_STOPPED = 0xED4245   # red: brain work that was stopped
 
 WEB_SEARCH = "🔎 Web search"
 READING_PAGE = "🌐 Reading a page"
@@ -43,15 +41,11 @@ SEARCHING_MESSAGES = "🔍 Searching messages"
 SAVING_MESSAGES = "🗂️ Saving messages to a file"
 READING_MESSAGES = "📜 Reading messages"
 PERSONALITY = "🎭 Personality updated"
-SANDBOX_STARTED = "🧵 Sandbox started"
-# The run embed's title: the server's workspace was already running, or has
-# to start first (sandbox_agent.sandbox_run_title).
-SANDBOX_READY = "🐳 Workspace · ready"
-SANDBOX_STARTING = "🐳 Workspace · starting"
-
-# Under the run's embed, in a thread only: messages there reach the run.
-SANDBOX_REPLY_HINT = ("💬 Reply in this thread to change the task or ask a question. "
-                      "No @mention needed.")
+# The brain's status embed, posted only once it uses the workspace (a
+# command or a file): a search or a poll shows only its own embed.
+BRAIN_WORKING = "🧠 Working on it"
+BRAIN_DONE = "🧠 Done"
+BRAIN_STOPPED = "🧠 Stopped"
 
 LINK_LABEL_CHARS = 80
 
@@ -120,8 +114,8 @@ def trim(text: str, limit: int) -> str:
     return cut.rstrip(",.;:") + "…"
 
 
-def sandbox_task_text(task: str, files=(), limit: int = 1000) -> str:
-    """The run embed's description: the task, and the chat files given to it."""
+def work_task_text(task: str, files=(), limit: int = 1000) -> str:
+    """The status embed's description: the request, and the chat files given to it."""
     text = trim(task, limit)
     if files:
         text += "\n📎 " + ", ".join(files)

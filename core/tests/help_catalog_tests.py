@@ -2,7 +2,7 @@
 Tests for /help (core/classes/help_catalog.py).
 
 The sync tests are the point: the catalog is hand-written, so they fail when
-an agent tool or a slash command is added without a /help entry (or one is
+a brain tool or a slash command is added without a /help entry (or one is
 removed and its entry left behind).
 
 Run from the repo root:
@@ -32,12 +32,12 @@ def _all_on(monkeypatch):
     monkeypatch.setenv("EVENTS_ENABLED", "1")
 
 
-def test_every_agent_tool_has_help(monkeypatch):
-    from classes.text_llm_handler import agent_tools
+def test_every_brain_tool_has_help(monkeypatch):
+    from classes.brain_tools import brain_tools
     _all_on(monkeypatch)
     # A voice turn swaps join_voice_channel for leave_voice_channel.
-    names = {tool.name for tool in agent_tools()} | {tool.name for tool in agent_tools(voice=True)}
-    assert names == help_catalog.documented_tools()
+    names = {tool.name for tool in brain_tools()} | {tool.name for tool in brain_tools(voice=True)}
+    assert names - help_catalog.INTERNAL_TOOLS == help_catalog.documented_tools()
 
 
 class FakeCommandTree:
@@ -92,10 +92,10 @@ def test_disabled_features_are_hidden(monkeypatch):
     assert "Events" not in text
     assert "/generate_image" not in text and "Make images" not in text
     # The workspace is always there: Docker is required.
-    assert "/workspace" in text and "Run code" in text
+    assert "/workspace" in text and "Code, files and charts" in text
     monkeypatch.setenv("EVENTS_ENABLED", "1")
     text = str(help_catalog.help_embed_data(True))
-    assert "/generate_image" in text and "Run code" in text and "Events" in text
+    assert "/generate_image" in text and "Code, files and charts" in text and "Events" in text
 
 
 def test_help_and_whats_new_replies_are_ephemeral(monkeypatch):

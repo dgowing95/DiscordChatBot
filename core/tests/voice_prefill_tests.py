@@ -97,12 +97,13 @@ async def test_voice_thinking_can_be_turned_back_on(captured, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_voice_tools_leave_rather_than_join(captured):
+async def test_a_voice_turn_has_only_ask_brain(captured):
+    # The persona's one tool; leaving the call is a brain tool now
+    # (brain_tools_tests checks a voice call's brain leaves, not joins).
     with pytest.raises(Captured):
         await _handler().prefill()
     names = {tool["function"]["name"] for tool in captured[0]["tools"]}
-    assert "leave_voice_channel" in names and "join_voice_channel" not in names
-    assert "web_search" in names and "store_memory" in names
+    assert names == {"ask_brain"}
 
 
 @pytest.mark.asyncio

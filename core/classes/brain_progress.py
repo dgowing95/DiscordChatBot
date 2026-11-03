@@ -1,54 +1,45 @@
-"""Live progress for the run_code_sandbox tool.
+"""The brain's status embed ("🧠 Working on it") and its live progress.
 
-Streams the sandbox agent's activity — every exec_command it runs and the
-output it gets back — into a SINGLE Discord message that is edited in
-place, so the channel can watch the sandbox work instead of going silent
-for minutes.
+Posted ONLY when the brain uses the server's workspace: its first shell
+command, file attachment or message export (D18). A brain call that only
+searches, saves a memory or posts a poll shows just that tool's own embed, as
+before; a status embed on top of a poll would be noise. So nothing is sent
+until the first workspace action (BrainProgressHooks.on_tool_start).
+
+Two forms, chosen per server with /workspace progress:
+  - off (the default): one static embed (title + the request), retitled
+    when the call ends ("🧠 Done" / "🧠 Stopped").
+  - on: the same embed with every exec_command and its output streamed in,
+    one field per command, edited in place.
 
 How it hooks in:
-  The OpenAI Agents SDK fires on_tool_start / on_tool_end lifecycle hooks
-  for every function-tool invocation — including the sandbox Shell
-  capability's exec_command and write_stdin (they are FunctionTools under
-  the hood). We attach a RunHooks instance (SandboxProgressHooks) to the
-  nested sandbox Runner.run: on_tool_start carries the tool arguments
-  (the command), on_tool_end carries the tool result (the command output,
-  formatted by the SDK). The Docker sandbox runs with a PTY, so
-  long-running commands are polled with write_stdin and each poll returns
-  up to ~10s of fresh output — that is what gets appended to the live
-  message.
+  The OpenAI Agents SDK fires on_tool_start / on_tool_end for every
+  function-tool call, the Shell capability's exec_command and write_stdin
+  included (they are FunctionTools underneath). BrainProgressHooks is one of
+  the brain run's hooks: on_tool_start carries the arguments (the command),
+  on_tool_end the result (the command's output, formatted by the SDK). The
+  Docker workspace runs with a PTY, so long commands are polled with
+  write_stdin, each poll returning fresh output.
 
 Discord rate limits:
-  Sends are limited to 5 messages/5s per channel and EDITS to 5/minute
-  per channel, so after the first message progress is ONE message edited
-  at most every EDIT_INTERVAL seconds (15s → max 4 edits/min), plus one
-  final flush when the run ends. Every network failure is swallowed
-  (best-effort progress must never break the sandbox run) with a backoff
-  before the next attempt; a deleted message falls back to a fresh send.
+  Sends are limited to 5 messages/5s per channel and EDITS to 5/minute per
+  channel, so after the first message progress is ONE message edited at most
+  every EDIT_INTERVAL seconds (15s, so at most 4 edits a minute), plus one
+  final flush when the call ends. Every network failure is swallowed (progress
+  must never break the brain's run) with a backoff before the next attempt; a
+  deleted message falls back to a fresh send.
 
-Rendering:
-  ONE embed, the same as the static one the tool sends when progress is
-  off: its title ("🐳 Sandbox · new workspace" / "· resumed"), the task as
-  the description (tool_embeds.sandbox_task_text), the reply hint as the
-  footer in a thread, and ONE FIELD PER COMMAND. One-line commands are the field NAME (bold, "$ cmd");
-  heredocs/long commands use the name "⌨ Command" and carry their full
-  text in the value. Output goes in a code fence (monospace, whitespace
-  kept) followed by an "exit N" / "… still running" status line. The
-  embed's accent colour is the overall state: teal (idle/initial, the
-  static embed's colour), yellow (latest command still running), red
-  (latest command failed). Events are QUEUED in the transcript and the
-  whole queue is rendered into every (throttled) edit, so many commands
-  land in one edit; when the queue outgrows Discord's embed budget
-  (25 fields / 6000 chars of embed text per message) the OLDEST fields
-  are dropped first.
+Rendering (streamed form):
+  One-line commands are the field NAME (bold, "$ cmd"); heredocs and long
+  commands use the name "⌨ Command" and carry their text in the value.
+  Output goes in a code fence followed by an "exit N" / "… still running"
+  status line. The accent colour is the overall state: teal (idle), yellow
+  (latest command still running), red (latest command failed). When the
+  queue outgrows Discord's embed budget (25 fields / 6000 characters) the
+  OLDEST fields are dropped first.
 
-This is a per-guild opt-in: the /workspace progress slash command
-stores the setting in Redis (configManager, dcb namespace); when it is off
-or unset (the default) the tool only sends the one static run embed and
-no progress hooks are attached.
-
-The pure parts (SandboxTranscript, parse_exec_result)
-are unit-tested in
-core/tests/sandbox_progress_tests.py.
+The pure parts (SandboxTranscript, parse_exec_result) are unit-tested in
+core/tests/brain_progress_tests.py.
 """
 import logging
 import json
@@ -60,7 +51,9 @@ import discord
 from agents import RunHooks
 
 from classes.sandbox_conversation import GATE_REFUSAL_PREFIX
-from classes.tool_embeds import COLOR_SANDBOX, COLOR_STOPPED, SANDBOX_STARTING, sandbox_task_text
+from classes.tool_embeds import (
+    BRAIN_DONE, BRAIN_STOPPED, BRAIN_WORKING, COLOR_BRAIN, COLOR_DONE, COLOR_STOPPED, work_task_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +73,7 @@ EMBED_CHAR_BUDGET = 5800      # stay a bit under the 6000 hard cap
 DESCRIPTION_CHARS = 1000      # the task in the embed description (the model reads it back from history)
 
 # Accent colours: the single embed's state.
-COLOR_TOOL = COLOR_SANDBOX    # teal — idle/initial, like the static embed
+COLOR_TOOL = COLOR_BRAIN      # teal — idle/initial, like the static embed
 COLOR_RUNNING = 0xFEE75C      # yellow — latest command still running
 COLOR_FAIL = COLOR_STOPPED    # red — latest command exited non-zero
 
@@ -143,7 +136,7 @@ class FieldSpec:
 class EmbedSpec:
     """One Discord embed, described without the discord library (pure).
 
-    SandboxProgressHooks turns this into a discord.Embed.
+    BrainProgressHooks turns this into a discord.Embed.
     """
     title: str
     color: int
@@ -154,7 +147,7 @@ class EmbedSpec:
 
 @dataclass
 class _Block:
-    """One command the sandbox ran, plus everything that came back."""
+    """One command the brain ran, plus everything that came back."""
     cmd: str
     stdin: str = ""
     output: str = ""
@@ -193,14 +186,13 @@ class SandboxTranscript:
     queue is bigger, the OLDEST fields are dropped.
     """
 
-    def __init__(self, task: str, *, title: str = SANDBOX_STARTING, files=(),
+    def __init__(self, task: str, *, title: str = BRAIN_WORKING, files=(),
                  footer: str | None = None):
         self._task = " ".join((task or "").split())
-        # Whether this run started from an empty workspace or resumed the
-        # thread's saved one (sandbox_agent.sandbox_run_title), the chat
-        # files given to it, and the reply hint (in a thread only): the
-        # same as the static embed sent when progress is off.
+        # The title (working / done / stopped), the chat files given to the
+        # call, and an optional footer: the same as the static embed.
         self._title = title
+        self._final_color: int | None = None
         self._files = list(files or ())
         self._footer = footer
         self._blocks: list[_Block] = []
@@ -244,7 +236,7 @@ class SandboxTranscript:
     def add_output(self, output: str, exit_code: int | None = None,
                    process_id: int | None = None, block: _Block | None = None) -> None:
         """block: the command this output belongs to, when the caller knows
-        it (SandboxProgressHooks keys blocks by tool call); otherwise the
+        it (BrainProgressHooks keys blocks by tool call); otherwise the
         latest one."""
         out = (output or "").strip("\n")
         if not out and exit_code is None and process_id is None:
@@ -273,6 +265,11 @@ class SandboxTranscript:
     def set_thinking(self, thinking: bool) -> None:
         self._thinking = bool(thinking)
 
+    def set_final(self, title: str, color: int) -> None:
+        """The call is over: its closing title and colour."""
+        self._title = title
+        self._final_color = color
+
     # -- render -----------------------------------------------------------
 
     def render_message(self) -> tuple[str, EmbedSpec]:
@@ -289,6 +286,8 @@ class SandboxTranscript:
         return body
 
     def _state_color(self) -> int:
+        if self._final_color is not None:
+            return self._final_color
         if self._blocks:
             last = self._blocks[-1]
             if last.held:
@@ -344,7 +343,7 @@ class SandboxTranscript:
 
     def _render_embed(self) -> EmbedSpec:
         title = self._title
-        description = sandbox_task_text(self._task, self._files, DESCRIPTION_CHARS)
+        description = work_task_text(self._task, self._files, DESCRIPTION_CHARS)
         # newest first: keep whole fields while they fit Discord's embed
         # budget; older fields are evicted as a unit so a command never
         # ends up separated from its output
@@ -363,21 +362,29 @@ class SandboxTranscript:
         return EmbedSpec(title, self._state_color(), description, fields, self._footer)
 
 
-class SandboxProgressHooks(RunHooks):
-    """RunHooks for the nested sandbox run: mirrors each exec_command /
-    write_stdin call and its output into one Discord message (edited in
+# The tools that use the server's workspace: the first of them posts the
+# status embed (D18).
+WORKSPACE_TOOLS = frozenset({"exec_command", "write_stdin", "attach_file", "save_messages_to_file"})
+
+
+class BrainProgressHooks(RunHooks):
+    """RunHooks for a brain call: posts the status embed at its first
+    workspace action and, with `stream` on (/workspace progress), mirrors
+    each exec_command / write_stdin call and its output into it (edited in
     place, throttled to stay under Discord's edit rate limit).
 
     All hook methods are exception-safe — the SDK awaits them inside the
-    run loop, and a raised hook would abort the sandbox run.
+    run loop, and a raised hook would abort the brain's run.
     """
 
-    def __init__(self, channel, task: str, *, title: str = SANDBOX_STARTING, files=(),
+    def __init__(self, channel, task: str, *, stream: bool = False, files=(),
                  footer: str | None = None, edit_interval: float = EDIT_INTERVAL_SECONDS):
         self.channel = channel
-        self.transcript = SandboxTranscript(task, title=title, files=files, footer=footer)
+        self.stream = stream
+        self.transcript = SandboxTranscript(task, title=BRAIN_WORKING, files=files, footer=footer)
         self.edit_interval = edit_interval
         self._message: discord.Message | None = None
+        self._started = False
         self._dirty = False
         self._last_flush = 0.0
         self._backoff_until = 0.0
@@ -387,25 +394,30 @@ class SandboxProgressHooks(RunHooks):
         # is not necessarily the one a finishing call belongs to.
         self._call_blocks: dict[str, _Block] = {}
 
-    # -- lifecycle (called by the tool, not by the SDK) -------------------
+    @property
+    def started(self) -> bool:
+        """Whether the status embed went out (the call used the workspace)."""
+        return self._started
 
-    async def start(self) -> None:
-        """Send the initial progress message (before Runner.run starts).
+    # -- lifecycle -----------------------------------------------------------
 
-        The embed mirrors the static run embed sent when progress is off —
-        the channel sees the same thing either way.
-        """
-        self.transcript.add_note("starting container…")
+    async def _start(self) -> None:
+        if self._started or self._finalized or self.channel is None:
+            return
+        self._started = True
         await self._flush(force=True)
 
-    async def finalize(self, note: str | None = None) -> None:
-        """Flush the final state (after the run ended: done/timeout/error)."""
+    async def finalize(self, ok: bool = True, note: str | None = None) -> None:
+        """Flush the final state once the call is over. Nothing when the
+        embed never went out."""
         if self._finalized:
             return
         self._finalized = True
+        if not self._started:
+            return
         self.transcript.set_thinking(False)
-        # The reply hint is over with the run (see run_code_sandbox).
-        self.transcript.clear_footer()
+        self.transcript.set_final(BRAIN_DONE if ok else BRAIN_STOPPED,
+                                  COLOR_DONE if ok else COLOR_STOPPED)
         if note:
             self.transcript.add_note(note)
         await self._flush(force=True)
@@ -413,13 +425,19 @@ class SandboxProgressHooks(RunHooks):
     # -- SDK hooks ----------------------------------------------------------
 
     async def on_llm_start(self, context, agent, system_prompt, input_items) -> None:
-        self._note(self.transcript.set_thinking, True)
+        if self.stream and self._started:
+            self._note(self.transcript.set_thinking, True)
 
     async def on_llm_end(self, context, agent, response) -> None:
-        self._note(self.transcript.set_thinking, False)
+        if self.stream and self._started:
+            self._note(self.transcript.set_thinking, False)
 
     async def on_tool_start(self, context, agent, tool) -> None:
         name = getattr(tool, "name", None)
+        if name in WORKSPACE_TOOLS:
+            await self._start()
+        if not self.stream:
+            return
         args = _tool_args(context)
         if name == "exec_command":
             cmd = args.get("cmd")
@@ -440,7 +458,7 @@ class SandboxProgressHooks(RunHooks):
 
     async def on_tool_end(self, context, agent, tool, result) -> None:
         name = getattr(tool, "name", None)
-        if name not in ("exec_command", "write_stdin"):
+        if not self.stream or name not in ("exec_command", "write_stdin"):
             return
         block = None
         if name == "exec_command":
@@ -471,7 +489,7 @@ class SandboxProgressHooks(RunHooks):
             logger.warning(f"Sandbox progress: ignoring transcript error: {e}")
 
     async def _maybe_flush(self, force: bool = False) -> None:
-        if self._finalized or not self._dirty:
+        if self._finalized or not self._started or not self._dirty:
             return
         now = time.monotonic()
         if not force and now < self._backoff_until:
@@ -508,7 +526,7 @@ class SandboxProgressHooks(RunHooks):
             return
         except Exception as e:
             # Usually a Discord rate limit (edits: 5/minute per channel) or
-            # a network error — back off and keep the sandbox run going.
+            # a network error — back off and keep the brain's run going.
             logger.warning(f"Sandbox progress: update failed, backing off: {e}")
             self._backoff_until = time.monotonic() + BACKOFF_SECONDS
             return

@@ -260,9 +260,9 @@ def test_voice_names():
 
 
 def test_hold_on_messages_carry_the_tool_and_request():
-    messages = vp.hold_on_messages("a pirate", vp.tool_action("web_search"), "f1 winner", "who won?")
+    messages = vp.hold_on_messages("a pirate", vp.tool_action("ask_brain"), "f1 winner", "who won?")
     content = messages[0]["content"]
-    assert "a pirate" in content and "searching the web" in content
+    assert "a pirate" in content and "looking into that" in content
     assert "f1 winner" in content and "who won?" in content
     assert vp.tool_action("made_up_tool") == "using made up tool"
 

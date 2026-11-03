@@ -293,15 +293,12 @@ voice:
   ttsConcurrency: 2
   queueSize: 16
 
-# Code sandbox (run_code_sandbox LLM tool): its run limits. The work happens
-# in the server's workspace container (brain.workspace below).
+# Threads for long workflows (from phase 5). The brain's own limits are under
+# brain below.
 sandbox:
-  # Max model turns for one sandbox task
-  maxTurns: 10
-  # Wall-clock seconds before a sandbox task is stopped
-  timeout: 600
-  # Max seconds the sandbox's ask_user tool waits for a reply in its Discord
-  # thread before telling the model to proceed on its own judgement
+  # Max seconds the ask_user tool of a run in a Discord thread waits for a
+  # reply before telling the model to proceed on its own judgement (used by
+  # long workflows from phase 5; brain calls in the channel don't wait yet)
   askUserTimeout: 300
 
 # llama.cpp server (replaces Ollama); which model it serves: the `model` value below
@@ -456,9 +453,10 @@ persona:
   # field (low/medium/high).
   reasoningEffort: "medium"
   # Max model turns for ONE reply (a turn = one model response, however many
-  # tool calls it carries). The SDK default of 10 is easily overrun by a reply
-  # that chains several tool calls, and overrunning loses the whole answer.
-  maxTurns: 20
+  # tool calls it carries). The persona has one tool, ask_brain, so a reply
+  # is at most: ask the brain, maybe again, answer. An overrun is still
+  # answered from what it has.
+  maxTurns: 4
   # Wall-clock seconds ONE model call may take, the OpenAI client's own
   # retries included. The client's timeout is per-read, so a server that keeps
   # the connection warm while it works (OpenRouter pads non-streaming
@@ -482,6 +480,18 @@ brain:
   # included; also its per-read timeout. Bounds a server that keeps the
   # connection alive with padding while it works.
   callTimeout: 600
+  # Backstops on ONE brain call, which works inline in the channel. Not
+  # budgets: the loop guard (repeatLimit) is what stops a stuck call.
+  #   maxTurns: model turns. timeout: wall-clock seconds, lane waits included.
+  maxTurns: 100
+  timeout: 1800
+  # The same tool with the same arguments this many times in a row (or eight
+  # calls that bring nothing new) earns a warning, and a second time stops
+  # the call with what it has so far.
+  repeatLimit: 3
+  # Tool outputs kept whole in a long call's prompt; older ones are cut to
+  # their first and last 400 characters.
+  trimKeepRecent: 6
   # The server workspace: ONE long-lived Docker container per Discord server,
   # on the NODE's Docker daemon (its socket is always mounted into the core
   # pod: Docker is required, and core exits at startup without it). Kept
@@ -525,8 +535,9 @@ brain:
     # task's in/ folder, all files together. Keep it well under
     # snapshotMaxBytes: in/ is saved with the workspace.
     inputMaxBytes: 25000000
-    # Start a server's workspace as soon as it gets a message (not used yet)
-    prewarm: false
+    # Start a server's workspace when the bot is about to answer there, so
+    # the brain finds it ready (every brain call runs in it)
+    prewarm: true
 # Which chat messages go into a prompt (core/classes/history_policy.py).
 #   limit:    messages in a window, the trigger included.
 #   mode:

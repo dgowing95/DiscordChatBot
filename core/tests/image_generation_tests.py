@@ -691,22 +691,10 @@ async def test_generate_image_command_reports_failure(monkeypatch):
 # ---------------------- tool registration in the LLM agent ----------------------
 
 async def _agent_tool_names(monkeypatch, enabled_value):
-    # TextLLMHandler.__init__ needs Redis; skip it and set what get_client()
-    # reads directly.
+    # Since v3 the image tool is the brain's (the persona has only ask_brain).
     monkeypatch.setenv("IMAGE_GEN_ENABLED", enabled_value)
-    from classes.text_llm_handler import TextLLMHandler
-
-    handler = TextLLMHandler.__new__(TextLLMHandler)
-    handler.messages = []
-    handler.guild_id = 0
-    handler.original_message = MagicMock()
-    handler.config = MagicMock()
-    handler.user_memory = MagicMock()
-    handler.system = "test"
-    handler.model = "qwen3:4b"
-    handler.options = {"temperature": 1.0}
-    await handler.get_client()
-    return [getattr(tool, "name", str(tool)) for tool in handler.agent.tools]
+    from classes.brain_tools import brain_tools
+    return [tool.name for tool in brain_tools()]
 
 
 @pytest.mark.asyncio

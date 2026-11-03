@@ -559,7 +559,7 @@ async def test_saving_stops_at_max_and_skips_repeats():
 @pytest.mark.asyncio
 async def test_saving_only_in_the_sandbox_and_failures():
     context, http = _env()
-    assert "only works inside the code sandbox" in (await _save(context, query="x"))
+    assert "needs the workspace" in (await _save(context, query="x"))
     http.request.assert_not_called()
     context["session"] = _FakeSession()
     http.request = AsyncMock(return_value=_body())
@@ -587,8 +587,9 @@ async def test_a_big_search_in_the_sandbox_points_at_saving():
     assert "To work with all 500 of them" in (await _search(context, query="x"))
 
 
-def test_only_the_sandbox_gets_the_save_tool():
-    from classes import sandbox_agent, tool_functions
-    assert "save_messages_to_file" not in {t.name for t in tool_functions.shared_tools()}
-    names = {t.name for t in sandbox_agent.build_sandbox_agent(None).tools}
+def test_the_brain_gets_the_save_tool_and_the_persona_does_not():
+    from classes.brain_tools import brain_tools
+    from classes.text_llm_handler import persona_tools
+    assert "save_messages_to_file" not in {t.name for t in persona_tools()}
+    names = {t.name for t in brain_tools()}
     assert {"save_messages_to_file", "read_messages_around", "search_messages"} <= names

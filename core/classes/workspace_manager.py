@@ -1,6 +1,6 @@
 """One long-lived Docker container per server: the server's workspace.
 
-It replaces the throwaway container every run_code_sandbox call used to get.
+It replaces the throwaway container every code sandbox call used to get.
 A server's workspace survives between calls and core restarts, is snapshotted
 to Redis on a timer and before it stops, stops after WORKSPACE_IDLE_SECONDS
 unused, and gives each call its own folder (jobs/<id>/). The pure rules
@@ -56,15 +56,14 @@ EXEC_TIMEOUT = 30
 DELETE_TIMEOUT = 30
 WAIT_SLICE = 5.0  # a missed wake-up only ever delays a waiting acquire this long
 DOCKER_WAIT_SECONDS = 60
+# A pre-warm waits this long for a slot, then gives up: it is only a head
+# start, and the brain call waits for itself.
+PREWARM_WAIT_SECONDS = 30
 
 
 class WorkspaceUnavailable(Exception):
     """The server's workspace could not be got: Docker is down, or every
     warm workspace stayed busy for the caller's whole timeout."""
-
-
-class NoServerWorkspace(WorkspaceUnavailable):
-    """A run with no server (a DM): there is never a workspace for it."""
 
 
 # --- Docker client and limits -------------------------------------------------
@@ -198,6 +197,10 @@ class GuildWorkspace:
     # Snapshot, process cleanup and stop never overlap (each runs commands
     # in the container that the others would break).
     ops: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Its saved snapshot could not be restored and no call has been told yet.
+    # Kept here, not only on the starting call's Lease: a pre-warm usually
+    # starts it, and the brain call after it would never hear.
+    restore_failed_untold: bool = False
 
     @property
     def container_id(self) -> str:
@@ -258,6 +261,10 @@ class Workspaces:
         # a release and a timed snapshot could otherwise drop each other's
         # fields.
         self._record_locks: dict[str, asyncio.Lock] = {}
+        # Pre-warms in flight (see prewarm), so a burst of messages starts
+        # one, and the tasks themselves, so none is garbage-collected early.
+        self._prewarming: set[str] = set()
+        self._prewarm_tasks: set[asyncio.Task] = set()
 
     # --- wiring -------------------------------------------------------------
 
@@ -337,16 +344,44 @@ class Workspaces:
     def is_warm(self, guild_id) -> bool:
         return self.lifecycle.is_warm(str(guild_id))
 
+    def prewarm(self, guild_id) -> None:
+        """Starts the guild's workspace in the background when it is not
+        running (WORKSPACE_PREWARM, on by default), so the brain call the
+        reply may make finds it ready. Fire-and-forget and fail-soft: a
+        failure is logged, and the brain call tries again itself."""
+        guild = str(guild_id)
+        if (not wl.prewarm(self._env) or self.lifecycle.is_warm(guild)
+                or guild in self._prewarming):
+            return
+        self._prewarming.add(guild)
+        task = asyncio.create_task(self._prewarm(guild))
+        self._prewarm_tasks.add(task)
+        task.add_done_callback(self._prewarm_tasks.discard)
+
+    async def _prewarm(self, guild: str) -> None:
+        try:
+            async with self.acquire(guild, timeout=PREWARM_WAIT_SECONDS, prewarm=True):
+                pass
+        except Exception as e:
+            logger.info(f"Workspace: pre-warming guild {guild}'s workspace failed: {e}")
+        finally:
+            self._prewarming.discard(guild)
+
     @contextlib.asynccontextmanager
-    async def acquire(self, guild_id, *, timeout: float | None = None):
+    async def acquire(self, guild_id, *, timeout: float | None = None, prewarm: bool = False):
         """The guild's workspace for one call, as a Lease. Waits (up to
         timeout) while it starts, stops or resets, or while every warm slot
-        is busy. Raises WorkspaceUnavailable."""
+        is busy. Raises WorkspaceUnavailable. A pre-warm's lease never takes
+        the lost-snapshot notice (the next real call does) and its release
+        does not count as a change (no snapshot for it)."""
         lease = await self._acquire(str(guild_id), timeout)
+        if not prewarm and lease.workspace.restore_failed_untold:
+            lease.workspace.restore_failed_untold = False
+            lease.restore_failed = True
         try:
             yield lease
         finally:
-            await self._release(str(guild_id))
+            await self._release(str(guild_id), changed=not prewarm)
 
     async def _acquire(self, guild: str, timeout: float | None) -> Lease:
         # Real time, not self._clock: this bounds an actual wait, while the
@@ -375,7 +410,8 @@ class Workspaces:
                 await self._notify()
                 metrics.observe_workspace_start(kind, self._clock() - started)
                 logger.info(f"Workspace: guild {guild} ready ({kind})")
-                return Lease(workspace, kind, restore_failed)
+                workspace.restore_failed_untold = restore_failed
+                return Lease(workspace, kind)
             if decision.action == wl.EVICT:
                 logger.info(f"Workspace: stopping guild {decision.victim}'s idle workspace "
                             f"to make room for guild {guild}")
@@ -392,8 +428,8 @@ class Workspaces:
                 except asyncio.TimeoutError:
                     pass
 
-    async def _release(self, guild: str) -> None:
-        if not self.lifecycle.release(guild, self._clock()):
+    async def _release(self, guild: str, changed: bool = True) -> None:
+        if not self.lifecycle.release(guild, self._clock(), changed=changed):
             return
         workspace = self._live.get(guild)
         try:

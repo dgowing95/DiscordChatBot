@@ -145,9 +145,19 @@ async def refresh_slot_context_forever():
         await asyncio.sleep(SLOT_CONTEXT_REFRESH_SECONDS)
 
 
+def make_command_tree():
+    """The slash command tree. Every command is server-only by default
+    (allowed_contexts): the bot works only in servers and never answers
+    direct messages, so a command must never be offered in one."""
+    return discord.app_commands.CommandTree(
+        client=client, fallback_to_global=True,
+        allowed_contexts=discord.app_commands.AppCommandContext(
+            guild=True, dm_channel=False, private_channel=False))
+
+
 async def register_commands():
     logger.info("Registering commands")
-    command_tree = discord.app_commands.CommandTree(client=client, fallback_to_global=True)
+    command_tree = make_command_tree()
     if automation_settings()["enabled"]:
         from classes.automation_commands import register_automation_commands
         register_automation_commands(command_tree)
@@ -499,9 +509,13 @@ async def on_voice_state_update(member, before, after):
 async def should_handle_message(message) -> bool:
     # Decides whether the bot should reply to a message; called from
     # on_message before enqueueing, so no-reply messages never reach the
-    # queue. Rules (in order): must have content/embeds/attachments, must
+    # queue. Rules (in order): must be in a server (never a direct message),
+    # must have content/embeds/attachments, must
     # not be from the bot, must not be a history reset, mentions always
     # reply, otherwise roll the per-guild response chance (default 5%).
+    # The bot works only in servers: a direct message is never answered.
+    if message.guild is None:
+        return False
     if len(message.content) == 0 and len(message.embeds) == 0 and not message.attachments:
         return False
     if message.author == client.user:
@@ -514,8 +528,7 @@ async def should_handle_message(message) -> bool:
 
 
 async def random_chance_reply(message) -> bool:
-    guild_id = message.guild.id if message.guild else 0
-    chance = await config.get_setting("response_chance", guild_id) or 5
+    chance = await config.get_setting("response_chance", message.guild.id) or 5
     try:
         chance = min(max(float(chance), 0), 50)
     except (ValueError, TypeError):

@@ -1,4 +1,4 @@
-"""Safety guard for the web_search, fetch_url and run_code_sandbox tools.
+"""Safety guard for the web_search and fetch_url tools and the brain's workspace.
 
 Blocks requests that are classified as unsafe *before* the bot touches the
 internet. Uses the free OpenAI Moderations endpoint
