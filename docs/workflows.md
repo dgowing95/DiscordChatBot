@@ -56,7 +56,7 @@ A restart of the bot stops a running workflow; its thread says so. Ask again to 
 | `WORKFLOW_ENABLED` | on | Off removes `/task`, and the bot never starts a workflow |
 | `WORKFLOW_FROM_AUTOMATIONS` | on | Schedules, rules and follow-ups may start one |
 | `WORKFLOW_PLAN_APPROVAL_SECONDS` | 900 | How long the plan waits for an answer |
-| `WORKFLOW_TIMEOUT` / `WORKFLOW_MAX_TURNS` | 4 h / 500 | Stops a workflow that never ends |
+| `WORKFLOW_TIMEOUT` / `WORKFLOW_MAX_TURNS` | 1 h / 250 | Caps one workflow (the biggest job tried took 62 min) |
 | `WORKFLOW_MAX_PER_GUILD` | 1 | Workflows running at once in one server |
 | `SUBAGENT_MODEL` / `SUBAGENT_LLM_HOST` / `SUBAGENT_LLM_API_KEY` | the brain's | The helpers' model |
 

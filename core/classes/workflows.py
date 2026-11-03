@@ -49,8 +49,8 @@ Why things are the way they are:
   once: a running subagent is cancelled and its files are kept. Everything
   else waits for the manager's review between steps, which records an
   outcome for each message. Subagents never see thread messages in 5a.
-- **Limits are loop guards**: WORKFLOW_TIMEOUT and WORKFLOW_MAX_TURNS stop a
-  workflow that never ends, with what exists (PARTIAL), never "retry".
+- **Limits cap the cost**: WORKFLOW_TIMEOUT (1 h) and WORKFLOW_MAX_TURNS (250) stop a
+  workflow bigger than the biggest job seen, with what exists (PARTIAL), never "retry".
 - **A restart interrupts**: resume is out of scope. At startup every live
   workflow becomes INTERRUPTED and its thread is told (interrupt_all).
 """
@@ -1126,8 +1126,13 @@ async def post_workflow_copy(wf: Workflow) -> list[str]:
         return []
     if getattr(wf.origin_channel, "id", None) == getattr(wf.thread, "id", None):
         return []
-    picked, total = [], 0
+    # A later step that fixes a file attaches it again: send only the newest
+    # of each name, in the order they were first made.
+    latest: dict[str, object] = {}
     for artifact in wf.artifacts:
+        latest[artifact.name] = artifact  # a dict keeps the first position
+    picked, total = [], 0
+    for artifact in latest.values():
         if len(picked) >= ECHO_MAX_FILES or total + len(artifact.data) > ECHO_MAX_BYTES:
             break
         picked.append(artifact)

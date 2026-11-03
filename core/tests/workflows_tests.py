@@ -746,3 +746,20 @@ async def test_task_refuses_while_the_bot_is_in_a_call(monkeypatch):
     await commands["task"](ctx, "a big job")
     assert ctx.response.send_message.await_args.kwargs == {"ephemeral": True}
     start.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_the_channel_gets_one_copy_of_each_file_the_newest(monkeypatch):
+    sent = []
+
+    async def _post_files(channel, artifacts):
+        sent.extend(artifacts)
+        return [a.name for a in artifacts]
+
+    monkeypatch.setattr(brain, "_post_files", _post_files)
+    a1, b1, a2 = (SimpleNamespace(name=n, data=d) for n, d in
+                  (("report.md", b"v1"), ("chart.png", b"c"), ("report.md", b"v2")))
+    wf = SimpleNamespace(origin_channel=FakeChannel(77), thread=FakeChannel(500),
+                         artifacts=[a1, b1, a2])
+    assert await workflows.post_workflow_copy(wf) == ["report.md", "chart.png"]
+    assert sent[0].data == b"v2"

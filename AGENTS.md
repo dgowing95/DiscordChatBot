@@ -401,7 +401,7 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
       (`_ask_in_thread`, `WORKFLOW_ASK_TIMEOUT`); the step runs once more with the answer.
     - **Folders** `jobs/c<thread id>-w<id>-<step>/`: each helper is told the earlier steps' folders, and
       a later brain call in the thread finds them as that channel's earlier jobs.
-    - **Limits are loop guards**: `WORKFLOW_TIMEOUT` and `WORKFLOW_MAX_TURNS` (every agent's turns
+    - **Limits cap the cost**: `WORKFLOW_TIMEOUT` (1 h) and `WORKFLOW_MAX_TURNS` (250, every agent's turns
       together) stop it with what exists (PARTIAL); `SUBAGENT_MAX_TURNS` per helper.
     - **Restarts**: resume is out of scope. A workflow cancelled at shutdown stays live in Redis, and
       at startup `interrupt_all` marks this instance's live ones INTERRUPTED and posts a note in their
@@ -577,7 +577,7 @@ reads has a row here and a line in `.env.example`, that every row is read by som
 | `WORKFLOW_PLAN_APPROVAL_SECONDS` | seconds a plan waits for Approve before it starts anyway [900]. Chart: `workflows.planApprovalSeconds` |
 | `WORKFLOW_PLAN_REVISIONS` | changes a plan may get before it must be approved or cancelled [3]. Chart: `workflows.planRevisions` |
 | `WORKFLOW_MAX_STEPS` | steps in one plan [8]. Chart: `workflows.maxSteps` |
-| `WORKFLOW_TIMEOUT` / `WORKFLOW_MAX_TURNS` | backstops on one workflow: wall-clock seconds [14400] and model turns across all its agents [500]; out of either stops it with what exists. Chart: `workflows.timeout` / `maxTurns` |
+| `WORKFLOW_TIMEOUT` / `WORKFLOW_MAX_TURNS` | backstops on one workflow: wall-clock seconds [3600] and model turns across all its agents [250]; out of either stops it with what exists. Chart: `workflows.timeout` / `maxTurns` |
 | `WORKFLOW_MAX_PER_GUILD` | workflows running at once per server [1]. Chart: `workflows.maxPerGuild` |
 | `SUBAGENT_MODEL` / `SUBAGENT_LLM_HOST` / `SUBAGENT_LLM_API_KEY` | a workflow helper's connection; empty = the brain's, then `LLM_*` (the key only for the same host). Chart: `subagents.model` / `llmHost` / `apiKey` |
 | `SUBAGENT_REASONING_EFFORT` / `SUBAGENT_CALL_TIMEOUT_SECONDS` | like the brain's [medium / 600]. Chart: `subagents.reasoningEffort` / `callTimeout` |

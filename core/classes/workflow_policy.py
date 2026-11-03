@@ -10,9 +10,9 @@ what a valid plan is, the order steps run in, how a plan reads in an embed,
 which state moves are legal, how much of the budget is left, and the
 WORKFLOW_* / SUBAGENT_* settings.
 
-The limits are loop guards, not budgets (maintainer, 2026-11-02): a
-workflow may take hours. WORKFLOW_TIMEOUT and WORKFLOW_MAX_TURNS only stop
-one that never ends, and running out stops it cleanly with what exists
+The limits are caps on cost (maintainer, 2026-11-03: the biggest job seen,
+a 10+ source report with a chart, took 62 min and 238 turns). WORKFLOW_TIMEOUT and WORKFLOW_MAX_TURNS stop
+anything bigger, and running out stops it cleanly with what exists
 (PARTIAL), never "try again".
 """
 import os
@@ -25,8 +25,8 @@ DEFAULT_ASK_TIMEOUT_SECONDS = 300
 DEFAULT_PLAN_APPROVAL_SECONDS = 900
 DEFAULT_PLAN_REVISIONS = 3
 DEFAULT_MAX_STEPS = 8
-DEFAULT_TIMEOUT_SECONDS = 14400
-DEFAULT_MAX_TURNS = 500
+DEFAULT_TIMEOUT_SECONDS = 3600
+DEFAULT_MAX_TURNS = 250
 DEFAULT_MAX_PER_GUILD = 1
 DEFAULT_SUBAGENT_MAX_TURNS = 100
 # Pictures one workflow may ask for (a chat reply gets 3). Not a setting.
@@ -85,13 +85,13 @@ def max_steps(env=os.environ) -> int:
 
 
 def timeout(env=os.environ) -> int:
-    """Wall-clock seconds one workflow may take (WORKFLOW_TIMEOUT, 4 h)."""
+    """Wall-clock seconds one workflow may take (WORKFLOW_TIMEOUT, 1 h)."""
     return _env_int("WORKFLOW_TIMEOUT", DEFAULT_TIMEOUT_SECONDS, env)
 
 
 def max_turns(env=os.environ) -> int:
     """Model turns across every agent of one workflow (WORKFLOW_MAX_TURNS,
-    default 500)."""
+    default 250)."""
     return _env_int("WORKFLOW_MAX_TURNS", DEFAULT_MAX_TURNS, env)
 
 
