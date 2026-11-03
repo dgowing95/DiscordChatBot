@@ -21,15 +21,33 @@ inside a tool (a research brief) cannot deadlock against its own parent run.
 Every call through the wrapper is bounded, including the ones core makes on
 the model directly (the max-turns wrap-up, the voice prefill), which the SDK
 never wrapped.
+
+A reply cut off before it said anything (finish_reason "length" with no
+text or tool call) is asked for again, once, in the same slot: a reasoning
+model can spend its whole output budget thinking. Seen live on the brain
+(a hosted DeepSeek thought for 185 s on "draw a lighthouse" and returned
+nothing, which the SDK raises as ModelBehaviorError and which ended the
+run); the same request a minute later went through. Not for streamed
+calls: by then part of the reply may already have been spoken.
 """
 import asyncio
+import logging
 import time
 
-from agents import ModelTimeoutError
+from agents import ModelBehaviorError, ModelTimeoutError
 from agents.models.interface import Model
 
 from classes import llm_lanes
-from classes.metrics import observe_lane_wait
+from classes.metrics import inc_empty_retry, observe_lane_wait
+
+logger = logging.getLogger(__name__)
+
+
+def _cut_off_empty(error: ModelBehaviorError) -> bool:
+    """The SDK's error for a reply truncated before any text or tool call
+    (agents/models/openai_chatcompletions.py). Matched on its wording: the
+    SDK has no subclass for it."""
+    return "finish_reason='length'" in str(error)
 
 
 class LanedModel(Model):
@@ -66,12 +84,25 @@ class LanedModel(Model):
     async def get_response(self, system_instructions, input, model_settings, tools,
                            output_schema, handoffs, tracing, *, previous_response_id=None,
                            conversation_id=None, prompt=None):
-        def call():
+        def attempt():
             return self._bounded(self.inner.get_response(
                 system_instructions, input, model_settings, tools, output_schema, handoffs,
                 tracing, previous_response_id=previous_response_id,
                 conversation_id=conversation_id, prompt=prompt,
             ))
+
+        async def call():
+            started = time.monotonic()
+            try:
+                return await attempt()
+            except ModelBehaviorError as e:
+                if not _cut_off_empty(e):
+                    raise
+                logger.warning(f"Model call ({self._lane()} lane) was cut off after "
+                               f"{time.monotonic() - started:.0f}s before saying anything; "
+                               f"asking once more")
+                inc_empty_retry(self._lane())
+                return await attempt()
 
         llm_lanes.last_wait.set(0.0)
         lanes = llm_lanes.lanes_for(self.host_key)

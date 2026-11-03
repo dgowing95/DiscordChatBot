@@ -60,6 +60,11 @@ Metrics (scraped by Prometheus from the /metrics HTTP endpoint):
            was sent (classes/llm_lanes.py). Not part of
            discord_bot_llm_call_seconds, which stays model time. A remote
            API has no lanes and records nothing here.
+  Counter  discord_bot_llm_empty_retries_total{lane}
+           Model calls cut off before they said anything (finish_reason
+           "length", no text or tool call) and so asked for once more
+           (classes/laned_model.py). A rising count means the model spends
+           its whole output on thinking.
   Gauge    discord_bot_llm_lane_in_use{host,lane} / discord_bot_llm_lane_waiting{host,lane}
            Slots held, and calls waiting for one, per server and lane, read
            at scrape time.
@@ -441,6 +446,12 @@ llm_lane_wait_seconds = Histogram(
     buckets=LATENCY_BUCKETS,
 )
 
+llm_empty_retries_total = Counter(
+    "discord_bot_llm_empty_retries_total",
+    "Model calls cut off before any output and asked for once more",
+    ["lane"],
+)
+
 llm_completion_tokens = Histogram(
     "discord_bot_llm_completion_tokens",
     "Generated tokens of one model request",
@@ -810,6 +821,10 @@ def set_llm_slots(host: str, slots: int, source: str) -> None:
             pass
     _slot_sources[host] = source
     llm_slots.labels(host=host, source=source).set(slots)
+
+
+def inc_empty_retry(lane: str) -> None:
+    llm_empty_retries_total.labels(lane=str(lane)).inc()
 
 
 def observe_lane_wait(lane: str, seconds: float) -> None:

@@ -465,7 +465,7 @@ persona:
 # The brain: the agent that does the work in the code sandbox. Its LLM is the
 # bot's own (llm.*) unless these name another. To use a hosted
 # OpenAI-compatible API instead (e.g. OpenRouter), set all three:
-#   model: deepseek/deepseek-v4-flash-0731
+#   model: deepseek/deepseek-v4.1-flash-1017
 #   llmHost: https://openrouter.ai/api   (core appends /v1 itself)
 #   apiKey: sk-or-...
 # The bot's own key is never sent to another host: without apiKey there, the
