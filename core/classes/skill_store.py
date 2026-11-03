@@ -101,9 +101,12 @@ class SkillStore:
 
     async def list(self, guild, include_deleted: bool = False) -> list[dict]:
         names = await self.redis.smembers(_names(guild) if include_deleted else _live(guild))
+        names = sorted(names)
+        # One round trip for them all: the brain reads this on every call.
+        raws = await self.redis.mget([_key(guild, n) for n in names]) if names else []
         rows = []
-        for name in sorted(names):
-            doc = await self._doc(guild, name)
+        for raw in raws:
+            doc = json.loads(raw) if raw else None
             if doc and (include_deleted or not doc.get("deleted")):
                 rows.append(_summary(doc))
         return rows

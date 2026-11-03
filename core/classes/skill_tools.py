@@ -152,8 +152,9 @@ async def use_skill(wrapper: RunContextWrapper[dict], name: str) -> str:
         if problem:
             out += ["", f"Its files could not be copied ({problem}); follow the steps above."]
         else:
+            extra = f", {_file_list(skill)}" if skill.get("files") else ""
             out += ["", f"Files (in {SKILLS_DIR}/{wanted}/, read-only; copy what you change): "
-                        f"SKILL.md, {_file_list(skill)}"]
+                        f"SKILL.md{extra}"]
         return "\n".join(out)
     except SkillError as e:
         return str(e)
@@ -199,12 +200,20 @@ async def save_skill(wrapper: RunContextWrapper[dict], name: str, description: s
         description: One line: what the skill does.
         steps: What to do, in order, and what to watch for.
         files: Paths in your folder to keep with it, e.g. the script that did the work.
+            Leave out to keep an existing skill's files; [] removes them.
         note: When updating, what changed.
     """
     ctx = _ctx(wrapper)
     try:
         guild = _scope(ctx)
-        stored, problems = await _read_files(ctx, files)
+        store = SkillStore()
+        clean = skill_format.clean_name(name)
+        if files is None:
+            # Left out: keep the skill's files. Its copy in skills/ is
+            # read-only, so the brain usually could not pass them again.
+            stored, problems = ((await store.get(guild, clean)) or {}).get("files") or {}, []
+        else:
+            stored, problems = await _read_files(ctx, files)
         if problems:
             return "Not saved: " + "; ".join(problems)
         refusal = await _guarded(description, steps)
@@ -212,8 +221,6 @@ async def save_skill(wrapper: RunContextWrapper[dict], name: str, description: s
             return refusal
         author = ctx.get("user_id") or 0
         job_id = posixpath.basename(ctx.get("job_dir") or "")
-        store = SkillStore()
-        clean = skill_format.clean_name(name)
         result = await store.save(guild, clean, description, steps, stored, author_id=author,
                                   source="brain", job_id=job_id, note=note)
     except QuotaError as e:

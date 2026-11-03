@@ -87,10 +87,15 @@ async def test_save_skill_stores_posts_an_embed_and_marks_the_call(store, ctx, a
     assert skill["files"] == {"scripts/chart.py": "print('hi')"} and skill["updated_by"] == 5
     assert ctx["skill_saved"] is True
     assert titles(ctx["channel"]) == [tool_embeds.SKILL_SAVED]
+    # No files given: the update keeps the script.
     out = await call(skill_tools.save_skill, ctx, name="weekly-chart", description="Charts tracker embeds",
                      steps="1. new steps", note="simpler")
     assert "updated" in out
     assert titles(ctx["channel"])[-1] == tool_embeds.SKILL_UPDATED
+    assert (await store.get(GUILD, "weekly-chart"))["files"] == {"scripts/chart.py": "print('hi')"}
+    # An empty list removes them.
+    await call(skill_tools.save_skill, ctx, name="weekly-chart", description="Charts tracker embeds",
+               steps="1. new steps", files=[], note="no script")
     assert (await store.get(GUILD, "weekly-chart"))["files"] == {}
 
 
@@ -146,6 +151,13 @@ async def test_use_skill_still_returns_the_steps_when_the_copy_fails(store, ctx,
     ctx["session"].write = AsyncMock(side_effect=RuntimeError("no disk"))
     out = await call(skill_tools.use_skill, ctx, name="weekly-chart")
     assert "1. do it" in out and "could not be copied" in out
+
+
+@pytest.mark.asyncio
+async def test_use_skill_without_files_lists_only_skill_md(store, ctx, allowed):
+    await store.save(GUILD, "weekly-chart", "d", "1. do it", author_id=1)
+    out = await call(skill_tools.use_skill, ctx, name="weekly-chart")
+    assert out.rstrip().endswith("SKILL.md") and "none" not in out
 
 
 @pytest.mark.asyncio
@@ -337,6 +349,7 @@ def _interaction(channel):
     ctx.guild_id, ctx.channel, ctx.user = GUILD, channel, SimpleNamespace(id=9)
     ctx.response.send_message = AsyncMock()
     ctx.response.send_modal = AsyncMock()
+    ctx.guild = SimpleNamespace(filesize_limit=10 * 1024 * 1024)
     return ctx
 
 
@@ -375,7 +388,7 @@ async def test_list_show_and_history(store, ctx, allowed):
     assert "1. do it\n" in four.response.send_message.call_args.args[0]
     five = _interaction(ctx["channel"])
     await cmds["history"](five, "weekly-chart")
-    text = five.response.send_message.call_args.args[0]
+    text = five.response.send_message.call_args.kwargs["embed"].description
     assert "v2" in text and "(current)" in text and "<@4>" in text and "better" in text
     six = _interaction(ctx["channel"])
     await cmds["show"](six, "nope", None)
@@ -446,6 +459,29 @@ async def test_export_sends_a_zip(store, ctx, allowed):
     one = _interaction(ctx["channel"])
     await _commands()["export"](one)
     assert one.response.send_message.call_args.kwargs["file"].filename == "skills.zip"
+    small = _interaction(ctx["channel"])
+    small.guild = SimpleNamespace(filesize_limit=10)
+    await _commands()["export"](small)
+    assert "file" not in small.response.send_message.call_args.kwargs
+    assert "more than this server can upload" in small.response.send_message.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_history_of_many_versions_fits_discord(store, ctx, allowed):
+    for i in range(50):
+        await store.save(GUILD, "weekly-chart", "d", f"step {i}", author_id=123456789012345678,
+                         note="a fairly long note about what changed here")
+    one = _interaction(ctx["channel"])
+    await _commands()["history"](one, "weekly-chart")
+    assert len(one.response.send_message.call_args.kwargs["embed"].description) <= 4096
+
+
+@pytest.mark.asyncio
+async def test_list_reads_every_skill_in_one_round_trip(store, ctx, allowed):
+    for name in ("one-skill", "two-skill", "three-skill"):
+        await store.save(GUILD, name, "d", "s", author_id=1)
+    store.redis.mgets = 0
+    assert len(await store.list(GUILD)) == 3 and store.redis.mgets == 1
 
 
 @pytest.mark.asyncio

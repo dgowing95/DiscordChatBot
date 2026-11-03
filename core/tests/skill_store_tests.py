@@ -77,6 +77,10 @@ class FakeRedis:
     async def get(self, key):
         return self.data.get(key)
 
+    async def mget(self, keys):
+        self.mgets = getattr(self, "mgets", 0) + 1
+        return [self.data.get(k) for k in keys]
+
     async def smembers(self, key):
         return set(self.data.get(key, set()))
 

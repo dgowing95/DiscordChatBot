@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 MODAL_BODY_CHARS = 4000  # Discord's cap for a text input
 SHOW_INLINE_CHARS = 1800
+DEFAULT_UPLOAD_BYTES = 10 * 1024 * 1024  # Discord's limit without boosts
 
 
 def _ago(ts) -> str:
@@ -146,7 +147,10 @@ def register_skill_commands(tree) -> None:
         if not rows:
             await ctx.response.send_message("No such skill.", ephemeral=True)
             return
-        await ctx.response.send_message(history_lines(rows), ephemeral=True)
+        # An embed: up to SKILLS_MAX_VERSIONS lines is past a message's 2000.
+        embed = discord.Embed(title=f"{skill_format.clean_name(name)}: history",
+                              description=history_lines(rows), color=tool_embeds.COLOR_SKILL)
+        await ctx.response.send_message(embed=embed, ephemeral=True)
 
     @group.command(name="edit", description="Change a skill's description and steps")
     @app_commands.autocomplete(name=_live_names)
@@ -193,6 +197,13 @@ def register_skill_commands(tree) -> None:
     @group.command(name="export", description="Download every skill, with its history")
     async def export(ctx: discord.Interaction):
         data = await SkillStore().export(ctx.guild_id)
+        limit = getattr(ctx.guild, "filesize_limit", None)
+        limit = limit if isinstance(limit, int) else DEFAULT_UPLOAD_BYTES
+        if len(data) > limit:
+            await ctx.response.send_message(
+                f"The export is {len(data) // 1_000_000 + 1} MB, more than this server can upload "
+                f"({limit // 1_000_000} MB). Delete old skills to make it smaller.", ephemeral=True)
+            return
         await ctx.response.send_message("Every skill in this server, with its history.", ephemeral=True,
                                         file=discord.File(io.BytesIO(data), filename="skills.zip"))
 

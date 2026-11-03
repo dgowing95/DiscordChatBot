@@ -814,6 +814,9 @@ async def _run_in_workspace(ctx, lease, request, inputs, problems, hooks_box) ->
         # existing shared/ folder.
         await session.exec("ln", "-sT", "../../shared", posixpath.join(job_path, "shared"),
                            shell=False)
+        # skills/ the same way, so use_skill's skills/<name>/ works from here.
+        await session.exec("ln", "-sT", "../../skills", posixpath.join(job_path, "skills"),
+                           shell=False)
     # After the mkdir, so the marker is never older than out/ itself (see
     # workspace_tools._mark_run_start).
     marker = await _mark_run_start(session, out_dir)
