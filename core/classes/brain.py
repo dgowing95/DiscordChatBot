@@ -13,8 +13,8 @@ embed ("🧠 Working on it") appears only once it uses the workspace
 facts, which the persona puts in its own voice
 (classes/brain_result.tool_result_for_persona). When a guess would waste
 the work it can ask the requester (ask_user): the question is posted as a
-reply to their request and their next message there is the answer
-(classes/brain_inbox.py). "Quick" means inline, not
+reply to their request, with buttons, and answered with a button or a
+Discord Reply (classes/brain_question.py, classes/brain_inbox.py). "Quick" means inline, not
 short: a call may take minutes, bounded only by the loop guard
 (classes/loop_guard.py) and the BRAIN_MAX_TURNS / BRAIN_TIMEOUT backstops.
 
@@ -282,41 +282,28 @@ def _no_one_to_ask(ctx: dict) -> bool:
             or ctx.get("channel") is None or not ctx.get("user_id"))
 
 
-async def _post_question(ctx: dict, text: str) -> bool:
-    """Posts the question as a reply to the request (or, with no source
-    message, with a mention), and in a voice call also speaks it. Whether
-    it reached the channel."""
-    channel = ctx.get("channel")
-    user_id = ctx.get("user_id")
-    message = ctx.get("original_message")
-    mention = discord.AllowedMentions(users=True, roles=False, everyone=False)
-    try:
-        if message is not None:
-            await message.reply(text, mention_author=True, allowed_mentions=mention)
-        else:
-            await channel.send(f"<@{user_id}> {text}", allowed_mentions=mention)
-    except Exception as e:
-        logger.warning(f"Brain: could not post its question: {e}")
-        return False
-    if ctx.get("voice"):
-        from classes import voice_gate
-        session = voice_gate.session(ctx.get("guild_id"))
-        if session is not None:
-            try:
-                await session.speak_line(text)
-            except Exception as e:
-                logger.info(f"Brain: could not speak its question: {e}")
-    return True
+async def _speak_question(ctx: dict, text: str) -> None:
+    """In a voice call the question is also said aloud."""
+    from classes import voice_gate
+    session = voice_gate.session(ctx.get("guild_id"))
+    if session is not None:
+        try:
+            await session.speak_line(text)
+        except Exception as e:
+            logger.info(f"Brain: could not speak its question: {e}")
 
 
 @function_tool(name_override="ask_user")
-async def ask_user(wrapper: RunContextWrapper[dict], question: str) -> str:
+async def ask_user(wrapper: RunContextWrapper[dict], question: str,
+                   options: list[str] | None = None) -> str:
     """Ask the person who made the request a question you need answered.
 
     Args:
         question: One specific question about a choice that changes the result.
+        options: Up to 4 short choices, shown as buttons, when the answer is
+            one of a few. They can always answer in their own words instead.
     """
-    from classes import brain_inbox, metrics, persona_voice
+    from classes import brain_inbox, brain_question, metrics, persona_voice
 
     ctx = _ctx(wrapper)
     wait = _ask_wait(ctx)
@@ -328,29 +315,40 @@ async def ask_user(wrapper: RunContextWrapper[dict], question: str) -> str:
     # so two questions in one turn must not both pass the cap.
     ctx["brain_questions"] = asked + 1
     text = await persona_voice.voice_question(ctx.get("guild_id"), question)
-    if not await _post_question(ctx, text):
+    message, view = await brain_question.post(ctx, text, options, wait)
+    if message is None:
         metrics.inc_brain_question("skipped")
         return NO_ONE_TO_ASK
-    channel_id, user_id = ctx["channel"].id, ctx["user_id"]
-    # Registered after the post: a message the requester sent before they
-    # could see the question is not taken as its answer.
-    future = brain_inbox.ask(channel_id, user_id)
+    voice = bool(ctx.get("voice"))
+    # Registered after the post (the waiter is keyed by the question's
+    # message), and before anything else awaits.
+    future = brain_inbox.ask(message.id, ctx["channel"].id, ctx["user_id"], voice=voice)
+    if voice:
+        await _speak_question(ctx, text)
     logger.info(f"Brain: asked the requester, waiting up to {wait:.0f}s")
+    line = brain_question.CLOSED
     try:
         answer = await asyncio.wait_for(future, wait)
     except asyncio.TimeoutError:
         metrics.inc_brain_question("timeout")
+        line = brain_question.TIMED_OUT
         return (f"No answer within {wait:.0f} seconds. Carry on with your best assumption "
                 "and say what you assumed in a fact.")
     finally:
         # Also on a cancel (the call's own timeout): a waiter left behind
-        # would swallow the requester's next message.
-        brain_inbox.cancel(channel_id, user_id, future)
+        # would take an answer nobody is waiting for.
+        brain_inbox.cancel(message.id, future)
+        if future.done() and not future.cancelled() and future.result():
+            line = brain_question.ANSWERED.format(answer=future.result()[:200])
+        await brain_question.close(message, view, line)
     if answer is brain_inbox.REPLACED:
         metrics.inc_brain_question("skipped")
         return ("A newer question took this one's place, so it will not be answered. "
                 "Carry on with your best assumption and say what you assumed in a fact.")
     metrics.inc_brain_question("answered")
+    if answer == brain_question.YOU_DECIDE_ANSWER:
+        return ("They said you should decide. Carry on with your best judgement and say "
+                "what you chose in a fact.")
     return f"They answered: {answer[:ANSWER_MAX_CHARS]}"
 
 

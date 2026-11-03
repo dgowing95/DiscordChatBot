@@ -1,78 +1,111 @@
 """Questions the brain is waiting on. PURE (stdlib only).
 
 When the brain calls `ask_user` (classes/brain.py) it posts the question in
-the channel, as a reply to the requester, and waits here for their answer:
-one waiter per (channel id, requester id). main.on_message (and, in a voice
-call, VoiceSession.heard) hands the requester's next message in that channel
-to the waiter instead of the persona.
+the channel, as a reply to the request, and waits here for the answer. One
+waiter per question message. Answering is always deliberate
+(maintainer, 2026-11-03): the requester presses one of the question's
+buttons, types in its "Answer…" box (classes/brain_question.py), or uses
+Discord's Reply on the question (main.on_message). An ordinary message is a
+new request, never taken as an answer: the first version took the
+requester's next message, so a new request sent instead of an answer was
+swallowed with no reply.
 
-Only the requester can answer: the key is their user id, so another member's
-message in the same channel is answered as usual. A webhook's message has the
-webhook as its author, so a webhook can answer only the questions its own
-messages caused (how the dev stack and E2E drive the bot).
+The one exception is a voice call, where nobody can press Reply: there the
+speaker's next utterance is the answer (VoiceSession.heard, through
+voice_waiting), as with the wake phrase's follow-up window.
+
+Only the requester can answer: every delivery names the person, and a
+waiter takes only its own requester's.
 
 No mutating function here awaits, so each one is atomic on the one event
 loop: a delivery can never land between a waiter's check and its removal.
 """
 import asyncio
+from dataclasses import dataclass, field
 
 # deliver() outcomes.
 ACCEPTED = "accepted"  # the waiter has the answer
 EMPTY = "empty"  # nothing to read (attachments only); the waiter keeps waiting
+NOT_YOURS = "not_yours"  # someone other than the requester
 NO_WAITER = "no_waiter"
 
-# What a replaced waiter resolves to (a newer question from the same call or
-# another call by the same requester in the same channel took its place).
+# What a replaced waiter resolves to (a newer question to the same person in
+# the same channel took its place: its buttons are dead).
 REPLACED = None
 
-_waiters: dict[tuple[int, int], asyncio.Future] = {}
+
+@dataclass
+class _Waiter:
+    channel_id: int
+    user_id: int
+    voice: bool
+    future: asyncio.Future = field(repr=False)
 
 
-def _key(channel_id, user_id) -> tuple[int, int]:
-    return int(channel_id), int(user_id)
+_waiters: dict[int, _Waiter] = {}  # question message id -> waiter
 
 
-def ask(channel_id, user_id) -> asyncio.Future:
-    """Register a waiter and return its future (the answer's text, or
-    REPLACED). An older waiter for the same key resolves to REPLACED."""
-    key = _key(channel_id, user_id)
-    old = _waiters.get(key)
-    if old is not None and not old.done():
-        old.set_result(REPLACED)
+def ask(question_id, channel_id, user_id, *, voice: bool = False) -> asyncio.Future:
+    """Register a waiter for the question message `question_id` and return
+    its future (the answer's text, or REPLACED). An open question to the
+    same person in the same channel resolves to REPLACED."""
+    channel_id, user_id = int(channel_id), int(user_id)
+    for old_id, old in list(_waiters.items()):
+        if old.channel_id == channel_id and old.user_id == user_id:
+            if not old.future.done():
+                old.future.set_result(REPLACED)
+            del _waiters[old_id]
     future = asyncio.get_running_loop().create_future()
-    _waiters[key] = future
+    _waiters[int(question_id)] = _Waiter(channel_id, user_id, voice, future)
     return future
 
 
-def waiting(channel_id, user_id) -> bool:
-    """Whether a question to this person in this channel is open."""
-    future = _waiters.get(_key(channel_id, user_id))
-    return future is not None and not future.done()
+def waiting(question_id) -> bool:
+    """Whether the question with this message id is still open."""
+    waiter = _waiters.get(int(question_id))
+    return waiter is not None and not waiter.future.done()
 
 
-def deliver(channel_id, user_id, text: str) -> str:
-    """Hand a message to the waiter. Text-less messages are refused
-    (EMPTY) and the question stays open."""
-    key = _key(channel_id, user_id)
-    future = _waiters.get(key)
-    if future is None or future.done():
+def requester(question_id) -> int | None:
+    """Who may answer this question (None when it is not open)."""
+    waiter = _waiters.get(int(question_id))
+    return waiter.user_id if waiter is not None and not waiter.future.done() else None
+
+
+def voice_waiting(channel_id, user_id) -> int | None:
+    """The open voice question to this speaker in this channel, if any."""
+    channel_id, user_id = int(channel_id), int(user_id)
+    for question_id, waiter in _waiters.items():
+        if (waiter.voice and waiter.channel_id == channel_id and waiter.user_id == user_id
+                and not waiter.future.done()):
+            return question_id
+    return None
+
+
+def deliver(question_id, user_id, text: str) -> str:
+    """Hand an answer to the question's waiter. Only its requester's count;
+    a text-less answer is refused (EMPTY) and the question stays open."""
+    question_id = int(question_id)
+    waiter = _waiters.get(question_id)
+    if waiter is None or waiter.future.done():
         return NO_WAITER
+    if int(user_id) != waiter.user_id:
+        return NOT_YOURS
     text = (text or "").strip()
     if not text:
         return EMPTY
-    future.set_result(text)
-    del _waiters[key]
+    waiter.future.set_result(text)
+    del _waiters[question_id]
     return ACCEPTED
 
 
-def cancel(channel_id, user_id, future: asyncio.Future) -> None:
+def cancel(question_id, future: asyncio.Future) -> None:
     """Remove THIS waiter (called in a finally: a timeout, or the brain run
-    being stopped mid-wait). A newer waiter under the same key is left
-    alone. Without it a stale waiter would swallow the requester's next
-    message."""
-    key = _key(channel_id, user_id)
-    if _waiters.get(key) is future:
-        del _waiters[key]
+    being stopped mid-wait). A newer waiter is left alone."""
+    question_id = int(question_id)
+    waiter = _waiters.get(question_id)
+    if waiter is not None and waiter.future is future:
+        del _waiters[question_id]
     if not future.done():
         future.cancel()
 

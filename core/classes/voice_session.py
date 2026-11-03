@@ -370,13 +370,13 @@ class VoiceSession:
         now = time.monotonic()
         matched, rest = match_wake(text, self.wake_phrase)
         # The brain asked this speaker a question (ask_user): what they say
-        # next is the answer, wake phrase or not. "leave" and "stop" still
-        # work as commands.
-        if (self.text_channel is not None
-                and brain_inbox.waiting(self.text_channel.id, user_id)
-                and not (matched and parse_command(rest) in (LEAVE, STOP))):
+        # next is the answer, wake phrase or not (nobody can press Reply in
+        # a call). "leave" and "stop" still work as commands.
+        question = (brain_inbox.voice_waiting(self.text_channel.id, user_id)
+                    if self.text_channel is not None else None)
+        if question is not None and not (matched and parse_command(rest) in (LEAVE, STOP)):
             answer = rest if matched and rest else text
-            if brain_inbox.deliver(self.text_channel.id, user_id, answer) == brain_inbox.ACCEPTED:
+            if brain_inbox.deliver(question, user_id, answer) == brain_inbox.ACCEPTED:
                 inc_voice_utterance("answer")
                 await self._chime()
                 return

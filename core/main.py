@@ -342,11 +342,11 @@ async def on_message(message):
             and sandbox_thread_inbox.is_run_active(message.channel.id)):
         await route_to_sandbox(message)
         return
-    # The brain asked this person a question here (ask_user): their next
-    # message is the answer, not a new request. Before the voice gate, so
-    # an answer typed in a call's thread counts too.
-    if (message.author != client.user and message.guild is not None
-            and brain_inbox.waiting(message.channel.id, message.author.id)):
+    # A Discord Reply to the brain's open question (ask_user) by the person
+    # it asked is the answer, not a new request. Any other message is
+    # handled as usual (classes/brain_inbox.py). Before the voice gate, so a
+    # reply in a call's thread counts too.
+    if message.author != client.user and _answers_brain_question(message):
         await answer_brain_question(message)
         return
     if await voice_dev_inject(message):
@@ -391,10 +391,17 @@ async def on_message(message):
     set_message_queue_size(message_queue.qsize())
 
 
+def _answers_brain_question(message) -> bool:
+    reference = getattr(message, "reference", None)
+    question_id = getattr(reference, "message_id", None)
+    return (question_id is not None and message.guild is not None
+            and brain_inbox.requester(question_id) == message.author.id)
+
+
 async def answer_brain_question(message) -> None:
-    """Hands the message to the waiting brain call and reacts ✅; a message
+    """Hands the reply to the waiting brain call and reacts ✅; a reply
     with no text gets a short note and the question stays open."""
-    outcome = brain_inbox.deliver(message.channel.id, message.author.id, message.content)
+    outcome = brain_inbox.deliver(message.reference.message_id, message.author.id, message.content)
     try:
         if outcome == brain_inbox.ACCEPTED:
             await message.add_reaction("✅")

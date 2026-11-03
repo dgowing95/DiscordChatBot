@@ -134,10 +134,12 @@ persona to put in its own words. What users notice:
   units do I like?" is answered at once.
 - **The bot no longer answers direct messages**, and its slash commands are offered in servers only.
   It never worked in DMs.
-- **The bot can ask you a question** when a guess would waste the work: it replies to your request
-  in the channel (and says it aloud in a voice call), and your next message there is the answer
-  (it reacts ✅). No answer within 2 minutes and it carries on with its best guess and says what it
-  assumed. Replies the bot was not asked for never ask, and get much shorter limits.
+- **The bot can ask you a question** when a guess would waste the work. It replies to your request
+  with buttons: its suggested choices, "Answer…" to type your own, and "You decide". Using Discord's
+  Reply on the question works too (it reacts ✅); any other message is a new request. In a voice call
+  it says the question aloud and your next words are the answer. No answer within 2 minutes and it
+  carries on with its best guess and says what it assumed. Replies the bot was not asked for never
+  ask, and get much shorter limits.
 - **Chat keeps working while the brain does.** Each running brain call gets a spare queue worker, so
   `QUEUE_WORKERS` stay free for new messages.
 - `/help` describes the brain's tools; the "Run code" entry is now "Code, files and charts".

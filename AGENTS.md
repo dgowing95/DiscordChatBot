@@ -52,7 +52,8 @@ core/                    # the bot (what runs in production)
     brain_tools.py         # the one list of the brain's tools, gated per kind of run
     brain_result.py        # P BrainReport and what the persona is told
     brain_policy.py        # P BRAIN_* limits (unprompted replies, questions, slots)
-    brain_inbox.py         # P questions the brain is waiting on, keyed (channel, requester)
+    brain_inbox.py         # P questions the brain is waiting on, one per question message
+    brain_question.py      # the question in Discord: choice / Answer… / You decide buttons
     persona_voice.py       # the brain's question reworded in the persona's voice
     loop_guard.py          # P stops a brain run that repeats itself
     context_trim.py        # P cuts old tool outputs in a long brain run
@@ -239,10 +240,12 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
    - **Files from the chat go in `in/`** (`workspace_inputs.py`): the asking message's and its reply
      target's attachments, plus any the persona names in `files`, capped by `WORKSPACE_INPUT_MAX_BYTES`.
    - **`ask_user` asks in the channel**: the question, reworded in the persona's voice
-     (`persona_voice.py`), is posted as a reply to the request (spoken too in a call), and the
-     requester's next message there is the answer (`brain_inbox.py`; `on_message` and
-     `VoiceSession.heard` route it, ✅). At most 3 per call, each up to `BRAIN_ASK_TIMEOUT`; automatic
-     runs and unprompted replies are told to assume.
+     (`persona_voice.py`), is posted as a reply to the request with buttons (`brain_question.py`: the
+     brain's choices, "Answer…" for a text box, "You decide"). Only the requester can answer, and only
+     deliberately: a button, or Discord's Reply on the question (`on_message`, ✅). An ordinary message
+     stays a new request. In a call it is spoken too, and the speaker's next words answer it
+     (`VoiceSession.heard`). At most 3 per call, each up to `BRAIN_ASK_TIMEOUT`; automatic runs and
+     unprompted replies are told to assume.
 
    Before editing, read `brain.py`'s module docstring, then `run_brain`, `workspace_tools._deliver` and
    `brain_result.tool_result_for_persona`.

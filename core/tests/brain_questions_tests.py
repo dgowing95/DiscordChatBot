@@ -1,7 +1,9 @@
 """Tests for the brain's questions to the requester (3b): the waiter ledger
-(core/classes/brain_inbox.py), the brain's ask_user tool
+(core/classes/brain_inbox.py), the question's buttons
+(core/classes/brain_question.py), the brain's ask_user tool
 (core/classes/brain.py), the persona-voiced wording
-(core/classes/persona_voice.py) and main.on_message routing the answer.
+(core/classes/persona_voice.py) and main.on_message taking a Discord Reply
+to the question as its answer.
 
 Run from the repo root:
     pytest core/tests/brain_questions_tests.py
@@ -15,7 +17,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from classes import brain, brain_inbox, metrics, persona_voice
+from classes import brain, brain_inbox, brain_question, metrics, persona_voice
+
+QUESTION_ID = 4100
 
 
 @pytest.fixture(autouse=True)
@@ -29,67 +33,181 @@ def _count(outcome):
     return metrics.brain_questions_total.labels(outcome=outcome)._value.get()
 
 
+async def _until(predicate):
+    for _ in range(50):
+        if predicate():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("never happened")
+
+
 # --------------------------- brain_inbox (pure) ---------------------------
 
 @pytest.mark.asyncio
-async def test_inbox_delivers_to_the_waiter_and_closes_it():
-    future = brain_inbox.ask(77, 5)
-    assert brain_inbox.waiting(77, 5)
-    assert not brain_inbox.waiting(77, 6)  # someone else
-    assert not brain_inbox.waiting(78, 5)  # another channel
-    assert brain_inbox.deliver(77, 5, "  bar chart  ") == brain_inbox.ACCEPTED
+async def test_inbox_takes_only_the_requesters_answer():
+    future = brain_inbox.ask(QUESTION_ID, 77, 5)
+    assert brain_inbox.waiting(QUESTION_ID)
+    assert brain_inbox.requester(QUESTION_ID) == 5
+    assert brain_inbox.deliver(QUESTION_ID, 6, "mine now") == brain_inbox.NOT_YOURS
+    assert not future.done()
+    assert brain_inbox.deliver(QUESTION_ID, 5, "  bar chart  ") == brain_inbox.ACCEPTED
     assert future.result() == "bar chart"
-    assert not brain_inbox.waiting(77, 5)
-    assert brain_inbox.deliver(77, 5, "again") == brain_inbox.NO_WAITER
+    assert not brain_inbox.waiting(QUESTION_ID)
+    assert brain_inbox.requester(QUESTION_ID) is None
+    assert brain_inbox.deliver(QUESTION_ID, 5, "again") == brain_inbox.NO_WAITER
 
 
 @pytest.mark.asyncio
 async def test_inbox_refuses_an_empty_answer_and_keeps_waiting():
-    future = brain_inbox.ask(77, 5)
-    assert brain_inbox.deliver(77, 5, "   ") == brain_inbox.EMPTY
-    assert brain_inbox.waiting(77, 5)
+    future = brain_inbox.ask(QUESTION_ID, 77, 5)
+    assert brain_inbox.deliver(QUESTION_ID, 5, "   ") == brain_inbox.EMPTY
+    assert brain_inbox.waiting(QUESTION_ID)
     assert not future.done()
 
 
 @pytest.mark.asyncio
-async def test_a_newer_question_replaces_the_older_one():
-    old = brain_inbox.ask(77, 5)
-    new = brain_inbox.ask(77, 5)
+async def test_a_newer_question_to_the_same_person_replaces_the_older_one():
+    old = brain_inbox.ask(1, 77, 5)
+    other = brain_inbox.ask(2, 77, 6)  # someone else: untouched
+    new = brain_inbox.ask(3, 77, 5)
     assert old.result() is brain_inbox.REPLACED
-    brain_inbox.deliver(77, 5, "line")
+    assert not brain_inbox.waiting(1)
+    assert not other.done()
+    brain_inbox.deliver(3, 5, "line")
     assert new.result() == "line"
 
 
 @pytest.mark.asyncio
 async def test_cancel_removes_only_its_own_waiter():
-    old = brain_inbox.ask(77, 5)
-    new = brain_inbox.ask(77, 5)
-    brain_inbox.cancel(77, 5, old)  # the replaced one cleaning up
-    assert brain_inbox.waiting(77, 5)
-    brain_inbox.cancel(77, 5, new)
-    assert not brain_inbox.waiting(77, 5)
+    old = brain_inbox.ask(1, 77, 5)
+    new = brain_inbox.ask(2, 77, 5)
+    brain_inbox.cancel(1, old)  # the replaced one cleaning up
+    assert brain_inbox.waiting(2)
+    brain_inbox.cancel(2, new)
+    assert not brain_inbox.waiting(2)
     assert new.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_only_voice_questions_take_spoken_answers():
+    brain_inbox.ask(1, 77, 5)
+    assert brain_inbox.voice_waiting(77, 5) is None
+    brain_inbox.ask(2, 77, 5, voice=True)
+    assert brain_inbox.voice_waiting(77, 5) == 2
+    assert brain_inbox.voice_waiting(77, 6) is None
+    assert brain_inbox.voice_waiting(78, 5) is None
+
+
+# --------------------------- the buttons ---------------------------
+
+def test_options_become_clean_button_labels():
+    labels = brain_question.clean_options(
+        ["Bar", " Bar ", "", None, "Line\nchart", "x" * 100, "Pie", "Donut", "You decide"])
+    assert labels == ["Bar", "Line chart", "x" * 80, "Pie"]
+
+
+def _labels(view):
+    return [item.label for item in view.children]
+
+
+@pytest.mark.asyncio
+async def test_the_view_has_the_choices_then_answer_and_you_decide():
+    view = brain_question.QuestionView(5, ["Bar", "Line"], timeout=60)
+    assert _labels(view) == ["Bar", "Line", "Answer…", "You decide"]
+    assert _labels(brain_question.QuestionView(5, None, timeout=60)) == ["Answer…", "You decide"]
+
+
+def _interaction(user_id=5, content="Bar or line?"):
+    interaction = MagicMock()
+    interaction.user = SimpleNamespace(id=user_id)
+    interaction.message = SimpleNamespace(content=content)
+    interaction.response.edit_message = AsyncMock()
+    interaction.response.send_message = AsyncMock()
+    interaction.response.send_modal = AsyncMock()
+    return interaction
+
+
+@pytest.mark.asyncio
+async def test_someone_else_pressing_a_button_is_told_privately():
+    view = brain_question.QuestionView(5, ["Bar"], timeout=60)
+    interaction = _interaction(user_id=6)
+    assert await view.interaction_check(interaction) is False
+    assert interaction.response.send_message.await_args.kwargs["ephemeral"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_choice_button_answers_and_closes_the_question():
+    view = brain_question.QuestionView(5, ["Bar", "Line"], timeout=60)
+    view.question_id = QUESTION_ID
+    future = brain_inbox.ask(QUESTION_ID, 77, 5)
+    interaction = _interaction()
+    await view.children[1].callback(interaction)
+    assert future.result() == "Line"
+    kwargs = interaction.response.edit_message.await_args.kwargs
+    assert kwargs["view"] is None
+    assert kwargs["content"] == "Bar or line?\n-# ✅ Line"
+    assert view.closed
+
+
+@pytest.mark.asyncio
+async def test_you_decide_hands_the_brain_its_marker():
+    view = brain_question.QuestionView(5, [], timeout=60)
+    view.question_id = QUESTION_ID
+    future = brain_inbox.ask(QUESTION_ID, 77, 5)
+    interaction = _interaction()
+    await view.children[-1].callback(interaction)
+    assert future.result() == brain_question.YOU_DECIDE_ANSWER
+    assert interaction.response.edit_message.await_args.kwargs["content"].endswith("✅ You decide")
+
+
+@pytest.mark.asyncio
+async def test_answer_opens_a_text_box_whose_text_is_the_answer():
+    view = brain_question.QuestionView(5, [], timeout=60)
+    view.question_id = QUESTION_ID
+    future = brain_inbox.ask(QUESTION_ID, 77, 5)
+    interaction = _interaction()
+    await view.children[0].callback(interaction)
+    modal = interaction.response.send_modal.await_args.args[0]
+    assert isinstance(modal, brain_question.AnswerModal)
+    modal.answer._value = "a line chart with dots"
+    await modal.on_submit(_interaction())
+    assert future.result() == "a line chart with dots"
+
+
+@pytest.mark.asyncio
+async def test_a_button_on_a_closed_question_says_so():
+    view = brain_question.QuestionView(5, ["Bar"], timeout=60)
+    view.question_id = QUESTION_ID  # no waiter: it timed out
+    interaction = _interaction()
+    await view.children[0].callback(interaction)
+    interaction.response.send_message.assert_awaited_once()
+    interaction.response.edit_message.assert_not_awaited()
 
 
 # --------------------------- ask_user ---------------------------
 
 def _ctx(**extra):
     channel = MagicMock(id=77)
-    channel.send = AsyncMock()
+    sent = MagicMock(id=QUESTION_ID, content="Bar or line chart?")
+    sent.edit = AsyncMock()
+    channel.send = AsyncMock(return_value=sent)
     message = MagicMock()
-    message.reply = AsyncMock()
+    message.reply = AsyncMock(return_value=sent)
     ctx = {"guild_id": 1, "user_id": 5, "channel": channel, "original_message": message,
            "automatic": False, "voice": False, "unprompted": False,
            "brain_deadline": time.monotonic() + 600}
     ctx.update(extra)
-    return ctx
+    return ctx, sent
 
 
-async def _ask(ctx, question="Bar or line chart?"):
+async def _ask(ctx, question="Bar or line chart?", options=None):
     from agents.tool_context import ToolContext
+    args = {"question": question}
+    if options is not None:
+        args["options"] = options
     return await brain.ask_user.on_invoke_tool(
         ToolContext(context=ctx, tool_name="ask_user", tool_call_id="q1", tool_arguments="{}"),
-        json.dumps({"question": question}))
+        json.dumps(args))
 
 
 @pytest.fixture
@@ -109,98 +227,103 @@ def plain_voice():
 ])
 async def test_no_one_to_ask_answers_at_once(extra, plain_voice):
     before = _count("skipped")
-    ctx = _ctx(**extra)
-    result = await _ask(ctx)
-    assert result == brain.NO_ONE_TO_ASK
+    ctx, _sent = _ctx(**extra)
+    assert await _ask(ctx) == brain.NO_ONE_TO_ASK
     assert _count("skipped") == before + 1
     ctx["original_message"].reply.assert_not_awaited()
-    assert not brain_inbox.waiting(77, 5)
 
 
 @pytest.mark.asyncio
-async def test_the_question_is_posted_as_a_reply_and_the_answer_returned(plain_voice):
+async def test_the_question_is_a_reply_with_buttons_and_the_answer_is_returned(plain_voice):
     before = _count("answered")
-    ctx = _ctx()
-    task = asyncio.create_task(_ask(ctx))
-    for _ in range(20):
-        await asyncio.sleep(0)
-        if brain_inbox.waiting(77, 5):
-            break
-    ctx["original_message"].reply.assert_awaited_once()
-    assert ctx["original_message"].reply.await_args.args[0] == "Bar or line chart?"
-    assert brain_inbox.deliver(77, 5, "line please") == brain_inbox.ACCEPTED
+    ctx, sent = _ctx()
+    task = asyncio.create_task(_ask(ctx, options=["Bar", "Line"]))
+    await _until(lambda: brain_inbox.waiting(QUESTION_ID))
+    reply = ctx["original_message"].reply.await_args
+    assert reply.args[0] == "Bar or line chart?"
+    assert _labels(reply.kwargs["view"]) == ["Bar", "Line", "Answer…", "You decide"]
+    assert reply.kwargs["view"].question_id == QUESTION_ID
+    brain_inbox.deliver(QUESTION_ID, 5, "line please")
     assert await task == "They answered: line please"
     assert ctx["brain_questions"] == 1
     assert _count("answered") == before + 1
+    # Answered without a button (a Reply): the buttons come off here.
+    edit = sent.edit.await_args.kwargs
+    assert edit["view"] is None and edit["content"].endswith("✅ line please")
+
+
+@pytest.mark.asyncio
+async def test_you_decide_tells_the_brain_to_choose(plain_voice):
+    ctx, _sent = _ctx()
+    task = asyncio.create_task(_ask(ctx))
+    await _until(lambda: brain_inbox.waiting(QUESTION_ID))
+    brain_inbox.deliver(QUESTION_ID, 5, brain_question.YOU_DECIDE_ANSWER)
+    assert (await task).startswith("They said you should decide")
 
 
 @pytest.mark.asyncio
 async def test_no_source_message_posts_with_a_mention(plain_voice):
-    ctx = _ctx(original_message=None)
+    ctx, _sent = _ctx(original_message=None)
     task = asyncio.create_task(_ask(ctx))
-    for _ in range(20):
-        await asyncio.sleep(0)
-        if brain_inbox.waiting(77, 5):
-            break
+    await _until(lambda: brain_inbox.waiting(QUESTION_ID))
     assert ctx["channel"].send.await_args.args[0] == "<@5> Bar or line chart?"
-    brain_inbox.deliver(77, 5, "bar")
+    brain_inbox.deliver(QUESTION_ID, 5, "bar")
     assert await task == "They answered: bar"
 
 
 @pytest.mark.asyncio
-async def test_no_answer_in_time_says_to_assume_and_leaves_no_waiter(plain_voice, monkeypatch):
+async def test_no_answer_in_time_says_to_assume_and_closes_the_question(plain_voice, monkeypatch):
     monkeypatch.setenv("BRAIN_ASK_TIMEOUT", "1")
     monkeypatch.setattr(brain, "MIN_ASK_SECONDS", 0.01)
     before = _count("timeout")
-    result = await _ask(_ctx())
+    ctx, sent = _ctx()
+    result = await _ask(ctx)
     assert result.startswith("No answer within 1 seconds")
-    assert not brain_inbox.waiting(77, 5)
+    assert not brain_inbox.waiting(QUESTION_ID)
     assert _count("timeout") == before + 1
+    assert sent.edit.await_args.kwargs["content"].endswith(brain_question.TIMED_OUT)
 
 
 @pytest.mark.asyncio
 async def test_a_stopped_run_leaves_no_waiter_behind(plain_voice):
     # The call's own timeout cancels ask_user mid-wait; a waiter left behind
-    # would swallow the requester's next message.
-    task = asyncio.create_task(_ask(_ctx()))
-    for _ in range(20):
-        await asyncio.sleep(0)
-        if brain_inbox.waiting(77, 5):
-            break
-    assert brain_inbox.waiting(77, 5)
+    # would take an answer nobody is waiting for.
+    ctx, sent = _ctx()
+    task = asyncio.create_task(_ask(ctx))
+    await _until(lambda: brain_inbox.waiting(QUESTION_ID))
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert not brain_inbox.waiting(77, 5)
+    assert not brain_inbox.waiting(QUESTION_ID)
+    assert sent.edit.await_args.kwargs["view"] is None
 
 
 @pytest.mark.asyncio
 async def test_two_questions_in_one_turn_share_the_cap(plain_voice):
-    ctx = _ctx(brain_questions=brain.MAX_QUESTIONS - 1)
+    ctx, _sent = _ctx(brain_questions=brain.MAX_QUESTIONS - 1)
     first = asyncio.create_task(_ask(ctx, "One?"))
     second = asyncio.create_task(_ask(ctx, "Two?"))
-    for _ in range(20):
-        await asyncio.sleep(0)
+    await _until(lambda: brain_inbox.waiting(QUESTION_ID))
     assert await second == brain.NO_ONE_TO_ASK
-    brain_inbox.deliver(77, 5, "yes")
+    brain_inbox.deliver(QUESTION_ID, 5, "yes")
     assert await first == "They answered: yes"
 
 
 @pytest.mark.asyncio
 async def test_a_replaced_question_tells_the_brain_to_assume(plain_voice):
-    first = asyncio.create_task(_ask(_ctx(), "One?"))
-    for _ in range(20):
-        await asyncio.sleep(0)
-    brain_inbox.ask(77, 5)  # another call by the same person asks too
+    ctx, _sent = _ctx()
+    first = asyncio.create_task(_ask(ctx, "One?"))
+    await _until(lambda: brain_inbox.waiting(QUESTION_ID))
+    brain_inbox.ask(QUESTION_ID + 1, 77, 5)  # another call by the same person asks too
     assert "newer question" in await first
 
 
 @pytest.mark.asyncio
 async def test_a_failed_post_asks_nothing(plain_voice):
-    ctx = _ctx()
+    ctx, _sent = _ctx()
     ctx["original_message"].reply.side_effect = RuntimeError("no permission")
     assert await _ask(ctx) == brain.NO_ONE_TO_ASK
-    assert not brain_inbox.waiting(77, 5)
+    assert not brain_inbox.waiting(QUESTION_ID)
 
 
 @pytest.mark.asyncio
@@ -211,14 +334,12 @@ async def test_in_a_voice_call_the_question_is_also_spoken(plain_voice):
     voice_gate.reset()
     voice_gate.enter(1, session)
     try:
-        ctx = _ctx(voice=True, original_message=None)
+        ctx, _sent = _ctx(voice=True, original_message=None)
         task = asyncio.create_task(_ask(ctx))
-        for _ in range(20):
-            await asyncio.sleep(0)
-            if brain_inbox.waiting(77, 5):
-                break
+        await _until(lambda: brain_inbox.waiting(QUESTION_ID))
         session.speak_line.assert_awaited_once_with("Bar or line chart?")
-        brain_inbox.deliver(77, 5, "bar")
+        assert brain_inbox.voice_waiting(77, 5) == QUESTION_ID
+        brain_inbox.deliver(QUESTION_ID, 5, "bar")
         assert await task == "They answered: bar"
     finally:
         voice_gate.reset()
@@ -271,7 +392,7 @@ def test_the_question_uses_the_personas_connection_not_the_brains(monkeypatch):
     assert persona_voice._llm.lane == "chat"
 
 
-# --------------------------- on_message routing ---------------------------
+# --------------------------- on_message: a Discord Reply ---------------------------
 
 def _main():
     if "main" in sys.modules:
@@ -280,56 +401,70 @@ def _main():
     return main
 
 
-def _message(author_id=5, content="line please", channel_id=77):
+def _message(author_id=5, content="line please", reply_to=QUESTION_ID):
     message = MagicMock()
     message.id = 9001
     message.content = content
     message.author = MagicMock(id=author_id)
     message.guild = MagicMock(id=1)
-    message.channel = MagicMock(id=channel_id)
+    message.channel = MagicMock(id=77)
     message.mentions = []
+    message.reference = SimpleNamespace(message_id=reply_to) if reply_to else None
     message.add_reaction = AsyncMock()
     message.reply = AsyncMock()
     return message
 
 
-@pytest.mark.asyncio
-async def test_the_requesters_next_message_is_the_answer():
+async def _on_message(message, handled=False):
     main = _main()
-    future = brain_inbox.ask(77, 5)
-    queue = asyncio.Queue(maxsize=2)
-    message = _message()
-    with patch.object(main, "message_queue", queue), \
-         patch.object(main, "remember_poll", AsyncMock()), \
-         patch.object(main, "should_handle_message", AsyncMock(return_value=True)) as handle:
-        await main.on_message(message)
-    assert future.result() == "line please"
-    message.add_reaction.assert_awaited_once_with("✅")
-    handle.assert_not_awaited()
-    assert queue.empty()
-
-
-@pytest.mark.asyncio
-async def test_someone_elses_message_is_not_taken_as_the_answer():
-    main = _main()
-    future = brain_inbox.ask(77, 5)
     queue = asyncio.Queue(maxsize=2)
     with patch.object(main, "message_queue", queue), \
          patch.object(main, "remember_poll", AsyncMock()), \
          patch.object(main.automation_runner, "match_message", AsyncMock(return_value=False)), \
-         patch.object(main, "should_handle_message", AsyncMock(return_value=False)) as handle:
-        await main.on_message(_message(author_id=6))
+         patch.object(main, "should_handle_message", AsyncMock(return_value=handled)) as handle:
+        await main.on_message(message)
+    return handle
+
+
+@pytest.mark.asyncio
+async def test_a_reply_to_the_question_by_the_requester_is_the_answer():
+    future = brain_inbox.ask(QUESTION_ID, 77, 5)
+    message = _message()
+    handle = await _on_message(message)
+    assert future.result() == "line please"
+    message.add_reaction.assert_awaited_once_with("✅")
+    handle.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_message_from_the_requester_is_a_new_request():
+    future = brain_inbox.ask(QUESTION_ID, 77, 5)
+    handle = await _on_message(_message(content="also, what's the time?", reply_to=None))
     assert not future.done()
     handle.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_an_attachment_only_answer_gets_a_note_and_the_question_stays_open():
-    main = _main()
-    future = brain_inbox.ask(77, 5)
+async def test_someone_elses_reply_to_the_question_is_not_the_answer():
+    future = brain_inbox.ask(QUESTION_ID, 77, 5)
+    handle = await _on_message(_message(author_id=6))
+    assert not future.done()
+    handle.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_reply_to_some_other_message_is_not_the_answer():
+    future = brain_inbox.ask(QUESTION_ID, 77, 5)
+    handle = await _on_message(_message(reply_to=QUESTION_ID + 7))
+    assert not future.done()
+    handle.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_an_attachment_only_reply_gets_a_note_and_the_question_stays_open():
+    future = brain_inbox.ask(QUESTION_ID, 77, 5)
     message = _message(content="")
-    with patch.object(main, "remember_poll", AsyncMock()):
-        await main.on_message(message)
+    await _on_message(message)
     assert not future.done()
     message.reply.assert_awaited_once()
     message.add_reaction.assert_not_awaited()

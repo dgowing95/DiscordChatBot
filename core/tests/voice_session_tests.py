@@ -450,7 +450,7 @@ async def test_the_asked_speakers_next_words_are_the_answer(monkeypatch, fake_ll
     brain_inbox.reset()
     session, bridge = _session(monkeypatch)
     session.text_channel.id = 900
-    future = brain_inbox.ask(900, 7)
+    future = brain_inbox.ask(4100, 900, 7, voice=True)
     await session.heard(8, "Bo", "unrelated chatter")  # someone else
     assert not future.done()
     await session.heard(7, "Ana", "the blue one")  # no wake phrase needed
@@ -466,7 +466,7 @@ async def test_stop_still_works_while_a_question_is_open(monkeypatch, fake_llm):
     brain_inbox.reset()
     session, bridge = _session(monkeypatch)
     session.text_channel.id = 900
-    future = brain_inbox.ask(900, 7)
+    future = brain_inbox.ask(4100, 900, 7, voice=True)
     await session.heard(7, "Ana", "hey sparky, stop")
     assert bridge.kinds() == ["stop"]
     assert not future.done()
