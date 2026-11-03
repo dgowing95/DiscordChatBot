@@ -33,7 +33,7 @@ the same objects:
 
 | mode        | Tools                                                         |
 |-------------|---------------------------------------------------------------|
-| manager     | web, fetch, message search/read, search_skills, use_skill, submit_plan |
+| manager     | web, fetch, message search/read, search_skills, submit_plan  |
 | review      | submit_review (the thread's messages between steps)          |
 | finish      | report                                                        |
 | researcher  | web, fetch, message search/read, attach_file, save_messages_to_file, report (+ Shell) |
@@ -80,7 +80,7 @@ def brain_tools(*, automatic: bool = False, voice: bool = False, workflows: bool
         store_memory,
         web_search,
     )
-    from classes.skill_tools import search_skills, skill_tools, use_skill
+    from classes.skill_tools import search_skills, skill_tools
     from classes.workflow_tools import start_workflow, submit_plan, submit_review
     from classes.workspace_tools import attach_file
 
@@ -89,7 +89,9 @@ def brain_tools(*, automatic: bool = False, voice: bool = False, workflows: bool
     if mode == MANAGER:
         tools = [web_search, fetch_url, *message_search_tools()]
         if skill_format.enabled():
-            tools.extend((search_skills, use_skill))
+            # search_skills only: use_skill posts a "Using a skill" embed, and a
+            # planner opened unrelated skills just to read them (live, twice).
+            tools.append(search_skills)
         tools.append(submit_plan)
         return tools
     if mode == REVIEW:

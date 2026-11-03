@@ -87,8 +87,7 @@ def test_start_workflow_is_offered_only_when_tier_3_is_allowed_and_never_in_voic
 def test_a_workflows_agents_get_their_own_short_lists(all_on, monkeypatch):
     monkeypatch.setenv("SKILLS_ENABLED", "1")
     assert _names(mode="manager") == ["web_search", "fetch_url", "search_messages",
-                                      "read_messages_around", "search_skills", "use_skill",
-                                      "submit_plan"]
+                                      "read_messages_around", "search_skills", "submit_plan"]
     assert _names(mode="review") == ["submit_review"]
     assert _names(mode="finish") == ["report"]
     assert _names(mode="researcher") == ["web_search", "fetch_url", "search_messages",
