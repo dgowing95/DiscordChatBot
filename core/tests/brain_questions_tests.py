@@ -66,10 +66,10 @@ async def test_inbox_refuses_an_empty_answer_and_keeps_waiting():
 
 
 @pytest.mark.asyncio
-async def test_a_newer_question_to_the_same_person_replaces_the_older_one():
-    old = brain_inbox.ask(1, 77, 5)
-    other = brain_inbox.ask(2, 77, 6)  # someone else: untouched
-    new = brain_inbox.ask(3, 77, 5)
+async def test_a_newer_spoken_question_to_the_same_speaker_replaces_the_older_one():
+    old = brain_inbox.ask(1, 77, 5, voice=True)
+    other = brain_inbox.ask(2, 77, 6, voice=True)  # someone else: untouched
+    new = brain_inbox.ask(3, 77, 5, voice=True)
     assert old.result() is brain_inbox.REPLACED
     assert not brain_inbox.waiting(1)
     assert not other.done()
@@ -78,9 +78,19 @@ async def test_a_newer_question_to_the_same_person_replaces_the_older_one():
 
 
 @pytest.mark.asyncio
+async def test_text_questions_never_replace_each_other():
+    # One turn can ask two (each has its own buttons and Reply target).
+    first = brain_inbox.ask(1, 77, 5)
+    second = brain_inbox.ask(2, 77, 5)
+    assert brain_inbox.waiting(1) and brain_inbox.waiting(2)
+    brain_inbox.deliver(1, 5, "one")
+    assert first.result() == "one" and not second.done()
+
+
+@pytest.mark.asyncio
 async def test_cancel_removes_only_its_own_waiter():
-    old = brain_inbox.ask(1, 77, 5)
-    new = brain_inbox.ask(2, 77, 5)
+    old = brain_inbox.ask(1, 77, 5, voice=True)
+    new = brain_inbox.ask(2, 77, 5, voice=True)
     brain_inbox.cancel(1, old)  # the replaced one cleaning up
     assert brain_inbox.waiting(2)
     brain_inbox.cancel(2, new)
@@ -316,9 +326,10 @@ async def test_two_questions_in_one_turn_share_the_cap(plain_voice):
 @pytest.mark.asyncio
 async def test_a_replaced_question_tells_the_brain_to_assume(plain_voice):
     ctx, _sent = _ctx()
+    ctx["voice"] = True
     first = asyncio.create_task(_ask(ctx, "One?"))
     await _until(lambda: brain_inbox.waiting(QUESTION_ID))
-    brain_inbox.ask(QUESTION_ID + 1, 77, 5)  # another call by the same person asks too
+    brain_inbox.ask(QUESTION_ID + 1, 77, 5, voice=True)  # a newer spoken question
     assert "newer question" in await first
 
 
@@ -516,3 +527,90 @@ async def test_an_attachment_only_reply_gets_a_note_and_the_question_stays_open(
     assert not future.done()
     message.reply.assert_awaited_once()
     message.add_reaction.assert_not_awaited()
+
+
+# --------------------------- fixes after the 3b/3c review ---------------------------
+
+@pytest.mark.asyncio
+async def test_two_questions_in_one_turn_are_both_answerable(plain_voice):
+    ctx, sent = _ctx()
+    sent2 = MagicMock(id=QUESTION_ID + 1, content="Colour?")
+    sent2.edit = AsyncMock()
+    ctx["channel"].send = AsyncMock(side_effect=[sent, sent2])
+    first = asyncio.create_task(_ask(ctx, "Bar or line?"))
+    second = asyncio.create_task(_ask(ctx, "Colour?"))
+    await _until(lambda: brain_inbox.waiting(QUESTION_ID) and brain_inbox.waiting(QUESTION_ID + 1))
+    brain_inbox.deliver(QUESTION_ID, 5, "bar")
+    brain_inbox.deliver(QUESTION_ID + 1, 5, "blue")
+    assert await first == "They answered: bar"
+    assert await second == "They answered: blue"
+
+
+@pytest.mark.asyncio
+async def test_a_button_answer_edits_the_message_once_with_its_own_label(plain_voice):
+    ctx, sent = _ctx()
+    task = asyncio.create_task(_ask(ctx, "Bar or line?", ["Bar"]))
+    await _until(lambda: brain_inbox.waiting(QUESTION_ID))
+    view = ctx["channel"].send.await_args.kwargs["view"]
+    interaction = _interaction()
+    async def slow_edit(**kw):
+        await asyncio.sleep(0.05)
+    interaction.response.edit_message = AsyncMock(side_effect=slow_edit)
+    await view.children[-1].callback(interaction)  # You decide
+    assert "decide" in await task
+    interaction.response.edit_message.assert_awaited_once()
+    sent.edit.assert_not_awaited()  # ask_user's own close() stood aside
+
+
+@pytest.mark.asyncio
+async def test_a_failed_button_edit_still_gets_the_question_closed(plain_voice):
+    ctx, sent = _ctx()
+    task = asyncio.create_task(_ask(ctx, "Bar or line?", ["Bar"]))
+    await _until(lambda: brain_inbox.waiting(QUESTION_ID))
+    view = ctx["channel"].send.await_args.kwargs["view"]
+    interaction = _interaction()
+    interaction.response.edit_message = AsyncMock(side_effect=RuntimeError("expired"))
+    with pytest.raises(RuntimeError):
+        await view.children[-1].callback(interaction)
+    await task
+    sent.edit.assert_awaited_once()
+    assert sent.edit.await_args.kwargs["content"].endswith("✅ You decide")
+
+
+def test_the_closing_line_survives_a_long_question():
+    out = brain_question.closed_content("x" * 1990, "⌛ No answer in time")
+    assert len(out) <= 2000 and out.endswith("-# ⌛ No answer in time")
+
+
+@pytest.mark.asyncio
+async def test_a_long_question_is_posted_cut_to_fit(plain_voice):
+    ctx, sent = _ctx()
+    task = asyncio.create_task(_ask(ctx, "q" * 2500))
+    await _until(lambda: brain_inbox.waiting(QUESTION_ID))
+    posted = ctx["channel"].send.await_args.args[0]
+    assert len(posted) <= brain_question.MAX_QUESTION_CHARS
+    brain_inbox.deliver(QUESTION_ID, 5, "ok")
+    await task
+
+
+@pytest.mark.asyncio
+async def test_the_fallback_wording_is_capped():
+    llm = AsyncMock(side_effect=RuntimeError("down"))
+    with patch.object(persona_voice._llm, "complete", llm), \
+         patch("classes.config_manager.configManager") as cm:
+        cm.return_value.get_setting = AsyncMock(return_value="a pirate")
+        assert len(await persona_voice.voice_question(1, "q" * 3000)) == 1500
+
+
+@pytest.mark.asyncio
+async def test_time_used_by_the_reword_and_post_is_counted(plain_voice):
+    ctx, sent = _ctx()
+
+    async def slow_reword(guild_id, question):
+        ctx["brain_deadline"] = time.monotonic() + 20  # the reword ate the time
+        return question
+    with patch.object(persona_voice, "voice_question", AsyncMock(side_effect=slow_reword)):
+        out = await _ask(ctx)
+    assert out == brain.NO_ONE_TO_ASK
+    assert not brain_inbox.waiting(QUESTION_ID)
+    sent.edit.assert_awaited_once()  # the posted question was closed

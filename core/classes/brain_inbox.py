@@ -29,8 +29,10 @@ EMPTY = "empty"  # nothing to read (attachments only); the waiter keeps waiting
 NOT_YOURS = "not_yours"  # someone other than the requester
 NO_WAITER = "no_waiter"
 
-# What a replaced waiter resolves to (a newer question to the same person in
-# the same channel took its place: its buttons are dead).
+# What a replaced waiter resolves to: a newer SPOKEN question to the same
+# speaker in the same channel took its place (what they say next can answer
+# only one). Text questions never replace each other: each has its own
+# buttons and its own Reply target, and one turn can ask two at once.
 REPLACED = None
 
 
@@ -47,11 +49,12 @@ _waiters: dict[int, _Waiter] = {}  # question message id -> waiter
 
 def ask(question_id, channel_id, user_id, *, voice: bool = False) -> asyncio.Future:
     """Register a waiter for the question message `question_id` and return
-    its future (the answer's text, or REPLACED). An open question to the
-    same person in the same channel resolves to REPLACED."""
+    its future (the answer's text, or REPLACED). An open spoken question to
+    the same speaker in the same channel resolves to REPLACED when a new
+    spoken one is asked."""
     channel_id, user_id = int(channel_id), int(user_id)
     for old_id, old in list(_waiters.items()):
-        if old.channel_id == channel_id and old.user_id == user_id:
+        if (voice and old.voice and old.channel_id == channel_id and old.user_id == user_id):
             if not old.future.done():
                 old.future.set_result(REPLACED)
             del _waiters[old_id]

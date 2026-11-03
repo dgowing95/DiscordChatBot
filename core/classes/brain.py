@@ -319,6 +319,13 @@ async def ask_user(wrapper: RunContextWrapper[dict], question: str,
     if message is None:
         metrics.inc_brain_question("skipped")
         return NO_ONE_TO_ASK
+    # The reword and the post took time too: what is left of the call may now
+    # be too little to wait for, or less than the wait worked out above.
+    wait = _ask_wait(ctx)
+    if wait is None:
+        metrics.inc_brain_question("timeout")
+        await brain_question.close(message, view, brain_question.TIMED_OUT)
+        return NO_ONE_TO_ASK
     voice = bool(ctx.get("voice"))
     # Registered after the post (the waiter is keyed by the question's
     # message), and before anything else awaits.
@@ -341,7 +348,9 @@ async def ask_user(wrapper: RunContextWrapper[dict], question: str,
         # would take an answer nobody is waiting for.
         brain_inbox.cancel(message.id, future)
         if future.done() and not future.cancelled() and future.result():
-            line = brain_question.ANSWERED.format(answer=future.result()[:200])
+            said = future.result()
+            said = brain_question.YOU_DECIDE if said == brain_question.YOU_DECIDE_ANSWER else said
+            line = brain_question.ANSWERED.format(answer=said[:200])
         await brain_question.close(message, view, line)
     if answer is brain_inbox.REPLACED:
         metrics.inc_brain_question("skipped")

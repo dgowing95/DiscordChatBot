@@ -493,3 +493,18 @@ async def test_the_wake_phrase_alone_does_not_answer_a_question(monkeypatch, fak
     await session.heard(7, "Ana", "hey sparky, the red one")
     assert future.result() == "the red one"
     brain_inbox.reset()
+
+
+@pytest.mark.asyncio
+async def test_a_bare_stop_while_a_question_is_open_is_a_command_not_the_answer(monkeypatch, fake_llm):
+    from classes import brain_inbox
+    brain_inbox.reset()
+    session, bridge = _session(monkeypatch)
+    session.text_channel.id = 900
+    future = brain_inbox.ask(4100, 900, 7, voice=True)
+    await session.heard(7, "Ana", "stop")  # no wake phrase
+    assert bridge.kinds() == ["stop"]
+    assert not future.done()
+    await session.heard(7, "Ana", "the blue one")
+    assert future.result() == "the blue one"
+    brain_inbox.reset()

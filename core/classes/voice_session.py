@@ -374,11 +374,15 @@ class VoiceSession:
         # a call). "leave" and "stop" still work as commands.
         question = (brain_inbox.voice_waiting(self.text_channel.id, user_id)
                     if self.text_channel is not None else None)
-        if question is not None and not (matched and parse_command(rest) in (LEAVE, STOP)):
+        if question is not None:
+            spoken = rest if matched else text
+            if parse_command(spoken) in (LEAVE, STOP):
+                # "stop" and "leave" are commands even without the wake
+                # phrase while a question is open; the question stays open.
+                matched, rest = True, spoken
             # The wake phrase alone is not an answer: deliver("") is refused
             # and the wake-only handling below runs as usual.
-            answer = rest if matched else text
-            if brain_inbox.deliver(question, user_id, answer) == brain_inbox.ACCEPTED:
+            elif brain_inbox.deliver(question, user_id, spoken) == brain_inbox.ACCEPTED:
                 inc_voice_utterance("answer")
                 await self._chime()
                 return
