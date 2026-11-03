@@ -130,7 +130,7 @@ async def test_concurrent_generations_recheck_cooldown_and_serialize_pair():
     sends = []
 
     class LLM:
-        def __init__(self, messages, guild_id, original_message, client=None):
+        def __init__(self, messages, guild_id, original_message, client=None, unprompted=False):
             self.mid = original_message.id
             self.reasoning = ""
 

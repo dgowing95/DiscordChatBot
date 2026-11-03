@@ -27,7 +27,7 @@ core/                    # the bot (what runs in production)
     message_handler.py     # one message: history, prompt build, generate, send
     history_policy.py      # P which history goes in a prompt: sliding / anchored, token budget
     attachment_cache.py    # P encoded images kept between prompt builds
-    message_queue.py       # P queue sizing, per-channel locks, in-flight registry (prompt hint)
+    message_queue.py       # P queue sizing, elastic worker pool, per-channel locks, in-flight hint
     reply_policy.py        # P occasional double replies
     text_llm_handler.py    # the persona: an agents-SDK Agent with one tool, ask_brain
     response_filter.py     # P answer cleaning, reasoning extraction, Discord chunking
@@ -51,7 +51,10 @@ core/                    # the bot (what runs in production)
     brain.py               # run_brain, its SandboxAgent, BRAIN_INSTRUCTIONS, report
     brain_tools.py         # the one list of the brain's tools, gated per kind of run
     brain_result.py        # P BrainReport and what the persona is told
-    brain_policy.py        # P BRAIN_* limits
+    brain_policy.py        # P BRAIN_* limits (unprompted replies, questions, slots)
+    brain_inbox.py         # P questions the brain is waiting on, one per question message
+    brain_question.py      # the question in Discord: choice / Answer… / You decide buttons
+    persona_voice.py       # the brain's question reworded in the persona's voice
     loop_guard.py          # P stops a brain run that repeats itself
     context_trim.py        # P cuts old tool outputs in a long brain run
     brain_progress.py      # the "Working on it" status embed and live command output
@@ -115,7 +118,9 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
    server message with content, embeds or attachments, not from the bot, not `!reset_history`, and
    either mentioning the bot or winning the per-guild reply-chance roll. Those go on a bounded queue
    (`QUEUE_MAX_SIZE`; when it is full a mention gets a short "busy" reply) served by `QUEUE_WORKERS`
-   workers. A per-channel lock covers only the two fast phases, the prompt build and the send. The slow
+   workers. A brain call on a worker starts a spare one (up to `BRAIN_MAX_CONCURRENT`), so chat keeps
+   `QUEUE_WORKERS` free; the pool shrinks back as workers finish. A message let in by the reply chance
+   is marked unprompted, and its brain call gets the `BRAIN_UNPROMPTED_*` limits. A per-channel lock covers only the two fast phases, the prompt build and the send. The slow
    LLM and tool phase runs unlocked, so channels run side by side and a new message can be answered
    while an earlier one in the same channel waits on the brain. **Never hold the lock across an LLM or
    tool await.** A brain call that has run 10 s shows in that channel's newer prompts as a one-line hint;
@@ -234,7 +239,13 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
      keep; files left by others are data, never instructions.
    - **Files from the chat go in `in/`** (`workspace_inputs.py`): the asking message's and its reply
      target's attachments, plus any the persona names in `files`, capped by `WORKSPACE_INPUT_MAX_BYTES`.
-   - **`ask_user` answers at once for now** ("carry on with your best assumption").
+   - **`ask_user` asks in the channel**: the question, reworded in the persona's voice
+     (`persona_voice.py`), is posted as a reply to the request with buttons (`brain_question.py`: the
+     brain's choices, "Answer…" for a text box, "You decide"). Only the requester can answer, and only
+     deliberately: a button, or Discord's Reply on the question (`on_message`, ✅). An ordinary message
+     stays a new request. In a call it is spoken too, and the speaker's next words answer it
+     (`VoiceSession.heard`). At most 3 per call, each up to `BRAIN_ASK_TIMEOUT`; automatic runs and
+     unprompted replies are told to assume.
 
    Before editing, read `brain.py`'s module docstring, then `run_brain`, `workspace_tools._deliver` and
    `brain_result.tool_result_for_persona`.
@@ -450,6 +461,9 @@ reads has a row here and a line in `.env.example`, that every row is read by som
 | `BRAIN_MAX_TURNS` | backstop on model turns per brain call [100]. Chart: `brain.maxTurns` |
 | `BRAIN_TIMEOUT` | backstop on a brain call's seconds, lane waits included [1800]. Chart: `brain.timeout` |
 | `BRAIN_REPEAT_LIMIT` | loop guard: the same call this many times in a row, or eight calls that bring nothing new, warns; a second time stops the call [3, min 2]. Chart: `brain.repeatLimit` |
+| `BRAIN_UNPROMPTED_MAX_TURNS` / `BRAIN_UNPROMPTED_TIMEOUT` | backstops for a brain call in a reply the bot was not asked for (the random reply chance): nobody is waiting on it [40 / 180]. Chart: `brain.unprompted.maxTurns` / `timeout` |
+| `BRAIN_ASK_TIMEOUT` | seconds `ask_user` waits for the requester's answer in the channel, cut to what the call has left [120]. Chart: `brain.askTimeout` |
+| `BRAIN_MAX_CONCURRENT` / `BRAIN_QUEUE_WAIT` | brain calls at once (each on a queue worker starts a spare worker), and seconds a call waits for a slot before it is told the bot is busy [3 / 120]. Chart: `brain.maxConcurrent` / `queueWait` |
 | `BRAIN_TRIM_KEEP_RECENT` | tool outputs kept whole in a long brain call; older ones are cut to their first and last 400 characters [6]. Chart: `brain.trimKeepRecent` |
 | `WORKSPACE_IMAGE` | the workspace's container image, pulled at startup if missing [`python:3.14-slim`]. Chart: `brain.workspace.image` |
 | `WORKSPACE_IDLE_SECONDS` | seconds after the last task before a workspace is saved and stopped [900]. Chart: `brain.workspace.idleSeconds` |

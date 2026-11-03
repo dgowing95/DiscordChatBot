@@ -40,7 +40,7 @@ import uuid
 
 import discord
 
-from classes import voice_gate, voice_policy
+from classes import brain_inbox, voice_gate, voice_policy
 from classes.config_manager import configManager
 from classes import llm_lanes
 from classes.llm_roles import PERSONA, role_config
@@ -369,6 +369,19 @@ class VoiceSession:
         logger.debug(f"Voice: heard {name}: {text}")
         now = time.monotonic()
         matched, rest = match_wake(text, self.wake_phrase)
+        # The brain asked this speaker a question (ask_user): what they say
+        # next is the answer, wake phrase or not (nobody can press Reply in
+        # a call). "leave" and "stop" still work as commands.
+        question = (brain_inbox.voice_waiting(self.text_channel.id, user_id)
+                    if self.text_channel is not None else None)
+        if question is not None and not (matched and parse_command(rest) in (LEAVE, STOP)):
+            # The wake phrase alone is not an answer: deliver("") is refused
+            # and the wake-only handling below runs as usual.
+            answer = rest if matched else text
+            if brain_inbox.deliver(question, user_id, answer) == brain_inbox.ACCEPTED:
+                inc_voice_utterance("answer")
+                await self._chime()
+                return
         if not matched and self._followup_user == user_id and now < self._followup_until:
             matched, rest = True, text
         if not matched:
@@ -550,6 +563,13 @@ class VoiceSession:
         """The "I heard you" cue, played by the sidecar with no TTS round trip."""
         if not self.ending:
             await self.bridge.send({"type": "chime", "guild_id": self.guild_key})
+
+    async def speak_line(self, text: str) -> None:
+        """Speak one line outside the turn's own speech (the brain's
+        question to a speaker, classes/brain.py)."""
+        text = speakable(text or "")
+        if text:
+            await self._speak_line(text)
 
     async def _speak_line(self, text: str) -> None:
         """A one-off line outside any turn (greeting, busy notice)."""

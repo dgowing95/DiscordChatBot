@@ -69,6 +69,9 @@ New variables, all optional:
 | `WORKSPACE_PREWARM` | Start a server's workspace when the bot is about to answer there (on) |
 | `BRAIN_REPEAT_LIMIT` | The loop guard: the same tool call this many times in a row (or eight calls that bring nothing new) earns a warning, then a stop (3) |
 | `BRAIN_TRIM_KEEP_RECENT` | Tool outputs kept whole in a long brain call's prompt; older ones are cut to their first and last 400 characters (6) |
+| `BRAIN_UNPROMPTED_MAX_TURNS` / `BRAIN_UNPROMPTED_TIMEOUT` | Backstops for a brain call in a reply the bot was not asked for (the random reply chance): 40 turns, 180 seconds |
+| `BRAIN_ASK_TIMEOUT` | Seconds the brain waits for the requester to answer its question (120) |
+| `BRAIN_MAX_CONCURRENT` / `BRAIN_QUEUE_WAIT` | Brain calls at once (3), and seconds a call waits for a free one before the bot says it is busy (120) |
 | `LLAMA_CTX_SIZE` / `LLAMA_PARALLEL` / `LLAMA_CACHE_RAM_MIB` | docker compose only: llama.cpp's total context (80000), slots (1) and prompt cache in MiB (8192). These were fixed in `docker-compose.yaml` before, at the same values |
 
 ### Keys stay with their server
@@ -131,6 +134,14 @@ persona to put in its own words. What users notice:
   units do I like?" is answered at once.
 - **The bot no longer answers direct messages**, and its slash commands are offered in servers only.
   It never worked in DMs.
+- **The bot can ask you a question** when a guess would waste the work. It replies to your request
+  with buttons: its suggested choices, "Answer…" to type your own, and "You decide". Using Discord's
+  Reply on the question works too (it reacts ✅); any other message is a new request. In a voice call
+  it says the question aloud and your next words are the answer. No answer within 2 minutes and it
+  carries on with its best guess and says what it assumed. Replies the bot was not asked for never
+  ask, and get much shorter limits.
+- **Chat keeps working while the brain does.** Each running brain call gets a spare queue worker, so
+  `QUEUE_WORKERS` stay free for new messages.
 - `/help` describes the brain's tools; the "Run code" entry is now "Code, files and charts".
 - A brain call runs in the server's workspace, so **every tool request now needs Docker**, not just
   code tasks. With Docker down the bot still chats but cannot search, remember or draw.
@@ -190,6 +201,7 @@ from the chart. Also new:
 | `persona.model`, `persona.llmHost`, `persona.apiKey` | empty (= `llm.*`) | The persona's own LLM; the key goes in the Secret as `PERSONA_LLM_API_KEY` |
 | `brain.reasoningEffort` | medium | `BRAIN_REASONING_EFFORT` |
 | `brain.repeatLimit`, `brain.trimKeepRecent` | 3, 6 | `BRAIN_REPEAT_LIMIT`, `BRAIN_TRIM_KEEP_RECENT` |
+| `brain.unprompted.maxTurns`, `brain.unprompted.timeout`, `brain.askTimeout`, `brain.maxConcurrent`, `brain.queueWait` | 40, 180, 120, 3, 120 | `BRAIN_UNPROMPTED_*`, `BRAIN_ASK_TIMEOUT`, `BRAIN_MAX_CONCURRENT`, `BRAIN_QUEUE_WAIT` |
 | `persona.maxTurns` | **4** (was 20 as `llmMaxTurns`) | `PERSONA_MAX_TURNS` |
 | `brain.workspace.idleSeconds`, `snapshotIntervalSeconds`, `maxWarm`, `jobRetentionHours`, `cpuLimit`, `pidsLimit`, `prewarm` | 900, 1800, 4, 72, empty, 512, true | The `WORKSPACE_*` settings above. `WORKSPACE_INSTANCE` is `<namespace>-<release name>`. The core pod's `terminationGracePeriodSeconds` is `snapshotTimeout` + 30, for the shutdown save |
 
@@ -229,4 +241,7 @@ unchanged.
 | `discord_bot_brain_loop_stops_total{kind}` | New: brain calls the loop guard stopped (`repeat`, `stale`) |
 | `discord_bot_brain_facts_dropped_total` | New: facts the brain marked must-keep that the persona's reply left out |
 | `discord_bot_persona_escalations_total{result}` | New: persona replies that called the brain (`brain`) or answered alone (`answered`) |
+| `discord_bot_brain_questions_total{outcome}` | New: the brain's questions to the requester (`answered`, `timeout`, `skipped`) |
+| `discord_bot_brain_slot_wait_seconds` | New: seconds a brain call waited for one of `BRAIN_MAX_CONCURRENT` slots |
+| `discord_bot_queue_workers` | New: queue workers running, spares for brain calls included |
 | `discord_bot_llm_call_seconds{caller="brain"}` | New caller: the brain's model calls (the persona's stay `main`) |

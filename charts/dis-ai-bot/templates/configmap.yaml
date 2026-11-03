@@ -187,6 +187,11 @@ data:
   BRAIN_TIMEOUT: {{ .Values.brain.timeout | toString | quote }}
   BRAIN_REPEAT_LIMIT: {{ .Values.brain.repeatLimit | toString | quote }}
   BRAIN_TRIM_KEEP_RECENT: {{ .Values.brain.trimKeepRecent | toString | quote }}
+  BRAIN_UNPROMPTED_MAX_TURNS: {{ .Values.brain.unprompted.maxTurns | toString | quote }}
+  BRAIN_UNPROMPTED_TIMEOUT: {{ .Values.brain.unprompted.timeout | toString | quote }}
+  BRAIN_ASK_TIMEOUT: {{ .Values.brain.askTimeout | toString | quote }}
+  BRAIN_MAX_CONCURRENT: {{ .Values.brain.maxConcurrent | toString | quote }}
+  BRAIN_QUEUE_WAIT: {{ .Values.brain.queueWait | toString | quote }}
   # Content guard (moderation of web and sandbox input); the key lives in
   # secret.yaml.
   CONTENT_GUARD_ENABLED: {{ .Values.contentGuard.enabled | quote }}

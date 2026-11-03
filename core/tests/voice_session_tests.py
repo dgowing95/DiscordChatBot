@@ -440,3 +440,56 @@ def test_main_argument():
     assert voice_session._main_argument('{"search_request": "f1 winner"}') == "f1 winner"
     assert voice_session._main_argument("not json") == ""
     assert voice_session._main_argument("[1, 2]") == ""
+
+
+# --- the brain's question to a speaker (ask_user, classes/brain_inbox.py) ----
+
+@pytest.mark.asyncio
+async def test_the_asked_speakers_next_words_are_the_answer(monkeypatch, fake_llm):
+    from classes import brain_inbox
+    brain_inbox.reset()
+    session, bridge = _session(monkeypatch)
+    session.text_channel.id = 900
+    future = brain_inbox.ask(4100, 900, 7, voice=True)
+    await session.heard(8, "Bo", "unrelated chatter")  # someone else
+    assert not future.done()
+    await session.heard(7, "Ana", "the blue one")  # no wake phrase needed
+    assert future.result() == "the blue one"
+    assert fake_llm.instances == []
+    assert "chime" in bridge.kinds()
+    brain_inbox.reset()
+
+
+@pytest.mark.asyncio
+async def test_stop_still_works_while_a_question_is_open(monkeypatch, fake_llm):
+    from classes import brain_inbox
+    brain_inbox.reset()
+    session, bridge = _session(monkeypatch)
+    session.text_channel.id = 900
+    future = brain_inbox.ask(4100, 900, 7, voice=True)
+    await session.heard(7, "Ana", "hey sparky, stop")
+    assert bridge.kinds() == ["stop"]
+    assert not future.done()
+    brain_inbox.reset()
+
+
+@pytest.mark.asyncio
+async def test_speak_line_speaks_plain_text(monkeypatch):
+    session, bridge = _session(monkeypatch)
+    await session.speak_line("**Bar** or line?")
+    assert bridge.spoken() == ["Bar or line?"]
+
+
+@pytest.mark.asyncio
+async def test_the_wake_phrase_alone_does_not_answer_a_question(monkeypatch, fake_llm):
+    from classes import brain_inbox
+    brain_inbox.reset()
+    session, bridge = _session(monkeypatch)
+    session.text_channel.id = 900
+    future = brain_inbox.ask(4100, 900, 7, voice=True)
+    await session.heard(7, "Ana", "Hey Sparky.")
+    assert not future.done()
+    assert session._followup_user == 7  # the usual wake-only follow-up window
+    await session.heard(7, "Ana", "hey sparky, the red one")
+    assert future.result() == "the red one"
+    brain_inbox.reset()

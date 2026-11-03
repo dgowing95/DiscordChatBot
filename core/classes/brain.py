@@ -11,7 +11,10 @@ and no steering; the tools post their own embeds as before, and a status
 embed ("🧠 Working on it") appears only once it uses the workspace
 (classes/brain_progress.py). It finishes by calling `report` with short
 facts, which the persona puts in its own voice
-(classes/brain_result.tool_result_for_persona). "Quick" means inline, not
+(classes/brain_result.tool_result_for_persona). When a guess would waste
+the work it can ask the requester (ask_user): the question is posted as a
+reply to their request, with buttons, and answered with a button or a
+Discord Reply (classes/brain_question.py, classes/brain_inbox.py). "Quick" means inline, not
 short: a call may take minutes, bounded only by the loop guard
 (classes/loop_guard.py) and the BRAIN_MAX_TURNS / BRAIN_TIMEOUT backstops.
 
@@ -93,7 +96,8 @@ MEMORY_CHARS = 1500
 # it is done: a second ask_brain in the same reply starts clean, and nothing
 # the persona's own run keeps holds a released workspace.
 _BRAIN_KEYS = ("session", "out_dir", "job_dir", "workspace_root", "deliverables",
-               "delivery_chosen", "brain_request", "brain_report_args", "brain_guard", "requester")
+               "delivery_chosen", "brain_request", "brain_report_args", "brain_guard", "requester",
+               "brain_deadline", "brain_questions")
 
 # The brain's instructions. ONE home per concept (AGENTS.md "Prompt
 # surface"): if something here needs saying again, edit the existing bullet.
@@ -117,7 +121,8 @@ receive a REQUEST plus the recent conversation, not a specification.
 - You own every decision the request does not pin down (style, sizes,
   libraries, method). Decide, do it, check the result. Only details the
   user stated are fixed. Assume where it is unclear and say what you
-  assumed in a fact; `ask_user` gets no answer yet, so carry on.
+  assumed in a fact; `ask_user` only if a wrong guess would waste
+  the work.
 - You also have a Linux workspace (a Python container) with shell tools:
   `exec_command` runs a command, `write_stdin` talks to a running process.
   There is no editing or patching tool: write files with heredocs
@@ -243,16 +248,110 @@ async def report(
     return REPORTED
 
 
+# --- ask_user: a question to the requester, answered inline (3b) -------------
+
+# Questions one brain call may ask; more get "assume". A loop guard of its
+# own: each unanswered one can hold the call for BRAIN_ASK_TIMEOUT.
+MAX_QUESTIONS = 3
+# Time kept back for the run to finish after a question goes unanswered, and
+# the least worth waiting for at all (a call near its timeout just assumes).
+ASK_MARGIN_SECONDS = 30
+MIN_ASK_SECONDS = 15
+ANSWER_MAX_CHARS = 2000
+
+NO_ONE_TO_ASK = ("No one can answer right now. Carry on with your best assumption and "
+                 "say what you assumed in a fact.")
+
+
+def _ask_wait(ctx: dict) -> float | None:
+    """Seconds this question may wait: BRAIN_ASK_TIMEOUT, cut to what the
+    call has left (its deadline, set by run_brain) minus a margin. None when
+    too little is left to be worth asking."""
+    wait = float(brain_policy.ask_timeout())
+    deadline = ctx.get("brain_deadline")
+    if deadline is not None:
+        wait = min(wait, deadline - time.monotonic() - ASK_MARGIN_SECONDS)
+    return wait if wait >= MIN_ASK_SECONDS else None
+
+
+def _no_one_to_ask(ctx: dict) -> bool:
+    """Automatic runs and unprompted replies have no one waiting on them,
+    so a question would sit unanswered (or be asked of someone who never
+    asked for anything)."""
+    return (bool(ctx.get("automatic")) or bool(ctx.get("unprompted"))
+            or ctx.get("channel") is None or not ctx.get("user_id"))
+
+
+async def _speak_question(ctx: dict, text: str) -> None:
+    """In a voice call the question is also said aloud."""
+    from classes import voice_gate
+    session = voice_gate.session(ctx.get("guild_id"))
+    if session is not None:
+        try:
+            await session.speak_line(text)
+        except Exception as e:
+            logger.info(f"Brain: could not speak its question: {e}")
+
+
 @function_tool(name_override="ask_user")
-async def ask_user(wrapper: RunContextWrapper[dict], question: str) -> str:
+async def ask_user(wrapper: RunContextWrapper[dict], question: str,
+                   options: list[str] | None = None) -> str:
     """Ask the person who made the request a question you need answered.
 
     Args:
         question: One specific question about a choice that changes the result.
+        options: Up to 4 short choices, shown as buttons, when the answer is
+            one of a few. They can always answer in their own words instead.
     """
-    # Tier 2 has no way to wait for an answer yet (the next PR adds one).
-    return ("No one can answer right now. Carry on with your best assumption and "
-            "say what you assumed in a fact.")
+    from classes import brain_inbox, brain_question, metrics, persona_voice
+
+    ctx = _ctx(wrapper)
+    wait = _ask_wait(ctx)
+    asked = ctx.get("brain_questions", 0)
+    if _no_one_to_ask(ctx) or wait is None or asked >= MAX_QUESTIONS:
+        metrics.inc_brain_question("skipped")
+        return NO_ONE_TO_ASK
+    # Counted before any await: the SDK runs one turn's tool calls at once,
+    # so two questions in one turn must not both pass the cap.
+    ctx["brain_questions"] = asked + 1
+    text = await persona_voice.voice_question(ctx.get("guild_id"), question)
+    message, view = await brain_question.post(ctx, text, options, wait)
+    if message is None:
+        metrics.inc_brain_question("skipped")
+        return NO_ONE_TO_ASK
+    voice = bool(ctx.get("voice"))
+    # Registered after the post (the waiter is keyed by the question's
+    # message), and before anything else awaits.
+    future = brain_inbox.ask(message.id, ctx["channel"].id, ctx["user_id"], voice=voice)
+    logger.info(f"Brain: asked the requester, waiting up to {wait:.0f}s")
+    line = brain_question.CLOSED
+    try:
+        # Inside the try: a run stopped while the question is being spoken
+        # must still take its waiter off.
+        if voice:
+            await _speak_question(ctx, text)
+        answer = await asyncio.wait_for(future, wait)
+    except asyncio.TimeoutError:
+        metrics.inc_brain_question("timeout")
+        line = brain_question.TIMED_OUT
+        return (f"No answer within {wait:.0f} seconds. Carry on with your best assumption "
+                "and say what you assumed in a fact.")
+    finally:
+        # Also on a cancel (the call's own timeout): a waiter left behind
+        # would take an answer nobody is waiting for.
+        brain_inbox.cancel(message.id, future)
+        if future.done() and not future.cancelled() and future.result():
+            line = brain_question.ANSWERED.format(answer=future.result()[:200])
+        await brain_question.close(message, view, line)
+    if answer is brain_inbox.REPLACED:
+        metrics.inc_brain_question("skipped")
+        return ("A newer question took this one's place, so it will not be answered. "
+                "Carry on with your best assumption and say what you assumed in a fact.")
+    metrics.inc_brain_question("answered")
+    if answer == brain_question.YOU_DECIDE_ANSWER:
+        return ("They said you should decide. Carry on with your best judgement and say "
+                "what you chose in a fact.")
+    return f"They answered: {answer[:ANSWER_MAX_CHARS]}"
 
 
 # --- content guard on the workspace -------------------------------------------
@@ -566,12 +665,25 @@ async def run_brain(ctx: dict, request: str, files=None) -> BrainReport:
     """One brain call for the persona: runs the brain to its report, posts
     the files it chose, and returns the report. Never raises (a failure is a
     BrainReport with status "failed"), and never asks to be retried."""
-    from classes import metrics
+    from classes import message_queue, metrics
     started = time.monotonic()
     token = llm_lanes.current_lane.set(llm_lanes.BRAIN)
     hooks_box = {}
+    # Chat replies and automatic runs hold a queue worker; a voice turn has
+    # its own task, so it takes a slot but needs no spare worker.
+    on_worker = not ctx.get("voice")
+    slot = None
     try:
-        report_out = await _run_brain(ctx, request, files, hooks_box)
+        slot = await _take_slot()
+        if slot is None:
+            report_out = BrainReport(
+                status=brain_result.FAILED,
+                note=("The bot is busy with other jobs, so nothing was done. "
+                      "Tell the user to try again in a few minutes."))
+        else:
+            if on_worker:
+                message_queue.brain_call_started()
+            report_out = await _run_brain(ctx, request, files, hooks_box)
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -579,6 +691,10 @@ async def run_brain(ctx: dict, request: str, files=None) -> BrainReport:
         report_out = BrainReport(status=brain_result.FAILED,
                                  note="Something went wrong on the bot's side. Say so briefly.")
     finally:
+        if slot is not None:
+            slot.release()
+            if on_worker:
+                message_queue.brain_call_finished()
         llm_lanes.current_lane.reset(token)
         for key in _BRAIN_KEYS:
             ctx.pop(key, None)
@@ -589,6 +705,33 @@ async def run_brain(ctx: dict, request: str, files=None) -> BrainReport:
     logger.info(f"Brain: {report_out.status} in {time.monotonic() - started:.1f}s"
                 + (f", {hooks.turns} turn(s), {hooks.tool_calls} tool call(s)" if hooks else ""))
     return report_out
+
+
+_slots: asyncio.Semaphore | None = None
+
+
+def _brain_slots() -> asyncio.Semaphore:
+    """BRAIN_MAX_CONCURRENT slots for the whole process, built on first use."""
+    global _slots
+    if _slots is None:
+        _slots = asyncio.Semaphore(brain_policy.max_concurrent())
+    return _slots
+
+
+async def _take_slot() -> asyncio.Semaphore | None:
+    """Waits up to BRAIN_QUEUE_WAIT for a brain slot: the semaphore (held),
+    or None when every slot stayed busy."""
+    from classes import metrics
+    slots = _brain_slots()
+    waited_from = time.monotonic()
+    try:
+        await asyncio.wait_for(slots.acquire(), brain_policy.queue_wait())
+    except asyncio.TimeoutError:
+        metrics.observe_brain_slot_wait(time.monotonic() - waited_from)
+        logger.warning("Brain: every brain slot stayed busy; the call was refused")
+        return None
+    metrics.observe_brain_slot_wait(time.monotonic() - waited_from)
+    return slots
 
 
 def _acquire_workspace(guild_id):
@@ -710,11 +853,15 @@ async def _run_and_deliver(ctx, lease, agent, task, run_config, hooks, progress,
     channel = ctx.get("channel")
     notes = []
     stopped = None
+    # A reply nobody asked for gets the tighter unprompted backstops. The
+    # deadline is what ask_user cuts its wait to.
+    max_turns, timeout = brain_policy.limits_for(unprompted=bool(ctx.get("unprompted")))
+    ctx["brain_deadline"] = time.monotonic() + timeout
     try:
         result = await asyncio.wait_for(
-            Runner.run(agent, task, max_turns=brain_policy.brain_max_turns(),
+            Runner.run(agent, task, max_turns=max_turns,
                        run_config=run_config, hooks=hooks, context=ctx),
-            timeout=brain_policy.brain_timeout())
+            timeout=timeout)
     except asyncio.TimeoutError:
         hooks.abandon_llm_call("timeout")
         stopped = "It ran out of time and was stopped."

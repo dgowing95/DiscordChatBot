@@ -483,7 +483,7 @@ async def test_handle_message_scoped_lock_generates_concurrently_sends_serially(
     class _FakeLLM:
         gen_events = []  # (msg_id, phase, monotonic)
 
-        def __init__(self, messages, guild_id, original_message, client=None):
+        def __init__(self, messages, guild_id, original_message, client=None, unprompted=False):
             self.original_message = original_message
             self.reasoning = ""
 
@@ -535,7 +535,7 @@ async def test_handle_message_appends_in_flight_hint_to_prompt():
     captured = {}
 
     class _FakeLLM:
-        def __init__(self, messages, guild_id, original_message, client=None):
+        def __init__(self, messages, guild_id, original_message, client=None, unprompted=False):
             captured["prompt"] = messages
             self.reasoning = ""
 
@@ -570,7 +570,7 @@ async def test_handle_message_no_hint_when_channel_idle():
     captured = {}
 
     class _FakeLLM:
-        def __init__(self, messages, guild_id, original_message, client=None):
+        def __init__(self, messages, guild_id, original_message, client=None, unprompted=False):
             captured["prompt"] = messages
             self.reasoning = ""
 
@@ -597,7 +597,7 @@ async def test_handle_message_passes_client_to_text_llm_handler():
     captured = {}
 
     class _FakeLLM:
-        def __init__(self, messages, guild_id, original_message, client=None):
+        def __init__(self, messages, guild_id, original_message, client=None, unprompted=False):
             captured["client"] = client
             self.reasoning = ""
 
@@ -613,6 +613,33 @@ async def test_handle_message_passes_client_to_text_llm_handler():
         await handler.handle_message()
 
     assert captured["client"] is handler.client
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("marked", [True, False])
+async def test_handle_message_passes_the_unprompted_flag(marked):
+    # A message the reply chance let in (main.on_message marks it) gets the
+    # brain's unprompted limits; the flag is popped, so it is used once.
+    from classes import message_queue
+    captured = {}
+
+    class _FakeLLM:
+        def __init__(self, messages, guild_id, original_message, client=None, unprompted=False):
+            captured["unprompted"] = unprompted
+            self.reasoning = ""
+
+        async def generate(self):
+            return "ok"
+
+    message = _llm_message(51)
+    if marked:
+        message_queue.mark_unprompted(message.id)
+    handler = _handled(_handler(), message,
+                       lambda h: setattr(h, "messages", [{"role": "user", "content": "hi"}]))
+    with patch("classes.message_handler.TextLLMHandler", _FakeLLM):
+        await handler.handle_message()
+    assert captured["unprompted"] is marked
+    assert not message_queue.pop_unprompted(message.id)
 
 
 @pytest.mark.asyncio
@@ -679,7 +706,7 @@ async def test_send_with_files_puts_ten_files_on_a_message():
 async def test_handle_message_replies_in_the_channel_it_was_asked_in():
     # The brain works inline: no thread, so the reply goes where it was asked.
     class _FakeLLM:
-        def __init__(self, messages, guild_id, original_message, client=None):
+        def __init__(self, messages, guild_id, original_message, client=None, unprompted=False):
             self.reasoning = ""
 
         async def generate(self):
@@ -706,7 +733,7 @@ def _reasoning_llm(reasoning, answer="the answer"):
     reasoning_content, so the answer text never carries them)."""
 
     class _FakeLLM:
-        def __init__(self, messages, guild_id, original_message, client=None):
+        def __init__(self, messages, guild_id, original_message, client=None, unprompted=False):
             self.reasoning = ""
 
         async def generate(self):
@@ -926,7 +953,7 @@ async def test_handle_message_sends_reasoning_even_when_the_run_failed():
     sends = []
 
     class _FailingLLM:
-        def __init__(self, messages, guild_id, original_message, client=None):
+        def __init__(self, messages, guild_id, original_message, client=None, unprompted=False):
             self.reasoning = ""
 
         async def generate(self):
@@ -946,7 +973,7 @@ async def test_handle_message_failed_run_with_no_reasoning_just_reacts():
     sends = []
 
     class _FailingLLM:
-        def __init__(self, messages, guild_id, original_message, client=None):
+        def __init__(self, messages, guild_id, original_message, client=None, unprompted=False):
             self.reasoning = ""
 
         async def generate(self):
@@ -965,7 +992,7 @@ async def test_handle_message_prewarms_the_servers_workspace():
     # The persona may hand the job to the brain, which needs the workspace:
     # it starts while the persona thinks.
     class _FakeLLM:
-        def __init__(self, messages, guild_id, original_message, client=None):
+        def __init__(self, messages, guild_id, original_message, client=None, unprompted=False):
             self.reasoning = ""
 
         async def generate(self):

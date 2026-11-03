@@ -2,6 +2,7 @@ import logging
 import discord
 import os
 import asyncio
+import contextvars
 import random
 import signal
 import time
@@ -17,15 +18,16 @@ from classes.image_generation import (
     create_image,
     image_generation_enabled,
 )
-from classes import attachment_cache, help_catalog, sandbox_thread_inbox, settings_check, whats_new
+from classes import attachment_cache, brain_inbox, help_catalog, sandbox_thread_inbox, settings_check, whats_new
 from classes.common import embed_from_data
 from classes.redis_client import text_client
 from classes import automation_runner, voice_gate
 from classes.polls import remember_poll
 from classes.automation_policy import settings as automation_settings
 from classes.voice_policy import settings as voice_settings
+from classes import message_queue as queue_policy
 from classes.message_queue import (
-    get_channel_lock, make_message_queue, mark_enqueued, pop_enqueued, queue_workers,
+    get_channel_lock, make_message_queue, mark_enqueued, mark_unprompted, pop_enqueued, queue_workers,
 )
 from classes.metrics import (
     inc_messages_processed,
@@ -33,6 +35,7 @@ from classes.metrics import (
     inc_queue_drop,
     inc_sandbox_thread_message,
     observe_queue_wait,
+    set_queue_workers,
     observe_reply_latency,
     set_attachment_cache_bytes,
     set_message_queue_size,
@@ -285,8 +288,9 @@ async def on_ready():
     logger.info(f"Starting {count} queue worker(s)")
     if not getattr(client, "workers_started", False):
         client.workers_started = True
+        queue_policy.set_spawner(start_worker)
         for _ in range(count):
-            client.background_tasks.append(client.loop.create_task(process_messages()))
+            start_worker()
     try:
         # Same accessor the bot itself uses, so the readiness check verifies
         # the model that is actually requested.
@@ -338,6 +342,13 @@ async def on_message(message):
             and sandbox_thread_inbox.is_run_active(message.channel.id)):
         await route_to_sandbox(message)
         return
+    # A Discord Reply to the brain's open question (ask_user) by the person
+    # it asked is the answer, not a new request. Any other message is
+    # handled as usual (classes/brain_inbox.py). Before the voice gate, so a
+    # reply in a call's thread counts too.
+    if message.author != client.user and _answers_brain_question(message):
+        await answer_brain_question(message)
+        return
     if await voice_dev_inject(message):
         return
     # In a voice call in this guild: no text replies, rules or queueing
@@ -374,8 +385,34 @@ async def on_message(message):
 
     inc_messages_received(guild_id)
     mark_enqueued(message.id)
+    if client.user not in message.mentions:
+        mark_unprompted(message.id)
     await message_queue.put(message)
     set_message_queue_size(message_queue.qsize())
+
+
+def _answers_brain_question(message) -> bool:
+    """A Reply (not a forward, which also points at the message) in the
+    question's own channel, by the person it asked."""
+    reference = getattr(message, "reference", None)
+    question_id = getattr(reference, "message_id", None)
+    return (question_id is not None and message.guild is not None
+            and getattr(reference, "type", None) != discord.MessageReferenceType.forward
+            and getattr(reference, "channel_id", None) == message.channel.id
+            and brain_inbox.requester(question_id) == message.author.id)
+
+
+async def answer_brain_question(message) -> None:
+    """Hands the reply to the waiting brain call and reacts ✅; a reply
+    with no text gets a short note and the question stays open."""
+    outcome = brain_inbox.deliver(message.reference.message_id, message.author.id, message.content)
+    try:
+        if outcome == brain_inbox.ACCEPTED:
+            await message.add_reaction("✅")
+        elif outcome == brain_inbox.EMPTY:
+            await message.reply("I need your answer as text, please.", mention_author=False)
+    except Exception as e:
+        logger.warning(f"Could not acknowledge an answer to the brain: {e}")
 
 
 # What a person sees for each delivery result (sandbox_thread_inbox.deliver).
@@ -572,8 +609,42 @@ async def maybe_announce_whats_new(message) -> None:
         logger.warning(f"What's New announcement failed: {e}")
 
 
+def start_worker() -> None:
+    """Starts one queue worker; also how a brain call gets its spare
+    (classes/message_queue.py). Counted in before it runs. A fresh context:
+    a spare started from inside a brain call must not inherit its context
+    variables (the brain's LLM lane), or every chat reply it handled would
+    run as brain work."""
+    queue_policy.worker_started()
+    set_queue_workers(queue_policy.pool_workers())
+    task = asyncio.get_running_loop().create_task(process_messages(), context=contextvars.Context())
+    tasks = getattr(client, "background_tasks", None)
+    if tasks is None:
+        tasks = client.background_tasks = []
+    tasks[:] = [t for t in tasks if not t.done()]
+    tasks.append(task)
+
+
 async def process_messages():
+    try:
+        await _process_messages()
+    except BaseException:
+        # Cancelled at shutdown, or died: counted out. A worker that exits
+        # because the pool is above target was counted out by claim_exit.
+        queue_policy.worker_stopped()
+        raise
+    finally:
+        set_queue_workers(queue_policy.pool_workers())
+
+
+async def _process_messages():
     while True:
+        # Before taking an item, so every path through the loop (automatic
+        # runs and dropped messages continue early) passes it: the pool
+        # shrinks back once brain calls end.
+        if queue_policy.claim_exit():
+            logger.info("Queue worker exiting: the pool is above target")
+            return
         message = await message_queue.get()
         set_message_queue_size(message_queue.qsize())
         if isinstance(message, automation_runner.AutomationJob):

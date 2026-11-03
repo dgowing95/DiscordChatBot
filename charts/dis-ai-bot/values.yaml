@@ -492,6 +492,19 @@ brain:
   # Tool outputs kept whole in a long call's prompt; older ones are cut to
   # their first and last 400 characters.
   trimKeepRecent: 6
+  # A reply the bot was not asked for (the random reply chance) gets these
+  # tighter backstops instead: nobody is waiting on it.
+  unprompted:
+    maxTurns: 40
+    timeout: 180
+  # Seconds the brain waits for the requester to answer a question it asked
+  # in the channel (ask_user); counted inside timeout.
+  askTimeout: 120
+  # Brain calls at once. Each one on a queue worker starts a spare worker, so
+  # chat keeps queue.workers free meanwhile; a call that finds every slot
+  # busy for queueWait seconds is told the bot is busy.
+  maxConcurrent: 3
+  queueWait: 120
   # The server workspace: ONE long-lived Docker container per Discord server,
   # on the NODE's Docker daemon (its socket is always mounted into the core
   # pod: Docker is required, and core exits at startup without it). Kept

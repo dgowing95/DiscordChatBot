@@ -182,6 +182,15 @@ Metrics (scraped by Prometheus from the /metrics HTTP endpoint):
   Counter  discord_bot_persona_escalations_total{result}
            Persona replies that called the brain (brain) or answered alone
            (answered).
+  Counter  discord_bot_brain_questions_total{outcome}
+           The brain's ask_user: answered / timeout (no answer in time) /
+           skipped (no one to ask: automatic runs, unprompted replies, or
+           the per-call cap).
+  Histogram discord_bot_brain_slot_wait_seconds
+           Seconds a brain call waited for one of BRAIN_MAX_CONCURRENT slots.
+  Gauge    discord_bot_queue_workers
+           Queue worker tasks running: QUEUE_WORKERS plus one spare per brain
+           call holding a worker (classes/message_queue.py).
 
 Context-window note: this is the PROMPT side, which is what has to fit before
 generation starts. The server-side counterpart is llama.cpp's own
@@ -611,6 +620,20 @@ persona_escalations_total = Counter(
     "Persona replies, by whether they called the brain",
     ["result"],
 )
+brain_questions_total = Counter(
+    "discord_bot_brain_questions_total",
+    "Questions the brain asked the requester, by outcome",
+    ["outcome"],
+)
+brain_slot_wait_seconds = Histogram(
+    "discord_bot_brain_slot_wait_seconds",
+    "Seconds a brain call waited for a brain slot",
+    buckets=(0.1, 1, 5, 15, 30, 60, 120, 300),
+)
+queue_workers_gauge = Gauge(
+    "discord_bot_queue_workers",
+    "Queue worker tasks running (base pool plus spares for brain calls)",
+)
 
 
 def observe_brain_call(tier, status: str, seconds: float, turns: int, tool_calls: int) -> None:
@@ -631,6 +654,18 @@ def inc_brain_facts_dropped(count: int) -> None:
 
 def inc_persona_escalation(result: str) -> None:
     persona_escalations_total.labels(result=str(result)).inc()
+
+
+def inc_brain_question(outcome: str) -> None:
+    brain_questions_total.labels(outcome=str(outcome)).inc()
+
+
+def observe_brain_slot_wait(seconds: float) -> None:
+    brain_slot_wait_seconds.observe(max(0.0, seconds))
+
+
+def set_queue_workers(n: int) -> None:
+    queue_workers_gauge.set(n)
 
 
 def observe_workspace_start(kind: str, seconds: float) -> None:

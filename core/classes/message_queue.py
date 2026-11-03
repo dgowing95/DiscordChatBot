@@ -125,6 +125,99 @@ def pop_enqueued(message_id: int) -> float | None:
     return _enqueued_at.pop(message_id, None)
 
 
+# Replies the bot was not asked for (the random reply chance let them in,
+# no mention): MessageHandler pops the flag and the brain gets the tighter
+# unprompted limits (brain_policy.limits_for) and asks no questions.
+_unprompted: dict[int, None] = {}
+
+
+def mark_unprompted(message_id: int) -> None:
+    """Record that `message_id` was let in by the reply chance."""
+    _unprompted[message_id] = None
+    while len(_unprompted) > MAX_ENQUEUED_TRACKED:
+        del _unprompted[next(iter(_unprompted))]
+
+
+def pop_unprompted(message_id: int) -> bool:
+    """Whether `message_id` was an unprompted reply (and forget it)."""
+    if message_id in _unprompted:
+        del _unprompted[message_id]
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Elastic worker pool (D9)
+# ---------------------------------------------------------------------------
+#
+# A brain call can hold its queue worker for minutes. So that chat keeps
+# QUEUE_WORKERS free workers meanwhile, each brain call running on a queue
+# worker (chat replies and automatic runs; not voice turns, which have their
+# own task) starts a spare: target = QUEUE_WORKERS + brain calls on workers,
+# at most BRAIN_MAX_CONCURRENT of them (the brain's slots). Nothing is ever
+# cancelled: when the pool is above target, the next worker to come back for
+# an item exits instead. main.py owns the tasks; this owns the counts. No
+# function here awaits, so each check-and-update is atomic.
+_pool = {"workers": 0, "brain_calls": 0}
+_spawner = None
+
+
+def set_spawner(spawn) -> None:
+    """The callable that starts one more worker task (main.py); it calls
+    worker_started() itself."""
+    global _spawner
+    _spawner = spawn
+
+
+def pool_workers() -> int:
+    return _pool["workers"]
+
+
+def target_workers() -> int:
+    return queue_workers() + _pool["brain_calls"]
+
+
+def worker_started() -> None:
+    """Count a worker in. Called by whoever creates the task, as it is
+    created, not from inside it: two brain calls starting back to back must
+    both see the first one's spare, or both would start one."""
+    _pool["workers"] += 1
+
+
+def worker_stopped() -> None:
+    _pool["workers"] = max(0, _pool["workers"] - 1)
+
+
+def claim_exit() -> bool:
+    """Called by a worker before it takes the next item: True (and the
+    worker is counted out) when the pool is above target."""
+    if _pool["workers"] > target_workers():
+        _pool["workers"] -= 1
+        return True
+    return False
+
+
+def brain_call_started() -> bool:
+    """A brain call took a slot on a queue worker. Starts a spare when the
+    pool is short; returns whether it did."""
+    _pool["brain_calls"] += 1
+    if _spawner is not None and _pool["workers"] < target_workers():
+        _spawner()
+        return True
+    return False
+
+
+def brain_call_finished() -> None:
+    _pool["brain_calls"] = max(0, _pool["brain_calls"] - 1)
+
+
+def reset_pool() -> None:
+    """Forget the counts and the spawner (tests)."""
+    global _spawner
+    _pool.update(workers=0, brain_calls=0)
+    _spawner = None
+
+
 # One lock per channel id. Creating a lock needs no guard: the event loop is
 # single-threaded and there is no await between the get and the set.
 _channel_locks: dict[int, asyncio.Lock] = {}
