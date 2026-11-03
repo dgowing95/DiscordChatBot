@@ -628,3 +628,121 @@ async def test_new_steps_may_build_on_a_done_step_and_later_helpers_hear_the_thr
     later = json.dumps(env.model.calls[4].input)
     assert "Ana: add Elegoo too (reply: Adding Elegoo.)" in later
     assert wf.record["state"] == wp.DONE
+
+
+# --------------------------- review fixes ---------------------------
+
+def _thread_message_during_the_step(env, seq_id, text):
+    thread_id = env.thread.id
+
+    @function_tool
+    async def look() -> str:
+        """Look."""
+        thread_inbox.deliver(thread_id, seq_id, 5, "Ana", text)
+        return "ok"
+
+    env.subagent_tools = [look]
+
+
+@pytest.mark.asyncio
+async def test_new_steps_sent_back_with_the_done_ones_still_apply(env):
+    # A small model often returns the whole plan, finished steps included.
+    _thread_message_during_the_step(env, 9400, "use @everyone 5 sources instead of 3")
+    env.model = LaneModel([
+        _plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"])),
+        ModelStep(output=[function_call("look", {}, call_id="l")]), _report(call_id="a"),
+        ModelStep(output=[function_call("submit_review", {
+            "replies": [{"id": 1, "reply": "Will do."}],
+            "steps": [{"id": "s1", "role": "researcher", "brief": "do s1", "depends_on": []},
+                      {"id": "s2", "role": "researcher", "brief": "5 sources",
+                       "depends_on": ["s1"]},
+                      {"id": "s3", "role": "implementer", "brief": "Write it",
+                       "depends_on": ["s2"]}]}, call_id="rv")]),
+        _report(call_id="b"), _report(call_id="c"), _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    assert list(wf.results) == ["s1", "s2", "s3"]
+    assert next(s for s in wf.plan.steps if s.id == "s2").brief == "5 sources"
+    echoed = next(m for m in env.thread.sent if "Will do." in (m.kwargs.get("content") or ""))
+    assert "couldn't change" not in echoed.kwargs["content"]
+    # People's text is echoed with no pings.
+    assert echoed.kwargs["allowed_mentions"].everyone is False
+    assert wf.record["state"] == wp.DONE
+
+
+@pytest.mark.asyncio
+async def test_unusable_new_steps_are_said_and_the_old_ones_run(env):
+    _thread_message_during_the_step(env, 9401, "add a step")
+    env.model = LaneModel([
+        _plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"])),
+        ModelStep(output=[function_call("look", {}, call_id="l")]), _report(call_id="a"),
+        ModelStep(output=[function_call("submit_review", {
+            "replies": [{"id": 1, "reply": "Added."}],
+            "steps": [{"id": "s3", "role": "wizard", "brief": "x", "depends_on": []}]},
+            call_id="rv")]),
+        _report(call_id="b"), _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    assert list(wf.results) == ["s1", "s2"]
+    assert any("Added." in t and "couldn't change" in t for t in env.thread.texts())
+
+
+@pytest.mark.asyncio
+async def test_a_stop_in_the_last_review_does_not_cancel_finished_work(env):
+    _thread_message_during_the_step(env, 9402, "ok you can stop now")
+    env.model = LaneModel([
+        _plan_call(("s1", "researcher", [])),
+        ModelStep(output=[function_call("look", {}, call_id="l")]), _report(call_id="a"),
+        ModelStep(output=[function_call("submit_review", {
+            "replies": [{"id": 1, "reply": "All done anyway."}], "stop": True}, call_id="rv")]),
+        _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    assert wf.record["state"] == wp.DONE and not wf.cancel_reason
+
+
+@pytest.mark.asyncio
+async def test_a_change_written_while_the_plan_is_made_becomes_an_edit(env, monkeypatch):
+    async def _index(guild_id):
+        # Runs inside the first planning run, after the thread was claimed.
+        if not thread_inbox.get_run(env.thread.id).events:
+            thread_inbox.deliver(env.thread.id, 9403, 5, "Ana", "prices in EUR please")
+        return ""
+
+    monkeypatch.setattr(brain, "_skills_index", _index)
+    env.model = LaneModel([
+        _plan_call(("s1", "researcher", [])),
+        _plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"]), call_id="p2"),
+        _report(call_id="a"), _report(call_id="b"), _report(call_id="f")])
+    wf, _ = await _start(env, automatic=False)
+    await _until(lambda: wf.revisions == 1 and wf.approval is not None
+                 and not wf.approval.done())
+    assert "prices in EUR please" in json.dumps(env.model.calls[1].input)
+    _, call = _press(wf, "approve")
+    await call
+    await _finish(wf)
+    assert set(wf.results) == {"s1", "s2"}
+
+
+@pytest.mark.asyncio
+async def test_no_copy_of_the_files_when_the_request_came_from_the_thread():
+    thread = FakeChannel(500)
+    wf = SimpleNamespace(origin_channel=thread, thread=thread,
+                         artifacts=[SimpleNamespace(name="a.md", data=b"x")])
+    assert await workflows.post_workflow_copy(wf) == []
+    assert thread.sent == []
+
+
+@pytest.mark.asyncio
+async def test_task_refuses_while_the_bot_is_in_a_call(monkeypatch):
+    from classes import task_commands, voice_gate
+    commands = {}
+    tree = SimpleNamespace(command=lambda **kw: (lambda f: commands.setdefault(kw["name"], f)))
+    task_commands.register_task_commands(tree, client=None)
+    monkeypatch.setattr(voice_gate, "active", lambda guild_id: True)
+    ctx = SimpleNamespace(guild_id=1, response=SimpleNamespace(send_message=AsyncMock()))
+    start = AsyncMock()
+    monkeypatch.setattr(workflows, "start_workflow", start)
+    await commands["task"](ctx, "a big job")
+    assert ctx.response.send_message.await_args.kwargs == {"ephemeral": True}
+    start.assert_not_awaited()

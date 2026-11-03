@@ -141,9 +141,6 @@ receive a REQUEST plus the recent conversation, not a specification.
   contents to stdout.
 - Iterate until it works: read errors, fix, retry. Once a result is
   checked, stop.
-- A job of many parts, like a report from 10+ sources or a program with
-  several files -> `start_workflow`: it runs in its own thread with a
-  plan the user approves, and that ends your part.
 - Finish by calling `report` once, on its own, with short facts the bot
   will repeat: exact numbers, names and links, what you made and anything
   that failed. E.g. `report(status="done", facts=["The Prusa Core One is the
@@ -162,10 +159,20 @@ SKILLS_INSTRUCTIONS = """
   skill fits the request, `use_skill` it first."""
 
 
-def instructions() -> str:
-    """The brain's system prompt: BRAIN_INSTRUCTIONS, plus the skills bullet."""
+# Added only when the call is offered start_workflow (brain_policy.effective_tier):
+# naming a tool the call does not have would make the model call it anyway.
+WORKFLOW_INSTRUCTIONS = """
+- A job of many parts, like a report from 10+ sources or a program with
+  several files -> `start_workflow`: it runs in its own thread with a
+  plan the user approves, and that ends your part."""
+
+
+def instructions(*, workflows: bool = False) -> str:
+    """The brain's system prompt: BRAIN_INSTRUCTIONS, plus the skills bullet,
+    plus the workflow bullet when this kind of call may start one."""
     from classes import skill_format
-    return BRAIN_INSTRUCTIONS + (SKILLS_INSTRUCTIONS if skill_format.enabled() else "")
+    return (BRAIN_INSTRUCTIONS + (SKILLS_INSTRUCTIONS if skill_format.enabled() else "")
+            + (WORKFLOW_INSTRUCTIONS if workflows else ""))
 
 
 def build_brain_model() -> LanedModel:
@@ -481,7 +488,7 @@ def build_brain_agent(*, automatic: bool = False, voice: bool = False, workflows
     return SandboxAgent(
         name="Brain",
         model=build_brain_model(),
-        instructions=instructions(),
+        instructions=instructions(workflows=workflows),
         base_instructions="",
         capabilities=[Shell(configure_tools=_configure_brain_shell)],
         tools=brain_tools(automatic=automatic, voice=voice, workflows=workflows),
@@ -1002,7 +1009,7 @@ async def _run_and_deliver(ctx, lease, agent, task, run_config, hooks, progress,
         await _record_skill_successes(ctx)
     if stopped is None:
         await _queue_skill_review(ctx, out, hooks, task, result)
-    await progress.finalize(ok=out.status == brain_result.DONE,
+    await progress.finalize(ok=out.status in (brain_result.DONE, brain_result.STARTED_WORKFLOW),
                             note=None if stopped is None else f"⚠️ {stopped}")
     return out
 

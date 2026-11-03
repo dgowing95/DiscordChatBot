@@ -134,3 +134,11 @@ def test_a_workflow_this_process_already_runs_is_not_interrupted(store):
     run(store.save(_record("a1", wp.RUNNING)))
     assert run(store.interrupt_all("dcb-dev", skip={"a1"})) == []
     assert run(store.get(7, "a1"))["state"] == wp.RUNNING
+
+
+def test_a_workflow_started_since_this_process_began_is_not_interrupted(store):
+    # Its record is saved before it is registered, so `skip` can miss it.
+    run(store.save(dict(_record("a1", wp.RUNNING), created_at=100.0)))
+    run(store.save(dict(_record("a2", wp.RUNNING), created_at=50.0)))
+    assert [r["id"] for r in run(store.interrupt_all("dcb-dev", before=90.0))] == ["a2"]
+    assert run(store.get(7, "a1"))["state"] == wp.RUNNING

@@ -217,10 +217,12 @@ class RunLedger:
             e.message_id == message_id for e in self.follow_ups)
 
     def deliver(self, message_id, author_id, author_name, text,
-                reply_to=None, has_attachments: bool = False) -> str:
+                reply_to=None, has_attachments: bool = False, stop_word: bool = False) -> str:
         """Records one thread message. Returns one of the delivery results
         above so the caller acknowledges accurately rather than implying the
-        run will see a message it never will."""
+        run will see a message it never will. A stop word from the requester
+        (`stop_word`, the caller's check) is never refused for a full inbox:
+        others' chatter must not take away their way to stop the run."""
         if self.state == CLOSED:
             return NO_RUN
         message_id = int(message_id) if message_id else None
@@ -252,13 +254,14 @@ class RunLedger:
             self.follow_ups.append(event)
             return FINISHING
         pending = self.unaddressed()
-        if len(pending) >= MAX_PENDING_MESSAGES:
-            return FULL
-        if sum(len(e.text) for e in pending) + len(text) > MAX_PENDING_CHARS:
-            return FULL
-        if (len(self.events) >= MAX_RETAINED_EVENTS
-                and all(e.stage != RESOLVED for e in self.events)):
-            return FULL
+        if not (stop_word and event.is_requester):
+            if len(pending) >= MAX_PENDING_MESSAGES:
+                return FULL
+            if sum(len(e.text) for e in pending) + len(text) > MAX_PENDING_CHARS:
+                return FULL
+            if (len(self.events) >= MAX_RETAINED_EVENTS
+                    and all(e.stage != RESOLVED for e in self.events)):
+                return FULL
         self.revision += 1
         event.seq = self.revision
         q = self.question
@@ -457,11 +460,12 @@ def is_run_active(thread_id: int) -> bool:
 
 
 def deliver(thread_id: int, message_id, author_id, author_name, text,
-            reply_to=None, has_attachments: bool = False) -> str:
+            reply_to=None, has_attachments: bool = False, stop_word: bool = False) -> str:
     """Records one thread message for the run claimed in this thread; see
     RunLedger.deliver for the possible results."""
     ledger = get_run(thread_id)
     if ledger is None:
         return NO_RUN
     return ledger.deliver(message_id, author_id, author_name, text,
-                          reply_to=reply_to, has_attachments=has_attachments)
+                          reply_to=reply_to, has_attachments=has_attachments,
+                          stop_word=stop_word)

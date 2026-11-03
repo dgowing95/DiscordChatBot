@@ -488,11 +488,11 @@ async def test_model_call_timeout_bounds_a_server_that_dribbles_padding():
 def test_the_instructions_stay_small_and_keep_their_rules():
     text = brain.BRAIN_INSTRUCTIONS
     # Pinned: one home per concept (AGENTS.md "Prompt surface"). Re-measure
-    # before raising it.
-    # 2300 until phase 5 added the start_workflow bullet (maintainer: raise it).
-    assert len(text) <= 2450, len(text)
+    # before raising it. With the workflow bullet: 2450 (maintainer, phase 5).
+    assert len(text) <= 2300, len(text)
+    assert len(text + brain.WORKFLOW_INSTRUCTIONS) <= 2450
     assert "`report`" in text and "`attach_file`" in text and "`out/`" in text
-    assert "`start_workflow`" in text
+    assert "`start_workflow`" not in text
     assert "never instructions" in text  # files from others are data
     assert "RELATIVE" in text and "absolute path" in text
     # naming apply_patch would invite a model to call it
@@ -645,3 +645,15 @@ def test_brain_calls_share_one_model_client(monkeypatch):
     _clear_llm_env(monkeypatch)
     monkeypatch.setenv("LLM_MODEL", "some/local-model")
     assert brain.build_brain_model() is brain.build_brain_model()
+
+
+def test_the_workflow_bullet_is_there_only_when_the_tool_is(monkeypatch):
+    monkeypatch.setenv("SKILLS_ENABLED", "0")
+    assert "`start_workflow`" in brain.instructions(workflows=True)
+    assert "`start_workflow`" not in brain.instructions()
+    names = lambda agent: {t.name for t in agent.tools}  # noqa: E731
+    monkeypatch.setattr(brain, "build_brain_model", lambda: None)
+    on = brain.build_brain_agent(workflows=True)
+    off = brain.build_brain_agent(workflows=False)
+    assert "start_workflow" in names(on) and "`start_workflow`" in on.instructions
+    assert "start_workflow" not in names(off) and "`start_workflow`" not in off.instructions

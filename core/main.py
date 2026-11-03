@@ -477,6 +477,7 @@ async def route_to_workflow(message) -> None:
     acknowledges it accurately: 📨 means the run WILL see it, and says
     nothing about whether it has been applied — the workflow's manager
     answers it between steps."""
+    from classes.workflow_policy import is_stop_word
     ledger = thread_inbox.get_run(message.channel.id)
     reference = getattr(message, "reference", None)
     outcome = thread_inbox.deliver(
@@ -484,6 +485,7 @@ async def route_to_workflow(message) -> None:
         message.author.id, message.author.display_name, message.content,
         reply_to=getattr(reference, "message_id", None),
         has_attachments=bool(getattr(message, "attachments", None)),
+        stop_word=is_stop_word(message.content or ""),
     )
     inc_workflow_thread_message(outcome)
     if outcome == thread_inbox.DUPLICATE:

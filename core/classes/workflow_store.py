@@ -115,11 +115,15 @@ class WorkflowStore:
 
     # -- restarts -----------------------------------------------------------------
 
-    async def interrupt_all(self, owner: str, skip=frozenset()) -> list[dict]:
+    async def interrupt_all(self, owner: str, skip=frozenset(),
+                            before: float | None = None) -> list[dict]:
         """Marks every live workflow `owner` started as INTERRUPTED and frees
-        its slot, except the ids in `skip` (started by this process: the
-        check runs while the bot already takes requests). Returns the
-        records, for the notes in their threads."""
+        its slot, except those this process started: the check runs while
+        the bot already takes requests. Those are the ids in `skip` (read at
+        each record, so pass the live registry) and, since a record is
+        saved before it is registered, any created at or after `before`
+        (this process's start). Returns the records, for the notes in
+        their threads."""
         interrupted = []
         for member in list(await self.redis.smembers(LIVE)):
             guild, _, workflow_id = str(member).partition(":")
@@ -129,7 +133,9 @@ class WorkflowStore:
             if record is None:
                 await self.redis.srem(LIVE, member)
                 continue
-            if record.get("instance") != owner:
+            if record.get("instance") != owner or workflow_id in skip:
+                continue
+            if before is not None and float(record.get("created_at") or 0) >= before:
                 continue
             if record.get("state") in wp.LIVE_STATES:
                 record["state"] = wp.INTERRUPTED

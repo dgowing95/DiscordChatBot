@@ -11,6 +11,8 @@ job, you approve the plan, and it works through the steps while the channel carr
 - **`/task <request>`** starts one straight away. Put every detail in the request.
 
 One workflow runs per server at a time. If one is already running, the bot says where it is.
+While the bot is in a voice call in the server, `/task` says so and starts nothing; a workflow already
+running carries on in its thread.
 
 ## The plan
 

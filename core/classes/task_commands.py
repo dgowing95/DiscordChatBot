@@ -14,6 +14,8 @@ from discord import app_commands
 logger = logging.getLogger(__name__)
 
 MAX_REQUEST_CHARS = 1800
+VOICE_BUSY_REPLY = ("🎙️ I'm in a voice call right now, so I can't start a big job. "
+                    "Try again after /voice leave.")
 
 
 def register_task_commands(tree, client) -> None:
@@ -21,7 +23,13 @@ def register_task_commands(tree, client) -> None:
     @app_commands.guild_only()
     @app_commands.describe(request="What you want done, with every detail")
     async def task(ctx: discord.Interaction, request: app_commands.Range[str, 1, MAX_REQUEST_CHARS]):
-        from classes import workflows
+        from classes import voice_gate, workflows
+        # Text stops while the bot is in a call here (classes/voice_gate.py),
+        # so no new workflow either. One already running carries on in its
+        # thread: its agents are on lanes below the call's.
+        if voice_gate.active(ctx.guild_id):
+            await ctx.response.send_message(VOICE_BUSY_REPLY, ephemeral=True)
+            return
         await ctx.response.send_message(f"🧵 Workflow: {request}",
                                         allowed_mentions=discord.AllowedMentions.none())
         message = await ctx.original_response()

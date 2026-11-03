@@ -220,6 +220,9 @@ class Workflow:
 
 # workflow id -> its handle, while it runs in this process.
 _RUNNING: dict[str, Workflow] = {}
+# When this process started: a live record created since is its own
+# (interrupt_all must leave it alone).
+_PROCESS_STARTED = time.time()
 # Set by main at startup: the bot's queue (WorkflowDone) and client.
 _queue: asyncio.Queue | None = None
 _client = None
@@ -331,7 +334,8 @@ async def _open_thread(ctx: dict, request: str, message):
         channel = ctx.get("channel")
         if channel is None:
             return None
-        message = await channel.send(f"🧵 Workflow: {request[:1800]}")
+        message = await channel.send(f"🧵 Workflow: {request[:1800]}",
+                                     allowed_mentions=discord.AllowedMentions.none())
     thread, _created = await ensure_work_thread(message, request)
     if not isinstance(thread, discord.Thread) or thread_inbox.is_run_active(thread.id):
         return None
@@ -476,6 +480,10 @@ async def _body(wf: Workflow) -> tuple[str, BrainReport]:
         if wf.cancel_reason:
             return wp.CANCELLED, _report_from_steps(wf, _cancel_note(wf))
         report = await _finish(wf, stopped)
+        if wf.cancel_reason:
+            # Stopped while the final report was written: what the steps made
+            # is kept and reported, but it was cancelled.
+            return wp.CANCELLED, _report_from_steps(wf, _cancel_note(wf))
         all_done = all(r.get("status") == brain_result.DONE for r in wf.results.values())
         if stopped is None and all_done and report.status == brain_result.DONE:
             await _set_state(wf, "finish")
@@ -746,6 +754,12 @@ async def _approve(wf: Workflow) -> bool:
             await _set_state(wf, "approve")
             return True
         wf.approval = asyncio.get_running_loop().create_future()
+        # A change the requester wrote while the plan was being written (or
+        # rewritten) is an edit now: _watch only takes them once this waits.
+        early = _waiting_edit(wf)
+        if early is not None:
+            wf.ledger.mark_presented([early.seq], 0)
+            wf.approval.set_result(("edit", early))
         try:
             action, event = await asyncio.wait_for(asyncio.shield(wf.approval), seconds)
         except asyncio.TimeoutError:
@@ -821,6 +835,17 @@ async def _update_plan_message(wf: Workflow, final: bool = False, content: str |
         await wf.plan_message.edit(**changes)
     except Exception as e:
         logger.info(f"Workflow {wf.id}: could not update the plan: {e}")
+
+
+def _waiting_edit(wf: Workflow):
+    """The requester's oldest thread message not yet taken (stop words
+    are _watch's), or None."""
+    if wf.ledger is None:
+        return None
+    for event in wf.ledger.unpresented():
+        if event.is_requester and not wp.is_stop_word(event.text):
+            return event
+    return None
 
 
 async def _post(channel, **kwargs):
@@ -977,6 +1002,12 @@ async def _review(wf: Workflow, queue: list) -> list:
                 replies[int(item.get("id"))] = " ".join(str(item.get("reply") or "").split())
             except (TypeError, ValueError):
                 continue
+    # A stop only means something while steps are left (the last review runs
+    # after they are all done, and must not call finished work cancelled).
+    stop = bool(args.get("stop")) and bool(queue) and any(e.is_requester for e in pending)
+    new_plan, unusable = None, False
+    if args.get("steps") and queue and not stop:
+        new_plan, unusable = _revised_steps(wf, args["steps"])
     posted = []
     for event in pending:
         reply = replies.get(event.seq, "")
@@ -985,40 +1016,53 @@ async def _review(wf: Workflow, queue: list) -> list:
                        + (f" (reply: {reply[:200]})" if reply else ""))
         if reply:
             posted.append(f"> {event.text[:150]}\n{reply[:400]}")
+    if posted and unusable:
+        # The reply may promise a change that was not made: say so.
+        posted.append("-# I couldn't change the remaining steps, so they stay as planned.")
     if posted:
-        await _post(wf.thread, content="\n\n".join(posted)[:2000])
-    if args.get("stop") and any(e.is_requester for e in pending):
+        await _post(wf.thread, content="\n\n".join(posted)[:2000],
+                    allowed_mentions=discord.AllowedMentions.none())
+    if stop:
         request_cancel(wf, "the requester asked to stop")
         return []
-    if args.get("steps") and queue:
+    if new_plan is not None:
         done = [s for s in wf.plan.steps if s.id in wf.results]
-        # A new step may build on one already done: those ids count as met
-        # (taken off before the check, which only knows the new steps).
-        steps = []
-        for item in args["steps"] if isinstance(args["steps"], list) else []:
-            if isinstance(item, dict):
-                item = dict(item)
-                deps = item.get("depends_on")
-                deps = deps if isinstance(deps, list) else [deps] if deps else []
-                item["depends_on"] = [d for d in deps if str(d).strip() not in wf.results]
-            steps.append(item)
-        plan, problems = wp.validate_plan(
-            {"goal": wf.plan.goal, "steps": steps, "deliverables": wf.plan.deliverables,
-             "notes": wf.plan.notes},
-            max_steps=max(1, wp.max_steps() - len(done)), request=wf.record["request"])
-        if plan is not None and any(s.id in wf.results for s in plan.steps):
-            plan, problems = None, ["a new step reuses the id of one already done"]
-        if plan is not None:
-            wf.plan = wp.Plan(goal=wf.plan.goal, steps=done + plan.steps,
-                              deliverables=wf.plan.deliverables, notes=wf.plan.notes)
-            _store_plan(wf, wf.plan)
-            for step in queue:
-                if step.id not in {s.id for s in plan.steps}:
-                    wf.step_states[step.id] = "skipped"
-            await _update_plan_message(wf)
-            return wp.order_steps(plan)
-        logger.info(f"Workflow {wf.id}: new steps not usable: {problems}")
+        wf.plan = wp.Plan(goal=wf.plan.goal, steps=done + new_plan.steps,
+                          deliverables=wf.plan.deliverables, notes=wf.plan.notes)
+        _store_plan(wf, wf.plan)
+        for step in queue:
+            if step.id not in {s.id for s in new_plan.steps}:
+                wf.step_states[step.id] = "skipped"
+        await _update_plan_message(wf)
+        return wp.order_steps(new_plan)
     return queue
+
+
+def _revised_steps(wf: Workflow, items) -> tuple[wp.Plan | None, bool]:
+    """The review's new remaining steps as a plan, or (None, True) when they
+    cannot be used. Steps already done are left out (a small model often
+    sends the whole plan back), and depending on one counts as met. All of
+    them done = no change, (None, False)."""
+    steps = []
+    for item in items if isinstance(items, list) else []:
+        if isinstance(item, dict):
+            if str(item.get("id") or "").strip() in wf.results:
+                continue
+            item = dict(item)
+            deps = item.get("depends_on")
+            deps = deps if isinstance(deps, list) else [deps] if deps else []
+            item["depends_on"] = [d for d in deps if str(d).strip() not in wf.results]
+        steps.append(item)
+    if not steps:
+        return None, False
+    plan, problems = wp.validate_plan(
+        {"goal": wf.plan.goal, "steps": steps, "deliverables": wf.plan.deliverables,
+         "notes": wf.plan.notes},
+        max_steps=max(1, wp.max_steps() - len(wf.results)), request=wf.record["request"])
+    if plan is None:
+        logger.info(f"Workflow {wf.id}: new steps not usable: {problems}")
+        return None, True
+    return plan, False
 
 
 async def _finish(wf: Workflow, stopped: str | None) -> BrainReport:
@@ -1075,9 +1119,12 @@ def _closing_embed(end_state: str, report: BrainReport) -> discord.Embed:
 async def post_workflow_copy(wf: Workflow) -> list[str]:
     """The workflow's files, echoed in the channel the request came from
     (they were posted in the thread as each step made them). Returns the
-    names sent."""
+    names sent. Nothing when the request came from the thread itself
+    (ensure_work_thread reuses it): the files are there already."""
     from classes.brain import _post_files
     if wf.origin_channel is None or not wf.artifacts:
+        return []
+    if getattr(wf.origin_channel, "id", None) == getattr(wf.thread, "id", None):
         return []
     picked, total = [], 0
     for artifact in wf.artifacts:
@@ -1236,7 +1283,8 @@ async def interrupt_all(client) -> int:
     its thread is told. Fail-soft."""
     from classes.workflow_store import instance
     try:
-        records = await _store().interrupt_all(instance(), skip=set(_RUNNING))
+        records = await _store().interrupt_all(instance(), skip=_RUNNING,
+                                                before=_PROCESS_STARTED)
     except Exception as e:
         logger.warning(f"Workflow: could not check for interrupted workflows: {e}")
         return 0
