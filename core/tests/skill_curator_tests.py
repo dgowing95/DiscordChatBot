@@ -339,6 +339,45 @@ async def test_a_failed_call_waits_for_the_interval(store, channels, clock):
 
 
 @pytest.mark.asyncio
+async def test_a_change_that_errors_does_not_stop_the_others(store, channels, clock):
+    await _seed(store, clock)
+    llm = FakeLLM(_answer({"action": "describe", "name": "pie-chart", "description": "Pie"},
+                          {"action": "retire", "name": "old-poll"}))
+    real_save = store.save
+
+    async def flaky_save(*args, **kwargs):
+        raise ConnectionError("redis went away")
+    store.save = flaky_save
+    try:
+        assert await _curator(store, channels, llm, clock).curate(GUILD) == "1"  # the retire
+    finally:
+        store.save = real_save
+    assert await store.get(GUILD, "old-poll") is None
+
+
+@pytest.mark.asyncio
+async def test_a_pass_that_breaks_still_waits_for_the_interval(store, channels, clock):
+    await _seed(store, clock)
+    # A describe, so five skills stay live and the next check reaches "due".
+    llm = FakeLLM(_answer({"action": "describe", "name": "pie-chart", "description": "Pie"}))
+    curator = _curator(store, channels, llm, clock)
+    real_list = store.list
+    calls = {"n": 0}
+
+    async def list_breaks_after_the_model(guild, **kwargs):
+        calls["n"] += 1
+        if calls["n"] > 1:  # the read after the changes
+            raise ConnectionError("redis went away")
+        return await real_list(guild, **kwargs)
+    store.list = list_breaks_after_the_model
+    assert await curator.curate(GUILD) == "failed"
+    store.list = real_list
+    clock.t += 3600
+    assert await curator.curate(GUILD) == "not due" and llm.calls == 1
+    assert not await store.redis.get(sc._lock_key(GUILD))
+
+
+@pytest.mark.asyncio
 async def test_a_pass_already_running_elsewhere_is_left_alone(store, channels, clock):
     await _seed(store, clock)
     await store.redis.set(sc._lock_key(GUILD), "other-process")

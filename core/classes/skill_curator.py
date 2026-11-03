@@ -284,7 +284,12 @@ class Curator:
             changes = parse_changes(text, set(by_name) - guarded, stale_names)
             made = 0
             for change in changes:
-                made += await self._apply(guild, change, by_name, cfg)
+                try:
+                    made += await self._apply(guild, change, by_name, cfg)
+                except Exception as e:
+                    # One change's failure (Redis, the guard) never stops the rest.
+                    logger.warning(f"Skills: a tidy-up change in guild {guild} failed: {e}")
+                    metrics.inc_skill_curator_change("failed")
             # After the changes, so the pass's own new versions never make the
             # next one due.
             after = await self.store.list(guild)
@@ -293,6 +298,12 @@ class Curator:
             return str(made)
         except Exception as e:
             logger.warning(f"Skills: tidy-up of guild {guild} failed: {e}")
+            # Like a failed model call: tried again after the interval, not
+            # every hour.
+            try:
+                await self._remember(guild, "")
+            except Exception:
+                pass
             return "failed"
         finally:
             try:
