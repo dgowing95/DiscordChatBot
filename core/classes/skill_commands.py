@@ -188,7 +188,7 @@ def register_skill_commands(tree) -> None:
     @app_commands.autocomplete(name=_live_names)
     async def revert(ctx: discord.Interaction, name: str, version: int):
         await _change(ctx, name, lambda n: SkillStore().revert(ctx.guild_id, n, version, ctx.user.id),
-                      tool_embeds.SKILL_REVERTED, f"→ v{version}")
+                      tool_embeds.SKILL_REVERTED, f"back to v{version}")
 
     @group.command(name="export", description="Download every skill, with its history")
     async def export(ctx: discord.Interaction):
