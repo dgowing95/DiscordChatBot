@@ -802,7 +802,8 @@ class TextLLMHandler:
       token. llama.cpp keeps the processed prompt in its slot; the real turn
       is that prompt plus a few tokens, so it is answered almost at once.
       Measured on the dev stack: a 2.4k-token voice prompt went from 1.0s of
-      prompt processing to 0.3s, 52 tokens instead of 2427.
+      prompt processing to 0.3s, 52 tokens instead of 2427. Other guilds share
+      the slot; llama.cpp's --cache-ram restores this prefix after them.
       """
       user_info = await self._prepare()
       run_context = RunContextWrapper(context=user_info)

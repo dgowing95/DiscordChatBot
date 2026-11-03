@@ -197,7 +197,8 @@ REPORTED = "Reported."
 
 
 def _report_failure(ctx, error) -> str:
-    # report's return value becomes the run's final output (StopAtTools), so
+    # report's return value becomes the run's final output (StopAtTools;
+    # other calls in the same turn still run first, pinned in brain_tests), so
     # it must never be the SDK's error text, and a failure still ends the
     # run cleanly. Arguments that are a JSON object but fail the schema (a
     # list sent as one string, seen live on the dev stack) are kept anyway:
