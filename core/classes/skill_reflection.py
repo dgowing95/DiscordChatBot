@@ -158,7 +158,8 @@ async def reflect(review: dict) -> str:
                                   # an update keeps the skill's files: the review reads no files
                                   (exists or {}).get("files"),
                                   author_id=review.get("user_id") or 0, source="reflection",
-                                  job_id=review.get("job_id", ""), note=decision["note"])
+                                  job_id=review.get("job_id", ""), note=decision["note"],
+                                  channel_id=getattr(review.get("channel"), "id", None))
         if result == "unchanged":
             metrics.inc_skill_reflection("none")
             return "none"

@@ -222,7 +222,8 @@ async def save_skill(wrapper: RunContextWrapper[dict], name: str, description: s
         author = ctx.get("user_id") or 0
         job_id = posixpath.basename(ctx.get("job_dir") or "")
         result = await store.save(guild, clean, description, steps, stored, author_id=author,
-                                  source="brain", job_id=job_id, note=note)
+                                  source="brain", job_id=job_id, note=note,
+                                  channel_id=getattr(ctx.get("channel"), "id", None))
     except QuotaError as e:
         return f"Not saved: {e}"
     except SkillError as e:

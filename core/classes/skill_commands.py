@@ -96,7 +96,8 @@ class EditModal(discord.ui.Modal, title="Edit skill"):
                 raise SkillError(f"Not saved: the safety guard blocked this ({reason or 'content refused'}).")
             result = await store.save(ctx.guild_id, name, str(self.description.value), str(self.steps.value),
                                       self.skill.get("files") or {}, author_id=ctx.user.id,
-                                      source="command", note=str(self.note.value or ""))
+                                      source="command", note=str(self.note.value or ""),
+                                      channel_id=ctx.channel_id)
         except SkillError as e:
             await ctx.response.send_message(str(e), ephemeral=True)
             return

@@ -21,7 +21,7 @@ from classes.image_generation import (
 from classes import attachment_cache, brain_inbox, help_catalog, sandbox_thread_inbox, settings_check, whats_new
 from classes.common import embed_from_data
 from classes.redis_client import text_client
-from classes import automation_runner, voice_gate
+from classes import automation_runner, skill_format, voice_gate
 from classes.polls import remember_poll
 from classes.automation_policy import settings as automation_settings
 from classes.voice_policy import settings as voice_settings
@@ -281,6 +281,14 @@ async def on_ready():
         client.background_tasks.append(client.loop.create_task(workspaces().run_forever()))
         if automation_settings()["enabled"]:
             client.background_tasks.append(client.loop.create_task(schedule_forever()))
+        if skill_format.enabled():
+            # The daily skills tidy-up (classes/skill_curator.py), which also
+            # keeps the live-skills gauge; it checks SKILLS_CURATOR_ENABLED.
+            from classes.skill_curator import Curator
+            from classes.skill_store import SkillStore
+            curator = Curator(SkillStore(), client.get_channel, client.user.id)
+            client.background_tasks.append(client.loop.create_task(
+                curator.run_forever(lambda: [guild.id for guild in client.guilds])))
         if voice_settings()["enabled"]:
             from classes.voice_bridge import start_bridge
             bridge = start_bridge(voice_settings()["bridge_url"], client, voice_settings()["bridge_token"])

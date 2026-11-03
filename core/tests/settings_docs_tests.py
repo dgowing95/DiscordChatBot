@@ -50,6 +50,14 @@ def _env_name_args(func) -> int:
     return 2 if name == "env_or" else 1 if name.startswith("_env") else 0
 
 
+def _reads_env_argument(node: ast.Call) -> bool:
+    func = node.func
+    if (isinstance(func, ast.Attribute) and func.attr == "get"
+            and isinstance(func.value, ast.Name) and func.value.id == "env"):
+        return True
+    return any(isinstance(arg, ast.Name) and arg.id == "env" for arg in node.args)
+
+
 def env_names_read_by_core() -> set[str]:
     names = set()
     files = [ROOT / "core" / "main.py", *sorted((ROOT / "core" / "classes").glob("*.py"))]
@@ -60,6 +68,12 @@ def env_names_read_by_core() -> set[str]:
                 for arg in node.args[:_env_name_args(node.func)]:
                     if isinstance(arg, ast.Constant) and isinstance(arg.value, str) and ENV_NAME.match(arg.value):
                         names.add(arg.value)
+            elif isinstance(node, ast.Call) and _reads_env_argument(node):
+                # env.get(NAME), _int(env, NAME, ...): the pure settings readers
+                # take the environment as an argument.
+                names.update(arg.value for arg in node.args
+                             if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                             and ENV_NAME.match(arg.value))
             elif (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute)
                   and node.value.attr == "environ" and isinstance(node.slice, ast.Constant)):
                 names.add(node.slice.value)

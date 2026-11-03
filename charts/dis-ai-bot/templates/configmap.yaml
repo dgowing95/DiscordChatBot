@@ -201,6 +201,10 @@ data:
   SKILLS_INDEX_MAX: {{ .Values.skills.indexMax | toString | quote }}
   SKILLS_REFLECTION_ENABLED: {{ .Values.skills.reflection.enabled | quote }}
   SKILLS_REFLECTION_MIN_TOOL_CALLS: {{ .Values.skills.reflection.minToolCalls | toString | quote }}
+  SKILLS_CURATOR_ENABLED: {{ .Values.skills.curator.enabled | quote }}
+  SKILLS_CURATOR_INTERVAL_HOURS: {{ .Values.skills.curator.intervalHours | toString | quote }}
+  SKILLS_CURATOR_MIN_SKILLS: {{ .Values.skills.curator.minSkills | toString | quote }}
+  SKILLS_RETIRE_DAYS: {{ .Values.skills.curator.retireDays | toString | quote }}
   # Content guard (moderation of web and sandbox input); the key lives in
   # secret.yaml.
   CONTENT_GUARD_ENABLED: {{ .Values.contentGuard.enabled | quote }}

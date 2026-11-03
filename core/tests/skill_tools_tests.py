@@ -85,6 +85,7 @@ async def test_save_skill_stores_posts_an_embed_and_marks_the_call(store, ctx, a
     assert "created" in out and "v1" in out
     skill = await store.get(GUILD, "weekly-chart")
     assert skill["files"] == {"scripts/chart.py": "print('hi')"} and skill["updated_by"] == 5
+    assert skill["last_channel_id"] == 77  # saved here: somewhere for the tidy-up's embeds
     assert ctx["skill_saved"] is True
     assert titles(ctx["channel"]) == [tool_embeds.SKILL_SAVED]
     # No files given: the update keeps the script.
@@ -347,6 +348,7 @@ async def test_a_queued_review_is_left_on_the_context_only_for_long_jobs(store, 
 def _interaction(channel):
     ctx = MagicMock()
     ctx.guild_id, ctx.channel, ctx.user = GUILD, channel, SimpleNamespace(id=9)
+    ctx.channel_id = channel.id
     ctx.response.send_message = AsyncMock()
     ctx.response.send_modal = AsyncMock()
     ctx.guild = SimpleNamespace(filesize_limit=10 * 1024 * 1024)
