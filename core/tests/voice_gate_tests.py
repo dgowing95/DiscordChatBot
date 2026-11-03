@@ -120,8 +120,8 @@ async def test_other_guilds_are_unaffected():
 async def test_sandbox_steering_still_reaches_a_running_sandbox():
     main = _import_main()
     voice_gate.enter(GUILD, object())
-    with patch.object(main.sandbox_thread_inbox, "is_run_active", return_value=True), \
-         patch.object(main, "route_to_sandbox", AsyncMock()) as route:
+    with patch.object(main.thread_inbox, "is_run_active", return_value=True), \
+         patch.object(main, "route_to_workflow", AsyncMock()) as route:
         await main.on_message(_message(content="make it blue"))
     route.assert_awaited_once()
 

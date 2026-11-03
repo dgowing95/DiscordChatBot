@@ -28,9 +28,7 @@ NOT_SETTINGS = {
 READ_ELSEWHERE = {
     "DOCKER_HOST",  # the docker library
 }
-# Read (llm_roles resolves subagents), but documented in phase 5, when
-# something uses them.
-UNDOCUMENTED_UNTIL_USED = {name for name in llm_roles.env_names() if name.startswith("SUBAGENT_")}
+UNDOCUMENTED_UNTIL_USED: set = set()
 
 
 def _env_name_args(func) -> int:

@@ -1,14 +1,14 @@
 import asyncio
 
-# sandbox_thread_inbox is imported as classes.* here and classes.* in
+# thread_inbox is imported as classes.* here and classes.* in
 # production (the app runs with cwd=core/); both resolve as namespace packages.
 
 import pytest
 
-from classes import sandbox_thread_inbox as inbox
+from classes import thread_inbox as inbox
 
 # To run this pytest file from the command line, use:
-# PYTHONPATH=$(pwd) pytest core/tests/sandbox_thread_inbox_tests.py
+# PYTHONPATH=$(pwd) pytest core/tests/thread_inbox_tests.py
 
 
 @pytest.fixture(autouse=True)

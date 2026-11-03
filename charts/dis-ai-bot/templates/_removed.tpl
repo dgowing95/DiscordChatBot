@@ -48,6 +48,7 @@ includes this, so every render runs it. core does the same for env vars
   "inputMaxBytes" "brain.workspace.inputMaxBytes"
   "maxTurns" "brain.maxTurns (default 100, was 10)"
   "timeout" "brain.timeout (default 1800, was 600)"
+  "askUserTimeout" "workflows.askTimeout"
 }}
 {{- if kindIs "map" .Values.sandbox }}
 {{- range $old, $new := $sandbox }}

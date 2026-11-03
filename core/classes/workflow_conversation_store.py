@@ -34,7 +34,7 @@ _CARRY_STATUSES = {"late", "unseen", "unacknowledged", "accepted", "deferred"}
 
 
 def _key(thread_id) -> str:
-    return f"dcb:sandbox_conversation:{thread_id}"
+    return f"dcb:workflow_conversation:{thread_id}"
 
 
 def build_record(outcomes: list[dict], *, outcome: str, open_question: str | None = None) -> dict:

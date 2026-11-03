@@ -1,8 +1,8 @@
 """The brain's tiers and limits. PURE (stdlib only).
 
 Tier 2 is the brain working inline in the channel (classes/brain.py). Tier 3
-(a long workflow in its own thread) does not exist yet, so effective_tier
-always answers 2.
+is a long workflow in its own thread (classes/workflows.py), which the brain
+may start only where effective_tier allows it.
 
 The limits are loop guards, not budgets (maintainer, 2026-11-02): a brain
 call may take minutes. classes/loop_guard.py is the real guard; the turn and
@@ -21,6 +21,7 @@ is busy.
 import os
 
 TIER_BRAIN = 2
+TIER_WORKFLOW = 3
 
 DEFAULT_MAX_TURNS = 100
 DEFAULT_TIMEOUT_SECONDS = 1800
@@ -43,9 +44,18 @@ def _env_int(name: str, default: int, env) -> int:
         return default
 
 
-def effective_tier(requested: int | None = None, **_flags) -> int:
-    """The tier a brain call runs at. Always 2 until workflows exist."""
-    return TIER_BRAIN
+def effective_tier(*, unprompted: bool = False, automatic: bool = False, voice: bool = False,
+                   env=os.environ) -> int:
+    """The highest tier a brain call may use: 3 when it may start a
+    workflow (classes/workflows.py), else 2. Never from a reply nobody asked
+    for (F11), never in a voice turn (not yet: a call has no thread to
+    follow), and from an automatic run only with WORKFLOW_FROM_AUTOMATIONS."""
+    from classes import workflow_policy
+    if unprompted or voice or not workflow_policy.enabled(env):
+        return TIER_BRAIN
+    if automatic and not workflow_policy.from_automations(env):
+        return TIER_BRAIN
+    return TIER_WORKFLOW
 
 
 def brain_max_turns(env=os.environ) -> int:

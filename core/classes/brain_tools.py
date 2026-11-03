@@ -16,7 +16,11 @@ Which tools a call gets depends on what kind of run it is:
 | leave voice (VOICE_ENABLED)                             | no   | no        | yes   |
 | generate_image (IMAGE_GEN_ENABLED)                      | yes  | yes       | yes   |
 | skills: use_skill, save_skill, search_skills (SKILLS_ENABLED)           | yes  | yes       | yes   |
-| workspace: attach_file, save_messages_to_file, ask_user, report (+ Shell) | yes | yes | yes |
+| workspace: attach_file, save_messages_to_file, ask_user (+ Shell) | yes | yes | yes |
+| start_workflow (when Tier 3 is allowed: brain_policy.effective_tier) | yes | yes* | no |
+| report                                                  | yes  | yes       | yes   |
+
+(*) only with WORKFLOW_FROM_AUTOMATIONS. Never in a reply nobody asked for.
 
 An automatic run (a schedule, a rule or a follow-up) has no personal memory
 and cannot set up more automations, as before. Its usual job is "read the poll,
@@ -24,15 +28,39 @@ make the event", so the event tools stay. The event tools check the editor's
 permission in a schedule or a rule, but not in a follow-up
 (event_tools._checks_requester).
 
+A Tier 3 workflow's agents (classes/workflows.py) get their own `mode`, from
+the same objects:
+
+| mode        | Tools                                                         |
+|-------------|---------------------------------------------------------------|
+| manager     | web, fetch, message search/read, search_skills, use_skill, submit_plan |
+| review      | submit_review (the thread's messages between steps)          |
+| finish      | report                                                        |
+| researcher  | web, fetch, message search/read, attach_file, save_messages_to_file, report (+ Shell) |
+| implementer | fetch, generate_image, attach_file, report (+ Shell)          |
+
+No workflow agent can save memories, change the personality, post polls or
+events, set automations, ask inline questions or start another workflow
+(depth <= 2): those belong to a conversation, and a workflow's agents work
+alone in its thread.
+
 The order is fixed, so the brain's tool schemas (part of its cached prompt
 prefix) are the same on every call of the same kind.
 
 Imports are inside the function: the tool modules import each other, and
 tool_functions imports nothing from here.
 """
+BRAIN = "brain"
+MANAGER = "manager"
+REVIEW = "review"
+FINISH = "finish"
+RESEARCHER = "researcher"
+IMPLEMENTER = "implementer"
+MODES = (BRAIN, MANAGER, REVIEW, FINISH, RESEARCHER, IMPLEMENTER)
 
 
-def brain_tools(*, automatic: bool = False, voice: bool = False) -> list:
+def brain_tools(*, automatic: bool = False, voice: bool = False, workflows: bool = False,
+                mode: str = BRAIN) -> list:
     from classes import skill_format, voice_policy
     from classes.automation_tools import automation_tools
     from classes.brain import ask_user, report
@@ -52,8 +80,30 @@ def brain_tools(*, automatic: bool = False, voice: bool = False) -> list:
         store_memory,
         web_search,
     )
-    from classes.skill_tools import skill_tools
+    from classes.skill_tools import search_skills, skill_tools, use_skill
+    from classes.workflow_tools import start_workflow, submit_plan, submit_review
     from classes.workspace_tools import attach_file
+
+    if mode not in MODES:
+        raise ValueError(f"unknown brain_tools mode {mode!r}")
+    if mode == MANAGER:
+        tools = [web_search, fetch_url, *message_search_tools()]
+        if skill_format.enabled():
+            tools.extend((search_skills, use_skill))
+        tools.append(submit_plan)
+        return tools
+    if mode == REVIEW:
+        return [submit_review]
+    if mode == FINISH:
+        return [report]
+    if mode == RESEARCHER:
+        return [web_search, fetch_url, *message_search_tools(), attach_file,
+                save_messages_to_file, report]
+    if mode == IMPLEMENTER:
+        tools = [fetch_url]
+        if image_generation_enabled():
+            tools.append(generate_image)
+        return tools + [attach_file, report]
 
     tools = [web_search, fetch_url, *message_search_tools(), check_polls, create_poll,
              *event_tools(), change_personality]
@@ -67,5 +117,7 @@ def brain_tools(*, automatic: bool = False, voice: bool = False) -> list:
     tools.extend((attach_file, save_messages_to_file, ask_user))
     if skill_format.enabled():
         tools.extend(skill_tools())
+    if workflows and not voice:
+        tools.append(start_workflow)
     tools.append(report)
     return tools

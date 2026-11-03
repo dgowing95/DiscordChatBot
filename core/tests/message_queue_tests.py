@@ -245,7 +245,7 @@ async def test_process_messages_worker_pool_runs_messages_concurrently():
 @pytest.fixture
 def claimed_thread():
     """A sandbox run claimed in channel 77 (the _message() default)."""
-    from classes import sandbox_thread_inbox as inbox
+    from classes import thread_inbox as inbox
     inbox._RUNS.clear()
     ledger = inbox.claim_run(77, requester_id=777)
     ledger.state = inbox.RUNNING
@@ -301,7 +301,7 @@ async def test_a_message_while_a_command_runs_gets_one_receipt_notice(claimed_th
         await main_mod.on_message(second)
 
     first.reply.assert_awaited_once()
-    assert "review this before my next step" in first.reply.await_args.args[0]
+    assert "look at this before the next step" in first.reply.await_args.args[0]
     second.reply.assert_not_awaited()  # coalesced
 
 

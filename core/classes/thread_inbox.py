@@ -1,9 +1,9 @@
 """Tracked ledger of what people say to a sandbox run while it happens.
 
 A sandbox run happens inside a Discord thread (see classes/sandbox_agent.py's
-ensure_sandbox_thread). While it runs, messages posted in that thread are
+ensure_work_thread). While it runs, messages posted in that thread are
 recorded here instead of going to the outer LLM, and the conversation
-coordinator (classes/sandbox_conversation.py) shows them to the nested model
+coordinator (classes/workflow_conversation.py) shows them to the nested model
 as user input at its next model call. That makes a run steerable ("actually
 make it blue") without restarting it.
 
@@ -25,13 +25,13 @@ So every accepted message is now an EVENT with an explicit stage:
                superseded or deferred.
 
 An event the model kept ignoring past the gate's refusal cap is marked
-UNACKNOWLEDGED instead (see sandbox_conversation.MAX_GATE_REFUSALS): it stays
+UNACKNOWLEDGED instead (see workflow_conversation.MAX_GATE_REFUSALS): it stays
 unresolved and is reported as such, but stops blocking the run.
 
 Deliberately pure: stdlib only, no discord and no SDK imports, so every rule
 here is unit testable without a Discord client. main.py's on_message does
 the Discord half (one deliver call plus a reaction), and
-sandbox_conversation.py does the runner half. Every mutating function here is
+workflow_conversation.py does the runner half. Every mutating function here is
 synchronous: the bot is one asyncio event loop, so a function with no await
 in it is atomic with respect to every other coroutine — which is what makes
 claim_run a real check-and-set rather than the old check, await, register.
@@ -46,7 +46,7 @@ State lives in a module-level dict, which is correct here and not a shortcut:
 the bot is one process running one event loop, and both the producer
 (on_message) and the consumer (the nested run) live in it. What must outlive
 the run (unapplied follow-ups, an unanswered question) is persisted by
-run_code_sandbox through classes/sandbox_conversation_store.py; an abrupt
+run_code_sandbox through classes/workflow_conversation_store.py; an abrupt
 crash before that point loses it, since this ledger is process memory.
 
 Stale owners: claim_run records the task that claimed the run, and get_run
@@ -147,12 +147,12 @@ class ThreadEvent:
     # Position in the model's input list where this event was first shown.
     # The SDK rebuilds that list every call and does not keep what a filter
     # added, so the coordinator re-inserts every presented event at its
-    # anchor on every call — see sandbox_conversation.
+    # anchor on every call — see workflow_conversation.
     anchor: int | None = None
     presented_at: float | None = None
     addressed_at: float | None = None
     # Responses (not tool calls) whose gated actions were refused over this
-    # event; see sandbox_conversation.gate.
+    # event; see workflow_conversation.gate.
     gate_refusals: int = 0
     last_refused_call: int | None = None
     # The open question this may be answering (see OpenQuestion). A candidate

@@ -228,7 +228,8 @@ async def generate_image(wrapper: RunContextWrapper[dict], prompt: str,
 
     context = wrapper.context
     context["image_calls"] = context.get("image_calls", 0) + 1
-    if context["image_calls"] > MAX_IMAGE_CALLS:
+    # A workflow sets its own, higher cap (workflow_policy.MAX_IMAGES).
+    if context["image_calls"] > context.get("image_cap", MAX_IMAGE_CALLS):
         logger.info("generate_image: per-reply limit reached; not generating")
         return TOO_MANY_IMAGES_TEXT
     channel = context["channel"]

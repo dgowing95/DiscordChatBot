@@ -25,7 +25,7 @@ def _no_conversation_record_redis():
     """No test here should reach a real Redis for a thread's conversation
     record."""
     store = MagicMock(load=AsyncMock(return_value=None), save=AsyncMock())
-    with patch("classes.sandbox_conversation_store.SandboxConversationStore",
+    with patch("classes.workflow_conversation_store.SandboxConversationStore",
                return_value=store):
         yield store
 
@@ -445,7 +445,7 @@ async def test_deliver_falls_back_to_the_sweep_when_nothing_was_attached():
 # persistent memory
 # ============================================================
 
-# ---------------------- ensure_sandbox_thread ----------------------
+# ---------------------- ensure_work_thread ----------------------
 
 def _thread_mock(thread_id=555):
     thread = MagicMock(spec=discord.Thread)
@@ -454,36 +454,36 @@ def _thread_mock(thread_id=555):
 
 
 @pytest.mark.asyncio
-async def test_ensure_sandbox_thread_reuses_existing_thread():
+async def test_ensure_work_thread_reuses_existing_thread():
     message = MagicMock()
     message.channel = _thread_mock()
-    channel, created = await prod_sandbox_agent.ensure_sandbox_thread(message, "do a thing")
+    channel, created = await prod_sandbox_agent.ensure_work_thread(message, "do a thing")
     assert channel is message.channel
     assert created is False
     message.create_thread.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_ensure_sandbox_thread_creates_one_off_a_normal_channel():
+async def test_ensure_work_thread_creates_one_off_a_normal_channel():
     message = MagicMock()
     message.channel = MagicMock()  # not a discord.Thread
     new_thread = _thread_mock()
     message.create_thread = AsyncMock(return_value=new_thread)
-    channel, created = await prod_sandbox_agent.ensure_sandbox_thread(message, "do a thing")
+    channel, created = await prod_sandbox_agent.ensure_work_thread(message, "do a thing")
     assert channel is new_thread
     assert created is True
     message.create_thread.assert_awaited_once()
-    assert message.create_thread.await_args.kwargs["name"].startswith("🐳 ")
+    assert message.create_thread.await_args.kwargs["name"].startswith("🧵 ")
 
 
 @pytest.mark.asyncio
-async def test_ensure_sandbox_thread_falls_back_when_creation_fails():
+async def test_ensure_work_thread_falls_back_when_creation_fails():
     # Some channel types (forum channels, DMs, ...) can't have a thread
     # created off a message at all; the tool must degrade, not fail.
     message = MagicMock()
     message.channel = MagicMock()
     message.create_thread = AsyncMock(side_effect=RuntimeError("can't thread here"))
-    channel, created = await prod_sandbox_agent.ensure_sandbox_thread(message, "do a thing")
+    channel, created = await prod_sandbox_agent.ensure_work_thread(message, "do a thing")
     assert channel is message.channel
     assert created is False
 
@@ -494,19 +494,19 @@ def test_thread_name_truncates_to_discord_limit():
 
 
 def test_thread_name_falls_back_when_task_empty():
-    assert prod_sandbox_agent._thread_name("") == "🐳 Sandbox"
+    assert prod_sandbox_agent._thread_name("") == "🧵 Workflow"
 
 
-# ---------------------- ask_user / sandbox_ask_user_timeout ----------------------
+# ---------------------- ask_user / thread_ask_timeout ----------------------
 
 def test_ask_user_timeout_default(monkeypatch):
-    monkeypatch.delenv("SANDBOX_ASK_USER_TIMEOUT", raising=False)
-    assert sandbox_agent.sandbox_ask_user_timeout() == 300
+    monkeypatch.delenv("WORKFLOW_ASK_TIMEOUT", raising=False)
+    assert sandbox_agent.thread_ask_timeout() == 300
 
 
 def test_ask_user_timeout_override(monkeypatch):
-    monkeypatch.setenv("SANDBOX_ASK_USER_TIMEOUT", "45")
-    assert sandbox_agent.sandbox_ask_user_timeout() == 45
+    monkeypatch.setenv("WORKFLOW_ASK_TIMEOUT", "45")
+    assert sandbox_agent.thread_ask_timeout() == 45
 
 
 def _ask_user_ctx(**overrides):
@@ -519,7 +519,7 @@ def _ask_user_ctx(**overrides):
     ctx.update(overrides)
     return ToolContext(
         context=ctx,
-        tool_name="ask_user",
+        tool_name="ask_in_thread",
         tool_call_id="a1",
         tool_arguments=json.dumps({"question": "png or jpg?"}),
     )
@@ -528,7 +528,7 @@ def _ask_user_ctx(**overrides):
 @pytest.mark.asyncio
 async def test_ask_user_hands_the_question_to_the_conversation():
     ctx = _ask_user_ctx()
-    result = await prod_sandbox_agent.ask_user.on_invoke_tool(
+    result = await prod_sandbox_agent.ask_in_thread.on_invoke_tool(
         ctx, json.dumps({"question": "png or jpg?", "blocking": False,
                          "choices": ["png", "jpg"], "default": "png"}))
 
@@ -543,7 +543,7 @@ async def test_ask_user_hands_the_question_to_the_conversation():
 @pytest.mark.asyncio
 async def test_ask_user_blocks_by_default():
     ctx = _ask_user_ctx()
-    await prod_sandbox_agent.ask_user.on_invoke_tool(ctx, json.dumps({"question": "q"}))
+    await prod_sandbox_agent.ask_in_thread.on_invoke_tool(ctx, json.dumps({"question": "q"}))
     assert ctx.context["conversation"].ask.await_args.kwargs["blocking"] is True
 
 
@@ -552,16 +552,16 @@ async def test_ask_user_without_thread_context_tells_model_to_proceed():
     # No thread available at all (the no-thread fallback) must degrade
     # gracefully, never raise.
     ctx = _ask_user_ctx(thread=None, conversation=None)
-    result = await prod_sandbox_agent.ask_user.on_invoke_tool(ctx, json.dumps({"question": "q"}))
+    result = await prod_sandbox_agent.ask_in_thread.on_invoke_tool(ctx, json.dumps({"question": "q"}))
     assert "proceed using your best judgement" in result.lower()
 
 
 @pytest.mark.asyncio
 async def test_ask_user_uses_full_timeout_without_a_deadline(monkeypatch):
-    monkeypatch.setenv("SANDBOX_ASK_USER_TIMEOUT", "45")
+    monkeypatch.setenv("WORKFLOW_ASK_TIMEOUT", "45")
     ctx = _ask_user_ctx(deadline=None)
 
-    await prod_sandbox_agent.ask_user.on_invoke_tool(ctx, json.dumps({"question": "q"}))
+    await prod_sandbox_agent.ask_in_thread.on_invoke_tool(ctx, json.dumps({"question": "q"}))
 
     assert ctx.context["conversation"].ask.await_args.kwargs["timeout"] == 45.0
 
@@ -810,12 +810,12 @@ async def test_send_preview_to_thread_without_context_is_graceful():
 
 # ---------------------- shell tools: gate and checkpoints ----------------------
 # Thread messages no longer ride on shell output (one delivery path: the
-# model input filter — see sandbox_conversation_tests). What the shell
+# model input filter — see workflow_conversation_tests). What the shell
 # wrappers own now is refusing a NEW command while input is unanswered, and
 # yielding a long command early when someone posts.
 
 def _gate_conversation(thread_id=7):
-    from classes import sandbox_thread_inbox as inbox
+    from classes import thread_inbox as inbox
     ledger = inbox.RunLedger(thread_id=thread_id, requester_id=1)
     return prod_sandbox_agent.SandboxConversation(ledger, _thread_mock(thread_id=thread_id))
 
@@ -1011,7 +1011,7 @@ def _warm(warm, calls=None):
 # ---------------------- retrying a stopped run stays in the thread ----------------------
 #
 # Observed failure this covers: a sandbox run timed out after 600s, the outer
-# model retried in the same turn, ensure_sandbox_thread asked Discord for a
+# model retried in the same turn, ensure_work_thread asked Discord for a
 # second thread off the same message and was refused with 160004 ("a thread
 # has already been created for this message"), so the retry ran in the PARENT
 # CHANNEL — away from the thread holding the work, and with no snapshot id,
@@ -1019,14 +1019,14 @@ def _warm(warm, calls=None):
 
 
 @pytest.mark.asyncio
-async def test_ensure_sandbox_thread_reuses_a_thread_already_started_off_the_message():
+async def test_ensure_work_thread_reuses_a_thread_already_started_off_the_message():
     # Discord allows exactly one thread per message, so create_thread would
     # fail here; reusing is both correct and the only thing that works.
     message = MagicMock()
     message.channel = MagicMock()  # not a discord.Thread
     message.thread = _thread_mock(thread_id=777)
     message.create_thread = AsyncMock()
-    channel, created = await prod_sandbox_agent.ensure_sandbox_thread(message, "do a thing")
+    channel, created = await prod_sandbox_agent.ensure_work_thread(message, "do a thing")
     assert channel is message.thread
     assert created is False
     message.create_thread.assert_not_awaited()

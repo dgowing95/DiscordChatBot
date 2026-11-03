@@ -99,7 +99,16 @@ def test_brain_limits_are_backstops(monkeypatch):
     assert brain_policy.trim_keep_recent(env) == 6
     assert brain_policy.repeat_limit({"BRAIN_REPEAT_LIMIT": "1"}) == 2
     assert brain_policy.brain_max_turns({"BRAIN_MAX_TURNS": "junk"}) == 100
-    assert brain_policy.effective_tier(3, unprompted=True) == brain_policy.TIER_BRAIN
+
+
+def test_only_asked_for_chat_and_allowed_automatic_runs_may_start_a_workflow():
+    tier = brain_policy.effective_tier
+    assert tier(env={}) == brain_policy.TIER_WORKFLOW
+    assert tier(unprompted=True, env={}) == brain_policy.TIER_BRAIN
+    assert tier(voice=True, env={}) == brain_policy.TIER_BRAIN
+    assert tier(automatic=True, env={}) == brain_policy.TIER_WORKFLOW
+    assert tier(automatic=True, env={"WORKFLOW_FROM_AUTOMATIONS": "0"}) == brain_policy.TIER_BRAIN
+    assert tier(env={"WORKFLOW_ENABLED": "false"}) == brain_policy.TIER_BRAIN
 
 
 # --------------------------- the loop guard ---------------------------

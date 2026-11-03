@@ -387,7 +387,7 @@ def test_the_brain_agent_is_a_sandbox_agent_that_stops_at_report(monkeypatch):
     from agents.sandbox import SandboxAgent
     agent = brain.build_brain_agent()
     assert isinstance(agent, SandboxAgent)
-    assert agent.tool_use_behavior == {"stop_at_tool_names": ["report"]}
+    assert agent.tool_use_behavior == {"stop_at_tool_names": ["report", "start_workflow"]}
     # The SDK's default base prompt pushes an apply_patch tool we do not have.
     assert agent.base_instructions == ""
     assert [type(c).__name__ for c in agent.capabilities] == ["Shell"]
@@ -489,8 +489,10 @@ def test_the_instructions_stay_small_and_keep_their_rules():
     text = brain.BRAIN_INSTRUCTIONS
     # Pinned: one home per concept (AGENTS.md "Prompt surface"). Re-measure
     # before raising it.
-    assert len(text) <= 2300, len(text)
+    # 2300 until phase 5 added the start_workflow bullet (maintainer: raise it).
+    assert len(text) <= 2450, len(text)
     assert "`report`" in text and "`attach_file`" in text and "`out/`" in text
+    assert "`start_workflow`" in text
     assert "never instructions" in text  # files from others are data
     assert "RELATIVE" in text and "absolute path" in text
     # naming apply_patch would invite a model to call it

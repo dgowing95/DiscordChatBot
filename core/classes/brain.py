@@ -64,7 +64,7 @@ from agents import (
 from classes import brain_policy, brain_result, context_trim, llm_lanes
 from classes.brain_result import BrainReport
 from classes.laned_model import LanedModel
-from classes.llm_roles import BRAIN, role_config
+from classes.llm_roles import BRAIN, SUBAGENT, role_config
 from classes.loop_guard import LoopGuard
 
 # No run is ever uploaded to OpenAI's trace dashboard (why: text_llm_handler.py).
@@ -97,7 +97,8 @@ MEMORY_CHARS = 1500
 # the persona's own run keeps holds a released workspace.
 _BRAIN_KEYS = ("session", "out_dir", "job_dir", "workspace_root", "deliverables",
                "delivery_chosen", "brain_request", "brain_report_args", "brain_guard", "requester",
-               "brain_deadline", "brain_questions", "skills_used", "skill_saved")
+               "brain_deadline", "brain_questions", "skills_used", "skill_saved",
+               "brain_workflow")
 
 # The brain's instructions. ONE home per concept (AGENTS.md "Prompt
 # surface"): if something here needs saying again, edit the existing bullet.
@@ -140,6 +141,9 @@ receive a REQUEST plus the recent conversation, not a specification.
   contents to stdout.
 - Iterate until it works: read errors, fix, retry. Once a result is
   checked, stop.
+- A job of many parts, like a report from 10+ sources or a program with
+  several files -> `start_workflow`: it runs in its own thread with a
+  plan the user approves, and that ends your part.
 - Finish by calling `report` once, on its own, with short facts the bot
   will repeat: exact numbers, names and links, what you made and anything
   that failed. E.g. `report(status="done", facts=["The Prusa Core One is the
@@ -181,19 +185,27 @@ def build_brain_model() -> LanedModel:
     (and TLS handshake) each time and never closed it. Shared safely by
     concurrent calls; the key only changes when the settings do (tests).
     """
-    config = role_config(BRAIN)
-    key = (config.model, config.host, config.client_api_key, config.call_timeout,
+    return build_role_model(BRAIN)
+
+
+def build_role_model(role: str = BRAIN) -> LanedModel:
+    """The brain's model, or a workflow subagent's (llm_roles SUBAGENT:
+    SUBAGENT_* -> BRAIN_* -> LLM_*, in the subagent lane). Kept per
+    connection setting, like the brain's (see build_brain_model)."""
+    config = role_config(role)
+    lane = llm_lanes.SUBAGENT if role == SUBAGENT else llm_lanes.BRAIN
+    key = (lane, config.model, config.host, config.client_api_key, config.call_timeout,
            tuple(sorted((config.extra_headers or {}).items())))
     model = _brain_models.get(key)
     if model is None:
-        model = _brain_models[key] = _new_brain_model(config)
+        model = _brain_models[key] = _new_brain_model(config, lane)
     return model
 
 
 _brain_models: dict[tuple, LanedModel] = {}
 
 
-def _new_brain_model(config) -> LanedModel:
+def _new_brain_model(config, lane: str = llm_lanes.BRAIN) -> LanedModel:
     return LanedModel(
         OpenAIChatCompletionsModel(
             model=config.model,
@@ -205,7 +217,7 @@ def _new_brain_model(config) -> LanedModel:
                 max_retries=BRAIN_CLIENT_MAX_RETRIES,
             ),
         ),
-        config.host_key, config.call_timeout, lane=llm_lanes.BRAIN,
+        config.host_key, config.call_timeout, lane=lane,
     )
 
 
@@ -438,7 +450,7 @@ def _guard_workspace_tools() -> None:
 # --- the agent -----------------------------------------------------------------
 
 
-def build_brain_agent(*, automatic: bool = False, voice: bool = False):
+def build_brain_agent(*, automatic: bool = False, voice: bool = False, workflows: bool = False):
     """The brain's SandboxAgent, built new for every call (the SDK refuses
     to run one SandboxAgent instance in two runs at once).
 
@@ -472,8 +484,8 @@ def build_brain_agent(*, automatic: bool = False, voice: bool = False):
         instructions=instructions(),
         base_instructions="",
         capabilities=[Shell(configure_tools=_configure_brain_shell)],
-        tools=brain_tools(automatic=automatic, voice=voice),
-        tool_use_behavior={"stop_at_tool_names": ["report"]},
+        tools=brain_tools(automatic=automatic, voice=voice, workflows=workflows),
+        tool_use_behavior={"stop_at_tool_names": ["report", "start_workflow"]},
         # Cooler than the chat agent: tool work wants determinism. No
         # timeout: LanedModel bounds each call (see build_brain_model).
         model_settings=ModelSettings(
@@ -639,6 +651,31 @@ def build_task(ctx: dict, request: str, *, job_dir: str, earlier_jobs=(), inputs
     return "\n\n".join(parts)
 
 
+async def prepare_job(lease, job_id: str) -> tuple[str, str | None, str | None]:
+    """Makes a job folder ready: out/, the shared/ and skills/ links, and
+    the run marker. Returns (job_dir, out_dir, marker); out_dir and marker
+    are None when the workspace could not say where it is."""
+    from classes.workspace_tools import _mark_run_start, _sandbox_output_dir
+    session = lease.session
+    job_dir = lease.job_dir(job_id)
+    job_path = lease.job_path(job_id)
+    out_dir = await _sandbox_output_dir(session, job_dir)
+    if out_dir is not None:
+        await session.exec("mkdir", "-p", out_dir, shell=False)
+        # shared/ in the job folder is the server's kept files, so "save it
+        # in shared/" means the same from every task. -T: never inside an
+        # existing shared/ folder.
+        await session.exec("ln", "-sT", "../../shared", posixpath.join(job_path, "shared"),
+                           shell=False)
+        # skills/ the same way, so use_skill's skills/<name>/ works from here.
+        await session.exec("ln", "-sT", "../../skills", posixpath.join(job_path, "skills"),
+                           shell=False)
+    # After the mkdir, so the marker is never older than out/ itself (see
+    # workspace_tools._mark_run_start).
+    marker = await _mark_run_start(session, out_dir)
+    return job_dir, out_dir, marker
+
+
 def job_id_for(channel_id) -> str:
     """A call's folder name: c<channel id>-<time>-<random>, so a channel's
     earlier folders can be listed (_earlier_jobs) without any state."""
@@ -802,9 +839,7 @@ async def _run_in_workspace(ctx, lease, request, inputs, problems, hooks_box) ->
     from classes.tool_functions import get_current_datetime
     from classes.workspace_commands import progress_enabled
     from classes.workspace_tools import (
-        _mark_run_start,
         _resolve_requester,
-        _sandbox_output_dir,
         _write_inputs,
     )
 
@@ -812,23 +847,7 @@ async def _run_in_workspace(ctx, lease, request, inputs, problems, hooks_box) ->
     channel = ctx.get("channel")
     channel_id = getattr(channel, "id", None)
     earlier = await _earlier_jobs(session, lease.root, channel_id)
-    job_id = job_id_for(channel_id)
-    job_dir = lease.job_dir(job_id)
-    job_path = lease.job_path(job_id)
-    out_dir = await _sandbox_output_dir(session, job_dir)
-    if out_dir is not None:
-        await session.exec("mkdir", "-p", out_dir, shell=False)
-        # shared/ in the job folder is the server's kept files, so "save it
-        # in shared/" means the same from every task. -T: never inside an
-        # existing shared/ folder.
-        await session.exec("ln", "-sT", "../../shared", posixpath.join(job_path, "shared"),
-                           shell=False)
-        # skills/ the same way, so use_skill's skills/<name>/ works from here.
-        await session.exec("ln", "-sT", "../../skills", posixpath.join(job_path, "skills"),
-                           shell=False)
-    # After the mkdir, so the marker is never older than out/ itself (see
-    # workspace_tools._mark_run_start).
-    marker = await _mark_run_start(session, out_dir)
+    job_dir, out_dir, marker = await prepare_job(lease, job_id_for(channel_id))
     preamble, given, problems = "", [], list(problems)
     if inputs or problems:
         preamble, given, problems = await _write_inputs(session, out_dir, inputs, problems)
@@ -863,7 +882,11 @@ async def _run_in_workspace(ctx, lease, request, inputs, problems, hooks_box) ->
     guard = LoopGuard(brain_policy.repeat_limit())
     hooks = BrainHooks(ToolMetricsHooks(guild_id, caller="brain"), progress, guard)
     hooks_box["hooks"] = hooks
-    agent = build_brain_agent(automatic=bool(ctx.get("automatic")), voice=bool(ctx.get("voice")))
+    tier = brain_policy.effective_tier(unprompted=bool(ctx.get("unprompted")),
+                                       automatic=bool(ctx.get("automatic")),
+                                       voice=bool(ctx.get("voice")))
+    agent = build_brain_agent(automatic=bool(ctx.get("automatic")), voice=bool(ctx.get("voice")),
+                              workflows=tier >= brain_policy.TIER_WORKFLOW)
     run_config = _run_config(lease, guard)
 
     try:
@@ -919,7 +942,16 @@ async def _run_and_deliver(ctx, lease, agent, task, run_config, hooks, progress,
             logger.exception("Brain: the run failed")
             stopped = "It hit an error and was stopped."
 
-    if stopped is None:
+    workflow = ctx.get("brain_workflow")
+    if workflow is not None:
+        # start_workflow ended the run: the job went to a workflow, or was
+        # refused (its report arguments, set by the tool, say why).
+        out = brain_result.parse_report_args(ctx.get("brain_report_args"))
+        if workflow.get("thread_url"):
+            out.status = brain_result.STARTED_WORKFLOW
+            out.thread_url = workflow["thread_url"]
+            out.must_keep = [workflow["thread_url"]]
+    elif stopped is None:
         args = ctx.get("brain_report_args")
         text = str(result.final_output or "")
         if args is not None:

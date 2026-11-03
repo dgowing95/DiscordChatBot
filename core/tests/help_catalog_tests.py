@@ -36,7 +36,8 @@ def test_every_brain_tool_has_help(monkeypatch):
     from classes.brain_tools import brain_tools
     _all_on(monkeypatch)
     # A voice turn swaps join_voice_channel for leave_voice_channel.
-    names = {tool.name for tool in brain_tools()} | {tool.name for tool in brain_tools(voice=True)}
+    names = ({tool.name for tool in brain_tools(workflows=True)}
+             | {tool.name for tool in brain_tools(voice=True)})
     assert names - help_catalog.INTERNAL_TOOLS == help_catalog.documented_tools()
 
 

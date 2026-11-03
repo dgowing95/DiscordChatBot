@@ -20,6 +20,7 @@ AUTOMATIONS = "automations"
 VOICE = "voice"
 EVENTS = "events"
 SKILLS = "skills"
+WORKFLOWS = "workflows"
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,10 @@ ASK_ENTRIES = (
     HelpEntry("📘 Skills", "When a job takes several steps worth repeating, I save how I did it "
               "as a skill and use it next time. Ask me to use, save or update one.",
               tools=("use_skill", "save_skill", "search_skills"), requires=SKILLS),
+    HelpEntry("🧵 Big jobs", "Ask for something large (a report from many sources, a small "
+              "program) and I'll plan it in a thread. You approve the plan, then I work on it "
+              "and tell you here when it's done.",
+              tools=("start_workflow",), requires=WORKFLOWS),
     HelpEntry("⏰ Schedules and rules", "Ask me to schedule or follow up on something, or react to a word.",
               tools=("list_schedules", "get_schedule", "create_schedule", "schedule_followup",
                      "update_schedule", "delete_schedule",
@@ -86,6 +91,8 @@ COMMAND_ENTRIES = (
               command="generate_image", requires=IMAGE),
     HelpEntry("/workspace", "The server's workspace for code tasks: status and reset (both "
               "need Manage Server), and live progress on or off.", command="workspace"),
+    HelpEntry("/task", "Start a big job in its own thread: I post a plan, you approve, edit "
+              "or cancel it, then I do the work.", command="task", requires=WORKFLOWS),
     HelpEntry("/skills", "List, read, edit, delete, restore, revert or export the skills I "
               "have saved in this server.", command="skills", requires=SKILLS),
     HelpEntry("/schedule", "Create, list, view, edit, delete, pause or resume schedules.",
@@ -116,6 +123,9 @@ def _shown(entry: HelpEntry, image_enabled: bool) -> bool:
         return events_enabled()
     if entry.requires == SKILLS:
         from classes.skill_format import enabled
+        return enabled()
+    if entry.requires == WORKFLOWS:
+        from classes.workflow_policy import enabled
         return enabled()
     if entry.requires == VOICE:
         from classes.voice_policy import settings

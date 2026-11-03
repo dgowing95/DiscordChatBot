@@ -70,9 +70,9 @@ core/                    # the bot (what runs in production)
     workspace_manager.py   # one Docker container per server: start, resume, snapshot, stop, reap
     workspace_snapshot_store.py    # workspace snapshots in Redis, one per guild
     workspace_commands.py  # /workspace (status, reset, progress)
-    sandbox_thread_inbox.py        # P thread-message ledger    | kept for Tier 3,
-    sandbox_conversation.py        # thread steering, ask_user   | unused until then
-    sandbox_conversation_store.py  # per-thread loose ends       |
+    thread_inbox.py        # P thread-message ledger    | kept for Tier 3,
+    workflow_conversation.py        # thread steering, ask_user   | unused until then
+    workflow_conversation_store.py  # per-thread loose ends       |
     # tools and features
     image_generation.py    # create_image: prompt, generate, check, retry; which image to edit
     image_prompt.py        # request -> SDXL prompt + negative prompt
@@ -208,7 +208,7 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
    | Status embed, live command output | `brain_progress.py` |
    | Shell wrappers, `attach_file`, delivery, `in/` files | `workspace_tools.py` |
    | The server's container | `workspace_manager.py` (rules: `workspace_lifecycle.py`) |
-   | Thread steering, kept for Tier 3 | `sandbox_thread_inbox.py`, `sandbox_conversation*.py` |
+   | Thread steering, kept for Tier 3 | `thread_inbox.py`, `workflow_conversation*.py` |
 
    Which tools a brain call gets, in a fixed order so its tool schemas stay a cached prefix:
 
@@ -521,7 +521,17 @@ reads has a row here and a line in `.env.example`, that every row is read by som
 | `BRAIN_LLM_HOST` | the brain's server (core appends `/v1`), e.g. `https://openrouter.ai/api`; empty = `LLM_HOST`. Chart: `brain.llmHost` |
 | `BRAIN_LLM_API_KEY` | the brain's key; empty = `LLM_API_KEY`, but only when the brain's host is `LLM_HOST` (else none; startup warns). Chart: `brain.apiKey` |
 | `BRAIN_REASONING_EFFORT` | the brain's `reasoning_effort` [medium]. Chart: `brain.reasoningEffort` |
-| `SANDBOX_ASK_USER_TIMEOUT` | seconds the thread `ask_user` (kept for Tier 3, unused) waits for a reply [300]. Chart: `sandbox.askUserTimeout` |
+| `WORKFLOW_ENABLED` | `0`/`false` removes `/task` and `start_workflow` [on]. Chart: `workflows.enabled` |
+| `WORKFLOW_FROM_AUTOMATIONS` | schedules, rules and follow-ups may start a workflow, approved at once [on]. Chart: `workflows.fromAutomations` |
+| `WORKFLOW_ASK_TIMEOUT` | seconds a workflow step's question in the thread waits for the requester [300]. Chart: `workflows.askTimeout` |
+| `WORKFLOW_PLAN_APPROVAL_SECONDS` | seconds a plan waits for Approve before it starts anyway [900]. Chart: `workflows.planApprovalSeconds` |
+| `WORKFLOW_PLAN_REVISIONS` | changes a plan may get before it must be approved or cancelled [3]. Chart: `workflows.planRevisions` |
+| `WORKFLOW_MAX_STEPS` | steps in one plan [8]. Chart: `workflows.maxSteps` |
+| `WORKFLOW_TIMEOUT` / `WORKFLOW_MAX_TURNS` | backstops on one workflow: wall-clock seconds [14400] and model turns across all its agents [500]; out of either stops it with what exists. Chart: `workflows.timeout` / `maxTurns` |
+| `WORKFLOW_MAX_PER_GUILD` | workflows running at once per server [1]. Chart: `workflows.maxPerGuild` |
+| `SUBAGENT_MODEL` / `SUBAGENT_LLM_HOST` / `SUBAGENT_LLM_API_KEY` | a workflow helper's connection; empty = the brain's, then `LLM_*` (the key only for the same host). Chart: `subagents.model` / `llmHost` / `apiKey` |
+| `SUBAGENT_REASONING_EFFORT` / `SUBAGENT_CALL_TIMEOUT_SECONDS` | like the brain's [medium / 600]. Chart: `subagents.reasoningEffort` / `callTimeout` |
+| `SUBAGENT_MAX_TURNS` | backstop on one helper's model turns [100]. Chart: `subagents.maxTurns` |
 | `WORKSPACE_SNAPSHOT_TIMEOUT_SECONDS` | seconds for one workspace save, and for all of them at shutdown [120]. Chart: `brain.workspace.snapshotTimeout` |
 | `BRAIN_CALL_TIMEOUT_SECONDS` | like `PERSONA_CALL_TIMEOUT_SECONDS`, for the brain [600]. Chart: `brain.callTimeout` |
 | `WORKSPACE_SNAPSHOT_MAX_BYTES` | most bytes of one saved workspace [50MB]; over it the previous save is kept and the container is stopped, not removed. Chart: `brain.workspace.snapshotMaxBytes` |
@@ -585,7 +595,7 @@ reads has a row here and a line in `.env.example`, that every row is read by som
   suite seem to hang on Redis connect timeouts.
 - Stub Redis with fixtures and `unittest.mock`. Anything worth unit-testing goes in a pure module.
 - Test the SDK boundary against the **real `Runner`** with `agents.testing.ScriptedModel`
-  (`brain_tests.py`, `sandbox_conversation_tests.py`, `max_turns_wrap_up_tests.py`) rather than mocking
+  (`brain_tests.py`, `workflow_conversation_tests.py`, `max_turns_wrap_up_tests.py`) rather than mocking
   `Runner`, so an SDK upgrade that changes the boundary fails a test.
 - Where the tests for the concurrency model live: `message_queue_tests.py` (also `main.py`'s
   `on_message` / `process_messages`; importing `main.py` starts nothing), `task_registry_tests.py`,
@@ -670,7 +680,7 @@ in the `e2e-logs` artifact.
 ## Conventions & gotchas
 
 - Docker is a hard requirement (runtime item 7); there is no fallback without it.
-- `sandbox_thread_inbox.py` (kept for Tier 3): keep every mutating function free of `await`; that is
+- `thread_inbox.py` (kept for Tier 3): keep every mutating function free of `await`; that is
   what makes `claim_run` / `deliver` / `finalize` atomic on the one event loop.
 - The free OpenAI Moderations endpoint rate-limits hard (429): `content_guard.py` retries with backoff,
   caches verdicts and fails open.

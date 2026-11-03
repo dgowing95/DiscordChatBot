@@ -17,12 +17,12 @@ discordToken: ""
 # Name of a Secret you manage yourself (e.g. via External Secrets Operator or
 # sealed-secrets) holding the core credentials, instead of the one this chart
 # renders from discordToken / llm.apiKey / persona.apiKey / contentGuard.apiKey /
-# brain.apiKey / diffusion.promptRewrite.apiKey / diffusion.review.apiKey /
-# research.apiKey (all ignored when this is set). Keys are the env var names:
-# DISCORD_TOKEN (required), LLM_API_KEY, PERSONA_LLM_API_KEY,
-# CONTENT_GUARD_API_KEY, BRAIN_LLM_API_KEY, IMAGE_PROMPT_LLM_API_KEY,
-# IMAGE_REVIEW_LLM_API_KEY, RESEARCH_LLM_API_KEY (each optional - omit rather
-# than leave empty).
+# brain.apiKey / subagents.apiKey / diffusion.promptRewrite.apiKey /
+# diffusion.review.apiKey / research.apiKey (all ignored when this is set).
+# Keys are the env var names: DISCORD_TOKEN (required), LLM_API_KEY,
+# PERSONA_LLM_API_KEY, CONTENT_GUARD_API_KEY, BRAIN_LLM_API_KEY,
+# SUBAGENT_LLM_API_KEY, IMAGE_PROMPT_LLM_API_KEY, IMAGE_REVIEW_LLM_API_KEY,
+# RESEARCH_LLM_API_KEY (each optional - omit rather than leave empty).
 existingSecret: ""
 redisHost: "dchatbot-redis-service.dchatbot.svc.cluster.local"
 # The bot's own LLM server, run by this chart, and the model it serves. The
@@ -293,13 +293,43 @@ voice:
   ttsConcurrency: 2
   queueSize: 16
 
-# Threads for long workflows (from phase 5). The brain's own limits are under
-# brain below.
-sandbox:
-  # Max seconds the ask_user tool of a run in a Discord thread waits for a
-  # reply before telling the model to proceed on its own judgement (used by
-  # long workflows from phase 5; brain calls in the channel don't wait yet)
-  askUserTimeout: 300
+# Tier 3 workflows: a big job in its own thread. A manager plans it, the
+# requester approves the plan (Approve / Edit / Cancel), helpers (subagents)
+# do the steps one at a time, and the bot replies in the channel when it ends.
+# Started by the brain (start_workflow) or with /task.
+workflows:
+  # false removes /task and start_workflow. Workflows are the heaviest load
+  # on a one-slot LLM server.
+  enabled: true
+  # Schedules, rules and follow-ups may start one, approved at once.
+  fromAutomations: true
+  # Seconds a helper's question in the thread waits for the requester.
+  askTimeout: 300
+  # Seconds the plan waits for Approve before it starts anyway.
+  planApprovalSeconds: 900
+  # Changes a plan may get before it must be approved or cancelled.
+  planRevisions: 3
+  # Steps in one plan.
+  maxSteps: 8
+  # Backstops on ONE workflow, not budgets: wall-clock seconds (4 h) and model
+  # turns across all its agents. Running out stops it with what exists.
+  timeout: 14400
+  maxTurns: 500
+  # Workflows running at once in one server.
+  maxPerGuild: 1
+
+# The helpers (subagents) of a workflow. Empty model/llmHost/apiKey fall back
+# to the brain's (brain.*), then the bot's own (llm.*).
+subagents:
+  model: ""
+  llmHost: ""
+  apiKey: ""
+  # Sent as "reasoning_effort" (low/medium/high).
+  reasoningEffort: "medium"
+  # Wall-clock seconds ONE model call may take, like brain.callTimeout.
+  callTimeout: 600
+  # Backstop on one helper's model turns.
+  maxTurns: 100
 
 # llama.cpp server (replaces Ollama); which model it serves: the `model` value below
 llamacpp:

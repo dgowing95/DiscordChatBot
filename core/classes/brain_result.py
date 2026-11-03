@@ -23,6 +23,10 @@ PARTIAL = "partial"
 NEEDS_INPUT = "needs_input"
 FAILED = "failed"
 STATUSES = (DONE, PARTIAL, NEEDS_INPUT, FAILED)
+# Set by run_brain when the brain handed the job to a Tier 3 workflow
+# (start_workflow), never from report's own arguments: a model writing it
+# there has started nothing.
+STARTED_WORKFLOW = "started_workflow"
 
 # Caps on what the persona is handed: a brain that writes an essay into
 # `facts` would otherwise fill the persona's slot with it.
@@ -47,6 +51,8 @@ class BrainReport:
     say_to_user: str = ""
     # Why it stopped, inputs left out, the workspace being unavailable...
     note: str = ""
+    # The workflow's thread, when the job went to one (STARTED_WORKFLOW).
+    thread_url: str = ""
 
 
 def _clean(text, limit: int) -> str:
@@ -148,12 +154,17 @@ _STATUS_LINE = {
     PARTIAL: "Brain result: only partly done.",
     NEEDS_INPUT: "Brain result: it needs more from the user.",
     FAILED: "Brain result: it could not do this.",
+    STARTED_WORKFLOW: "Brain result: this is a big job, so it started a workflow in its own thread.",
 }
 
 
 def tool_result_for_persona(report: BrainReport) -> str:
     """The string ask_brain returns to the persona."""
     lines = [_STATUS_LINE.get(report.status, _STATUS_LINE[DONE])]
+    if report.status == STARTED_WORKFLOW:
+        lines.append(f"It runs in {report.thread_url}: the plan is posted there first. Tell "
+                     "them it has started and where. It is not done; never say it is. "
+                     "You will be told when it ends.")
     posted = list(report.files_posted) + list(report.posted)
     if posted:
         lines.append(f"Already posted in the channel: {_join(posted)}. "

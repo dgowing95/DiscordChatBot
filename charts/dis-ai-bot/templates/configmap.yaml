@@ -138,9 +138,28 @@ data:
   {{- if .Values.diffusion.review.llmHost }}
   IMAGE_REVIEW_LLM_HOST: {{ .Values.diffusion.review.llmHost }}
   {{- end }}
-  # Code sandbox run limits; the work runs in the server's workspace container
-  # on the node's Docker daemon, through the socket mounted in core.yaml.
-  SANDBOX_ASK_USER_TIMEOUT: {{ .Values.sandbox.askUserTimeout | toString | quote }}
+  # Tier 3 workflows and their helpers (subagents). Empty subagent
+  # model/host fall back to the brain's; the key lives in secret.yaml.
+  WORKFLOW_ENABLED: {{ .Values.workflows.enabled | quote }}
+  WORKFLOW_FROM_AUTOMATIONS: {{ .Values.workflows.fromAutomations | quote }}
+  WORKFLOW_ASK_TIMEOUT: {{ .Values.workflows.askTimeout | toString | quote }}
+  WORKFLOW_PLAN_APPROVAL_SECONDS: {{ .Values.workflows.planApprovalSeconds | toString | quote }}
+  WORKFLOW_PLAN_REVISIONS: {{ .Values.workflows.planRevisions | toString | quote }}
+  WORKFLOW_MAX_STEPS: {{ .Values.workflows.maxSteps | toString | quote }}
+  WORKFLOW_TIMEOUT: {{ .Values.workflows.timeout | toString | quote }}
+  WORKFLOW_MAX_TURNS: {{ .Values.workflows.maxTurns | toString | quote }}
+  WORKFLOW_MAX_PER_GUILD: {{ .Values.workflows.maxPerGuild | toString | quote }}
+  {{- if .Values.subagents.model }}
+  SUBAGENT_MODEL: {{ .Values.subagents.model | quote }}
+  {{- end }}
+  {{- if .Values.subagents.llmHost }}
+  SUBAGENT_LLM_HOST: {{ .Values.subagents.llmHost | quote }}
+  {{- end }}
+  SUBAGENT_REASONING_EFFORT: {{ .Values.subagents.reasoningEffort | quote }}
+  SUBAGENT_CALL_TIMEOUT_SECONDS: {{ .Values.subagents.callTimeout | toString | quote }}
+  SUBAGENT_MAX_TURNS: {{ .Values.subagents.maxTurns | toString | quote }}
+  # The server workspace container runs on the node's Docker daemon, through
+  # the socket mounted in core.yaml.
   {{- with .Values.brain.workspace }}
   WORKSPACE_IMAGE: {{ .image | quote }}
   # Namespace + release name: the reaper only removes containers with its own
