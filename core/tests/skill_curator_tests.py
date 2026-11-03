@@ -328,8 +328,9 @@ async def test_tick_sets_the_live_gauge(store, channels, clock):
     await _seed(store, clock)
     await store.save(12, "other-server", "d", "s", author_id=1)
     with patch.object(sc.metrics, "set_skills_live") as gauge:
-        await _curator(store, channels, FakeLLM(_answer()), clock).tick([GUILD, 12])
-    gauge.assert_called_once_with(6)
+        await _curator(store, channels, FakeLLM(_answer({"action": "retire", "name": "old-poll"})),
+                       clock).tick([GUILD, 12])
+    gauge.assert_called_once_with(5)  # counted after the pass's retire
 
 
 # ------------------------------ store additions ---------------------------

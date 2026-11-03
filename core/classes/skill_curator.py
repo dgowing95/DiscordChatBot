@@ -345,11 +345,11 @@ class Curator:
         """One round: the live-skill gauge, and a pass for each due server."""
         total = 0
         for guild in guild_ids:
-            try:
+            await self.curate(guild)
+            try:  # after the pass, so its retires are counted
                 total += await self.store.count_live(guild)
             except Exception as e:
                 logger.warning(f"Skills: could not count guild {guild}'s skills: {e}")
-            await self.curate(guild)
         metrics.set_skills_live(total)
 
     async def run_forever(self, guild_ids) -> None:
