@@ -7,6 +7,8 @@ The whole server is searched unless a channel is named. Discord only
 returns messages from channels the bot itself can read, and
 read_messages_around reads the same channels: what the BOT can see, not
 only what the person asking can (the owner's choice, as for search).
+There is no cap on calls per reply: a cap of 3 once stopped a workspace task
+that needed far more, and the brain's loop guard and turn limit bound a loop.
 message_search_format.py holds the query and result rules and the
 endpoint's quirks.
 """
