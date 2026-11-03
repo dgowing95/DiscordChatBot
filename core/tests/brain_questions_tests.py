@@ -345,6 +345,33 @@ async def test_in_a_voice_call_the_question_is_also_spoken(plain_voice):
         voice_gate.reset()
 
 
+@pytest.mark.asyncio
+async def test_a_run_stopped_while_the_question_is_spoken_leaves_no_waiter(plain_voice):
+    from classes import voice_gate
+    spoken = asyncio.Event()
+
+    async def _slow_speak(text):
+        spoken.set()
+        await asyncio.sleep(60)
+
+    session = MagicMock()
+    session.speak_line = _slow_speak
+    voice_gate.reset()
+    voice_gate.enter(1, session)
+    try:
+        ctx, _sent = _ctx(voice=True, original_message=None)
+        task = asyncio.create_task(_ask(ctx))
+        await asyncio.wait_for(spoken.wait(), 1)
+        assert brain_inbox.waiting(QUESTION_ID)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not brain_inbox.waiting(QUESTION_ID)
+        assert brain_inbox.voice_waiting(77, 5) is None
+    finally:
+        voice_gate.reset()
+
+
 def test_ask_wait_is_cut_to_the_calls_deadline(monkeypatch):
     monkeypatch.setenv("BRAIN_ASK_TIMEOUT", "120")
     assert brain._ask_wait({}) == 120

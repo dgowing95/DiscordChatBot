@@ -323,11 +323,13 @@ async def ask_user(wrapper: RunContextWrapper[dict], question: str,
     # Registered after the post (the waiter is keyed by the question's
     # message), and before anything else awaits.
     future = brain_inbox.ask(message.id, ctx["channel"].id, ctx["user_id"], voice=voice)
-    if voice:
-        await _speak_question(ctx, text)
     logger.info(f"Brain: asked the requester, waiting up to {wait:.0f}s")
     line = brain_question.CLOSED
     try:
+        # Inside the try: a run stopped while the question is being spoken
+        # must still take its waiter off.
+        if voice:
+            await _speak_question(ctx, text)
         answer = await asyncio.wait_for(future, wait)
     except asyncio.TimeoutError:
         metrics.inc_brain_question("timeout")

@@ -375,7 +375,9 @@ class VoiceSession:
         question = (brain_inbox.voice_waiting(self.text_channel.id, user_id)
                     if self.text_channel is not None else None)
         if question is not None and not (matched and parse_command(rest) in (LEAVE, STOP)):
-            answer = rest if matched and rest else text
+            # The wake phrase alone is not an answer: deliver("") is refused
+            # and the wake-only handling below runs as usual.
+            answer = rest if matched else text
             if brain_inbox.deliver(question, user_id, answer) == brain_inbox.ACCEPTED:
                 inc_voice_utterance("answer")
                 await self._chime()
