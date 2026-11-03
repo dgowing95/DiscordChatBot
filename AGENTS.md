@@ -397,7 +397,7 @@ are the ones that actually change behaviour). The persona's *system* prompt is n
   choose went on to choose items straight off the list. The prompts show the shape instead
   (`ask_brain`'s examples, the `report(...)` call in `BRAIN_INSTRUCTIONS`).
 - Sizes are pinned by `brain_tests.py`: `BRAIN_INSTRUCTIONS` ~2230 characters (ceiling 2300),
-  `ask_brain` ~1570 including its JSON schema (ceiling 1600). Re-measure before adding. Skills have
+  `ask_brain` ~1670 including its JSON schema (ceiling 1700). Re-measure before adding. Skills have
   their own homes, pinned by `skill_tools_tests.py`: `SKILLS_INSTRUCTIONS` ~270 characters (ceiling
   400, added to the brain's prompt only when skills are on) and `REFLECTION_PROMPT` ~730 (ceiling
   1000, the one prompt of the after-job review).
