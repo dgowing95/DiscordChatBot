@@ -331,12 +331,9 @@ async def on_message(message):
     # Every poll, the bot's own included, is recorded so check_polls can
     # find it after it scrolls out of the history window (no-op otherwise).
     await remember_poll(message)
-    # A sandbox run in flight in this thread takes the message instead of
-    # the outer LLM, so people can steer a run while it happens ("make it
-    # blue instead") without an @mention. Returning here is also the
-    # concurrency guard: a second run in the same thread would work in the
-    # first one's job folder at the same time and clobber its files. Answers to the sandbox's ask_user questions come
-    # through here too — the ledger is the one pipeline for thread input.
+    # A thread run in flight takes its thread's messages (steering, ask_user
+    # answers) instead of the persona. Kept for Tier 3: nothing in v3 starts
+    # a thread run yet, so this never matches today.
     if (message.author != client.user and not message.author.bot
             and sandbox_thread_inbox.is_run_active(message.channel.id)):
         await route_to_sandbox(message)
@@ -344,8 +341,7 @@ async def on_message(message):
     if await voice_dev_inject(message):
         return
     # In a voice call in this guild: no text replies, rules or queueing
-    # (classes/voice_gate.py). Sandbox steering above still works, so a run
-    # started from the call can be steered in its thread.
+    # (classes/voice_gate.py).
     if message.guild is not None and voice_gate.active(message.guild.id):
         await voice_busy_notice(message)
         return
