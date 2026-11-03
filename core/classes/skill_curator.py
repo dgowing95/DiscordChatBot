@@ -17,7 +17,10 @@ of a name that is not live, a skill named twice, or anything past the limit
 (`parse_changes`). Every change is a new version or a soft delete with
 source "curator", so /skills history shows it and /skills revert or restore
 undoes it. Each is made only if the skill is still at the version the model
-read (`expect_version`): a person's edit made meanwhile wins.
+read (`expect_version`): a person's edit made meanwhile wins. And an undo
+sticks: a skill a person restored, reverted or edited with /skills within
+SKILLS_RETIRE_DAYS is `protected`, shown to the model as such and never
+changed, so the next pass cannot retire again what someone just restored.
 
 When a pass is due is kept in Redis (`dcb:skills:v1:{guild}:curator`: when
 it last ran and a signature of what it saw), so a restart neither repeats a
@@ -80,6 +83,24 @@ def stale(skills, now: float, days: int) -> set[str]:
     return {s["name"] for s in skills if now - _idle_since(s) >= days * DAY}
 
 
+PERSON_SOURCES = ("command", "revert")
+
+
+def protected(skills, now: float, days: int) -> set[str]:
+    """Names a person acted on within `days`: restored, or whose current
+    version is their /skills edit or revert. No change may touch them."""
+    window = days * DAY
+    return {s["name"] for s in skills
+            if (s.get("restored_at") and now - s["restored_at"] < window)
+            or (s.get("source") in PERSON_SOURCES and now - (s.get("updated_at") or 0) < window)}
+
+
+def view(skills, now: float, days: int) -> tuple[set[str], set[str]]:
+    """(stale, protected): what a pass may retire, and what it may not touch."""
+    guarded = protected(skills, now, days)
+    return stale(skills, now, days) - guarded, guarded
+
+
 def signature(skills, stale_names) -> str:
     """What a pass saw: every live skill's name and version, and the stale
     set. Equal signatures mean nothing to do."""
@@ -94,14 +115,16 @@ def due(state: dict | None, sig: str, now: float, interval_hours: int) -> bool:
     return now - float(state.get("at") or 0) >= interval_hours * 3600 and state.get("sig") != sig
 
 
-def skills_text(skills, stale_names, now: float, limit: int = PROMPT_SKILLS_CHARS) -> str:
+def skills_text(skills, stale_names, now: float, limit: int = PROMPT_SKILLS_CHARS,
+                guarded=()) -> str:
     """The skills as the model reads them, best ranked first (so a cut drops
     the least used). Bodies are cut to BODY_CHARS."""
     parts = []
     used = 0
     for s in skill_format.rank(skills, now):
         idle = int((now - _idle_since(s)) // DAY)
-        mark = " [unused]" if s["name"] in stale_names else ""
+        mark = (" [a person changed it lately: leave it]" if s["name"] in guarded
+                else " [unused]" if s["name"] in stale_names else "")
         body = s["body"] if len(s["body"]) <= BODY_CHARS else s["body"][:BODY_CHARS] + "…"
         part = (f"## {s['name']}{mark}\n{s['description']}\n"
                 f"used {s.get('uses', 0)}x, worked {s.get('successes', 0)}x, idle {idle} days\n{body}")
@@ -113,9 +136,9 @@ def skills_text(skills, stale_names, now: float, limit: int = PROMPT_SKILLS_CHAR
     return "\n\n".join(parts)
 
 
-def curator_messages(skills, stale_names, now: float) -> list[dict]:
+def curator_messages(skills, stale_names, now: float, guarded=()) -> list[dict]:
     return [{"role": "system", "content": CURATOR_PROMPT},
-            {"role": "user", "content": skills_text(skills, stale_names, now)}]
+            {"role": "user", "content": skills_text(skills, stale_names, now, guarded=guarded)}]
 
 
 def _text(change, key) -> str:
@@ -234,7 +257,7 @@ class Curator:
             if len(skills) < cfg["curator_min_skills"]:
                 return "few"
             now = self.clock()
-            stale_names = stale(skills, now, cfg["retire_days"])
+            stale_names, guarded = view(skills, now, cfg["retire_days"])
             sig = signature(skills, stale_names)
             if not force and not due(await self._state(guild), sig, now, cfg["curator_interval_hours"]):
                 return "not due"
@@ -246,7 +269,7 @@ class Curator:
             return "failed"
         try:
             try:
-                text = await self.llm.complete(curator_messages(skills, stale_names, now),
+                text = await self.llm.complete(curator_messages(skills, stale_names, now, guarded),
                                                temperature=0.2, max_tokens=MAX_TOKENS)
             except Exception as e:
                 logger.warning(f"Skills: tidy-up of guild {guild} failed: {e}")
@@ -256,14 +279,15 @@ class Curator:
                 metrics.inc_skill_curator_change("failed")
                 return "failed"
             by_name = {s["name"]: s for s in skills}
-            changes = parse_changes(text, by_name, stale_names)
+            # A protected skill is not offered as live: no change can name it.
+            changes = parse_changes(text, set(by_name) - guarded, stale_names)
             made = 0
             for change in changes:
                 made += await self._apply(guild, change, by_name, cfg)
             # After the changes, so the pass's own new versions never make the
             # next one due.
             after = await self.store.list(guild)
-            await self._remember(guild, signature(after, stale(after, self.clock(), cfg["retire_days"])))
+            await self._remember(guild, signature(after, view(after, self.clock(), cfg["retire_days"])[0]))
             logger.info(f"Skills: tidy-up of guild {guild}: {made} change(s) of {len(changes)} proposed")
             return str(made)
         except Exception as e:
@@ -328,7 +352,12 @@ class Curator:
                 raise
             # Over a file limit together: the kept skill's files only.
             await self._save(guild, keep, change["description"], change["body"], keep["files"], note)
-        await self.store.delete(guild, drop["name"], self.actor_id, expect_version=drop["version"])
+        try:
+            await self.store.delete(guild, drop["name"], self.actor_id, expect_version=drop["version"])
+        except VersionError:
+            logger.info(f"Skills: tidy-up merged into {keep['name']} but kept {drop['name']}: "
+                        "it changed meanwhile")
+            return
         await self._announce(drop, tool_embeds.SKILL_RETIRED,
                              f"merged into {keep['name']} (restore with /skills restore)")
 

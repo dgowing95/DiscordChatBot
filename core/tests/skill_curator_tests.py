@@ -263,9 +263,10 @@ async def test_a_merge_whose_drop_changed_keeps_both(store, channels, clock):
         await store.save(GUILD, "week-chart", "d", "a person's steps", author_id=5)
     llm = FakeLLM(_answer({"action": "merge", "keep": "weekly-chart", "drop": "week-chart",
                            "description": "d", "body": "b"}), side_effect=person_edits)
-    assert await _curator(store, channels, llm, clock).curate(GUILD) == "0"
+    assert await _curator(store, channels, llm, clock).curate(GUILD) == "1"  # the kept one changed
     assert (await store.get(GUILD, "week-chart"))["body"] == "a person's steps"
     assert (await store.get(GUILD, "weekly-chart"))["body"] == "b"  # updated first: nothing lost
+    assert [t for t, _ in embeds(channels[0][77])] == [tool_embeds.SKILL_UPDATED]
 
 
 @pytest.mark.asyncio
@@ -331,6 +332,56 @@ async def test_tick_sets_the_live_gauge(store, channels, clock):
         await _curator(store, channels, FakeLLM(_answer({"action": "retire", "name": "old-poll"})),
                        clock).tick([GUILD, 12])
     gauge.assert_called_once_with(5)  # counted after the pass's retire
+
+
+def test_protected_is_a_persons_recent_restore_edit_or_revert():
+    now = 100 * DAY
+    skills = [dict(_skill("restored"), restored_at=95 * DAY),
+              dict(_skill("restored-long-ago"), restored_at=10 * DAY),
+              dict(_skill("edited"), source="command", updated_at=95 * DAY),
+              dict(_skill("reverted"), source="revert", updated_at=95 * DAY),
+              dict(_skill("brain-saved"), source="brain", updated_at=95 * DAY)]
+    assert sc.protected(skills, now, 60) == {"restored", "edited", "reverted"}
+    stale_names, guarded = sc.view(skills, now, 60)
+    assert "restored" in guarded and "restored" not in stale_names
+
+
+@pytest.mark.asyncio
+async def test_a_restored_skill_is_not_retired_again(store, channels, clock):
+    await _seed(store, clock)
+    retire = FakeLLM(_answer({"action": "retire", "name": "old-poll"}))
+    curator = _curator(store, channels, retire, clock)
+    assert await curator.curate(GUILD) == "1"
+    await store.restore(GUILD, "old-poll", 5)  # a person undoes it
+    clock.t += 25 * 3600
+    assert await curator.curate(GUILD) == "0"  # the model asked again; code said no
+    assert await store.get(GUILD, "old-poll")
+    assert "## old-poll [a person changed it lately: leave it]" in retire.messages[1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_a_reverted_change_is_not_redone(store, channels, clock):
+    await _seed(store, clock, old=())
+    describe = FakeLLM(_answer({"action": "describe", "name": "pie-chart", "description": "clearer"}))
+    curator = _curator(store, channels, describe, clock)
+    assert await curator.curate(GUILD) == "1"
+    await store.revert(GUILD, "pie-chart", 1, 5)
+    clock.t += 25 * 3600
+    assert await curator.curate(GUILD) == "0"
+    assert (await store.get(GUILD, "pie-chart"))["description"] == "pie-chart things"
+
+
+@pytest.mark.asyncio
+async def test_a_restored_merge_is_not_merged_again(store, channels, clock):
+    await _seed(store, clock, old=())
+    merge = FakeLLM(_answer({"action": "merge", "keep": "weekly-chart", "drop": "week-chart",
+                             "description": "d", "body": "b"}))
+    curator = _curator(store, channels, merge, clock)
+    assert await curator.curate(GUILD) == "1"
+    await store.restore(GUILD, "week-chart", 5)
+    clock.t += 25 * 3600
+    assert await curator.curate(GUILD) == "0"
+    assert await store.get(GUILD, "week-chart")
 
 
 # ------------------------------ store additions ---------------------------

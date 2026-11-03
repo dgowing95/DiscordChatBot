@@ -273,7 +273,9 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
      `SKILLS_CURATOR_MIN_SKILLS`+ skills proposes at most 3 merges, retires or clearer descriptions.
      The model only proposes: code decides which skills are stale (`SKILLS_RETIRE_DAYS`), drops
      anything else, and makes each change only if the skill is still at the version it read
-     (`expect_version`), so a person's edit made meanwhile wins. When a pass is due is kept in Redis
+     (`expect_version`), so a person's edit made meanwhile wins. An undo sticks: a skill a person
+     restored, reverted or edited with `/skills` within `SKILLS_RETIRE_DAYS` is `protected` and never
+     changed, or the next pass would retire again what was just restored. When a pass is due is kept in Redis
      (`...:curator`, with a signature of what it saw, taken after its own changes), and a lock per
      server keeps two processes from running one twice. Its embeds (🗑️ retired, 📗 updated, footer
      "tidy-up") go to the skill's last channel, used or saved.

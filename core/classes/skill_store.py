@@ -88,6 +88,7 @@ def _summary(doc: dict) -> dict:
         "updated_by": current.get("author_id"),
         "updated_at": current["created_at"],
         "source": current.get("source"),
+        "restored_at": doc.get("restored_at"),
     }
 
 
@@ -272,6 +273,10 @@ class SkillStore:
                 raise QuotaError(f"This server already has {live} skills; delete one first.")
             out = dict(doc)
             out["deleted"] = False
+            # A person's undo: the tidy-up leaves the skill alone for a while
+            # (skill_curator.protected).
+            out["restored_at"] = self.clock()
+            out["restored_by"] = actor
             return out, None
         await self._change(guild, name, build)
 

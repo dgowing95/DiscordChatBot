@@ -43,8 +43,9 @@ changes:
 
 Each shows as a message with "tidy-up" under it, in the channel where the skill was last used (📗
 updated, 🗑️ retired). Nothing is lost: `/skills restore` brings back a retired or merged skill, and
-`/skills revert` undoes a change. If someone edits a skill while the bot is deciding, their edit
-wins and the bot leaves that skill alone. Most days it changes nothing.
+`/skills revert` undoes a change, and the bot then leaves that skill alone for 60 days. A skill
+someone edited with `/skills edit` is left alone the same way. If someone edits a skill while the
+bot is deciding, their edit wins. Most days it changes nothing.
 
 ## Limits
 
