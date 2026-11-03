@@ -97,5 +97,5 @@ def test_a_copied_poll_label_is_stripped_from_replies():
     Polls use the one label response_filter strips; a "Poll from" label of
     their own once leaked straight into a reply."""
     from classes.response_filter import filter_response
-    label = format_poll("Bubba", "Q", [], 0, False, False, END).split(" Poll ")[0]
+    label = format_poll("Sparky", "Q", [], 0, False, False, END).split(" Poll ")[0]
     assert filter_response(f"{label} Poll's up, go vote!") == "Poll's up, go vote!"
