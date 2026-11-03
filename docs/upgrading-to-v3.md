@@ -18,7 +18,7 @@ unless the note says otherwise.
 | `MODEL` | `LLM_MODEL` | **Required now**: the bot will not start without it. The old code default (`qwen3:4b`) matched nothing compose or the chart serves. Compose's `llamacpp` service reads the same name |
 | `LLM_PASS` | `LLM_API_KEY` | Same value. For Strata it is also the key compose gives the `strata` service |
 | `REASONING_EFFORT` | `PERSONA_REASONING_EFFORT` | Default unchanged (medium) |
-| `LLM_MAX_TURNS` | `PERSONA_MAX_TURNS` | Default unchanged (20) |
+| `LLM_MAX_TURNS` | `PERSONA_MAX_TURNS` | **Default 20 → 4**: the persona has one tool now (see "The brain" below) |
 | `LLM_CALL_TIMEOUT_SECONDS` | `PERSONA_CALL_TIMEOUT_SECONDS` | Default unchanged (600) |
 | `LLM_CONTEXT_LENGTH` | removed | The context-window gauge (`discord_bot_llm_context_window_tokens`) is now read from the LLM server's `/props` (per-slot context × slots). Delete the line |
 | `SANDBOX_MODEL` | `BRAIN_MODEL` | Empty still means the bot's own model |
@@ -38,6 +38,8 @@ unless the note says otherwise.
 | `SANDBOX_SNAPSHOT_TTL_SECONDS` | `WORKSPACE_SNAPSHOT_TTL_SECONDS` | Default unchanged (7 days) |
 | `SANDBOX_PERSIST_TIMEOUT_SECONDS` | `WORKSPACE_SNAPSHOT_TIMEOUT_SECONDS` | **Default 180 → 120**: the Memory capability that needed the extra time is gone |
 | `SANDBOX_INPUT_MAX_BYTES` | `WORKSPACE_INPUT_MAX_BYTES` | Default unchanged (25 MB) |
+| `SANDBOX_MAX_TURNS` | `BRAIN_MAX_TURNS` | **Default 10 → 100**, and only a backstop now: the loop guard stops a stuck brain call. Choose again rather than copy the old value |
+| `SANDBOX_TIMEOUT` | `BRAIN_TIMEOUT` | **Default 600 → 1800** seconds, a backstop like `BRAIN_MAX_TURNS`; lane waits count towards it |
 | `LLAMA_ARG_CACHE_TYPE_K` | `LLAMA_CACHE_TYPE_K` | docker compose only; compose passes it on as llama.cpp's own `LLAMA_ARG_CACHE_TYPE_K` |
 | `LLAMA_ARG_CACHE_TYPE_V` | `LLAMA_CACHE_TYPE_V` | docker compose only, as above |
 
@@ -47,6 +49,8 @@ Default changes without a rename:
 |---|---|---|
 | `CONTENT_GUARD_DEBUG` | on | **off**: set it to `1` to log the guard's per-request detail |
 | `BRAIN_REASONING_EFFORT` (new) | none sent | **medium**, like the persona: the brain now sends `reasoning_effort` |
+| `PERSONA_MAX_TURNS` | 20 | **4** (it was `LLM_MAX_TURNS`) |
+| `WORKSPACE_PREWARM` | off | **on**: every brain call needs the workspace, so it starts when the bot is about to answer |
 
 New variables, all optional:
 
@@ -62,7 +66,9 @@ New variables, all optional:
 | `WORKSPACE_JOB_RETENTION_HOURS` | Task folders older than this are deleted (72) |
 | `WORKSPACE_CPU_LIMIT` / `WORKSPACE_PIDS_LIMIT` | CPUs (none) and processes (512) per workspace container |
 | `WORKSPACE_INSTANCE` | Label that keeps two bots on one Docker daemon apart (`dcb-dev`; the chart uses `<namespace>-<release name>`) |
-| `WORKSPACE_PREWARM` | Start a server's workspace on its first message (off; not used yet) |
+| `WORKSPACE_PREWARM` | Start a server's workspace when the bot is about to answer there (on) |
+| `BRAIN_REPEAT_LIMIT` | The loop guard: the same tool call this many times in a row (or eight calls that bring nothing new) earns a warning, then a stop (3) |
+| `BRAIN_TRIM_KEEP_RECENT` | Tool outputs kept whole in a long brain call's prompt; older ones are cut to their first and last 400 characters (6) |
 | `LLAMA_CTX_SIZE` / `LLAMA_PARALLEL` / `LLAMA_CACHE_RAM_MIB` | docker compose only: llama.cpp's total context (80000), slots (1) and prompt cache in MiB (8192). These were fixed in `docker-compose.yaml` before, at the same values |
 
 ### Keys stay with their server
@@ -108,6 +114,27 @@ thread's files when the task ended (up to 3 minutes after the reply). Now each D
   hand: `docker rm -f $(docker ps -aq --filter label=dcb.role=workspace)`.
 - E2E now runs the sandbox too, on the GitHub runner's own Docker.
 
+### The brain: one tool for the persona, every other tool behind it
+
+The personality that answers in chat (the persona) now has **one tool, `ask_brain`**. Everything it
+could do itself before (web search, reading links, memory, images, polls, events, message search,
+schedules, voice) and the code sandbox are the **brain's** tools now. The persona answers plain chat
+itself and hands anything else to the brain, which does the work and reports facts back for the
+persona to put in its own words. What users notice:
+
+- **No more sandbox threads.** Code and file work happens inline, in the channel it was asked in:
+  files arrive there, and a "🧠 Working on it" embed appears only while the brain uses the
+  workspace (a search or a poll shows just its own embed, as before). Messages in an old sandbox
+  thread are answered like any other.
+- **The bot remembers what it saved about you.** Saved memories never reached the model in v2 (since
+  August 2025); now the asker's newest 20 are shown to the persona with every message, so "what
+  units do I like?" is answered at once.
+- **The bot no longer answers direct messages**, and its slash commands are offered in servers only.
+  It never worked in DMs.
+- `/help` describes the brain's tools; the "Run code" entry is now "Code, files and charts".
+- A brain call runs in the server's workspace, so **every tool request now needs Docker**, not just
+  code tasks. With Docker down the bot still chats but cannot search, remember or draw.
+
 ### Lanes
 
 On a self-hosted server (llama.cpp, Strata), chat replies now go ahead of brain work and side jobs
@@ -148,6 +175,8 @@ time a call waits for a slot does not count toward its `*_CALL_TIMEOUT_SECONDS`.
 | `sandbox.snapshotTtlSeconds` | `brain.workspace.snapshotTtlSeconds` | |
 | `sandbox.persistTimeout` | `brain.workspace.snapshotTimeout` | Default 180 → 120 |
 | `sandbox.inputMaxBytes` | `brain.workspace.inputMaxBytes` | |
+| `sandbox.maxTurns` | `brain.maxTurns` | **Default 10 → 100**, see `BRAIN_MAX_TURNS` |
+| `sandbox.timeout` | `brain.timeout` | **Default 600 → 1800**, see `BRAIN_TIMEOUT` |
 | `imagePullSecrets`, `podAnnotations`, `podLabels`, `resources` | removed | Chart scaffolding no template ever used; setting them never had an effect. Per-pod resources are `coreResources`, `llamacppResources`, … as before |
 
 New keys: `contentGuard.enabled` (default true) and `contentGuard.debug` (default false) now reach core
@@ -160,7 +189,9 @@ from the chart. Also new:
 | `llamacpp.cacheRamMiB` | empty (llama.cpp's 8192) | llama.cpp's `--cache-ram` |
 | `persona.model`, `persona.llmHost`, `persona.apiKey` | empty (= `llm.*`) | The persona's own LLM; the key goes in the Secret as `PERSONA_LLM_API_KEY` |
 | `brain.reasoningEffort` | medium | `BRAIN_REASONING_EFFORT` |
-| `brain.workspace.idleSeconds`, `snapshotIntervalSeconds`, `maxWarm`, `jobRetentionHours`, `cpuLimit`, `pidsLimit`, `prewarm` | 900, 1800, 4, 72, empty, 512, false | The `WORKSPACE_*` settings above. `WORKSPACE_INSTANCE` is `<namespace>-<release name>`. The core pod's `terminationGracePeriodSeconds` is `snapshotTimeout` + 30, for the shutdown save |
+| `brain.repeatLimit`, `brain.trimKeepRecent` | 3, 6 | `BRAIN_REPEAT_LIMIT`, `BRAIN_TRIM_KEEP_RECENT` |
+| `persona.maxTurns` | **4** (was 20 as `llmMaxTurns`) | `PERSONA_MAX_TURNS` |
+| `brain.workspace.idleSeconds`, `snapshotIntervalSeconds`, `maxWarm`, `jobRetentionHours`, `cpuLimit`, `pidsLimit`, `prewarm` | 900, 1800, 4, 72, empty, 512, true | The `WORKSPACE_*` settings above. `WORKSPACE_INSTANCE` is `<namespace>-<release name>`. The core pod's `terminationGracePeriodSeconds` is `snapshotTimeout` + 30, for the shutdown save |
 
 With `llm.engine: strata`, the render now fails when `persona.apiKey`, `brain.apiKey`, `research.apiKey`,
 `diffusion.promptRewrite.apiKey` or `diffusion.review.apiKey` is set without a host to go with it
@@ -193,3 +224,9 @@ unchanged.
 | `discord_bot_workspaces_warm` | New: workspaces running in this core process |
 | `discord_bot_workspace_snapshot_seconds`, `discord_bot_workspace_snapshot_bytes`, `discord_bot_workspace_snapshot_failures_total{reason}` | New: each save's time and size, and saves that failed (`too_large`, `timeout`, `error`) |
 | `discord_bot_workspace_reaped_total` | New: leftover workspace containers removed |
+| `discord_bot_brain_calls_total{tier,status}`, `discord_bot_brain_call_seconds{tier,status}` | New: each brain call and how long it took (`done`, `partial`, `needs_input`, `failed`) |
+| `discord_bot_brain_turns`, `discord_bot_brain_tool_calls` | New: model turns and tool calls per brain call |
+| `discord_bot_brain_loop_stops_total{kind}` | New: brain calls the loop guard stopped (`repeat`, `stale`) |
+| `discord_bot_brain_facts_dropped_total` | New: facts the brain marked must-keep that the persona's reply left out |
+| `discord_bot_persona_escalations_total{result}` | New: persona replies that called the brain (`brain`) or answered alone (`answered`) |
+| `discord_bot_llm_call_seconds{caller="brain"}` | New caller: the brain's model calls (the persona's stay `main`) |

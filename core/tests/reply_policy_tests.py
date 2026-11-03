@@ -180,21 +180,6 @@ async def test_send_failure_never_replays_pair(fail_at, remaining):
 
 
 @pytest.mark.asyncio
-async def test_sandbox_combines_pair_in_thread():
-    thread = MagicMock(id=904, send=AsyncMock())
-    base = _reasoning_llm("", "result\n<message_break>\ndetails")
-
-    class LLM(base):
-        sandbox_thread = thread
-
-    sends = []
-    await _run_with_llm(LLM, 903, sends)
-    # The original channel gets the same combined reply as the thread.
-    assert sends == ["result\n\ndetails"]
-    thread.send.assert_awaited_once_with("result\n\ndetails")
-
-
-@pytest.mark.asyncio
 async def test_disabled_combines_unsolicited_pair(monkeypatch):
     monkeypatch.setenv("DOUBLE_REPLY_CHANCE", "0")
     sends = []

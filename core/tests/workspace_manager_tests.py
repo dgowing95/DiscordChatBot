@@ -709,3 +709,63 @@ async def test_a_pending_reset_still_runs_when_the_stop_fails():
         await manager._stop("1")
     assert manager.lifecycle.state("1").phase == "cold"
     assert env.record() is None and "guild-1" not in env.store.data
+
+
+
+# ---------------------- pre-warm ----------------------
+
+@pytest.mark.asyncio
+async def test_prewarm_starts_a_cold_workspace_in_the_background():
+    env = Env()
+    manager = env.manager()
+    manager.prewarm(1)
+    manager.prewarm(1)  # a burst of messages starts one
+    assert len(manager._prewarm_tasks) == 1
+    await asyncio.gather(*manager._prewarm_tasks)
+    assert manager.is_warm("1")
+    assert len(env.daemon.containers) == 1
+    # warm: nothing more to do
+    manager.prewarm(1)
+    assert not manager._prewarm_tasks
+
+
+@pytest.mark.asyncio
+async def test_a_lost_snapshot_found_by_a_prewarm_is_told_to_the_next_call():
+    env = Env()
+    env.store.data["guild-1"] = b"corrupt"
+    manager = env.manager()
+    manager.prewarm(1)
+    await asyncio.gather(*manager._prewarm_tasks)
+    assert manager.lifecycle.state("1").dirty is False  # the pre-warm changed nothing
+    async with manager.acquire("1") as lease:
+        assert lease.kind == "cached" and lease.restore_failed is True
+        lease.restore_reported = True
+    assert (await _use(manager)).restore_failed is False  # told once
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_never_reports_a_lost_snapshot_leaves_it_for_the_next():
+    env = Env()
+    env.store.data["guild-1"] = b"corrupt"
+    manager = env.manager()
+    assert (await _use(manager)).restore_failed is True  # failed before telling anyone
+    assert (await _use(manager)).restore_failed is True
+
+
+@pytest.mark.asyncio
+async def test_prewarm_can_be_switched_off():
+    env = Env(WORKSPACE_PREWARM="0")
+    manager = env.manager()
+    manager.prewarm(1)
+    assert not manager._prewarm_tasks and not env.daemon.containers
+
+
+@pytest.mark.asyncio
+async def test_a_failed_prewarm_is_only_logged():
+    from unittest.mock import AsyncMock, patch
+    env = Env()
+    manager = env.manager()
+    with patch.object(manager, "_start", AsyncMock(side_effect=RuntimeError("docker down"))):
+        manager.prewarm(1)
+        await asyncio.gather(*manager._prewarm_tasks)
+    assert not manager.is_warm("1") and "1" not in manager._prewarming

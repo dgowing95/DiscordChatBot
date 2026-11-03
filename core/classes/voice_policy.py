@@ -461,17 +461,8 @@ def greeting_messages(persona: str, bot_name: str, people: list[str]) -> list[di
 
 # Readable tool names for the hold-on prompt and its last-resort fallback.
 TOOL_ACTIONS = {
-    "web_search": "searching the web",
-    "fetch_url": "reading a web page",
-    "search_messages": "searching old messages",
-    "read_messages_around": "reading old messages",
-    "generate_image": "making a picture",
-    "run_code_sandbox": "running some code",
-    "store_memory": "remembering that",
-    "remove_memory": "forgetting that",
-    "clear_memories": "clearing my memories",
-    "change_personality": "changing my personality",
-    "leave_voice_channel": "leaving the call",
+    # The persona's only tool: every search, picture or job goes through it.
+    "ask_brain": "looking into that",
 }
 
 

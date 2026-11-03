@@ -10,7 +10,7 @@ from classes import tool_embeds as te
 def test_titles_name_the_action_and_fit_discord():
     titles = [te.WEB_SEARCH, te.READING_PAGE, te.REMEMBERED, te.DRAWING, te.EDITING,
               te.SEARCHING_MESSAGES, te.SAVING_MESSAGES, te.READING_MESSAGES,
-              te.PERSONALITY, te.SANDBOX_STARTED, te.SANDBOX_READY, te.SANDBOX_STARTING]
+              te.PERSONALITY, te.BRAIN_WORKING, te.BRAIN_DONE, te.BRAIN_STOPPED]
     assert "Tool Usage" not in titles
     assert len(set(titles)) == len(titles)
     assert all(len(t) <= 256 for t in titles)
@@ -64,9 +64,9 @@ def test_trim_cuts_at_a_word():
     assert len(te.trim("x" * 50, 10)) == 10
 
 
-def test_sandbox_task_text_lists_the_files():
-    assert te.sandbox_task_text("chart it", ["a.csv", "b.png"]) == "chart it\n📎 a.csv, b.png"
-    assert te.sandbox_task_text("chart it") == "chart it"
+def test_work_task_text_lists_the_files():
+    assert te.work_task_text("chart it", ["a.csv", "b.png"]) == "chart it\n📎 a.csv, b.png"
+    assert te.work_task_text("chart it") == "chart it"
 
 
 def test_link_label_keeps_a_double_underscore_from_underlining():
@@ -80,14 +80,6 @@ def test_link_label_keeps_a_double_underscore_from_underlining():
     # and the link itself keeps the real path
     assert te.page_link("https://docs.python.org/3/library/__main__.html").endswith(
         "(https://docs.python.org/3/library/__main__.html)")
-
-
-def test_one_home_for_stop_wording():
-    # the closing title and the live-progress note say the same thing
-    from classes import sandbox_agent
-    assert sandbox_agent.SANDBOX_STOP_TITLES.keys() == sandbox_agent.SANDBOX_OUTCOME_NOTES.keys()
-    assert sandbox_agent.sandbox_outcome_note("infra_error") == \
-        "❌ Stopped: the sandbox itself failed."
 
 
 def test_page_link_reads_a_bare_domain_as_https():

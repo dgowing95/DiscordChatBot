@@ -2,14 +2,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from classes.text_llm_handler import TextLLMHandler, agent_tools
+from classes.brain_tools import brain_tools
+from classes.text_llm_handler import TextLLMHandler
 
 
 def test_automatic_tool_set_excludes_memory_and_management(monkeypatch):
     monkeypatch.setenv("AUTOMATIONS_ENABLED", "1")
     monkeypatch.setenv("IMAGE_GEN_ENABLED", "1")
-    names = {tool.name for tool in agent_tools(automatic=True)}
-    assert {"web_search", "fetch_url", "generate_image", "run_code_sandbox", "change_personality"} <= names
+    names = {tool.name for tool in brain_tools(automatic=True)}
+    assert {"web_search", "fetch_url", "generate_image", "attach_file", "change_personality"} <= names
     assert not any(name.endswith("memory") or "memories" in name for name in names)
     assert not any("schedule" in name or "rule" in name for name in names)
 
@@ -19,15 +20,15 @@ def test_automatic_runs_keep_event_tools_but_cannot_make_followups(monkeypatch):
     it must not be able to schedule another follow-up."""
     monkeypatch.setenv("AUTOMATIONS_ENABLED", "1")
     monkeypatch.setenv("EVENTS_ENABLED", "1")
-    automatic = {tool.name for tool in agent_tools(automatic=True)}
+    automatic = {tool.name for tool in brain_tools(automatic=True)}
     assert {"create_event", "list_events", "update_event", "check_polls"} <= automatic
     assert "schedule_followup" not in automatic
-    assert "schedule_followup" in {tool.name for tool in agent_tools()}
+    assert "schedule_followup" in {tool.name for tool in brain_tools()}
 
 
 def test_disabled_events_hide_event_tools(monkeypatch):
     monkeypatch.setenv("EVENTS_ENABLED", "0")
-    names = {tool.name for tool in agent_tools()} | {tool.name for tool in agent_tools(automatic=True)}
+    names = {tool.name for tool in brain_tools()} | {tool.name for tool in brain_tools(automatic=True)}
     assert not any("event" in name for name in names)
 
 
@@ -44,7 +45,7 @@ def test_automatic_handler_needs_no_source_message():
 
 def test_disabled_automations_hide_management_tools(monkeypatch):
     monkeypatch.setenv("AUTOMATIONS_ENABLED", "0")
-    names = {tool.name for tool in agent_tools()}
+    names = {tool.name for tool in brain_tools()}
     assert not any("schedule" in name or "rule" in name for name in names)
 
 

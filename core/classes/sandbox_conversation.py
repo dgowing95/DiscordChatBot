@@ -91,7 +91,7 @@ MIN_CONTINUATION_TURNS = 2
 REPLY_SEND_ATTEMPTS = 2
 
 RESPOND_TOOL_NAME = "respond_to_updates"
-# Every gate refusal starts with this, so sandbox_progress can show a held
+# Every gate refusal starts with this, so brain_progress can show a held
 # command as held rather than as a command still running.
 GATE_REFUSAL_PREFIX = "Not run"
 
@@ -523,7 +523,6 @@ class SandboxConversation:
                 logger.debug(f"Sandbox conversation: could not show typing: {e}")
                 return
             await asyncio.sleep(5)
-
 
 
 def record_exit_metrics(ledger: inbox.RunLedger) -> None:

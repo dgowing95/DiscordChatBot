@@ -252,6 +252,22 @@ class Run:
             raise CheckFailed(f"no stored memory mentions teal (stored: {facts})")
         return f"stored: {facts}"
 
+    async def recall(self):
+        """The saved memory is in the persona's prompt now, so asking about it
+        needs no brain call."""
+        # Hide the "remember ... teal" message from the history first, so the
+        # answer can only come from the saved-memories block.
+        await self.post("!reset_history")
+        calls = lambda: metric(self.session, "discord_bot_brain_calls_total")
+        before = await calls()
+        messages = await self.ask("What is my favourite colour? Answer in one short sentence.")
+        text = " ".join(m["content"] for m in messages)
+        if "teal" not in text.lower():
+            raise CheckFailed(f"the reply does not mention teal: {_quote(text)}")
+        if await calls() > before:
+            raise CheckFailed("the bot asked the brain to recall a saved memory")
+        return _quote(text)
+
     async def image(self):
         messages = await self.ask("Generate an image of a red apple on a wooden table.", IMAGE_TIMEOUT)
         for message in messages:
@@ -273,14 +289,15 @@ class Run:
         return f"{polls[0]['question'].get('text', '')!r} {answers}"
 
     async def workspace(self):
-        """A code task in the server workspace: the file must come back."""
-        starts = lambda: metric(self.session, "discord_bot_workspace_starts_total")
-        before = await starts()
+        """A code task through the brain, in the server workspace: the file
+        must come back in the channel."""
+        calls = lambda: metric(self.session, "discord_bot_brain_calls_total")
+        before = await calls()
         messages = await self.ask(
-            "Use your code sandbox to write a CSV file named squares.csv with the numbers "
-            "1 to 5 and their squares, and send me the file.", WORKSPACE_TIMEOUT)
-        if await starts() <= before:
-            raise CheckFailed("the server workspace was never used (no run_code_sandbox call?)")
+            "Write a CSV file named squares.csv with the numbers 1 to 5 and their "
+            "squares, and send me the file.", WORKSPACE_TIMEOUT)
+        if await calls() <= before:
+            raise CheckFailed("the brain was never asked (no ask_brain call)")
         for message in messages:
             for attachment in message.get("attachments", []):
                 if attachment["filename"].endswith(".csv") and attachment.get("size", 0) > 0:
@@ -414,6 +431,7 @@ async def main() -> int:
             await run.case("slash commands", run.slash_commands)
             await run.case("chat reply", run.chat)
             await run.case("memory tool", run.memory)
+            await run.case("memory recall", run.recall)
             # The poll before the image: once the picture is in the thread,
             # every later reply sends it to the LLM as part of the history,
             # and the E2E LLM may be a text-only model. (Voice turns use no

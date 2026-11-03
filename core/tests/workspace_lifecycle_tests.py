@@ -32,7 +32,7 @@ def test_settings_defaults():
     assert wl.cpu_limit(env) is None
     assert wl.snapshot_timeout_seconds(env) == 120
     assert wl.instance(env) == "dcb-dev"
-    assert wl.prewarm(env) is False
+    assert wl.prewarm(env) is True
 
 
 @pytest.mark.parametrize("name, raw, reader, expected", [
@@ -47,6 +47,7 @@ def test_settings_defaults():
     ("WORKSPACE_CPU_LIMIT", "two", wl.cpu_limit, None),
     ("WORKSPACE_INSTANCE", " prod ", wl.instance, "prod"),
     ("WORKSPACE_PREWARM", "true", wl.prewarm, True),
+    ("WORKSPACE_PREWARM", "0", wl.prewarm, False),
     ("WORKSPACE_IMAGE", "  ", wl.workspace_image, "python:3.14-slim"),
 ])
 def test_settings_parse(name, raw, reader, expected):
@@ -98,6 +99,13 @@ def test_release_marks_the_workspace_changed():
     assert lc.state("g").dirty is False
     lc.release("g", 1)
     assert lc.state("g").dirty is True
+
+
+def test_a_prewarm_release_does_not_mark_it_changed():
+    lc = _lc()
+    _warm(lc, "g")
+    lc.release("g", 1, changed=False)
+    assert lc.state("g").dirty is False  # so the idle stop takes no snapshot
 
 
 def test_a_release_with_nothing_held_is_ignored():

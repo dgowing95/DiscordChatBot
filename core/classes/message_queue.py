@@ -37,30 +37,34 @@ import time
 DEFAULT_QUEUE_WORKERS = 2
 DEFAULT_QUEUE_MAX_SIZE = 10
 
-# The tools that can pin a worker for a long time (sandbox up to
-# SANDBOX_TIMEOUT, image gen up to IMAGE_GEN_TIMEOUT + queue wait). Names
-# must match the FunctionTool names in tool_functions.py. The registry is
-# generic (register/unregister work for any label); this set only drives
-# which tools get tracked automatically by the metrics hooks.
-SLOW_TOOL_NAMES = frozenset({"run_code_sandbox", "generate_image"})
+# The tools that can pin a worker for a long time. Since v3 the persona has
+# one tool, ask_brain, and every slow tool (the workspace, images) runs inside
+# it, so it is the one tracked. Names must match the FunctionTool names. The
+# registry is generic (register/unregister work for any label); this set only
+# drives which tools the metrics hooks track automatically.
+SLOW_TOOL_NAMES = frozenset({"ask_brain"})
 
 # Human-facing labels for the hint (emoji + short name).
 TOOL_DISPLAY = {
-    "run_code_sandbox": "🐳 code sandbox",
-    "generate_image": "🎨 image generation",
+    "ask_brain": "🧠 brain",
 }
+
+# Most brain calls are one quick tool (a search, a memory save). A hint for
+# those would only be noise, so a run shows as running once it is this old.
+HINT_AFTER_SECONDS = 10.0
 
 # Source text (the tool's argument: sandbox task / image prompt) kept per
 # in-flight run and shown in the hint, truncated.
 MAX_SOURCE_CHARS = 120
 
-# Recently-finished runs stay visible to follow-up prompts this long (a
-# follow-up like "make it shorter" often lands seconds after the result was
-# posted; without this, the prompt looks like the result never happened).
-RECENT_DONE_SECONDS = 300.0
-
-# Cap on the recently-done list per channel (oldest dropped).
-MAX_RECENT_DONE = 5
+# Only RUNNING calls are listed, never finished ones. Finished entries
+# (kept 5 minutes until v3) date from sandbox runs that posted into a
+# thread, outside the channel history. Since v3 the brain's files and the
+# persona's reply land in the channel within seconds, so the history shows
+# what finished; and a finished entry, which cannot say whether the call
+# worked, made the persona claim work was done that it never asked for, or
+# that had failed ("Done! I've set a reminder" after a failed call; live on
+# the dev stack, 2026-11-03).
 
 
 def _env_positive_int(name: str, default: int) -> int:
@@ -159,8 +163,6 @@ def get_channel_lock(channel_id: int) -> asyncio.Lock:
 _in_flight: dict[int, dict[str, dict]] = {}
 # channel_id -> [run_key, ...] in registration order (stable hint order)
 _in_flight_order: dict[int, list[str]] = {}
-# channel_id -> [{"label", "ended"}, ...] recently finished (ordered)
-_recent_done: dict[int, list[dict]] = {}
 
 
 def _truncate(text: str, limit: int = MAX_SOURCE_CHARS) -> str:
@@ -212,61 +214,35 @@ def register_task_run(
     return True
 
 
-def unregister_task_run(
-    channel_id: int,
-    run_key: str | None = None,
-    finish: bool = True,
-    ended: float | None = None,
-) -> bool:
+def unregister_task_run(channel_id: int, run_key: str | None = None) -> bool:
     """Remove an in-flight run from `channel_id`.
 
     `run_key` must match the one used in register_task_run (the hooks pass
     the same key to both). If no key is given, or the key is unknown, this
     is a no-op rather than a guess — removing the wrong run would clear
-    someone else's hint. With `finish` (default) the run is also kept in
-    the channel's recently-done list for RECENT_DONE_SECONDS. `ended`
-    overrides the end timestamp (tests). Returns True when an entry was
-    removed.
+    someone else's hint. Returns True when an entry was removed.
     """
     runs = _in_flight.get(channel_id)
     if not runs or run_key is None or run_key not in runs:
         return False
-    entry = runs.pop(run_key)
+    runs.pop(run_key)
     order = _in_flight_order.get(channel_id, [])
     if run_key in order:
         order.remove(run_key)
     if not runs:
         del _in_flight[channel_id]
         _in_flight_order.pop(channel_id, None)
-    if finish:
-        recent = _recent_done.setdefault(channel_id, [])
-        recent.append({
-            "label": entry["label"],
-            "source": entry["source"],
-            "ended": ended if ended is not None else time.monotonic(),
-        })
-        if len(recent) > MAX_RECENT_DONE:
-            del recent[: len(recent) - MAX_RECENT_DONE]
     return True
 
 
 def in_flight_hint(channel_id: int, now: float | None = None) -> str:
     """Prompt hint for a message being built in `channel_id`, or "".
 
-    Lists tools still running (with how long they've been running and a
-    truncated source) and runs that finished within RECENT_DONE_SECONDS
-    (whose result was already sent to the channel). Called from
-    MessageHandler.build_messages(); it only READS the registry (plus
-    prunes stale recently-done entries), so it is safe to call either
-    inside or outside the per-channel lock.
-
-    The two groups get SEPARATE headers. A single header covering both
-    ("...still being processed or finished very recently") made the model
-    announce completed work as still on its way: it saw the words "still
-    being processed" in the freshest user-role turn and ignored the
-    qualifier. When nothing is actually running, the note now says so
-    outright and tells the model not to promise a result that already
-    landed.
+    Lists tools still running, with how long they've been running and
+    the request they were given (truncated). Finished runs are never listed
+    (why: the comment after MAX_SOURCE_CHARS). Called from
+    MessageHandler.build_messages(); it only READS the registry, so it is
+    safe to call either inside or outside the per-channel lock.
     """
     now = time.monotonic() if now is None else now
     running: list[str] = []
@@ -274,45 +250,22 @@ def in_flight_hint(channel_id: int, now: float | None = None) -> str:
     if runs:
         for key in _in_flight_order.get(channel_id, []):
             entry = runs.get(key)
-            if entry is None:
+            if entry is None or now - entry["started"] < HINT_AFTER_SECONDS:
                 continue
+            if not entry["source"]:
+                continue  # nothing to say WHICH request: it would read as this one
             running.append(
                 f"- {entry['label']} running for {_format_elapsed(now - entry['started'])}"
                 f" — {entry['source']}"
             )
-    done: list[str] = []
-    recent = _recent_done.get(channel_id)
-    if recent:
-        kept: list[dict] = []
-        for record in recent:
-            age = now - record["ended"]
-            if age > RECENT_DONE_SECONDS:
-                continue  # stale: drop it
-            kept.append(record)
-            done.append(
-                f"- {record['label']} finished {_format_elapsed(age)} ago — {record['source']}"
-                f" (result already sent to the channel)"
-            )
-        if len(kept) != len(recent):
-            _recent_done[channel_id] = kept
-        if not kept:
-            _recent_done.pop(channel_id, None)
-    if not running and not done:
+    if not running:
         return ""
 
     # Always opens with "Note:" — it is injected as a user-role turn (the
     # chat template rejects a late system message), so it has to announce
     # itself as a status note rather than something the user said.
     parts = ["Note: this is an automatic status note about this channel, not"
-             " a message from the user."]
-    if running:
-        parts.append("Earlier request(s) still being processed right now:")
-        parts.extend(running)
-    if done:
-        parts.append(
-            "Already FINISHED (nothing left to wait for — the result is"
-            " already in the channel above; never say this work is still"
-            " coming, on its way, or will arrive shortly):"
-        )
-        parts.extend(done)
+             " a message from the user.",
+             "Earlier request(s) still being processed right now:"]
+    parts.extend(running)
     return "\n".join(parts)

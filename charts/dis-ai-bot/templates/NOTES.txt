@@ -20,7 +20,7 @@
    kubectl get svc <release>-diffusion-service
    kubectl logs deploy/<release>-diffusion-deployment
 
-4. Server workspaces: the bot's run_code_sandbox tool runs in one long-lived
+4. Server workspaces: the bot's brain (every tool request) runs in one long-lived
    container per Discord server on this node. The node needs a Docker daemon
    (required): its socket is mounted into the core pod via hostPath
    (brain.workspace.dockerSocketPath, default /var/run/docker.sock), and the

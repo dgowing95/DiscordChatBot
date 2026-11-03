@@ -1,9 +1,12 @@
 import asyncio
+import json
 import logging
 import os,aiohttp, discord, io, time
 from classes.user_memory import UserMemory
 from classes.metrics import (
+    inc_brain_facts_dropped,
     inc_llm_error,
+    inc_persona_escalation,
     inc_tool_call,
     inc_tool_error,
     observe_llm_call,
@@ -35,19 +38,18 @@ from classes import voice_policy
 # an operator may still export the old one for something else). Off for good,
 # in code: the SDK lets this call win over its
 # OPENAI_AGENTS_DISABLE_TRACING env var and a run's own RunConfig.
-# sandbox_agent.py does the same for the nested agent.
+# brain.py does the same for the nested agent.
 set_tracing_disabled(True)
 
-# Max turns for ONE reply from the main agent (a turn = one model response,
-# however many tool calls it carries). The SDK's own default is 10, which a
-# chained tool run overruns easily - three sandbox calls plus the reasoning
-# turns around them is already most of it - and overrunning raises
-# MaxTurnsExceeded, which costs the user the whole answer.
-DEFAULT_PERSONA_MAX_TURNS = 20
+# Max turns for ONE reply from the persona (a turn = one model response,
+# however many tool calls it carries). The persona has one tool, ask_brain, so
+# a reply is at most: ask the brain, maybe ask again, answer. An overrun is
+# still answered (_wrap_up), not failed.
+DEFAULT_PERSONA_MAX_TURNS = 4
 
 
 def persona_max_turns() -> int:
-    """Max model turns for one reply (PERSONA_MAX_TURNS, default 20)."""
+    """Max model turns for one reply (PERSONA_MAX_TURNS, default 4)."""
     try:
         value = int(str(os.environ.get("PERSONA_MAX_TURNS")).strip())
         return value if value > 0 else DEFAULT_PERSONA_MAX_TURNS
@@ -66,10 +68,6 @@ WRAP_UP_INSTRUCTION = (
 )
 
 
-
-
-from classes.image_generation import image_generation_enabled
-
 from classes.message_queue import (
     SLOW_TOOL_NAMES,
     TOOL_DISPLAY,
@@ -78,16 +76,7 @@ from classes.message_queue import (
 )
 
 
-from classes.tool_functions import (
-    change_personality,
-    clear_memories,
-    generate_image,
-    get_current_datetime,
-    remove_memory,
-    run_code_sandbox,
-    shared_tools,
-    store_memory,
-)
+from classes.tool_functions import ask_brain, get_current_datetime
 
 logger = logging.getLogger(__name__)
 
@@ -235,21 +224,22 @@ class ToolMetricsHooks(RunHooks):
     In-flight tracking: the slow tools (SLOW_TOOL_NAMES) register themselves
     at start and unregister at end, so a NEWER message in the same channel
     (the per-channel lock only guards build+send) gets a hint in its prompt
-    that the older one is still being processed. A run that ends in the SDK
-    failure prefix is unregistered WITHOUT the recently-done note — the user
-    didn't receive a result to refer to.
+    that the older one is still being processed.
     """
 
     _SDK_FAILURE_PREFIX = "An error occurred while running the tool"
     # The tool argument that identifies what a slow tool is doing (shown,
     # truncated, in the in-flight hint).
     _SOURCE_FIELDS = {
-        "run_code_sandbox": "task",
-        "generate_image": "prompt",
+        "ask_brain": "request",
     }
 
-    def __init__(self, guild_id):
+    def __init__(self, guild_id, caller: str = "main"):
+        """caller labels the model-call metrics: "main" for the persona,
+        "brain" for a brain call (classes/brain.py attaches these hooks too,
+        so the tools it runs are still counted)."""
         self.guild_id = guild_id
+        self.caller = caller
         self._starts: dict[str, tuple[float, str]] = {}
         # Start of the model request in progress. One run's requests are
         # sequential, so one slot is enough; a request that raises never
@@ -263,9 +253,9 @@ class ToolMetricsHooks(RunHooks):
         try:
             started, self._llm_started = self._llm_started, None
             if started is not None:
-                observe_llm_call("main", "ok", self._model_seconds(started))
+                observe_llm_call(self.caller, "ok", self._model_seconds(started))
             usage = getattr(response, "usage", None)
-            observe_llm_completion_tokens("main", getattr(usage, "output_tokens", None))
+            observe_llm_completion_tokens(self.caller, getattr(usage, "output_tokens", None))
         except Exception as e:
             logger.warning(f"Metrics llm_end hook failed: {e}")
 
@@ -274,7 +264,7 @@ class ToolMetricsHooks(RunHooks):
         try:
             started, self._llm_started = self._llm_started, None
             if started is not None:
-                observe_llm_call("main", outcome, self._model_seconds(started))
+                observe_llm_call(self.caller, outcome, self._model_seconds(started))
         except Exception as e:
             logger.warning(f"Metrics llm abandon failed: {e}")
 
@@ -294,8 +284,20 @@ class ToolMetricsHooks(RunHooks):
         return getattr(context, "tool_name", None) or getattr(tool, "name", "unknown")
 
     def _task_source(self, context, name: str) -> str:
-        """The tool argument shown in the in-flight hint (task/prompt)."""
+        """The tool argument shown in the in-flight hint (the request).
+
+        A function tool's arguments are in `tool_arguments` (the JSON
+        string); the SDK leaves `tool_input` empty for them. Reading only
+        `tool_input` left every hint entry without its request, and a
+        finished entry with no request reads as "the job you are answering
+        is done": the persona then claimed work it never asked for (about a
+        quarter of action requests in a busy channel, live on v3)."""
         raw = getattr(context, "tool_input", None)
+        if raw is None:
+            try:
+                raw = json.loads(getattr(context, "tool_arguments", "") or "")
+            except (TypeError, ValueError):
+                raw = None
         field = self._SOURCE_FIELDS.get(name)
         if field is not None and isinstance(raw, dict):
             return str(raw.get(field) or "")
@@ -309,7 +311,7 @@ class ToolMetricsHooks(RunHooks):
         # so the dict lives on context.context.
         return (context.context.get("channel") or context.context["original_message"].channel).id
 
-    # Hook failures must never abort the run (same rule as sandbox_progress).
+    # Hook failures must never abort the run (same rule as brain_progress).
 
     async def on_tool_start(self, context, agent, tool) -> None:
         name = self._tool_name(context, tool)
@@ -341,14 +343,7 @@ class ToolMetricsHooks(RunHooks):
             logger.warning(f"Metrics tool_end hook failed: {e}")
         if name in SLOW_TOOL_NAMES:
             try:
-                failed = isinstance(result, str) and result.startswith(self._SDK_FAILURE_PREFIX)
-                unregister_task_run(
-                    self._channel_id(context),
-                    run_key=self._key(context, tool),
-                    # No "just finished" note when the run failed — the user
-                    # didn't receive a result to refer to.
-                    finish=not failed,
-                )
+                unregister_task_run(self._channel_id(context), run_key=self._key(context, tool))
             except Exception as e:
                 logger.warning(f"In-flight registry tool_end failed: {e}")
 
@@ -362,34 +357,39 @@ def voice_thinking_off() -> bool:
     return not voice_policy.settings()["thinking"] and _voice_latch["send_no_thinking"]
 
 
-def agent_tools(automatic: bool = False, voice: bool = False) -> list:
-    """The function tools the main agent gets. A function of its own so the
-    /help sync test (core/tests/help_catalog_tests.py) can list them.
+def persona_tools() -> list:
+    """The persona's tools: exactly one, ask_brain, in chat, voice turns and
+    automatic runs alike (maintainer, 2026-11-02). With one tool its choice is
+    "answer from the chat, or ask the brain", which fixes its habit of trying
+    jobs it could not do. Every other tool is the brain's, and what differs
+    between chat, voice and automatic runs is decided there
+    (classes/brain_tools.py)."""
+    return [ask_brain]
 
-    A voice turn gets the same tools as a chat reply, except that it can
-    leave the call instead of joining one."""
-    # The sandbox agent gets these same tools (tool_functions.shared_tools).
-    # Automatic runs keep them all: a follow-up's usual job is to read a poll
-    # and make the event; search and the poll lookup are read-only. The event
-    # tools check the editor's permission in a schedule or a rule, but not in
-    # a follow-up (event_tools._checks_requester).
-    tools = [*shared_tools(), change_personality]
-    if not automatic:
-        tools.extend((store_memory, remove_memory, clear_memories))
-        from classes.automation_tools import automation_tools
-        tools.extend(automation_tools())
-    if not automatic and voice_policy.settings()["enabled"]:
-        from classes.tool_functions import join_voice_channel, leave_voice_channel
-        tools.append(leave_voice_channel if voice else join_voice_channel)
-    # The image tool only exists when the diffusion service is enabled
-    # (IMAGE_GEN_ENABLED; set from the helm chart's diffusion.enabled).
-    if image_generation_enabled():
-        tools.append(generate_image)
 
-    # Sandbox tool (nested SandboxAgent in the server's workspace container).
-    # Always on: Docker is required (main.py exits at startup without it).
-    tools.append(run_code_sandbox)
-    return tools
+def trailing_block(datetime: str, memories=None, name: str | None = None) -> str:
+    """The per-message block after the history: the time and, when there
+    are any, what is saved about the person asking.
+
+    It goes LAST, after the history, so the cached prompt prefix (system
+    prompt + the ask_brain schema + history) does not change when a memory
+    does; the voice prefill sends the request without it for the same
+    reason. role="user" (not "system"): some chat templates raise for a
+    system message that isn't the very first one.
+
+    The memories are what fixed recall (broken since 2025-08-27, when they
+    were dropped from the prompt and no tool read them back): "what units do
+    I like?" is answered from here, with no brain call. Capped like the
+    brain's task (brain.MEMORY_COUNT newest, within brain.MEMORY_CHARS), by
+    the same memory_lines. Saving or deleting one is brain work.
+    """
+    from classes.brain import memory_lines
+    text = f"(Current datetime: {datetime})"
+    lines = memory_lines(memories)
+    if lines:
+        who = name or "the person asking"
+        text += f"\n(Saved about {who}:\n" + "\n".join(f"- {m}" for m in lines) + ")"
+    return text
 
 
 class TextLLMHandler:
@@ -403,7 +403,7 @@ class TextLLMHandler:
         self.messages = messages
         self.guild_id = guild_id
         # The discord.Client, forwarded to tool-run context as
-        # "discord_client" (see generate()) and on into the nested sandbox
+        # "discord_client" (see generate()) and on into the brain
         # run's context. Nothing there waits on it any more (ask_user's
         # replies arrive through the thread ledger), so it is optional/None
         # for callers and tests.
@@ -431,23 +431,32 @@ class TextLLMHandler:
         # rather than by changing generate()'s string return (and its
         # "Error" sentinel).
         self.reasoning = ""
-        # Filled in by generate() from the shared run context: the Discord
-        # thread run_code_sandbox resolved/created for this run, if any. The
-        # caller (MessageHandler) sends the final reply there instead of
-        # self.message.channel so it lands next to the sandbox's own output
-        # rather than outside the thread.
-        self.sandbox_thread = None
-        # The files that sandbox run sent to its thread, as (name, bytes),
-        # so MessageHandler can post them with the reply in the channel the
-        # request came from too.
-        self.sandbox_files = []
+        # Filled in by generate(): whether this reply called the brain.
+        self.used_brain = False
 
-    def _capture_sandbox(self, user_info):
-        """Reads back what run_code_sandbox left on the run context. Called
-        on every way a run ends: a tool may have run before a later turn
-        failed."""
-        self.sandbox_thread = user_info.get("sandbox_thread")
-        self.sandbox_files = list(user_info.get("sandbox_files") or [])
+    def _after_run(self, user_info, reply) -> None:
+        """Records whether the reply called the brain, and checks the reply
+        kept the brain's must-keep facts (logged and counted, never
+        retried). Never raises."""
+        try:
+            reports = user_info.get("brain_reports") or []
+            self.used_brain = bool(reports)
+            failed = not isinstance(reply, str) or reply == "Error"
+            # A run that failed before calling the brain answered nothing, so
+            # counting it as "answered" would skew the routing metric.
+            if reports or not failed:
+                inc_persona_escalation("brain" if reports else "answered")
+            # A spoken reply says "8 degrees", never "8°C" or a URL, so the
+            # exact-token check would count every voice turn as dropping facts.
+            if not isinstance(reply, str) or reply == "Error" or user_info.get("voice"):
+                return
+            from classes.brain_result import missing_tokens
+            dropped = [t for r in reports for t in missing_tokens(reply, r)]
+            if dropped:
+                logger.warning(f"Persona reply left out brain facts: {dropped}")
+                inc_brain_facts_dropped(len(dropped))
+        except Exception as e:
+            logger.warning(f"Could not check the reply against the brain's facts: {e}")
 
 
     @staticmethod
@@ -533,7 +542,7 @@ class TextLLMHandler:
     async def get_client(self):
         main_model_client = _get_main_model_client()
         voice = getattr(self, "voice", False)
-        tools = agent_tools(getattr(self, "automatic", False), voice)
+        tools = persona_tools()
         instructions = self.system
         if voice:
             # After the personality, and the same for the whole call, so it
@@ -578,6 +587,8 @@ class TextLLMHandler:
       a voice prefill sends the same prompt prefix as the turn after it."""
       await self.get_settings()
       user_info = {
+        # The requester's saved memories: shown to the persona in the
+        # trailing block, and to the brain in its task.
         "data": await self.user_memory.get() or [] if getattr(self, "user_memory", None) else [],
         "user_id": self.actor_id if hasattr(self, "actor_id") else self.original_message.author.id,
         "guild_id": self.guild_id,
@@ -591,33 +602,46 @@ class TextLLMHandler:
         "poll_tool_calls": 0,
         "events_made": [],
         "event_tool_failures": 0,
-        # Set by run_code_sandbox (tool_functions.py) if/when it runs, to the
-        # thread it resolved/created — read back below regardless of how the
-        # run ends, since a tool call may have already mutated this dict
-        # before a later turn raises (e.g. MaxTurnsExceeded).
-        "sandbox_thread": None,
-        # (name, bytes) of each file a sandbox run sent, also set by it.
-        "sandbox_files": [],
         # What a voice speaker said (no source message to read it from).
         "request_text": getattr(self, "request_text", None),
+        # For the brain (classes/brain.py): what kind of run this is (its
+        # tools differ), the history it is shown as text, and who asked.
+        "voice": getattr(self, "voice", False),
+        "persona_messages": self.messages,
+        "requester_name": self._requester_name(),
+        # One per ask_brain call, read back after the reply (_after_run).
+        "brain_reports": [],
       }
       self.system = f"Answer as if you are {self.system}."
       await self.get_client()
       return user_info
 
+    def _requester_name(self) -> str | None:
+        """The asking person's display name, for the memory block and the
+        brain's task. A voice turn and an automatic run have no message, so
+        the member cache is tried (often a miss: no members intent)."""
+        author = getattr(getattr(self, "original_message", None), "author", None)
+        if author is not None:
+            return getattr(author, "display_name", None) or getattr(author, "name", None)
+        guild = getattr(getattr(self, "channel", None), "guild", None)
+        actor = getattr(self, "actor_id", None)
+        member = guild.get_member(actor) if guild is not None and actor is not None else None
+        return getattr(member, "display_name", None)
+
+    def _trailing(self, user_info, datetime: str) -> dict:
+        return {"role": "user", "content": trailing_block(
+            datetime, user_info.get("data"), user_info.get("requester_name"))}
+
     async def generate(self):
       user_info = await self._prepare()
       datetime = await get_current_datetime()
-      # The datetime is appended as a trailing message rather than folded
-      # into the system prompt: the system prompt + growing history stays
-      # byte-identical across turns of the same conversation, so llama.cpp's
-      # prefix cache only has to prefill the new tail instead of the whole
-      # prompt every time. role="user" (not "system"): some chat templates
-      # (e.g. this model's) raise a Jinja error ("System message must be at
-      # the beginning") for any system message that isn't the very first one.
-      messages_for_run = self.messages + [
-          {"role": "user", "content": f"(Current datetime: {datetime})"}
-      ]
+      # The datetime (and the person's saved memories) are appended as a
+      # trailing message rather than folded into the system prompt: the
+      # system prompt + growing history stays byte-identical across turns of
+      # the same conversation, so llama.cpp's prefix cache only has to
+      # prefill the new tail instead of the whole prompt every time. See
+      # trailing_block.
+      messages_for_run = self.messages + [self._trailing(user_info, datetime)]
       if self.allow_double_reply and not getattr(self, "automatic", False):
           messages_for_run.append({"role": "user", "content": DOUBLE_REPLY_INSTRUCTION})
       hooks = ToolMetricsHooks(self.guild_id)
@@ -631,14 +655,14 @@ class TextLLMHandler:
          final_output = response.final_output
          self._capture_reasoning(response.new_items, final_output)
          self._record_prompt_tokens(response.raw_responses)
-         self._capture_sandbox(user_info)
+         self._after_run(user_info, final_output)
          return final_output
       except asyncio.CancelledError:
          hooks.abandon_llm_call("cancelled")
          raise
       except Exception as e:
          hooks.abandon_llm_call("error")
-         self._capture_sandbox(user_info)
+         self._after_run(user_info, None)
          logger.warning('Failed to get response from LLM: ' + str(e))
          # A run that died part-way (MaxTurnsExceeded after a few chained
          # tool calls is the common one) still reasoned before it broke, and
@@ -668,11 +692,9 @@ class TextLLMHandler:
       """
       user_info = await self._prepare()
       datetime = await get_current_datetime()
-      # Same trailing datetime as generate(): everything before it is the
+      # Same trailing block as generate(): everything before it is the
       # prompt prefix a voice prefill warmed (see prefill()).
-      messages_for_run = self.messages + [
-          {"role": "user", "content": f"(Current datetime: {datetime})"}
-      ]
+      messages_for_run = self.messages + [self._trailing(user_info, datetime)]
       hooks = hooks or ToolMetricsHooks(self.guild_id)
       emitted = False
       retried_without_option = False
@@ -695,12 +717,13 @@ class TextLLMHandler:
           final_output = result.final_output
           self._capture_reasoning(result.new_items, final_output)
           self._record_prompt_tokens(result.raw_responses)
-          self._capture_sandbox(user_info)
+          final_text = final_output if isinstance(final_output, str) else str(final_output or "")
+          self._after_run(user_info, final_text)
           if retried_without_option:
             # Only now is the option known to be what the server refused;
             # a retry that failed too says nothing about it.
             _voice_latch["send_no_thinking"] = False
-          return final_output if isinstance(final_output, str) else str(final_output or "")
+          return final_text
         except asyncio.CancelledError:
           hooks.abandon_llm_call("cancelled")
           raise
@@ -764,7 +787,7 @@ class TextLLMHandler:
 
     def _streamed_failure(self, hooks, user_info, e) -> str:
       hooks.abandon_llm_call("error")
-      self._capture_sandbox(user_info)
+      self._after_run(user_info, None)
       logger.warning('Failed to get a streamed response from LLM: ' + str(e))
       inc_llm_error(self.guild_id)
       return "Error"
@@ -775,7 +798,7 @@ class TextLLMHandler:
 
       Sends exactly what generate_streamed() would send for these messages --
       same instructions, tools and model settings, built by the same
-      _prepare() -- minus the trailing datetime message, and asks for one
+      _prepare() -- minus the trailing block (time, memories), and asks for one
       token. llama.cpp keeps the processed prompt in its slot; the real turn
       is that prompt plus a few tokens, so it is answered almost at once.
       Measured on the dev stack: a 2.4k-token voice prompt went from 1.0s of

@@ -162,6 +162,22 @@ Metrics (scraped by Prometheus from the /metrics HTTP endpoint):
   Counter  discord_bot_workspace_reaped_total
            Workspace containers removed because no live record names them.
 
+  The brain (classes/brain.py; labels are bounded: tier is 2 until Tier 3,
+  status is done / partial / needs_input / failed):
+  Counter  discord_bot_brain_calls_total{tier,status}
+  Histogram discord_bot_brain_call_seconds{tier,status}
+           Each ask_brain call, and how long it took end to end.
+  Histogram discord_bot_brain_turns / discord_bot_brain_tool_calls
+           Model turns and tool calls per brain call: how far real calls are
+           from the loop guard's backstops, and how many are one-tool jobs.
+  Counter  discord_bot_brain_loop_stops_total{kind}
+           Brain calls the loop guard stopped (repeat / stale).
+  Counter  discord_bot_brain_facts_dropped_total
+           Must-keep facts the persona's reply left out.
+  Counter  discord_bot_persona_escalations_total{result}
+           Persona replies that called the brain (brain) or answered alone
+           (answered).
+
 Context-window note: this is the PROMPT side, which is what has to fit before
 generation starts. The server-side counterpart is llama.cpp's own
 `llamacpp:n_tokens_max` - "high watermark of the context size observed", which
@@ -551,6 +567,59 @@ workspace_reaped_total = Counter(
     "discord_bot_workspace_reaped_total",
     "Workspace containers removed by the reaper (no live record names them)",
 )
+
+
+# The brain (classes/brain.py).
+brain_calls_total = Counter(
+    "discord_bot_brain_calls_total", "Brain calls, by tier and how they ended",
+    ["tier", "status"],
+)
+brain_call_seconds = Histogram(
+    "discord_bot_brain_call_seconds", "Seconds one brain call took, by tier and how it ended",
+    ["tier", "status"],
+    buckets=(1, 2.5, 5, 10, 20, 30, 60, 120, 300, 600, 1200, 1800),
+)
+brain_turns = Histogram(
+    "discord_bot_brain_turns", "Model turns per brain call",
+    buckets=(1, 2, 3, 5, 8, 12, 20, 30, 50, 75, 100),
+)
+brain_tool_calls = Histogram(
+    "discord_bot_brain_tool_calls", "Tool calls per brain call",
+    buckets=(0, 1, 2, 3, 5, 8, 12, 20, 30, 50, 100),
+)
+brain_loop_stops_total = Counter(
+    "discord_bot_brain_loop_stops_total", "Brain calls stopped by the loop guard, by kind",
+    ["kind"],
+)
+brain_facts_dropped_total = Counter(
+    "discord_bot_brain_facts_dropped_total",
+    "Must-keep facts from the brain that the persona's reply left out",
+)
+persona_escalations_total = Counter(
+    "discord_bot_persona_escalations_total",
+    "Persona replies, by whether they called the brain",
+    ["result"],
+)
+
+
+def observe_brain_call(tier, status: str, seconds: float, turns: int, tool_calls: int) -> None:
+    brain_calls_total.labels(tier=str(tier), status=str(status)).inc()
+    brain_call_seconds.labels(tier=str(tier), status=str(status)).observe(max(0.0, seconds))
+    brain_turns.observe(max(0, turns))
+    brain_tool_calls.observe(max(0, tool_calls))
+
+
+def inc_brain_loop_stop(kind: str) -> None:
+    brain_loop_stops_total.labels(kind=str(kind)).inc()
+
+
+def inc_brain_facts_dropped(count: int) -> None:
+    if count > 0:
+        brain_facts_dropped_total.inc(count)
+
+
+def inc_persona_escalation(result: str) -> None:
+    persona_escalations_total.labels(result=str(result)).inc()
 
 
 def observe_workspace_start(kind: str, seconds: float) -> None:

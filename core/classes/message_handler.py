@@ -13,7 +13,6 @@ pillow_heif.register_heif_opener()
 from classes.text_llm_handler import TextLLMHandler, slot_context_tokens
 from classes import attachment_cache, history_policy, reply_policy
 from classes.workspace_inputs import attachment_note
-from classes.common import send_with_files
 from classes.history_policy import (
     ANCHORED,
     KEEP,
@@ -385,7 +384,7 @@ class MessageHandler:
             role = "assistant" if message.author.id == self.client.user.id else "user"
         entries = []
         # Names a user's files (a CSV would otherwise not be in the prompt at
-        # all), so the model can hand them to run_code_sandbox. Not on the
+        # all), so the model can hand them to ask_brain. Not on the
         # bot's own messages: the model copies its earlier replies' shape, and
         # would start writing the tag itself.
         files = ""
@@ -484,58 +483,12 @@ class MessageHandler:
                 await asyncio.sleep(1)
 
 
-
-
-    def _sandbox_copy_channel(self, thread):
-        """Where a sandbox run's reply and files are copied, besides the
-        thread they went to; None for nowhere.
-
-        A request made outside the thread: the channel it was made in. A
-        follow-up made inside a thread the bot started (a sandbox thread):
-        the channel that thread belongs to, so each new result shows up in
-        the channel the work began in. Not a thread people started
-        themselves, where the bot only joined in, and not a run whose thread
-        could not be made (it ran in the request's own channel)."""
-        channel = self.message.channel
-        if thread is None:
-            return None
-        if thread is not channel and getattr(thread, "id", None) != getattr(channel, "id", None):
-            return channel
-        bot_id = getattr(getattr(self.client, "user", None), "id", None)
-        if (isinstance(channel, discord.Thread) and bot_id is not None
-                and getattr(channel, "owner_id", None) == bot_id):
-            return getattr(channel, "parent", None)
-        return None
-
-    async def _post_sandbox_copy(self, ollama, text):
-        """Posts the reply and the files a sandbox run sent to its thread in
-        the channel the work was asked for in too (_sandbox_copy_channel),
-        so the result is there as well as in the thread. Sent under THAT
-        channel's lock, taken after this handle's own is released (for a
-        follow-up the two differ, and holding one while waiting for the
-        other could deadlock).
-        Exception-safe: the thread already has everything, so a failure
-        here must not cost the rest of the handle."""
-        channel = self._sandbox_copy_channel(getattr(ollama, "sandbox_thread", None))
-        if channel is None:
-            return
-        files = list(getattr(ollama, "sandbox_files", None) or [])
-        chunks = chunk_for_discord(text or "")
-        if not chunks and not files:
-            return
+    def _prewarm_workspace(self) -> None:
         try:
-            async with get_channel_lock(channel.id):
-                for chunk in chunks[:-1]:
-                    # One lost chunk must not cost the files below.
-                    try:
-                        await channel.send(chunk)
-                    except Exception as e:
-                        logger.warning(f"Could not copy part of the sandbox reply: {e!r}")
-                    await asyncio.sleep(1)
-                await send_with_files(channel, chunks[-1] if chunks else None, files)
+            from classes.workspace_manager import workspaces
+            workspaces().prewarm(self.message.guild.id)
         except Exception as e:
-            logger.warning(f"Could not post the sandbox result in the original channel: {e}")
-
+            logger.info(f"Could not pre-warm the server's workspace: {e}")
 
     async def handle_message(self):
         logger.info(f'Handling message: {self.message.content}')
@@ -557,8 +510,8 @@ class MessageHandler:
             #    read is a consistent snapshot (no half-sent replies from a
             #    concurrent same-channel handle).
             await self.select_messages()
-            # If an earlier message's slow tool is still running (or just
-            # finished) in this channel, tell the model — it can then answer
+            # If an earlier message's brain call is still running in this
+            # channel, tell the model — it can then answer
             # follow-ups honestly ("it's still running") instead of guessing
             # that the previous request went unanswered.
             hint = in_flight_hint(self.message.channel.id)
@@ -569,6 +522,10 @@ class MessageHandler:
         await self.prepare_messages()
         if hint:
             self.messages.append({"role": "user", "content": hint})
+        # The persona may hand the job to the brain, which needs this server's
+        # workspace: start it now, while the persona thinks
+        # (WORKSPACE_PREWARM, on by default). Fire-and-forget, fail-soft.
+        self._prewarm_workspace()
         # 3) LLM run + tool calls UNLOCKED (the slow phase; other messages —
         #    same channel or not — can build/generate concurrently).
         ollama = TextLLMHandler(
@@ -585,11 +542,9 @@ class MessageHandler:
         # from TextLLMHandler breaks a test instead of silently killing the
         # feature again.
         thinking = ollama.reasoning if SHOW_THINKING else ""
-        # If run_code_sandbox created/reused a thread this run, the sandbox's
-        # own output already lives there — send the outer agent's reply
-        # there, next to it. The reply and the run's files are then posted
-        # in the channel the work was asked for as well (_post_sandbox_copy).
-        target_channel = getattr(ollama, "sandbox_thread", None) or self.message.channel
+        # The brain works inline (no thread): its files are already in this
+        # channel, and the reply goes here too.
+        target_channel = self.message.channel
 
         if response == "Error":
             # The run broke part-way (e.g. it ran out of turns chaining tool
@@ -603,8 +558,6 @@ class MessageHandler:
                     started = time.monotonic()
                     await self.handle_thinking_send(thinking, channel=target_channel)
                     self._observe_stage("send", started)
-            # No reply to copy, but the files a sandbox run made still exist.
-            await self._post_sandbox_copy(ollama, "")
         else:
             response = self.filter_response(response)
             # 4) Send under the lock: serializes the chunked replies of
@@ -614,7 +567,6 @@ class MessageHandler:
                 parts = reply_policy.reply_parts(
                     response,
                     allowed=(allow_double_reply
-                             and not getattr(ollama, "sandbox_thread", None)
                              and reply_policy.policy.available(target_channel.id)),
                 )
                 if len(parts) == 2:
@@ -633,7 +585,4 @@ class MessageHandler:
                 if thinking:
                     await self.handle_thinking_send(thinking, channel=target_channel)
                 self._observe_stage("send", started)
-            # parts, not response: what the thread got (pair marker resolved).
-            # After the lock: the copy takes the lock of the channel it goes to.
-            await self._post_sandbox_copy(ollama, "\n\n".join(p for p in parts if p))
         observe_response_generation(self.message.guild.id, time.monotonic() - start)

@@ -9,6 +9,8 @@ per-process; tests use a unique guild/user id to read exact values.
 """
 
 import importlib
+import json
+import time
 import os
 import sys
 import urllib.error
@@ -213,9 +215,11 @@ def test_start_from_env_disabled(monkeypatch):
 
 
 def _hook_context(channel_id, tool_name, tool_input, call_id):
-    """A RunContextWrapper-like mock: the hooks read .tool_call_id /
-    .tool_name / .tool_input off it and the user_info dict (carrying the
-    original message) off .context."""
+    """A ToolContext-like mock: the hooks read .tool_call_id / .tool_name /
+    the arguments off it and the user_info dict (carrying the original
+    message) off .context. Shaped like the SDK's own for a function tool:
+    the arguments are the JSON string in .tool_arguments and .tool_input is
+    None (a mock with .tool_input set hid a hint with no request in it)."""
     message = MagicMock()
     message.channel = MagicMock()
     message.channel.id = channel_id
@@ -223,7 +227,8 @@ def _hook_context(channel_id, tool_name, tool_input, call_id):
     context.context = {"original_message": message}
     context.tool_call_id = call_id
     context.tool_name = tool_name
-    context.tool_input = tool_input
+    context.tool_input = None
+    context.tool_arguments = json.dumps(tool_input) if isinstance(tool_input, dict) else (tool_input or "")
     return context
 
 
@@ -239,38 +244,21 @@ def test_tool_hooks_register_slow_tool_in_flight():
     from classes import text_llm_handler as tlh
 
     hooks = tlh.ToolMetricsHooks(GUILD)
-    ctx = _hook_context(300, "run_code_sandbox", {"task": "compute pi"}, "call_1")
-    tool = _hook_tool("run_code_sandbox")
+    ctx = _hook_context(300, "ask_brain", {"request": "compute pi"}, "call_1")
+    tool = _hook_tool("ask_brain")
 
     asyncio.run(hooks.on_tool_start(ctx, None, tool))
-    hint = mq.in_flight_hint(300)
-    assert "🐳 code sandbox" in hint
+    # Shown once it has run a while (a quick call never shows).
+    later = time.monotonic() + mq.HINT_AFTER_SECONDS + 1
+    hint = mq.in_flight_hint(300, now=later)
+    assert "🧠 brain" in hint
     assert "compute pi" in hint
     assert "running for" in hint
 
-    asyncio.run(hooks.on_tool_end(ctx, None, tool, "Done: 3.14159"))
-    hint = mq.in_flight_hint(300)
-    assert "running for" not in hint
-    assert "finished" in hint  # recently-done note for follow-up prompts
-
-
-def test_tool_hooks_failed_run_leaves_no_recently_done_note():
-    import asyncio
-    from classes import message_queue as mq
-    from classes import text_llm_handler as tlh
-
-    hooks = tlh.ToolMetricsHooks(GUILD)
-    ctx = _hook_context(301, "generate_image", {"prompt": "a red fox"}, "call_2")
-    tool = _hook_tool("generate_image")
-
-    asyncio.run(hooks.on_tool_start(ctx, None, tool))
-    asyncio.run(hooks.on_tool_end(
-        ctx, None, tool,
-        tlh.ToolMetricsHooks._SDK_FAILURE_PREFIX + " boom",))
-    # the run vanished (no more "running"), and there is NO "finished" note —
-    # the user never received a result to refer to
-    assert mq.in_flight_hint(301) == ""
-
+    with patch.object(mq.time, "monotonic", return_value=later):
+        asyncio.run(hooks.on_tool_end(ctx, None, tool, "Done: 3.14159"))
+    # Gone once it ends: finished calls are never listed.
+    assert mq.in_flight_hint(300, now=later + 1) == ""
 
 def test_tool_hooks_ignore_fast_tools():
     import asyncio

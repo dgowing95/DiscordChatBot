@@ -114,8 +114,8 @@ async def search_messages(wrapper: RunContextWrapper[dict], query: str, channel:
         return body
     text = format_results(body, scope.guild.id, _channel_names(scope.guild), scope.query,
                           scope.where)
-    # In a sandbox run (it has a workspace) a big result can go to a file for
-    # code to read; only the sandbox has that tool.
+    # In a brain call (it has a workspace) a big result can go to a file for
+    # code to read with save_messages_to_file.
     shown, total = len(flatten(body)), int(body.get("total_results") or 0)
     if context.get("session") is not None and total > shown:
         text += (f"\nTo work with all {total} of them (counting, adding up, charting), "
@@ -202,7 +202,7 @@ async def save_messages_to_file(wrapper: RunContextWrapper[dict], query: str = "
     context = wrapper.context
     session = context.get("session")
     if session is None:
-        return "Saving messages to a file only works inside the code sandbox."
+        return "Saving messages to a file needs the workspace, which is not available."
     scope = await _scope(context, query, channel, author)
     if isinstance(scope, str):
         return scope

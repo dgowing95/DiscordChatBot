@@ -140,8 +140,6 @@ data:
   {{- end }}
   # Code sandbox run limits; the work runs in the server's workspace container
   # on the node's Docker daemon, through the socket mounted in core.yaml.
-  SANDBOX_MAX_TURNS: {{ .Values.sandbox.maxTurns | toString | quote }}
-  SANDBOX_TIMEOUT: {{ .Values.sandbox.timeout | toString | quote }}
   SANDBOX_ASK_USER_TIMEOUT: {{ .Values.sandbox.askUserTimeout | toString | quote }}
   {{- with .Values.brain.workspace }}
   WORKSPACE_IMAGE: {{ .image | quote }}
@@ -185,6 +183,10 @@ data:
   {{- end }}
   BRAIN_REASONING_EFFORT: {{ .Values.brain.reasoningEffort | quote }}
   BRAIN_CALL_TIMEOUT_SECONDS: {{ .Values.brain.callTimeout | toString | quote }}
+  BRAIN_MAX_TURNS: {{ .Values.brain.maxTurns | toString | quote }}
+  BRAIN_TIMEOUT: {{ .Values.brain.timeout | toString | quote }}
+  BRAIN_REPEAT_LIMIT: {{ .Values.brain.repeatLimit | toString | quote }}
+  BRAIN_TRIM_KEEP_RECENT: {{ .Values.brain.trimKeepRecent | toString | quote }}
   # Content guard (moderation of web and sandbox input); the key lives in
   # secret.yaml.
   CONTENT_GUARD_ENABLED: {{ .Values.contentGuard.enabled | quote }}

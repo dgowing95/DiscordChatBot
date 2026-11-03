@@ -2,9 +2,10 @@
 
 Hand-written on purpose: generating it with the LLM on every call would be
 slow, and a small local model can invent or misdescribe features. To stop it
-going stale, core/tests/help_catalog_tests.py fails when an agent tool
-(text_llm_handler.agent_tools) or a slash command (main.register_commands)
-has no entry here. Adding a tool or command therefore means adding a line.
+going stale, core/tests/help_catalog_tests.py fails when a brain tool
+(brain_tools.brain_tools: since v3 every tool is the brain's, and the persona
+only has ask_brain) or a slash command (main.register_commands) has no entry
+here. Adding a tool or command therefore means adding a line.
 
 Entries with `requires` are hidden when that feature is switched off for the
 deployment (IMAGE_GEN_ENABLED / EVENTS_ENABLED ...), so /help never offers
@@ -24,15 +25,15 @@ EVENTS = "events"
 class HelpEntry:
     name: str
     description: str
-    # The agent tool names this entry explains (what the sync test checks).
+    # The brain tool names this entry explains (what the sync test checks).
     tools: tuple = ()
     # The slash command this entry IS ("" for an ask-me entry).
     command: str = ""
     requires: str = ""
 
 
-# "Just ask me" - agent tools, described by what a person asks for rather
-# than by tool name, since nobody calls them directly.
+# "Just ask me" - the brain's tools, described by what a person asks for
+# rather than by tool name, since nobody calls them directly.
 ASK_ENTRIES = (
     HelpEntry("🔎 Search the web", "Ask about news or anything recent and I'll look it up, "
               "read the top results and tell you what they say, with links.",
@@ -55,10 +56,10 @@ ASK_ENTRIES = (
     HelpEntry("🎨 Make images", "Ask me to draw a picture, or to change one I made "
               "(reply to it, or just say what to change).",
               tools=("generate_image",), requires=IMAGE),
-    HelpEntry("🐳 Run code", "Ask me to build or run something with code (scripts, charts, "
-              "gifs...). I work in a thread: reply there to steer me, or @mention me there "
-              "later to carry on.",
-              tools=("run_code_sandbox",)),
+    HelpEntry("💻 Code, files and charts", "Ask me to build or run something with code "
+              "(scripts, charts, gifs, a file you attach...). The files come back here, and "
+              "you can ask for changes after.",
+              tools=("attach_file", "save_messages_to_file")),
     HelpEntry("⏰ Schedules and rules", "Ask me to schedule or follow up on something, or react to a word.",
               tools=("list_schedules", "get_schedule", "create_schedule", "schedule_followup",
                      "update_schedule", "delete_schedule",
@@ -142,6 +143,10 @@ def help_embed_data(image_enabled: bool) -> dict:
                    + [{"name": "Tips", "value": TIPS}]),
         "footer": "",
     }
+
+
+# Brain tools that are its own bookkeeping, not something a person asks for.
+INTERNAL_TOOLS = frozenset({"ask_user", "report"})
 
 
 def documented_tools() -> set:

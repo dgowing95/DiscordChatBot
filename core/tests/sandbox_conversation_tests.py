@@ -6,7 +6,7 @@ behaviour the coordinator depends on — where a filter's items land, when
 on_llm_end fires relative to a response's tools, what a continuation
 replays — against the pinned SDK, not against a mock of it. No network, no
 Docker: the agent is a plain Agent with small function tools gated exactly
-the way the sandbox's are (sandbox_agent._gated_invoke).
+the way the sandbox's are (workspace_tools._gated_invoke).
 """
 import asyncio
 import dataclasses
@@ -17,7 +17,7 @@ import pytest
 from agents import Agent, RunConfig, Runner, function_tool
 from agents.testing import ModelStep, ScriptedModel, assistant_message, function_call
 
-from classes import sandbox_agent
+from classes import workspace_tools
 from classes import sandbox_conversation as conv_mod
 from classes import sandbox_thread_inbox as inbox
 from classes.sandbox_conversation import SandboxConversation, make_agent_hooks
@@ -73,8 +73,8 @@ def _agent(conv, model, executed):
         return f"did {what}"
 
     gated = dataclasses.replace(
-        work, on_invoke_tool=sandbox_agent._gated_invoke(work.on_invoke_tool, "work"))
-    return Agent(name="t", model=model, tools=[gated, sandbox_agent.respond_to_updates],
+        work, on_invoke_tool=workspace_tools._gated_invoke(work.on_invoke_tool, "work"))
+    return Agent(name="t", model=model, tools=[gated, workspace_tools.respond_to_updates],
                  hooks=make_agent_hooks(conv))
 
 
@@ -177,7 +177,7 @@ async def test_a_message_landing_mid_batch_blocks_the_rest_of_the_batch():
         return f"did {what}"
 
     gated = dataclasses.replace(
-        work, on_invoke_tool=sandbox_agent._gated_invoke(work.on_invoke_tool, "work"))
+        work, on_invoke_tool=workspace_tools._gated_invoke(work.on_invoke_tool, "work"))
     model = ScriptedModel([
         [function_call("work", {"what": "first"}, call_id="c1"),
          function_call("work", {"what": "second"}, call_id="c2")],
@@ -185,7 +185,7 @@ async def test_a_message_landing_mid_batch_blocks_the_rest_of_the_batch():
                        {"message_ids": "1", "decision": "noted"}, call_id="c3")],
         [assistant_message("ok", item_id="m1")],
     ])
-    agent = Agent(name="t", model=model, tools=[gated, sandbox_agent.respond_to_updates],
+    agent = Agent(name="t", model=model, tools=[gated, workspace_tools.respond_to_updates],
                   hooks=make_agent_hooks(conv))
     await Runner.run(agent, "task", max_turns=6,
                      context={"conversation": conv, "thread": conv.thread},
@@ -436,7 +436,6 @@ async def test_a_failed_question_send_is_not_left_open():
 
 @pytest.mark.asyncio
 async def test_finishing_with_input_unanswered_continues_without_replaying_tools(monkeypatch):
-    monkeypatch.setenv("SANDBOX_MAX_TURNS", "10")
     conv = _conversation()
     rec = _Recorder()
     executed = []
@@ -456,7 +455,7 @@ async def test_finishing_with_input_unanswered_continues_without_replaying_tools
     context = {"conversation": conv, "thread": conv.thread, "deliverables": []}
     run_config = RunConfig(call_model_input_filter=conv.input_filter)
 
-    result = await sandbox_agent._converse(agent, "task", run_config, None, context, conv)
+    result = await workspace_tools._converse(agent, "task", run_config, None, context, conv)
 
     assert result.final_output == "chart with a title"
     assert executed == ["chart", "title"]  # nothing ran twice
@@ -471,7 +470,6 @@ async def test_finishing_with_input_unanswered_continues_without_replaying_tools
 
 @pytest.mark.asyncio
 async def test_continuations_are_bounded_when_the_model_never_answers(monkeypatch):
-    monkeypatch.setenv("SANDBOX_MAX_TURNS", "20")
     conv = _conversation()
     _deliver(conv, 11, "make it blue")
     executed = []
@@ -480,8 +478,8 @@ async def test_continuations_are_bounded_when_the_model_never_answers(monkeypatc
     agent = _agent(conv, model, executed)
     context = {"conversation": conv, "thread": conv.thread, "deliverables": []}
 
-    result = await sandbox_agent._converse(
-        agent, "task", RunConfig(call_model_input_filter=conv.input_filter), None, context, conv)
+    result = await workspace_tools._converse(
+        agent, "task", RunConfig(call_model_input_filter=conv.input_filter), None, context, conv, max_turns=20)
 
     assert result.final_output == f"done {conv_mod.MAX_CONTINUATIONS}"
     assert conv.continuations == conv_mod.MAX_CONTINUATIONS
@@ -491,7 +489,6 @@ async def test_continuations_are_bounded_when_the_model_never_answers(monkeypatc
 
 @pytest.mark.asyncio
 async def test_no_continuation_without_turns_left_for_it(monkeypatch):
-    monkeypatch.setenv("SANDBOX_MAX_TURNS", "2")
     conv = _conversation()
     executed = []
     model = ScriptedModel([
@@ -502,8 +499,8 @@ async def test_no_continuation_without_turns_left_for_it(monkeypatch):
     agent = _agent(conv, model, executed)
     context = {"conversation": conv, "thread": conv.thread, "deliverables": []}
 
-    result = await sandbox_agent._converse(
-        agent, "task", RunConfig(call_model_input_filter=conv.input_filter), None, context, conv)
+    result = await workspace_tools._converse(
+        agent, "task", RunConfig(call_model_input_filter=conv.input_filter), None, context, conv, max_turns=2)
 
     assert result.final_output == "done"
     assert conv.continuations == 0
@@ -516,7 +513,7 @@ async def test_a_message_after_the_boundary_becomes_a_follow_up(monkeypatch):
     model = ScriptedModel([[assistant_message("done", item_id="m1")]])
     agent = _agent(conv, model, [])
     context = {"conversation": conv, "thread": conv.thread, "deliverables": []}
-    await sandbox_agent._converse(
+    await workspace_tools._converse(
         agent, "task", RunConfig(call_model_input_filter=conv.input_filter), None, context, conv)
 
     assert conv.ledger.deliver(99, 1, "ana", "and a csv") == inbox.FINISHING
@@ -552,7 +549,7 @@ async def test_attach_file_can_remove_an_outdated_selection():
         context={"session": MagicMock(), "deliverables": [
             {"path": "out/red.png", "size": 1, "caption": "", "change_revision": 0}]},
         tool_name="attach_file", tool_call_id="a1", tool_arguments="{}")
-    out = await sandbox_agent.attach_file.on_invoke_tool(
+    out = await workspace_tools.attach_file.on_invoke_tool(
         ctx, json.dumps({"path": "out/red.png", "remove": True}))
     assert "Removed" in out
     assert ctx.context["deliverables"] == []
@@ -577,7 +574,6 @@ def _client_timeout():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("make_error", [_max_turns, _model_timeout, _client_timeout])
 async def test_a_failed_continuation_delivers_the_answer_it_was_continuing(monkeypatch, make_error):
-    monkeypatch.setenv("SANDBOX_MAX_TURNS", "10")
     conv = _conversation()
     model = ScriptedModel([
         ModelStep.respond(lambda call: (_deliver(conv, 11, "add a title"),
@@ -594,8 +590,8 @@ async def test_a_failed_continuation_delivers_the_answer_it_was_continuing(monke
             raise make_error()
         return await real_run(*args, **kwargs)
 
-    monkeypatch.setattr(sandbox_agent.Runner, "run", _run_then_fail)
-    result = await sandbox_agent._converse(
+    monkeypatch.setattr(workspace_tools.Runner, "run", _run_then_fail)
+    result = await workspace_tools._converse(
         agent, "task", RunConfig(call_model_input_filter=conv.input_filter), None, context, conv)
 
     assert result.final_output == "your chart"
@@ -611,9 +607,9 @@ async def test_a_first_pass_failure_still_raises(monkeypatch):
     async def _fail(*args, **kwargs):
         raise MaxTurnsExceeded("no final answer at all")
 
-    monkeypatch.setattr(sandbox_agent.Runner, "run", _fail)
+    monkeypatch.setattr(workspace_tools.Runner, "run", _fail)
     with pytest.raises(MaxTurnsExceeded):
-        await sandbox_agent._converse(MagicMock(), "task", MagicMock(), None,
+        await workspace_tools._converse(MagicMock(), "task", MagicMock(), None,
                                       {"deliverables": []}, conv)
 
 
@@ -626,7 +622,7 @@ async def test_respond_to_updates_accepts_a_bare_number():
     raw = json.dumps({"message_ids": 1, "decision": "will_apply", "reply": "on it"})
     ctx = ToolContext(context={"conversation": conv}, tool_name=conv_mod.RESPOND_TOOL_NAME,
                       tool_call_id="r1", tool_arguments=raw)
-    await sandbox_agent.respond_to_updates.on_invoke_tool(ctx, raw)
+    await workspace_tools.respond_to_updates.on_invoke_tool(ctx, raw)
     assert conv.ledger.events[0].outcome == "will_apply"
 
 
@@ -674,7 +670,7 @@ async def test_the_thread_shows_typing_only_while_the_model_is_generating():
         return "ok"
 
     agent = Agent(name="t", model=model, tools=[work], hooks=make_agent_hooks(conv))
-    await sandbox_agent._converse(agent, "task", RunConfig(), None, {"deliverables": []}, conv)
+    await workspace_tools._converse(agent, "task", RunConfig(), None, {"deliverables": []}, conv)
 
     assert seen == [("model", True), ("tool", False), ("model", True)]
     assert conv._typing_task is None
@@ -690,8 +686,8 @@ async def test_typing_stops_when_the_run_fails_mid_call(monkeypatch):
         conv.start_typing()
         raise RuntimeError("model server went away")
 
-    monkeypatch.setattr(sandbox_agent.Runner, "run", _fail)
+    monkeypatch.setattr(workspace_tools.Runner, "run", _fail)
     with pytest.raises(RuntimeError):
-        await sandbox_agent._converse(MagicMock(), "task", MagicMock(), None,
+        await workspace_tools._converse(MagicMock(), "task", MagicMock(), None,
                                       {"deliverables": []}, conv)
     assert conv._typing_task is None
