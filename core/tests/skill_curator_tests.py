@@ -270,6 +270,36 @@ async def test_a_merge_whose_drop_changed_keeps_both(store, channels, clock):
 
 
 @pytest.mark.asyncio
+async def test_the_same_description_again_is_no_change(store, channels, clock):
+    await _seed(store, clock)
+    llm = FakeLLM(_answer({"action": "describe", "name": "pie-chart", "description": "pie-chart things"}))
+    assert await _curator(store, channels, llm, clock).curate(GUILD) == "0"
+    assert 77 not in channels[0] or not channels[0][77].send.called
+
+
+@pytest.mark.asyncio
+async def test_a_retire_shows_fixed_words_and_notes_are_capped(store, channels, clock):
+    await _seed(store, clock)
+    llm = FakeLLM(_answer({"action": "retire", "name": "old-poll", "note": "@everyone " + "x" * 500},
+                          {"action": "describe", "name": "pie-chart", "description": "Pie chart",
+                           "note": "y" * 500}))
+    assert await _curator(store, channels, llm, clock).curate(GUILD) == "2"
+    lines = [c.kwargs["embed"].description for c in channels[0][77].send.call_args_list]
+    assert "everyone" not in lines[0] and "not used in 60 days" in lines[0]
+    assert "y" * 201 not in lines[1]
+
+
+@pytest.mark.asyncio
+async def test_the_guard_reads_the_note_too(store, channels, clock):
+    await _seed(store, clock)
+    guard = AsyncMock(return_value=(True, ""))
+    llm = FakeLLM(_answer({"action": "describe", "name": "pie-chart", "description": "Pie", "note": "why"}))
+    with patch("classes.content_guard.check_web_request", guard):
+        await _curator(store, channels, llm, clock).curate(GUILD)
+    assert "why" in guard.call_args.args[0]
+
+
+@pytest.mark.asyncio
 async def test_the_guard_can_refuse_new_text(store, channels, clock):
     await _seed(store, clock)
     llm = FakeLLM(_answer({"action": "describe", "name": "pie-chart", "description": "bad words"}))
@@ -288,7 +318,8 @@ async def test_a_pass_is_not_repeated_until_something_changes(store, channels, c
     # Its own change made a new version, but the signature was taken after it.
     assert await curator.curate(GUILD) == "not due"
     clock.t += 70 * DAY  # every skill goes stale: the stale set changed
-    assert await curator.curate(GUILD) == "1" and llm.calls == 2
+    # Due again (a model call), but the same description again is no change.
+    assert await curator.curate(GUILD) == "0" and llm.calls == 2
 
 
 @pytest.mark.asyncio

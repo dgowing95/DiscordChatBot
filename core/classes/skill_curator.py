@@ -168,7 +168,8 @@ def parse_changes(text: str, live_names, stale_names, limit: int = MAX_CHANGES) 
             break
         if not isinstance(change, dict):
             continue
-        action, note = change.get("action"), _text(change, "note")
+        action = change.get("action")
+        note = skill_format.one_line(_text(change, "note"), skill_format.NOTE_CHARS)
         if action == "merge":
             keep = skill_format.clean_name(change.get("keep"))
             drop = skill_format.clean_name(change.get("drop"))
@@ -307,7 +308,7 @@ class Curator:
         kind = change["action"]
         try:
             if kind in ("merge", "describe"):
-                text = change["description"] + ("\n" + change["body"] if kind == "merge" else "")
+                text = "\n".join([change["description"], change.get("body", ""), change["note"]])
                 allowed, _ = await check_web_request(text)
                 if not allowed:
                     raise SkillError("the safety guard refused the new text")
@@ -316,9 +317,9 @@ class Curator:
             elif kind == "retire":
                 skill = by_name[change["name"]]
                 await self.store.delete(guild, skill["name"], self.actor_id, expect_version=skill["version"])
-                why = change["note"] or f"not used in {cfg['retire_days']} days"
+                # Fixed wording: the model's note is not shown for a retire.
                 await self._announce(skill, tool_embeds.SKILL_RETIRED,
-                                     f"{why} (restore with /skills restore)")
+                                     f"not used in {cfg['retire_days']} days (restore with /skills restore)")
             else:
                 skill = by_name[change["name"]]
                 await self._save(guild, skill, change["description"], skill["body"], skill["files"],
@@ -331,8 +332,12 @@ class Curator:
         return 1
 
     async def _save(self, guild, skill, description, body, files, note) -> None:
-        await self.store.save(guild, skill["name"], description, body, files, author_id=self.actor_id,
-                              source="curator", note=note, expect_version=skill["version"])
+        from classes.skill_store import UNCHANGED, SkillError
+        result = await self.store.save(guild, skill["name"], description, body, files,
+                                       author_id=self.actor_id, source="curator", note=note,
+                                       expect_version=skill["version"])
+        if result == UNCHANGED:
+            raise SkillError("the proposed text is what it already says")
         fresh = await self.store.get(guild, skill["name"])
         await self._announce(skill, tool_embeds.SKILL_UPDATED, f"v{fresh['version']}: {note}")
 
