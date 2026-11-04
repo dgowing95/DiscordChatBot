@@ -2,6 +2,9 @@
 
   start_workflow  the brain's: hands a big job to a workflow, which ends the
                   brain's run (StopAtTools, like report)
+  discover        the manager's, before the plan: scouts look at how the job
+                  is laid out (classes/workflow_planning.py)
+  ask_requester   the manager's, before the plan: questions in the thread
   submit_plan     the manager's: the plan, which ends its planning run
   submit_review   the manager's, between steps: a reply to each thread
                   message, and optionally new remaining steps
@@ -57,6 +60,44 @@ class ReplyArg(TypedDict, total=False):
     reply: str
 
 
+class QuestionArg(TypedDict, total=False):
+    question: str
+    options: list[str]
+
+
+@function_tool(failure_error_function=_keeping("workflow_discover_args"))
+async def discover(wrapper: RunContextWrapper[dict], subjects: list[str]) -> str:
+    """Before planning, find out the SHAPE of the job so your briefs can be
+    exact. Name what to look up, and a scout finds where it is and how it is
+    laid out: the sources or files, their format and fields. The answers
+    themselves are the helpers' job, in the plan's steps. E.g. asked to chart
+    the population of the 10 biggest Nordic cities:
+    discover(subjects=["Nordic city populations"]). A researcher step then
+    collects the figures. Use it only when you cannot write exact briefs
+    without it. Call it on its own.
+
+    Args:
+        subjects: At most 2, one per scout, a few words each, e.g.
+            "UK rail delay statistics" or "sales.csv".
+    """
+    _ctx(wrapper)["workflow_discover_args"] = {"subjects": subjects}
+    return RECORDED
+
+
+@function_tool(failure_error_function=_keeping("workflow_ask_args"))
+async def ask_requester(wrapper: RunContextWrapper[dict], questions: list[QuestionArg]) -> str:
+    """Ask the requester only what changes the plan, like a budget or which
+    of two outputs they want. Everything else you decide yourself and put in
+    the plan's notes. Call it on its own.
+
+    Args:
+        questions: At most 3. Each: question, and options (up to 4 short
+            choices, shown as buttons) when the answer is one of a few.
+    """
+    _ctx(wrapper)["workflow_ask_args"] = {"questions": questions}
+    return RECORDED
+
+
 @function_tool(failure_error_function=_keeping("workflow_plan_args"))
 async def submit_plan(wrapper: RunContextWrapper[dict], goal: str, steps: list[StepArg],
                       deliverables: list[str] | None = None, notes: str = "") -> str:
@@ -110,6 +151,7 @@ async def start_workflow(wrapper: RunContextWrapper[dict], request: str, reason:
                                             draft=draft_steps)
     if result.ok:
         ctx["brain_workflow"] = {"thread_url": result.thread_url}
+        ctx["workflow_url"] = result.thread_url  # outlives the brain call, for automations
         ctx["brain_report_args"] = {"status": "done", "facts": [f"Started a workflow: {request}"]}
     else:
         ctx["brain_workflow"] = {"thread_url": ""}

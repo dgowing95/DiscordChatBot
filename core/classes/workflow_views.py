@@ -1,5 +1,5 @@
-"""The buttons on a workflow's plan: Approve / Edit / Cancel, then Cancel
-alone while it runs (classes/workflows.py).
+"""The buttons on a workflow's plan card: Approve / Edit / Cancel, then Cancel
+alone while it runs (classes/workflows.py, classes/card.py).
 
 Each button is a discord.ui.DynamicItem whose custom_id carries the
 workflow's id and the action ("workflow:<id>:approve"). The class is
@@ -43,16 +43,9 @@ class WorkflowButton(discord.ui.DynamicItem[discord.ui.Button], template=TEMPLAT
         await workflows.on_button(interaction, self.workflow_id, self.action)
 
 
-def _view(workflow_id: str, actions) -> discord.ui.View:
-    view = discord.ui.View(timeout=None)
-    for action in actions:
-        view.add_item(WorkflowButton(workflow_id, action))
-    return view
+def approval_buttons(workflow_id: str) -> list:
+    return [WorkflowButton(workflow_id, action) for action in ("approve", "edit", "cancel")]
 
 
-def approval_view(workflow_id: str) -> discord.ui.View:
-    return _view(workflow_id, ("approve", "edit", "cancel"))
-
-
-def running_view(workflow_id: str) -> discord.ui.View:
-    return _view(workflow_id, ("cancel",))
+def running_buttons(workflow_id: str) -> list:
+    return [WorkflowButton(workflow_id, "cancel")]

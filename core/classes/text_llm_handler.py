@@ -441,6 +441,8 @@ class TextLLMHandler:
         self.used_brain = False
         # Skill reviews of long brain jobs, started after the reply is sent.
         self.skill_reviews = []
+        # The thread of a workflow this run started, if any.
+        self.workflow_url = ""
 
     def _after_run(self, user_info, reply) -> None:
         """Records whether the reply called the brain, and checks the reply
@@ -450,6 +452,7 @@ class TextLLMHandler:
             reports = user_info.get("brain_reports") or []
             self.used_brain = bool(reports)
             self.skill_reviews = list(user_info.get("skill_reviews") or [])
+            self.workflow_url = user_info.get("workflow_url") or ""
             failed = not isinstance(reply, str) or reply == "Error"
             # A run that failed before calling the brain answered nothing, so
             # counting it as "answered" would skew the routing metric.

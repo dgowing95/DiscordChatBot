@@ -378,7 +378,7 @@ async def on_message(message):
     if message.author != client.user and _answers_brain_question(message):
         await answer_brain_question(message)
         return
-    if await voice_dev_inject(message):
+    if await voice_dev_inject(message) or await workflow_dev_inject(message):
         return
     # In a voice call in this guild: no text replies, rules or queueing
     # (classes/voice_gate.py).
@@ -526,6 +526,27 @@ async def voice_busy_notice(message) -> None:
         await message.reply(VOICE_BUSY_REPLY, mention_author=False)
     except Exception as e:
         logger.warning(f"Could not send the in-a-call notice: {e}")
+
+
+async def workflow_dev_inject(message) -> bool:
+    """WORKFLOW_DEV_INJECT=1 only (local testing and E2E, never in the chart):
+    "!workflow <request>" starts a workflow, as /task does. A webhook cannot
+    use a slash command, and the brain's own hand-off is the model's choice,
+    so a check going through it fails at random."""
+    from classes import workflow_policy, workflows
+    content = message.content or ""
+    if not content.startswith("!workflow ") or message.guild is None:
+        return False
+    if not workflow_policy.dev_inject() or message.author == client.user:
+        return False
+    context = {"guild_id": message.guild.id, "user_id": message.author.id,
+               "requester_name": message.author.display_name, "channel": message.channel,
+               "discord_client": client}
+    result = await workflows.start_workflow(context, content.partition(" ")[2],
+                                            trigger=workflows.TRIGGER_SLASH, message=message)
+    if not result.ok:
+        await message.reply(f"❌ {result.text}", mention_author=False)
+    return True
 
 
 async def voice_dev_inject(message) -> bool:

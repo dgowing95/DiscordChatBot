@@ -290,7 +290,11 @@ async def generate_image(wrapper: RunContextWrapper[dict], prompt: str,
         return "The image was generated but could not be sent to the channel."
     # Counted only once sent: the brain's report lists it as already posted.
     context["images_posted"] = context.get("images_posted", 0) + 1
-    return tool_result_text(result)
+    kept = ""
+    if context.get("workflow_id"):
+        from classes import workflows
+        kept = await workflows.keep_image(context, result.png)
+    return tool_result_text(result) + kept
 
 
 @function_tool
@@ -309,6 +313,7 @@ async def ask_brain(wrapper: RunContextWrapper[dict], request: str,
     "remember I'm vegan" -> request="Remember that they are vegan";
     "be a pirate from now on" -> request="Change the personality to a pirate";
     "send the script for that chart" -> request="Send the script that made the last chart";
+    "do a deep dive on printers" -> request="Start a workflow: a deep dive on printers";
     "use the weekly-chart skill" -> request="Use the weekly-chart skill".
     Not for chat, opinions or jokes, or what the chat or what is saved
     about the person (shown below it) already answers.

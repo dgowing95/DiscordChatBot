@@ -2,8 +2,8 @@
 
 A workflow is a job too big for one inline brain call (classes/workflows.py).
 It runs in its own thread: a manager writes a plan, the requester approves it,
-subagents do the steps one at a time, and the persona replies in the channel
-when it ends.
+subagents do the steps (researchers side by side: next_wave), and the
+persona replies in the channel when it ends.
 
 Everything here is a rule the tests can check without Discord or the SDK:
 what a valid plan is, the order steps run in, how a plan reads in an embed,
@@ -29,8 +29,21 @@ DEFAULT_TIMEOUT_SECONDS = 3600
 DEFAULT_MAX_TURNS = 250
 DEFAULT_MAX_PER_GUILD = 1
 DEFAULT_SUBAGENT_MAX_TURNS = 100
+DEFAULT_SUBAGENT_MAX_CONCURRENT = 2
 # Pictures one workflow may ask for (a chat reply gets 3). Not a setting.
 MAX_IMAGES = 10
+# What keeps discovery a quick look (classes/workflow_planning.py). Not
+# settings: past these it would be research, which is the steps' job.
+MAX_SCOUTS = 2
+SCOUT_MAX_TURNS = 12
+SCOUT_SECONDS = 300
+SCOUT_FINISH_UP_TURNS = 2     # turns before the limit it is told to report
+SCOUT_LAST_REPORT_SECONDS = 90
+SCOUT_FACTS = 3
+SCOUT_FACT_CHARS = 400        # uncut they ran about 350 live, and 240 cut 27 of 28 findings
+MAX_SUBJECT_CHARS = 120
+MAX_FINDINGS_CHARS = 2700      # room for two scouts' whole findings, so nothing is cut twice
+MAX_PLAN_QUESTIONS = 3
 
 
 def _env_int(name: str, default: int, env) -> int:
@@ -106,11 +119,24 @@ def subagent_max_turns(env=os.environ) -> int:
     return _env_int("SUBAGENT_MAX_TURNS", DEFAULT_SUBAGENT_MAX_TURNS, env)
 
 
+def subagent_max_concurrent(env=os.environ) -> int:
+    """Researchers running at once (SUBAGENT_MAX_CONCURRENT, default 2)."""
+    return _env_int("SUBAGENT_MAX_CONCURRENT", DEFAULT_SUBAGENT_MAX_CONCURRENT, env)
+
+
+def dev_inject(env=os.environ) -> bool:
+    """WORKFLOW_DEV_INJECT (local testing and E2E, never in the chart):
+    "!workflow <request>" starts one (main.workflow_dev_inject)."""
+    return _env_flag("WORKFLOW_DEV_INJECT", False, env)
+
+
 # --- plans -------------------------------------------------------------------
 
 RESEARCHER = "researcher"
 IMPLEMENTER = "implementer"
 ROLES = (RESEARCHER, IMPLEMENTER)
+# Runs before the plan, so it is never a step's role.
+SCOUT = "scout"
 # Loose role names a small model writes, mapped onto ROLES.
 _ROLE_ALIASES = {
     "research": RESEARCHER, "researcher": RESEARCHER, "reader": RESEARCHER,
@@ -124,6 +150,7 @@ MAX_BRIEF_CHARS = 1500
 MAX_DELIVERABLE_CHARS = 200
 MAX_DELIVERABLES = 10
 MAX_NOTES_CHARS = 1000
+MAX_QUESTION_CHARS = 300
 
 
 @dataclass
@@ -243,8 +270,8 @@ def _has_cycle(steps) -> bool:
 
 
 def order_steps(plan: Plan) -> list[Step]:
-    """The steps in the order they run: one at a time (5a), each after the
-    steps it depends on, otherwise in the plan's own order."""
+    """The steps in the order they are taken up: each after the steps it
+    depends on, otherwise in the plan's own order."""
     done: set[str] = set()
     ordered: list[Step] = []
     remaining = list(plan.steps)
@@ -256,6 +283,56 @@ def order_steps(plan: Plan) -> list[Step]:
         ordered.append(ready)
         done.add(ready.id)
     return ordered
+
+
+def next_wave(queue: list[Step], done, limit: int) -> list[Step]:
+    """The steps to run next, from `queue` (those not run yet, in order) and
+    `done` (the ids of those that have). Researchers only read, so the ready
+    ones run together, up to `limit`. An implementer runs alone: two of them
+    would build on each other's half-made files (Cognition's rule)."""
+    ready = [s for s in queue if all(d in done for d in s.depends_on)]
+    if not ready:  # a cycle validate_plan missed: plan order
+        return queue[:1]
+    if ready[0].role != RESEARCHER:
+        return ready[:1]
+    return [s for s in ready if s.role == RESEARCHER][:max(1, limit)]
+
+
+def clean_scout_subjects(raw) -> list[str]:
+    """The manager's discover arguments as the scouts' subjects: text only,
+    at most MAX_SCOUTS. A small model may send one string."""
+    items = raw.get("subjects") if isinstance(raw, dict) else raw
+    texts = [_text(item, MAX_SUBJECT_CHARS) for item in _list(items)]
+    return [text for text in texts if text][:MAX_SCOUTS]
+
+
+def scout_question(subject: str) -> str:
+    """Always this question, written here and not by the manager: asked in its
+    own words it asked for the answers ("what is the final table?"), and the
+    scouts duly brought them (3 of 10 findings live, 2026-11-04)."""
+    return f"where is {subject} published or kept, and how is it laid out?"
+
+
+def clean_plan_questions(raw) -> list[tuple[str, list]]:
+    """The manager's ask_requester arguments as (question, options), at most
+    MAX_PLAN_QUESTIONS. A question may come as plain text, without options."""
+    items = raw.get("questions") if isinstance(raw, dict) else raw
+    if isinstance(items, dict):
+        items = [items]
+    questions = []
+    for item in _list(items):
+        options = _list(item.get("options")) if isinstance(item, dict) else []
+        text = _text(item.get("question") if isinstance(item, dict) else item, MAX_QUESTION_CHARS)
+        if text:
+            questions.append((text, options))
+    return questions[:MAX_PLAN_QUESTIONS]
+
+
+def findings_text(findings: list[str]) -> str:
+    """What the scouts found, as lines, within MAX_FINDINGS_CHARS in all."""
+    lines = [f"- {line}" for line in findings]
+    share = MAX_FINDINGS_CHARS // max(1, len(lines))
+    return "\n".join(line if len(line) <= share else line[: share - 1] + "…" for line in lines)
 
 
 def fallback_plan(request: str) -> Plan:
@@ -291,24 +368,24 @@ def plan_text(plan: Plan) -> str:
 
 # Discord embed limits (a field value is 1024 characters, a description 4096).
 _FIELD_CHARS = 1000
-_DESCRIPTION_CHARS = 3000
+_DESCRIPTION_CHARS = 1500
 # Under Discord's 6000 for a whole embed, leaving room for the title.
-_EMBED_CHARS = 5800
+_PLAN_CHARS = 3400
 STEP_ICONS = {"pending": "⏳", "running": "▶️", "done": "✅", "partial": "🟡",
               "failed": "❌", "cancelled": "⏹️", "skipped": "⏭️"}
 
 
 def render_plan(plan: Plan, step_states: dict | None = None) -> dict:
-    """The plan as embed data: {title, description, fields: [(name, value)]}.
+    """The plan as card data: {title, description, fields: [(name, value)]}.
     With step_states, each step shows its state's icon."""
     states = step_states or {}
     description = plan.goal
     if plan.deliverables:
         description += "\n\n**You get:** " + "; ".join(plan.deliverables)
     description = description[:_DESCRIPTION_CHARS]
-    # Discord refuses an embed over 6000 characters in all, so the steps
+    # A card holds 4000 characters in all (classes/card.py), so the steps
     # share what the description leaves.
-    budget = _EMBED_CHARS - len(description)
+    budget = _PLAN_CHARS - len(description)
     steps = plan.steps[:25]
     fields = []
     for index, step in enumerate(steps):

@@ -162,6 +162,7 @@ data:
   SUBAGENT_CALL_TIMEOUT_SECONDS: {{ .Values.subagents.callTimeout | toString | quote }}
   {{- end }}
   SUBAGENT_MAX_TURNS: {{ .Values.subagents.maxTurns | toString | quote }}
+  SUBAGENT_MAX_CONCURRENT: {{ .Values.subagents.maxConcurrent | toString | quote }}
   # The server workspace container runs on the node's Docker daemon, through
   # the socket mounted in core.yaml.
   {{- with .Values.brain.workspace }}

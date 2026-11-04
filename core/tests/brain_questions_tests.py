@@ -117,7 +117,7 @@ def test_options_become_clean_button_labels():
 
 
 def _labels(view):
-    return [item.label for item in view.children]
+    return [item.label for item in view.buttons]
 
 
 @pytest.mark.asyncio
@@ -151,11 +151,10 @@ async def test_a_choice_button_answers_and_closes_the_question():
     view.question_id = QUESTION_ID
     future = brain_inbox.ask(QUESTION_ID, 77, 5)
     interaction = _interaction()
-    await view.children[1].callback(interaction)
+    await view.buttons[1].callback(interaction)
     assert future.result() == "Line"
-    kwargs = interaction.response.edit_message.await_args.kwargs
-    assert kwargs["view"] is None
-    assert kwargs["content"] == "Bar or line?\n-# ✅ Line"
+    finished = interaction.response.edit_message.await_args.kwargs["view"]
+    assert finished.buttons == [] and finished.note == "✅ Line"
     assert view.closed
 
 
@@ -165,9 +164,9 @@ async def test_you_decide_hands_the_brain_its_marker():
     view.question_id = QUESTION_ID
     future = brain_inbox.ask(QUESTION_ID, 77, 5)
     interaction = _interaction()
-    await view.children[-1].callback(interaction)
+    await view.buttons[-1].callback(interaction)
     assert future.result() == brain_question.YOU_DECIDE_ANSWER
-    assert interaction.response.edit_message.await_args.kwargs["content"].endswith("✅ You decide")
+    assert interaction.response.edit_message.await_args.kwargs["view"].note == "✅ You decide"
 
 
 @pytest.mark.asyncio
@@ -176,7 +175,7 @@ async def test_answer_opens_a_text_box_whose_text_is_the_answer():
     view.question_id = QUESTION_ID
     future = brain_inbox.ask(QUESTION_ID, 77, 5)
     interaction = _interaction()
-    await view.children[0].callback(interaction)
+    await view.buttons[0].callback(interaction)
     modal = interaction.response.send_modal.await_args.args[0]
     assert isinstance(modal, brain_question.AnswerModal)
     modal.answer._value = "a line chart with dots"
@@ -189,7 +188,7 @@ async def test_a_button_on_a_closed_question_says_so():
     view = brain_question.QuestionView(5, ["Bar"], timeout=60)
     view.question_id = QUESTION_ID  # no waiter: it timed out
     interaction = _interaction()
-    await view.children[0].callback(interaction)
+    await view.buttons[0].callback(interaction)
     interaction.response.send_message.assert_awaited_once()
     interaction.response.edit_message.assert_not_awaited()
 
@@ -251,7 +250,7 @@ async def test_the_question_is_a_reply_with_buttons_and_the_answer_is_returned(p
     task = asyncio.create_task(_ask(ctx, options=["Bar", "Line"]))
     await _until(lambda: brain_inbox.waiting(QUESTION_ID))
     reply = ctx["channel"].send.await_args
-    assert reply.args[0] == "Bar or line chart?"
+    assert reply.kwargs["view"].text == "### ❓ Bar or line chart?" and not reply.args
     # A reply to the request, posted even if the request was deleted.
     assert reply.kwargs["reference"] == "ref"
     ctx["original_message"].to_reference.assert_called_once_with(fail_if_not_exists=False)
@@ -262,8 +261,8 @@ async def test_the_question_is_a_reply_with_buttons_and_the_answer_is_returned(p
     assert ctx["brain_questions"] == 1
     assert _count("answered") == before + 1
     # Answered without a button (a Reply): the buttons come off here.
-    edit = sent.edit.await_args.kwargs
-    assert edit["view"] is None and edit["content"].endswith("✅ line please")
+    finished = sent.edit.await_args.kwargs["view"]
+    assert finished.buttons == [] and finished.note == "✅ line please"
 
 
 @pytest.mark.asyncio
@@ -280,7 +279,8 @@ async def test_no_source_message_posts_with_a_mention(plain_voice):
     ctx, _sent = _ctx(original_message=None)
     task = asyncio.create_task(_ask(ctx))
     await _until(lambda: brain_inbox.waiting(QUESTION_ID))
-    assert ctx["channel"].send.await_args.args[0] == "<@5> Bar or line chart?"
+    view = ctx["channel"].send.await_args.kwargs["view"]
+    assert view.text == "### ❓ Bar or line chart?" and view.note == "<@5>"
     brain_inbox.deliver(QUESTION_ID, 5, "bar")
     assert await task == "They answered: bar"
 
@@ -295,7 +295,7 @@ async def test_no_answer_in_time_says_to_assume_and_closes_the_question(plain_vo
     assert result.startswith("No answer within 1 seconds")
     assert not brain_inbox.waiting(QUESTION_ID)
     assert _count("timeout") == before + 1
-    assert sent.edit.await_args.kwargs["content"].endswith(brain_question.TIMED_OUT)
+    assert sent.edit.await_args.kwargs["view"].note == brain_question.TIMED_OUT
 
 
 @pytest.mark.asyncio
@@ -309,7 +309,7 @@ async def test_a_stopped_run_leaves_no_waiter_behind(plain_voice):
     with pytest.raises(asyncio.CancelledError):
         await task
     assert not brain_inbox.waiting(QUESTION_ID)
-    assert sent.edit.await_args.kwargs["view"] is None
+    assert sent.edit.await_args.kwargs["view"].buttons == []
 
 
 @pytest.mark.asyncio
@@ -556,7 +556,7 @@ async def test_a_button_answer_edits_the_message_once_with_its_own_label(plain_v
     async def slow_edit(**kw):
         await asyncio.sleep(0.05)
     interaction.response.edit_message = AsyncMock(side_effect=slow_edit)
-    await view.children[-1].callback(interaction)  # You decide
+    await view.buttons[-1].callback(interaction)  # You decide
     assert "decide" in await task
     interaction.response.edit_message.assert_awaited_once()
     sent.edit.assert_not_awaited()  # ask_user's own close() stood aside
@@ -571,15 +571,16 @@ async def test_a_failed_button_edit_still_gets_the_question_closed(plain_voice):
     interaction = _interaction()
     interaction.response.edit_message = AsyncMock(side_effect=RuntimeError("expired"))
     with pytest.raises(RuntimeError):
-        await view.children[-1].callback(interaction)
+        await view.buttons[-1].callback(interaction)
     await task
     sent.edit.assert_awaited_once()
-    assert sent.edit.await_args.kwargs["content"].endswith("✅ You decide")
+    assert sent.edit.await_args.kwargs["view"].note == "✅ You decide"
 
 
 def test_the_closing_line_survives_a_long_question():
-    out = brain_question.closed_content("x" * 1990, "⌛ No answer in time")
-    assert len(out) <= 2000 and out.endswith("-# ⌛ No answer in time")
+    view = brain_question.QuestionView(5, [], 60, text="x" * brain_question.MAX_QUESTION_CHARS)
+    finished = view.finished("⌛ No answer in time")
+    assert finished.note == "⌛ No answer in time" and finished.text == view.text
 
 
 @pytest.mark.asyncio
@@ -587,8 +588,8 @@ async def test_a_long_question_is_posted_cut_to_fit(plain_voice):
     ctx, sent = _ctx()
     task = asyncio.create_task(_ask(ctx, "q" * 2500))
     await _until(lambda: brain_inbox.waiting(QUESTION_ID))
-    posted = ctx["channel"].send.await_args.args[0]
-    assert len(posted) <= brain_question.MAX_QUESTION_CHARS
+    posted = ctx["channel"].send.await_args.kwargs["view"].text
+    assert posted.count("q") == brain_question.MAX_QUESTION_CHARS
     brain_inbox.deliver(QUESTION_ID, 5, "ok")
     await task
 

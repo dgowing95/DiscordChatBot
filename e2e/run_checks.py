@@ -57,11 +57,26 @@ WORKSPACE_TIMEOUT = 420
 # A whole Tier 3 workflow: plan, the approval wait (WORKFLOW_PLAN_APPROVAL_SECONDS
 # is short here), its steps and the reply. start_stack.sh caps it with WORKFLOW_TIMEOUT.
 WORKFLOW_TIMEOUT = 1200
+# `!workflow` starts one at once, so anything longer means it never started.
+WORKFLOW_START_TIMEOUT = 60
 READY_TIMEOUT = 600
 
 LOG_DIR = Path(os.environ.get("E2E_LOG_DIR", Path(__file__).parent / "logs"))
 METRICS_URL = os.environ.get("E2E_METRICS_URL", "http://127.0.0.1:9464/metrics")
 SPEECH_URL = os.environ.get("E2E_SPEECH_URL", "http://127.0.0.1:8002").rstrip("/")
+
+
+def card_text(message: dict) -> str:
+    """The text of a card (core/classes/card.py), which has no content or embeds."""
+    lines = []
+
+    def walk(items) -> None:
+        for item in items:
+            lines.append(item.get("content") or "")
+            walk(item.get("components") or [])
+
+    walk(message.get("components") or [])
+    return "\n".join(lines)
 
 
 class CheckFailed(Exception):
@@ -323,27 +338,40 @@ class Run:
         raise CheckFailed("no .csv attachment in the reply")
 
     async def workflow(self):
-        """A Tier 3 workflow, by structure only: the brain hands the job over,
-        the plan is posted, no one presses Approve (a webhook cannot), so it
-        starts after the short approval wait, and the end is posted."""
+        """A Tier 3 workflow, by structure only: `!workflow` starts it (the
+        brain's own hand-off is the model's choice, so a check through it
+        fails at random), the plan is posted, no one presses Approve (a
+        webhook cannot), so it starts after the short approval wait, and the
+        end and the persona's reply are posted."""
         ended = lambda: metric(self.session, "discord_bot_workflows_total")
+        running = lambda: metric(self.session, "discord_bot_workflows_running")
         before = await ended()
-        messages = await self.ask(
-            "Start a workflow for this big job: research the diameters of Jupiter's four "
-            "largest moons from two sources each, then write a moons.md report with a table.")
-        reply = " ".join(m["content"] for m in messages)
+        trigger = await self.post(
+            "!workflow Research the diameters of Jupiter's four largest moons from two sources "
+            "each, then write a moons.md report with a table.")
+        self.last_trigger_id = trigger["id"]
+
+        async def _started():
+            return await running() > 0 or await ended() > before
+        await wait_until(_started, WORKFLOW_START_TIMEOUT, "the workflow to start")
         await wait_until(lambda: _gt(ended(), before), WORKFLOW_TIMEOUT, "the workflow to end")
-        # From the trigger, not the reply: the plan is posted by the workflow's
-        # own task, so it may come before the reply. `after` is exclusive.
+        # `after` is exclusive.
         posted = await self.messages_after(self.last_trigger_id)
-        titles = [e.get("title", "") for m in posted if m["author"]["id"] == self.bot_id
-                  for e in m.get("embeds", [])]
-        if not any(t.startswith("🧵 Plan") for t in titles):
-            raise CheckFailed(f"no plan embed was posted (embeds: {titles})")
-        closing = [t for t in titles if t.startswith("🧵 Workflow")]
+        mine = [m for m in posted if m["author"]["id"] == self.bot_id]
+        titles = [e.get("title", "") for m in mine for e in m.get("embeds", [])]
+        if not any("🧵 Plan" in card_text(m) for m in mine):
+            raise CheckFailed(f"no plan card was posted (embeds: {titles})")
+        closing = [m for m in mine for e in m.get("embeds", [])
+                   if e.get("title", "").startswith("🧵 Workflow")]
         if not closing:
             raise CheckFailed(f"no closing embed was posted (embeds: {titles})")
-        return f"{closing[-1]}; reply: {_quote(reply, 80)}"
+
+        async def _reply():
+            later = [m for m in await self.messages_after(closing[-1]["id"])
+                     if m["author"]["id"] == self.bot_id and m["content"]]
+            return later[-1]["content"] if later else ""
+        reply = await wait_until(_reply, REPLY_TIMEOUT, "the reply after the closing embed")
+        return f"{closing[-1]['embeds'][0]['title']}; reply: {_quote(reply, 80)}"
 
     async def slash_commands(self):
         # From this run's log, not GET /applications/.../commands: the

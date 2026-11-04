@@ -330,6 +330,8 @@ subagents:
   callTimeout: ""
   # Backstop on one helper's model turns.
   maxTurns: 100
+  # Researchers running at once, cut to the slots a self-hosted server has beside chat's.
+  maxConcurrent: 2
 
 # llama.cpp server (replaces Ollama); which model it serves: the `model` value below
 llamacpp:

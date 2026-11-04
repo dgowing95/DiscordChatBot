@@ -14,10 +14,26 @@ One workflow runs per server at a time. If one is already running, the bot says 
 While the bot is in a voice call in the server, `/task` says so and starts nothing; a workflow already
 running carries on in its thread.
 
+## Before the plan
+
+The bot tells you a plan is coming, so you know to look in the thread. For most jobs it follows
+within a minute. Before writing it the bot may:
+
+- **Look at how the job is laid out.** It sends up to two quick scouts to see what sources or data
+  exist and what shape they are in, so each step's brief is exact. They do not do the work: asked for
+  populations, a scout finds the table and its columns, and a step collects the figures later. The
+  thread says when this happens.
+- **Ask you what changes the plan.** Up to three questions, one at a time, each with buttons, an
+  **Answer…** box and **You decide**. Writing in the thread answers too. With no answer in 5 minutes
+  it stops asking, decides for itself and says so in the plan.
+
+Anything else you write in the thread meanwhile goes into the plan. Automatic runs (schedules, rules)
+can look but never ask.
+
 ## The plan
 
-The bot posts its plan in the thread: the goal, what you will get, and the steps. Only the person
-who asked can answer it:
+The bot posts its plan in the thread and pings you: the goal, what you will get, and the steps. Only
+the person who asked can answer it:
 
 | | What it does |
 |---|---|
@@ -30,13 +46,13 @@ rule starts at once.
 
 ## While it works
 
-- Each step is done by a helper, one at a time. The plan shows each step's state (⏳ waiting,
-  ▶️ running, ✅ done). Files a step makes are posted in the thread.
+- Each step is done by a helper. Research steps that do not depend on each other run side by side,
+  two at a time. The plan shows each step's state (⏳ waiting, ▶️ running, ✅ done). Files and pictures
+  a step makes are posted in the thread. A research step shows as one embed with the last thing it did.
 - Write in the thread to steer it. Your message gets 📨 and the bot answers it before the next step,
   changing the remaining steps if you ask. Anyone in the server can write there, but only the person
   who asked can change the steps.
-- If a helper needs to know something, it asks you in the thread. Your next message there is the
-  answer.
+- If a helper needs to know something, it asks you in the thread, the same way as before the plan.
 - Say just **stop** in the thread, or press **Cancel** on the plan, to stop it. Files made so far
   are kept.
 
@@ -58,7 +74,9 @@ A restart of the bot stops a running workflow; its thread says so. Ask again to 
 | `WORKFLOW_FROM_AUTOMATIONS` | on | Schedules, rules and follow-ups may start one |
 | `WORKFLOW_PLAN_APPROVAL_SECONDS` | 900 | How long the plan waits for an answer |
 | `WORKFLOW_TIMEOUT` / `WORKFLOW_MAX_TURNS` | 1 h / 250 | Caps one workflow (the biggest job tried took 62 min) |
+| `WORKFLOW_ASK_TIMEOUT` | 300 | How long a question waits for an answer, in seconds |
 | `WORKFLOW_MAX_PER_GUILD` | 1 | Workflows running at once in one server |
+| `SUBAGENT_MAX_CONCURRENT` | 2 | Research steps at once, cut to the LLM slots beside chat's |
 | `SUBAGENT_MODEL` / `SUBAGENT_LLM_HOST` / `SUBAGENT_LLM_API_KEY` | the brain's | The helpers' model |
 
 Workflows are the heaviest load the bot has. On a server with one LLM slot, chat still comes first.

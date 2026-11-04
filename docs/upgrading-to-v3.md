@@ -159,8 +159,9 @@ persona to put in its own words. What users notice:
 - **Big jobs run as workflows** in a thread of their own (`docs/workflows.md`). The brain hands
   one over when a job has many parts (a report from many sources, a small program), or anyone can
   start one with `/task`. A plan is posted first, with Approve / Edit / Cancel for the person who
-  asked; no answer in 15 minutes and it starts anyway. The steps run one at a time, files arrive in
-  the thread and in the channel, and the bot replies in the channel when it ends. Saying just
+  asked; no answer in 15 minutes and it starts anyway. Before the plan it may look at how the job
+  is laid out and ask what changes the plan. The steps run in turn, research side by side, and files
+  arrive in the thread and in the channel, and the bot replies in the channel when it ends. Saying just
   "stop" in the thread, or Cancel, stops it. One runs per server at a time; a restart stops it
   (the thread says so). Thread state is kept under `dcb:workflows:v1:*` and
   `dcb:workflow_conversation:*` (the old `dcb:sandbox_conversation:*` keys simply expire).

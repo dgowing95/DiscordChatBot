@@ -161,18 +161,24 @@ SKILLS_INSTRUCTIONS = """
 
 # Added only when the call is offered start_workflow (brain_policy.effective_tier):
 # naming a tool the call does not have would make the model call it anyway.
-WORKFLOW_INSTRUCTIONS = """
-- A job of many parts, like a report from 10+ sources or a program with
-  several files -> `start_workflow`: it runs in its own thread with a
-  plan the user approves, and that ends your part."""
+# It goes before the first rule: at the end of the prompt the same words handed
+# off a multi-file program 0 times in 6, and first 3 in 6 (Qwen, phase 5).
+WORKFLOW_INSTRUCTIONS = """- Size up the job first. A report from many sources, a program with several
+  files or a deep dive -> `start_workflow` as your FIRST call, before any
+  search: it runs in its own thread with a plan the user approves, and that
+  ends your part.
+"""
+FIRST_RULE = "- Most requests need one tool."
 
 
 def instructions(*, workflows: bool = False) -> str:
-    """The brain's system prompt: BRAIN_INSTRUCTIONS, plus the skills bullet,
-    plus the workflow bullet when this kind of call may start one."""
+    """The brain's system prompt: BRAIN_INSTRUCTIONS, with the workflow bullet
+    first when this kind of call may start one, and the skills bullet last."""
     from classes import skill_format
-    return (BRAIN_INSTRUCTIONS + (SKILLS_INSTRUCTIONS if skill_format.enabled() else "")
-            + (WORKFLOW_INSTRUCTIONS if workflows else ""))
+    text = BRAIN_INSTRUCTIONS
+    if workflows:
+        text = text.replace(FIRST_RULE, WORKFLOW_INSTRUCTIONS + FIRST_RULE, 1)
+    return text + (SKILLS_INSTRUCTIONS if skill_format.enabled() else "")
 
 
 def build_brain_model() -> LanedModel:
@@ -532,6 +538,8 @@ class BrainHooks(RunHooks):
         self.guard = guard
         self.turns = 0
         self.tool_calls = 0
+        # The longest prompt of the run: what a slot's context has to hold.
+        self.peak_prompt_tokens = 0
 
     async def on_llm_start(self, context, agent, system_prompt, input_items) -> None:
         self.turns += 1
@@ -539,6 +547,9 @@ class BrainHooks(RunHooks):
             await part.on_llm_start(context, agent, system_prompt, input_items)
 
     async def on_llm_end(self, context, agent, response) -> None:
+        tokens = getattr(getattr(response, "usage", None), "input_tokens", None)
+        if isinstance(tokens, int):
+            self.peak_prompt_tokens = max(self.peak_prompt_tokens, tokens)
         for part in self.parts:
             await part.on_llm_end(context, agent, response)
 
@@ -958,6 +969,7 @@ async def _run_and_deliver(ctx, lease, agent, task, run_config, hooks, progress,
         if workflow.get("thread_url"):
             out.status = brain_result.STARTED_WORKFLOW
             out.thread_url = workflow["thread_url"]
+            out.plan_to_approve = not ctx.get("automatic")
             out.must_keep = [workflow["thread_url"]]
     elif stopped is None:
         args = ctx.get("brain_report_args")

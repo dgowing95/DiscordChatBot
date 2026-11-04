@@ -232,6 +232,39 @@ async def test_dev_inject_is_off_by_default(monkeypatch):
     assert await main.voice_dev_inject(_message(content="!voice_say hey sparky hi")) is False
 
 
+@pytest.mark.asyncio
+async def test_the_workflow_command_is_off_by_default(monkeypatch):
+    main = _import_main()
+    monkeypatch.delenv("WORKFLOW_DEV_INJECT", raising=False)
+    assert await main.workflow_dev_inject(_message(content="!workflow do a big job")) is False
+
+
+@pytest.mark.asyncio
+async def test_the_workflow_command_starts_one_when_switched_on(monkeypatch):
+    from classes import workflows
+    main = _import_main()
+    monkeypatch.setenv("WORKFLOW_DEV_INJECT", "1")
+    start = AsyncMock(return_value=workflows.StartResult(True, thread_url="link"))
+    monkeypatch.setattr(workflows, "start_workflow", start)
+    message = _message(content="!workflow do a big job")
+    assert await main.workflow_dev_inject(message) is True
+    assert start.await_args.args[1] == "do a big job"
+    assert start.await_args.kwargs["message"] is message
+
+
+@pytest.mark.asyncio
+async def test_the_workflow_command_says_why_it_did_not_start(monkeypatch):
+    from classes import workflows
+    main = _import_main()
+    monkeypatch.setenv("WORKFLOW_DEV_INJECT", "1")
+    monkeypatch.setattr(workflows, "start_workflow",
+                        AsyncMock(return_value=workflows.StartResult(False, text="One is running.")))
+    message = _message(content="!workflow do a big job")
+    message.reply = AsyncMock()
+    assert await main.workflow_dev_inject(message) is True
+    assert "One is running." in message.reply.await_args.args[0]
+
+
 # ---------------------------------------------------------------------------
 # voice_bridge: discord.py's side of the handshake
 # ---------------------------------------------------------------------------

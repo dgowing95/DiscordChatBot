@@ -232,6 +232,11 @@ async def execute(job, client):
             if result == "Error":
                 raise RuntimeError("Model run failed")
             output = clean_response(result, mention=str(client.user.id))
+            # Nobody is watching an automatic run, so the link never depends
+            # on the persona repeating it.
+            workflow = getattr(handler, "workflow_url", "")
+            if workflow and workflow not in output:
+                output += f"\nWorkflow: {workflow}"
             async with get_channel_lock(channel.id):
                 send_started = True
                 for chunk in chunk_for_discord(output):

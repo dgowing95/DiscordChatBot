@@ -12,6 +12,7 @@ from PIL import Image
 pillow_heif.register_heif_opener()
 from classes.text_llm_handler import TextLLMHandler, slot_context_tokens
 from classes import attachment_cache, history_policy, reply_policy
+from classes.card import text_of
 from classes.workspace_inputs import attachment_note
 from classes.history_policy import (
     ANCHORED,
@@ -390,7 +391,7 @@ class MessageHandler:
         files = ""
         if role == "user":
             files = attachment_note([(a.filename, a.size) for a in message.attachments or []])
-        if message.content or image_parts or always or files:
+        if message.content or text_of(message) or image_parts or always or files:
             text = f"Message from '{message.author.name}': {self.clean_message_content(message)}{files}"
             # With images the content becomes a list of parts (base64 images + text);
             # the agents SDK forwards them as multimodal chat-completions input.
@@ -444,7 +445,8 @@ class MessageHandler:
 
 
     def clean_message_content(self, message):
-        return (message.content or "").replace(f'<@{self.client.user.id}>', '').strip()
+        text = message.content or text_of(message)
+        return text.replace(f'<@{self.client.user.id}>', '').strip()
     
 
 

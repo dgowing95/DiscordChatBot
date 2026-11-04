@@ -37,7 +37,8 @@ core/                    # the bot (what runs in production)
     redis_client.py        # the two shared, lazily built Redis clients (str + binary)
     settings_check.py      # P settings removed in v3, and the startup check that exits on them
     metrics.py             # P Prometheus metrics and the /metrics server
-    common.py              # shared Discord helpers (tool embeds)
+    common.py              # shared Discord helpers (tool embeds, QuietChannel)
+    card.py                # a message as one card with its buttons inside (questions, the plan)
     tool_embeds.py         # P how tool embeds read: titles, colours, link labels
     whats_new.py           # P What's New notes: parse, limits, embed
     help_catalog.py        # P the hand-written /help listing
@@ -71,11 +72,13 @@ core/                    # the bot (what runs in production)
     workspace_snapshot_store.py    # workspace snapshots in Redis, one per guild
     workspace_commands.py  # /workspace (status, reset, progress)
     # Tier 3 workflows (runtime item 13)
-    workflows.py           # start, plan, approval, steps, finish, the completion reply
-    workflow_policy.py     # P plans, step order, states, WORKFLOW_* / SUBAGENT_* settings
+    workflows.py           # start, approval, steps, questions, finish, the completion reply
+    workflow_planning.py   # the plan stage: scouts, questions before the plan, submit_plan
+    workflow_policy.py     # P plans, waves, states, WORKFLOW_* / SUBAGENT_* settings
     workflow_store.py      # records and each server's running slot, in Redis
-    workflow_tools.py      # start_workflow (brain), submit_plan / submit_review (manager)
-    workflow_views.py      # the plan's Approve / Edit / Cancel buttons (work across restarts)
+    workflow_tools.py      # start_workflow (brain); discover, ask_requester, submit_plan,
+                           #   submit_review (manager)
+    workflow_views.py      # the plan card's Approve / Edit / Cancel buttons (work across restarts)
     task_commands.py       # /task
     thread_inbox.py        # P thread-message ledger (a workflow claims its thread's)
     workflow_conversation.py        # thread steering with a gate      | for 5b's steering
@@ -255,7 +258,7 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
    - **Files from the chat go in `in/`** (`workspace_inputs.py`): the asking message's and its reply
      target's attachments, plus any the persona names in `files`, capped by `WORKSPACE_INPUT_MAX_BYTES`.
    - **`ask_user` asks in the channel**: the question, reworded in the persona's voice
-     (`persona_voice.py`), is posted as a reply to the request with buttons (`brain_question.py`: the
+     (`persona_voice.py`), is posted as a card (`card.py`) replying to the request (`brain_question.py`: the
      brain's choices, "Answer…" for a text box, "You decide"). Only the requester can answer, and only
      deliberately: a button, or Discord's Reply on the question (`on_message`, ✅). An ordinary message
      stays a new request. In a call it is spoken too, and the speaker's next words answer it
@@ -377,31 +380,56 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
 
     | Phase | What runs | Lane / role | Ends at |
     |---|---|---|---|
-    | Plan | the manager (a plain Agent, `MANAGER_INSTRUCTIONS`, `brain_tools(mode="manager")`) | brain | `submit_plan` |
-    | Approval | the plan embed with Approve / Edit / Cancel (`workflow_views.py`), requester only | - | a button, a thread message (a change), or `WORKFLOW_PLAN_APPROVAL_SECONDS` |
-    | Steps, one at a time | a helper per step (a SandboxAgent, `SUBAGENT_INSTRUCTIONS`, mode researcher / implementer) | subagent | `report` |
+    | Discovery, if asked for | up to 2 scouts (a SandboxAgent, `SCOUT_INSTRUCTIONS`, mode scout) | subagent | `report` |
+    | Questions, if asked for | up to 3 in the thread (`ask_requester`), one at a time | - | a button, a thread message, or `WORKFLOW_ASK_TIMEOUT` |
+    | Plan | the manager (a plain Agent, `MANAGER_INSTRUCTIONS`, `brain_tools(mode="manager")`), a fresh run after each round above | brain | `discover`, `ask_requester` or `submit_plan` |
+    | Approval | the plan card with Approve / Edit / Cancel (`workflow_views.py`), requester only | - | a button, a thread message (a change), or `WORKFLOW_PLAN_APPROVAL_SECONDS` |
+    | Steps, in waves (`next_wave`): researchers side by side, an implementer alone | a helper per step (a SandboxAgent, `SUBAGENT_INSTRUCTIONS`, mode researcher / implementer) | subagent | `report` |
     | Between steps | the manager answers waiting thread messages, may change the remaining steps | brain | `submit_review` |
     | Finish | the manager's final report; files echoed in the origin channel | brain | `report` |
     | Reply | `WorkflowDone` on the queue; the persona with NO tools, in the origin channel | chat | - |
 
+    - **Rounds before the plan** (`workflow_planning.py`): each is one stop tool, done by code, which then
+      takes the tool away, so there is at most one of each. **Discovery is not research** (maintainer,
+      2026-11-04): scouts report where the data is and how it is laid out, and the plan's steps find
+      the answers. The manager only names `subjects`, and code writes the question
+      (`wp.scout_question`), because a question in its own words asked for the answers and got them.
+      The manager has no web tools, and the `workflow_policy` constants keep it a quick look (2 scouts,
+      12 turns, 5 minutes, 3 facts, 2700 characters of findings). A scout is told to finish two turns
+      before its limit (`FINISH_UP`), and one that reaches a limit gets one last call that can only be
+      `report` (`_last_report`), so what it found is kept. Findings and answers go to every later run
+      by code (`planning_text`). Automatic runs may look but not ask.
+    - **One embed per scout and researcher** (`brain_progress.HelperProgress`): their last tool call
+      and turn, trimmed, edited at most every 30 s since two share a thread's edits. Their tools post
+      nothing (`common.QuietChannel`), which replaced dozens of embeds a run. An implementer keeps the
+      status embed and its tools' own, since a picture has to reach the thread.
+    - **Told a plan is coming**: the persona's start reply and `/task`'s message say so, and discovery
+      leaves a note in the thread. Only the plan and a question ping the requester.
     - **Its own run context**, built once (`_run_context`): the thread is `channel`, there is no source
       message, and `image_cap` is `workflow_policy.MAX_IMAGES`. D19 (the persona's dict) cannot hold:
-      the reply ends long before the workflow does.
+      the reply ends long before the workflow does. Each helper runs on a copy (`_helper_ctx`), since two
+      run at once; `_SHARED_KEYS` come back so the picture cap covers the whole job.
     - **Started from an empty `contextvars.Context`**, and every agent run sets its lane, so nothing of
       the `ask_brain` call that started it leaks in.
     - **No brain slot** (`BRAIN_MAX_CONCURRENT`): a workflow runs far longer than a brain call. It holds
       the server's workspace lease from approval to the end, so the workspace is never stopped or reset
       under it, and at most `WORKSPACE_MAX_WARM` - 1 run per process, so other servers still get one.
+      Before approval only the scouts hold it: nothing does while a person is waited on.
     - **Steering**: the workflow claims the thread's ledger (`thread_inbox.claim_run`, inside its own
       task), so `on_message` routes thread messages to it (📨). A bare "stop" from the requester, or
-      Cancel, cancels at once (`request_cancel`: a running helper's task is cancelled, files kept);
-      while the plan waits, the requester's message is a change to it; everything else waits for the
+      Cancel, cancels at once (`request_cancel`: every running helper's task is cancelled, files kept);
+      with a question open their message answers it; while the plan is being written it goes into the
+      next run; while the plan waits it is a change to it; everything else waits for the
       review between steps (and once more after the last step), which records an outcome per message.
       The thread is open to the server: only the requester can change the steps, and only their words
       reach later helpers. Plan edits, thread messages and answers pass the content guard first (the
       run context's guard only ever saw the request).
-    - A helper that reports `needs_input` makes the workflow ask the requester in the thread
-      (`_ask_in_thread`, `WORKFLOW_ASK_TIMEOUT`); the step runs once more with the answer.
+    - **One way to ask** (`workflows.ask_requester`): the buttons of the brain's `ask_user`, or the
+      requester's next thread message (a Discord Reply lands there too, since the thread is claimed).
+      One question at a time, `WORKFLOW_ASK_TIMEOUT` each. A helper that reports `needs_input` asks this
+      way, and the step runs once more with the answer.
+    - **A helper's picture** (`keep_image`) is also saved in its folder's `images/`, not `out/`, which
+      `_deliver` would post again, and reaches the channel with the job's files.
     - **Folders** `jobs/c<thread id>-w<id>-<step>/`: each helper is told the earlier steps' folders, and
       a later brain call in the thread finds them as that channel's earlier jobs.
     - **Limits cap the cost**: `WORKFLOW_TIMEOUT` (1 h) and `WORKFLOW_MAX_TURNS` (250, every agent's turns
@@ -459,15 +487,18 @@ are the ones that actually change behaviour). The persona's *system* prompt is n
 - **Prefer a positive example over a list of prohibitions.** A model given a list of things not to
   choose went on to choose items straight off the list. The prompts show the shape instead
   (`ask_brain`'s examples, the `report(...)` call in `BRAIN_INSTRUCTIONS`).
-- Sizes are pinned by `brain_tests.py`: `BRAIN_INSTRUCTIONS` ~2240 characters (ceiling 2300; 2450 with `WORKFLOW_INSTRUCTIONS`, ~190, added only to calls offered `start_workflow`),
-  `ask_brain` ~1670 including its JSON schema (ceiling 1700). Re-measure before adding. Skills have
+- Sizes are pinned by `brain_tests.py`: `BRAIN_INSTRUCTIONS` ~2240 characters (ceiling 2300; 2500 with `WORKFLOW_INSTRUCTIONS`, ~245, put first and only in calls offered `start_workflow`),
+  `ask_brain` ~1750 including its JSON schema (ceiling 1760). Re-measure before adding. Skills have
   their own homes, pinned by `skill_tools_tests.py`: `SKILLS_INSTRUCTIONS` ~270 characters (ceiling
   400, added to the brain's prompt only when skills are on), `REFLECTION_PROMPT` ~730 (ceiling
   1000, the one prompt of the after-job review) and `CURATOR_PROMPT` ~860 (ceiling 1000, the
-  tidy-up's). Workflows' are pinned by `workflows_tests.py`: `MANAGER_INSTRUCTIONS` ~1200 (ceiling
-  1400; every manager run: plan, review, finish) and `SUBAGENT_INSTRUCTIONS` ~1170 (ceiling 1400,
-  plus one `ROLE_LINES` line per helper). The workflow tools' docstrings (`workflow_tools.py`) and
-  the tasks `workflows.py` builds are the rest of their surface.
+  tidy-up's). Workflows' are pinned by `workflows_tests.py`: `MANAGER_INSTRUCTIONS` ~1260 (ceiling
+  1400; every manager run: plan, review, finish; `MANAGER_IMAGE_LINE` ~100 is added when the bot can
+  draw) and `SUBAGENT_INSTRUCTIONS` ~1170 (ceiling 1400, plus one `ROLE_LINES` line per helper), and
+  by `workflow_planning_tests.py`: `SCOUT_INSTRUCTIONS` ~890 (ceiling 900) and `discover`'s docstring
+  (ceiling 650), the home of "the shape, not the answers". The other workflow tools' docstrings
+  (`workflow_tools.py`) and the tasks `workflows.py` and `workflow_planning.py` build are the rest of
+  their surface.
 
 ### Environment variables
 
@@ -583,9 +614,11 @@ reads has a row here and a line in `.env.example`, that every row is read by som
 | `WORKFLOW_MAX_STEPS` | steps in one plan [8]. Chart: `workflows.maxSteps` |
 | `WORKFLOW_TIMEOUT` / `WORKFLOW_MAX_TURNS` | backstops on one workflow: wall-clock seconds [3600] and model turns across all its agents [250]; out of either stops it with what exists. Chart: `workflows.timeout` / `maxTurns` |
 | `WORKFLOW_MAX_PER_GUILD` | workflows running at once per server [1]. Chart: `workflows.maxPerGuild` |
+| `WORKFLOW_DEV_INJECT` | local testing and E2E only, never in the chart: `!workflow <request>` starts a workflow directly, since a webhook cannot use `/task` |
 | `SUBAGENT_MODEL` / `SUBAGENT_LLM_HOST` / `SUBAGENT_LLM_API_KEY` | a workflow helper's connection; empty = the brain's, then `LLM_*` (the key only for the same host). Chart: `subagents.model` / `llmHost` / `apiKey` |
 | `SUBAGENT_REASONING_EFFORT` / `SUBAGENT_CALL_TIMEOUT_SECONDS` | a helper's; empty = the brain's. Chart: `subagents.reasoningEffort` / `callTimeout` |
 | `SUBAGENT_MAX_TURNS` | backstop on one helper's model turns [100]. Chart: `subagents.maxTurns` |
+| `SUBAGENT_MAX_CONCURRENT` | researchers running at once [2], cut to the slots a self-hosted server has beside chat's; an implementer always runs alone. Chart: `subagents.maxConcurrent` |
 | `WORKSPACE_SNAPSHOT_TIMEOUT_SECONDS` | seconds for one workspace save, and for all of them at shutdown [120]. Chart: `brain.workspace.snapshotTimeout` |
 | `BRAIN_CALL_TIMEOUT_SECONDS` | like `PERSONA_CALL_TIMEOUT_SECONDS`, for the brain [600]. Chart: `brain.callTimeout` |
 | `WORKSPACE_SNAPSHOT_MAX_BYTES` | most bytes of one saved workspace [50MB]; over it the previous save is kept and the container is stopped, not removed. Chart: `brain.workspace.snapshotMaxBytes` |

@@ -33,7 +33,8 @@ the same objects:
 
 | mode        | Tools                                                         |
 |-------------|---------------------------------------------------------------|
-| manager     | web, fetch, message search/read, search_skills, submit_plan  |
+| manager     | search_skills, submit_plan, and the `rounds` still allowed (discover, ask_requester) |
+| scout       | web, fetch, message search/read, save_messages_to_file, report (+ Shell) |
 | review      | submit_review (the thread's messages between steps)          |
 | finish      | report                                                        |
 | researcher  | web, fetch, message search/read, attach_file, save_messages_to_file, report (+ Shell) |
@@ -42,7 +43,8 @@ the same objects:
 No workflow agent can save memories, change the personality, post polls or
 events, set automations, ask inline questions or start another workflow
 (depth <= 2): those belong to a conversation, and a workflow's agents work
-alone in its thread.
+alone in its thread. The manager has no web tools: it looks at a job through
+scouts, whose prompt keeps them to its shape (classes/workflow_planning.py).
 
 The order is fixed, so the brain's tool schemas (part of its cached prompt
 prefix) are the same on every call of the same kind.
@@ -52,15 +54,16 @@ tool_functions imports nothing from here.
 """
 BRAIN = "brain"
 MANAGER = "manager"
+SCOUT = "scout"
 REVIEW = "review"
 FINISH = "finish"
 RESEARCHER = "researcher"
 IMPLEMENTER = "implementer"
-MODES = (BRAIN, MANAGER, REVIEW, FINISH, RESEARCHER, IMPLEMENTER)
+MODES = (BRAIN, MANAGER, SCOUT, REVIEW, FINISH, RESEARCHER, IMPLEMENTER)
 
 
 def brain_tools(*, automatic: bool = False, voice: bool = False, workflows: bool = False,
-                mode: str = BRAIN) -> list:
+                mode: str = BRAIN, rounds=()) -> list:
     from classes import skill_format, voice_policy
     from classes.automation_tools import automation_tools
     from classes.brain import ask_user, report
@@ -81,19 +84,28 @@ def brain_tools(*, automatic: bool = False, voice: bool = False, workflows: bool
         web_search,
     )
     from classes.skill_tools import search_skills, skill_tools
-    from classes.workflow_tools import start_workflow, submit_plan, submit_review
+    from classes.workflow_tools import (
+        ask_requester,
+        discover,
+        start_workflow,
+        submit_plan,
+        submit_review,
+    )
     from classes.workspace_tools import attach_file
 
     if mode not in MODES:
         raise ValueError(f"unknown brain_tools mode {mode!r}")
     if mode == MANAGER:
-        tools = [web_search, fetch_url, *message_search_tools()]
+        tools = []
         if skill_format.enabled():
             # search_skills only: use_skill posts a "Using a skill" embed, and a
             # planner opened unrelated skills just to read them (live, twice).
             tools.append(search_skills)
+        tools.extend(tool for tool in (discover, ask_requester) if tool.name in rounds)
         tools.append(submit_plan)
         return tools
+    if mode == SCOUT:
+        return [web_search, fetch_url, *message_search_tools(), save_messages_to_file, report]
     if mode == REVIEW:
         return [submit_review]
     if mode == FINISH:

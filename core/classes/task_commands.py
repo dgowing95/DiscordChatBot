@@ -14,6 +14,7 @@ from discord import app_commands
 logger = logging.getLogger(__name__)
 
 MAX_REQUEST_CHARS = 1800
+PLAN_COMING = "A plan will appear in the thread for you to approve."
 VOICE_BUSY_REPLY = ("🎙️ I'm in a voice call right now, so I can't start a big job. "
                     "Try again after /voice leave.")
 
@@ -30,7 +31,7 @@ def register_task_commands(tree, client) -> None:
         if voice_gate.active(ctx.guild_id):
             await ctx.response.send_message(VOICE_BUSY_REPLY, ephemeral=True)
             return
-        await ctx.response.send_message(f"🧵 Workflow: {request}",
+        await ctx.response.send_message(f"🧵 Workflow: {request}\n-# {PLAN_COMING}",
                                         allowed_mentions=discord.AllowedMentions.none())
         message = await ctx.original_response()
         run_ctx = {"guild_id": ctx.guild_id, "user_id": ctx.user.id,

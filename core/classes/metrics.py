@@ -139,6 +139,8 @@ Metrics (scraped by Prometheus from the /metrics HTTP endpoint):
   Histogram discord_bot_workflow_turns
            Model turns per workflow, every agent together.
   Counter  discord_bot_workflow_plan_approval_total{outcome}
+  Counter  discord_bot_workflow_scouts_total{outcome}
+  Counter  discord_bot_workflow_plan_questions_total{outcome}
            How plans were approved (approved / edited / cancelled / timeout /
            auto).
   Gauge    discord_bot_workflows_running
@@ -847,6 +849,11 @@ workflow_turns = Histogram(
     buckets=(5, 10, 25, 50, 100, 200, 350, 500))
 workflow_plan_approval_total = Counter(
     "discord_bot_workflow_plan_approval_total", "How workflow plans were approved", ["outcome"])
+workflow_scouts_total = Counter(
+    "discord_bot_workflow_scouts_total", "Scouts sent before a workflow's plan", ["outcome"])
+workflow_plan_questions_total = Counter(
+    "discord_bot_workflow_plan_questions_total", "Questions asked before a workflow's plan",
+    ["outcome"])
 workflows_running_gauge = Gauge("discord_bot_workflows_running", "Workflows running in this process")
 
 
@@ -860,6 +867,14 @@ def observe_workflow(trigger: str, end_state: str, seconds: float, subagents: in
 
 def inc_workflow_plan_approval(outcome: str) -> None:
     workflow_plan_approval_total.labels(outcome=str(outcome)).inc()
+
+
+def inc_workflow_scout(outcome: str) -> None:
+    workflow_scouts_total.labels(outcome=str(outcome)).inc()
+
+
+def inc_workflow_plan_question(outcome: str) -> None:
+    workflow_plan_questions_total.labels(outcome=str(outcome)).inc()
 
 
 def set_workflows_running(count: int) -> None:

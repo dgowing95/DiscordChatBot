@@ -59,6 +59,8 @@ BRAIN_DONE = "🧠 Done"
 BRAIN_STOPPED = "🧠 Stopped"
 
 LINK_LABEL_CHARS = 80
+HELPER_LINE_CHARS = 80
+HELPER_TITLE_CHARS = 120
 
 
 def reading_page_title(part: int) -> str:
@@ -123,6 +125,40 @@ def trim(text: str, limit: int) -> str:
     if " " in cut[limit // 2:]:
         cut = cut.rsplit(" ", 1)[0]
     return cut.rstrip(",.;:") + "…"
+
+
+def helper_line(tool: str, args: dict) -> str | None:
+    """One short line for a helper's status embed: what it just started.
+    None for a call that says nothing new (a poll, its report)."""
+    if tool in ("report", "write_stdin"):
+        return None
+    if tool == "web_search":
+        line = f"🔎 Searching: {args.get('search_request') or ''}"
+    elif tool == "fetch_url":
+        url = str(args.get("url") or "")
+        host = urlsplit(url if "://" in url else "https://" + url).hostname or url
+        line = f"🌐 Reading {host.removeprefix('www.')}"
+    elif tool == "search_messages":
+        line = f"🔍 Searching messages: {args.get('query') or ''}"
+    elif tool == "read_messages_around":
+        line = "📜 Reading messages"
+    elif tool == "save_messages_to_file":
+        line = "🗂️ Saving messages"
+    elif tool == "exec_command":
+        line = f"💻 {str(args.get('cmd') or '').splitlines()[0] if args.get('cmd') else ''}"
+    elif tool == "attach_file":
+        line = f"📎 Attaching {args.get('path') or ''}"
+    else:
+        line = f"🔧 {tool}"
+    return trim(_plain(line), HELPER_LINE_CHARS)
+
+
+def helper_ending(ok: bool, note: str | None, found: int, line: str) -> str:
+    """The same embed when the helper ends: how it went, how many facts it
+    kept, and the last thing it did."""
+    head = note or ("✅ Done" if ok else "⚠️ Not finished")
+    text = f"{head} · {found} fact{'' if found == 1 else 's'}"
+    return f"{text}\nLast: {line}" if line else text
 
 
 def work_task_text(task: str, files=(), limit: int = 1000) -> str:
