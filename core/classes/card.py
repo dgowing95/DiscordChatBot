@@ -11,7 +11,8 @@ ActionRows). That layout has rules of its own, and Card is where they are kept:
   Discord refuses. finished() is the same card with its buttons gone.
 - **4000 characters over the whole message**, so the text is cut to fit.
 - **Its text is not message.content.** text_of() reads it back, or the bot
-  would not see in the history what it had asked.
+  would not see in the history what it had asked. The message tools read the
+  raw API, so they have their own (message_search_format._card_text).
 
 Buttons come in rows of at most 5, in four colours: blurple, grey, green, red.
 """

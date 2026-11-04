@@ -212,7 +212,9 @@ async def _scout(wf, number: int, subject: str) -> None:
     from classes.brain_progress import HelperProgress
     from classes.common import QuietChannel
 
-    job_dir, out_dir, _marker = await prepare_job(wf.lease, f"c{wf.thread.id}-w{wf.id}-d{number}")
+    job_id = f"c{wf.thread.id}-w{wf.id}-d{number}"
+    job_dir, out_dir, _marker = await prepare_job(wf.lease, job_id)
+    wf.scout_jobs.append(job_id)
     ctx = workflows._helper_ctx(wf, session=wf.lease.session, workspace_root=wf.lease.root,
                                 job_dir=job_dir, out_dir=out_dir,
                                 channel=QuietChannel(wf.thread))

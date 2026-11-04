@@ -239,11 +239,13 @@ class Workflow:
     plan_message: object = None
     plan_card: object = None  # the card plan_message shows now
     plan_lead: str = ""       # the line above the plan
-    sharing: int = 1          # runs now sharing what turns are left
+    sharing: int = 1          # runs yet to start, sharing what turns are left
+    promised: int = 0         # turns given to the runs going now
     step_states: dict = field(default_factory=dict)
     results: dict = field(default_factory=dict)
     artifacts: list = field(default_factory=list)
     revisions: int = 0
+    failed_revisions: int = 0  # cost no revision, but cannot go on for ever
     # What was said in the thread and the manager's replies, for later helpers.
     said: list = field(default_factory=list)
     # The plan stage's rounds (classes/workflow_planning.py): done yet, and
@@ -251,6 +253,7 @@ class Workflow:
     scouted: bool = False
     asked: bool = False
     findings: list = field(default_factory=list)
+    scout_jobs: list = field(default_factory=list)  # their folders: a finding may name a file
     answers: list = field(default_factory=list)
     # The open question (ask_requester), one at a time: its message, the
     # ledger's revision when it was asked, and its answer's future.
@@ -723,6 +726,8 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
         # request_cancel can only stop a run that exists. No await from here
         # to wf.running, so a cancel lands on one side or the other.
         return _Outcome(stopped="It was cancelled.")
+    wf.promised += turns
+    wf.sharing = max(1, wf.sharing - 1)
 
     async def _go():
         llm_lanes.current_lane.set(lane)
@@ -759,6 +764,7 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
             outcome.stopped = "It hit an error and was stopped."
     finally:
         wf.running.discard(child)
+        wf.promised -= turns
         wf.turns += hooks.turns
         logger.info(f"Workflow {wf.id}: {caller}: {hooks.turns} turn(s), longest prompt "
                     f"{hooks.peak_prompt_tokens} tokens")
@@ -766,9 +772,11 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
 
 
 def _turn_limit(wf: Workflow, max_turns: int) -> int:
-    """A run's turns. wf.turns only rises when a run ends, so runs side by
-    side split what is left, or together they would pass WORKFLOW_MAX_TURNS."""
-    return max(1, min(max_turns, wf.turns_left() // max(1, wf.sharing)))
+    """A run's turns. wf.turns only rises when a run ends, so a run counts
+    what the others were promised, and runs starting together split the rest,
+    or together they would pass WORKFLOW_MAX_TURNS. That covers a run that
+    starts late too: a step asked a question and carries on with the answer."""
+    return max(1, min(max_turns, (wf.turns_left() - wf.promised) // max(1, wf.sharing)))
 
 
 def _finishing_up(run_config, hooks, at: int, seen: list):
@@ -994,7 +1002,7 @@ async def _approve(wf: Workflow) -> bool:
             return False
         # An edit: the requester's message in the thread. A refused one keeps
         # the plan's wait running: writing again must not extend it.
-        if wf.revisions >= wp.plan_revisions():
+        if max(wf.revisions, wf.failed_revisions) >= wp.plan_revisions():
             wf.ledger.record_decision([event.seq], "declined", "No more changes.")
             await _post(wf.thread, content="That's as many changes as I can make to the plan. "
                                            "Press Approve or Cancel.")
@@ -1017,7 +1025,8 @@ async def _approve(wf: Workflow) -> bool:
         if wf.cancel_reason:
             return False
         if not changed:
-            wf.revisions -= 1  # nothing was changed, so it costs nothing
+            wf.revisions -= 1  # nothing was changed, so it costs no revision
+            wf.failed_revisions += 1
             await _post(wf.thread, content="I couldn't make that change, so the plan is as it was.")
         await _set_state(wf, "planned")
 
@@ -1038,9 +1047,14 @@ def _plan_view(wf: Workflow, buttons=(), note: str = "", **options) -> Card:
 
 async def _post_plan(wf: Workflow, buttons, note: str = "") -> None:
     wf.plan_card = _plan_view(wf, buttons, note)
+    # The card holds what the model wrote, and a mention in a card notifies.
     wf.plan_message = await _post(
         wf.thread, view=wf.plan_card,
-        allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
+        allowed_mentions=discord.AllowedMentions(users=[discord.Object(wf.requester_id)],
+                                                 roles=False, everyone=False))
+
+
+PLAN_CLOSED = "This plan is closed."
 
 
 async def _remove_buttons(wf: Workflow) -> None:
@@ -1049,7 +1063,7 @@ async def _remove_buttons(wf: Workflow) -> None:
     if wf.plan_message is None or wf.plan_card is None:
         return
     try:
-        wf.plan_card = wf.plan_card.finished()
+        wf.plan_card = wf.plan_card.finished(PLAN_CLOSED)
         await wf.plan_message.edit(view=wf.plan_card)
     except Exception as e:
         logger.info(f"Workflow {wf.id}: could not take the buttons off: {e}")
@@ -1217,6 +1231,9 @@ async def _step_attempt(wf: Workflow, step: wp.Step, progress, answer) -> tuple[
     folder = f"Your folder (the working directory, already open): {job_dir}/"
     if earlier:
         folder += "\nEarlier steps' folders: " + ", ".join(earlier)
+    if wf.scout_jobs:
+        folder += ("\nA file named in what was found before planning is in one of these: "
+                   + ", ".join(f"../{job}/" for job in wf.scout_jobs))
     parts.append(folder)
     parts.append(f"Current datetime: {await get_current_datetime()}")
     outcome = await _agent_run(wf, _subagent(step.role), "\n\n".join(parts),

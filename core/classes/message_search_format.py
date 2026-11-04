@@ -152,8 +152,24 @@ def _embed(embed: dict) -> str:
     return f"[embed: {text}]" if text else ""
 
 
+def _card_text(message: dict) -> str:
+    """The text of a card (classes/card.py), which has no content or embeds.
+    The raw API's form of card.text_of."""
+    lines = []
+
+    def walk(items) -> None:
+        for item in items or []:
+            if isinstance(item, dict):
+                if item.get("content"):
+                    lines.append(str(item["content"]))
+                walk(item.get("components"))
+
+    walk(message.get("components"))
+    return "\n".join(lines)
+
+
 def _content(message: dict) -> str:
-    text = _cut(message.get("content"), CONTENT_CHARS)
+    text = _cut(message.get("content") or _card_text(message), CONTENT_CHARS)
     extras = [f"[attached: {a.get('filename')}]" for a in message.get("attachments") or []
               if a.get("filename")]
     extras += [e for e in (_embed(e) for e in message.get("embeds") or [] if isinstance(e, dict))
@@ -307,7 +323,7 @@ def export_record(message: dict, guild_id, channel_names: dict) -> dict:
         "author_id": str(author.get("id", "")),
         "bot": bool(author.get("bot")),
         "timestamp": str(message.get("timestamp") or ""),
-        "content": str(message.get("content") or ""),
+        "content": str(message.get("content") or _card_text(message)),
         "embeds": embeds,
         "attachments": [a.get("filename") for a in message.get("attachments") or []
                         if a.get("filename")],

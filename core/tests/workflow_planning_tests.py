@@ -524,6 +524,16 @@ async def test_a_scout_that_crashes_closes_its_embed_and_keeps_the_others_findin
     assert workflows.HELPER_FAILED in embed.edits[-1]["embed"].description
 
 
+@pytest.mark.asyncio
+async def test_a_helper_is_told_where_the_scouts_files_are(env):
+    env.model = LaneModel([_discover("Sales chat"), _report(facts=("in/sales.jsonl",), call_id="s"),
+                           _plan_call(("s1", "implementer", [])), _report(call_id="a"),
+                           _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    assert f"../c500-w{wf.id}-d1/" in _text_of(env.model.calls[3])
+
+
 def test_two_scouts_whole_findings_are_never_cut_again():
     whole = wp.MAX_SUBJECT_CHARS + wp.SCOUT_FACTS * (wp.SCOUT_FACT_CHARS + 1) + len("- : ")
     assert whole <= wp.MAX_FINDINGS_CHARS // wp.MAX_SCOUTS

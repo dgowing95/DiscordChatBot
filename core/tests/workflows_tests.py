@@ -906,7 +906,45 @@ async def test_a_failed_revision_says_so_and_costs_nothing(env, monkeypatch):
     await _until(lambda: any("couldn't make that change" in t for t in env.thread.texts()))
     await _until(lambda: wf.approval is not None and not wf.approval.done())
     assert wf.revisions == 0 and len(wf.plan.steps) == 1
+    old = env.thread.plans()[0].edits[-1]["view"]
+    assert old.note == workflows.PLAN_CLOSED and old.buttons == []
     _, call = _press(wf, "approve")
+    await call
+    await _finish(wf)
+
+
+@pytest.mark.asyncio
+async def test_failed_changes_to_the_plan_run_out_too(env, monkeypatch):
+    async def _index(guild_id, header=None):
+        if not thread_inbox.get_run(env.thread.id).events:
+            thread_inbox.deliver(env.thread.id, 9403, 5, "Ana", "add a second step")
+        return ""
+
+    monkeypatch.setenv("WORKFLOW_PLAN_REVISIONS", "1")
+    monkeypatch.setattr(brain, "_skills_index", _index)
+    env.model = LaneModel([_plan_call(("s1", "researcher", [])),
+                           _plan_call(call_id="p2"), _plan_call(call_id="p3"),
+                           _report(call_id="a"), _report(call_id="f")])
+    wf, _ = await _start(env, automatic=False)
+    await _until(lambda: any("couldn't make that change" in t for t in env.thread.texts()))
+    await _until(lambda: wf.approval is not None and not wf.approval.done())
+    thread_inbox.deliver(env.thread.id, 9404, 5, "Ana", "add a third step")
+    await _until(lambda: any("as many changes" in t for t in env.thread.texts()))
+    assert wf.failed_revisions == 1 and len(env.model.calls) == 3
+    _, call = _press(wf, "approve")
+    await call
+    await _finish(wf)
+
+
+@pytest.mark.asyncio
+async def test_the_plan_pings_the_requester_and_nobody_else(env):
+    env.model = LaneModel([_plan_call(("s1", "researcher", [])), _report(call_id="f")])
+    wf, _ = await _start(env, automatic=False)
+    await _until(lambda: wf.approval is not None and not wf.approval.done())
+    mentions = env.thread.plans()[-1].kwargs["allowed_mentions"]
+    assert [user.id for user in mentions.users] == [wf.requester_id]
+    assert mentions.roles is False and mentions.everyone is False
+    _, call = _press(wf, "cancel")
     await call
     await _finish(wf)
 
@@ -924,12 +962,48 @@ async def test_a_step_that_crashes_leaves_nothing_saying_it_is_running(env, monk
 
 
 def test_runs_side_by_side_split_the_turns_left():
-    wf = SimpleNamespace(turns_left=lambda: 110, sharing=2)
+    wf = SimpleNamespace(turns_left=lambda: 110, sharing=2, promised=0)
     assert workflows._turn_limit(wf, 100) == 55
     wf.sharing = 1
     assert workflows._turn_limit(wf, 100) == 100
     wf.turns_left = lambda: 0
     assert workflows._turn_limit(wf, 100) == 1
+
+
+def test_a_run_that_starts_late_fits_what_the_others_were_promised():
+    wf = SimpleNamespace(turns_left=lambda: 130, sharing=1, promised=100)
+    assert workflows._turn_limit(wf, 100) == 30
+
+
+@pytest.mark.asyncio
+async def test_runs_side_by_side_are_never_promised_more_than_is_left(env, monkeypatch):
+    both_here = asyncio.Barrier(2)
+    limits = []
+    real = workflows._turn_limit
+
+    def _spy(wf, max_turns):
+        limit = real(wf, max_turns)
+        if max_turns == 77:
+            limits.append(limit)
+        return limit
+
+    @function_tool
+    async def look() -> str:
+        """Look."""
+        await asyncio.wait_for(both_here.wait(), 5)
+        return "ok"
+
+    monkeypatch.setenv("WORKFLOW_MAX_TURNS", "41")
+    monkeypatch.setenv("SUBAGENT_MAX_TURNS", "77")
+    monkeypatch.setattr(workflows, "_turn_limit", _spy)
+    env.subagent_tools = [look]
+    env.model = LaneModel([_plan_call(("s1", "researcher", []), ("s2", "researcher", [])),
+                           _look_call("l1"), _look_call("l2"), _report(call_id="a"),
+                           _report(call_id="b"), _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    assert len(limits) == 2 and sum(limits) <= 40  # the plan took one turn
+    assert wf.promised == 0
 
 
 @pytest.mark.asyncio
