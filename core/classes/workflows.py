@@ -741,7 +741,9 @@ async def _approve(wf: Workflow) -> bool:
         await _set_state(wf, "approve")
         return True
     seconds = wp.plan_approval_seconds()
-    line = await voice_question(wf.guild_id, "Here's my plan for this. Shall I go ahead?")
+    # Says where the plan is: the rewording call cannot see it, and told only
+    # "my plan" a small model asked for the plan or refused (seen on Strata).
+    line = await voice_question(wf.guild_id, "Shall I go ahead with the plan below?")
     while True:
         await _remove_buttons(wf)
         content = (f"<@{wf.requester_id}> {line}\n-# Approve, Edit or Cancel. With no answer in "

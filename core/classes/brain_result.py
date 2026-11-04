@@ -14,6 +14,7 @@ separately (must_keep), and missing_tokens checks the reply for them after.
 What was already posted (files, a poll, an image) is listed too, because a
 persona that does not know tells the user the picture is "coming".
 """
+import json
 import posixpath
 import re
 from dataclasses import dataclass, field
@@ -61,12 +62,17 @@ def _clean(text, limit: int) -> str:
 
 
 def _strings(value, limit: int, count: int) -> list[str]:
-    """A list of short strings from whatever the model sent: a list, one
-    string (split on lines), or nothing. Empty entries and repeats go."""
+    """A list of short strings from whatever the model sent: a list, a list
+    written out as JSON (seen on Strata), one string (split on lines), or
+    nothing. Empty entries and repeats go."""
     if value is None:
         return []
     if isinstance(value, str):
-        value = value.splitlines()
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            parsed = None
+        value = parsed if isinstance(parsed, list) else value.splitlines()
     if not isinstance(value, (list, tuple)):
         value = [value]
     out = []

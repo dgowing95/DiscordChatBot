@@ -202,3 +202,12 @@ def test_the_name_of_a_posted_file_need_not_be_in_the_reply():
 def test_markdown_bold_inside_a_kept_fact_still_counts():
     report = br.BrainReport(must_keep=["feels like ~15°C", "`out/chart.png`"])
     assert br.missing_tokens("It is 16°C, feels like **~15°C**. Saved out/chart.png", report) == []
+
+
+def test_facts_sent_as_a_json_string_become_a_list():
+    report = br.parse_report_args(
+        {"status": "done", "facts": '["Made date.py", "Made README.md"]'})
+    assert report.facts == ["Made date.py", "Made README.md"]
+    # Text that only looks like a list stays text.
+    assert br.parse_report_args({"facts": "[1] was read\nmore"}).facts == [
+        "[1] was read", "more"]

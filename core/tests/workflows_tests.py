@@ -858,3 +858,13 @@ async def test_a_workflows_image_limit_names_its_own_cap():
         ToolContext(context=context, tool_name="generate_image", tool_call_id="i",
                     tool_arguments='{"prompt": "a boat"}'), '{"prompt": "a boat"}')
     assert f"limit of {wp.MAX_IMAGES} picture requests for this workflow" in text
+
+
+@pytest.mark.asyncio
+async def test_the_plan_line_says_where_the_plan_is(env):
+    env.model = LaneModel([_plan_call(("s1", "researcher", []))])
+    wf, _ = await _start(env, automatic=False)
+    await _until(lambda: wf.state == wp.AWAITING_APPROVAL and wf.approval is not None)
+    assert "(voiced) Shall I go ahead with the plan below?" in env.thread.texts()[-1]
+    workflows.request_cancel(wf, "test")
+    await _finish(wf)
