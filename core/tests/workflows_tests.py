@@ -937,6 +937,7 @@ async def test_a_thread_message_the_guard_blocks_never_reaches_the_review(env, m
     await _finish(wf)
     assert wf.ledger.events[0].outcome == "declined"
     assert wf.said == [] and wf.record["state"] == wp.DONE
+    assert "I can't act on that message." in env.thread.texts()
 
 
 @pytest.mark.asyncio

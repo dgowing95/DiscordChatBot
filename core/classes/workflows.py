@@ -1062,6 +1062,9 @@ async def _review(wf: Workflow, queue: list) -> list:
             usable.append(event)
         else:
             ledger.record_decision([event.seq], "declined", "Blocked by the content guard.")
+    if len(usable) < len(pending):
+        # 📨 said it would be seen: say what became of it.
+        await _post(wf.thread, content="I can't act on that message.")
     pending = usable
     if not pending:
         return queue
