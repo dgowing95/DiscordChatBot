@@ -878,6 +878,94 @@ async def test_a_revised_plan_leaves_the_old_one_as_it_was_with_no_buttons(env, 
     await _finish(wf)
 
 
+@pytest.mark.asyncio
+async def test_a_stop_before_the_plan_is_up_is_not_lost(env, monkeypatch):
+    async def _stopped_meanwhile(guild_id, text):
+        workflows.request_cancel(workflows.get(next(iter(workflows._RUNNING))), "stop")
+        return text
+
+    monkeypatch.setattr("classes.persona_voice.voice_question", _stopped_meanwhile)
+    env.model = LaneModel([_plan_call(("s1", "researcher", []))])
+    wf, _ = await _start(env, automatic=False)
+    await asyncio.wait_for(_finish(wf), 5)
+    assert wf.record["state"] == wp.CANCELLED and len(env.model.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_revision_says_so_and_costs_nothing(env, monkeypatch):
+    async def _index(guild_id, header=None):
+        if not thread_inbox.get_run(env.thread.id).events:
+            thread_inbox.deliver(env.thread.id, 9403, 5, "Ana", "add a second step")
+        return ""
+
+    monkeypatch.setattr(brain, "_skills_index", _index)
+    env.model = LaneModel([_plan_call(("s1", "researcher", [])),
+                           _plan_call(call_id="p2"), _plan_call(call_id="p3"),
+                           _report(call_id="a"), _report(call_id="f")])
+    wf, _ = await _start(env, automatic=False)
+    await _until(lambda: any("couldn't make that change" in t for t in env.thread.texts()))
+    await _until(lambda: wf.approval is not None and not wf.approval.done())
+    assert wf.revisions == 0 and len(wf.plan.steps) == 1
+    _, call = _press(wf, "approve")
+    await call
+    await _finish(wf)
+
+
+@pytest.mark.asyncio
+async def test_a_step_that_crashes_leaves_nothing_saying_it_is_running(env, monkeypatch):
+    env.model = LaneModel([_plan_call(("s1", "researcher", [])), _report(call_id="f")])
+    monkeypatch.setattr(workflows, "_step_attempt", AsyncMock(side_effect=RuntimeError("gone")))
+    wf, _ = await _start(env)
+    await _finish(wf)
+    assert wf.step_states["s1"] == "failed" and wf.record["state"] == wp.FAILED
+    embed = next(m for m in env.thread.sent if m.kwargs.get("embed") is not None
+                 and m.kwargs["embed"].title.startswith("🔬 s1"))
+    assert workflows.HELPER_FAILED in embed.edits[-1]["embed"].description
+
+
+def test_runs_side_by_side_split_the_turns_left():
+    wf = SimpleNamespace(turns_left=lambda: 110, sharing=2)
+    assert workflows._turn_limit(wf, 100) == 55
+    wf.sharing = 1
+    assert workflows._turn_limit(wf, 100) == 100
+    wf.turns_left = lambda: 0
+    assert workflows._turn_limit(wf, 100) == 1
+
+
+@pytest.mark.asyncio
+async def test_helpers_share_one_content_check(monkeypatch):
+    calls = []
+
+    async def _check(request):
+        calls.append(request)
+        return True, ""
+
+    monkeypatch.setattr("classes.content_guard.check_web_request", _check)
+    wf = SimpleNamespace(ctx={"brain_request": "the job", "brain_guard": None})
+    first, second = workflows._helper_ctx(wf), workflows._helper_ctx(wf)
+    assert await brain._workspace_allowed(first) and await brain._workspace_allowed(second)
+    assert calls == ["the job"]
+
+
+@pytest.mark.asyncio
+async def test_a_helper_stopped_during_the_check_leaves_it_for_the_next(monkeypatch):
+    release = asyncio.Event()
+
+    async def _slow(request):
+        await release.wait()
+        return True, ""
+
+    monkeypatch.setattr("classes.content_guard.check_web_request", _slow)
+    context = {"brain_request": "the job"}
+    waiting = asyncio.create_task(brain._workspace_allowed(context))
+    await asyncio.sleep(0)
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    release.set()
+    assert await brain._workspace_allowed(context)
+
+
 def test_the_longest_plan_fits_a_card():
     steps = [wp.Step(id=f"s{n}", role="researcher", brief="b" * 3000, depends_on=[])
              for n in range(1, 9)]

@@ -302,7 +302,9 @@ def clean_scout_subjects(raw) -> list[str]:
     """The manager's discover arguments as the scouts' subjects: text only,
     at most MAX_SCOUTS. A small model may send one string."""
     items = raw.get("subjects") if isinstance(raw, dict) else raw
-    texts = [_text(item, MAX_SUBJECT_CHARS) for item in _list(items)]
+    # One string is one subject: _list would split it at its commas.
+    items = [items] if isinstance(items, str) else _list(items)
+    texts = [_text(item, MAX_SUBJECT_CHARS) for item in items]
     return [text for text in texts if text][:MAX_SCOUTS]
 
 
@@ -317,8 +319,8 @@ def clean_plan_questions(raw) -> list[tuple[str, list]]:
     """The manager's ask_requester arguments as (question, options), at most
     MAX_PLAN_QUESTIONS. A question may come as plain text, without options."""
     items = raw.get("questions") if isinstance(raw, dict) else raw
-    if isinstance(items, dict):
-        items = [items]
+    if isinstance(items, (dict, str)):
+        items = [items]  # one question, whatever commas it has
     questions = []
     for item in _list(items):
         options = _list(item.get("options")) if isinstance(item, dict) else []

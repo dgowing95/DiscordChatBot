@@ -110,6 +110,12 @@ def test_a_question_has_green_choices_then_answer_and_you_decide_on_their_own_ro
         ("You decide", discord.ButtonStyle.primary.value)]
 
 
+def test_a_label_sits_small_above_the_question_and_stays_when_it_closes():
+    view = brain_question.QuestionView(5, [], 60, text="Which?", label="Planning needs more")
+    assert view.text == "-# Planning needs more\n### ❓ Which?"
+    assert view.finished("✅ That").text == view.text
+
+
 def test_a_short_question_is_a_heading_and_a_long_one_is_not():
     assert brain_question.question_text("Which?") == "### ❓ Which?"
     assert brain_question.question_text("x" * 200).startswith("❓ x")

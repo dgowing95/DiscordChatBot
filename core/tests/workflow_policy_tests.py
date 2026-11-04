@@ -116,6 +116,13 @@ def test_a_long_scout_question_is_cut():
     assert len(wp.clean_scout_subjects(["x" * 900])[0]) == wp.MAX_SUBJECT_CHARS
 
 
+def test_one_string_is_one_subject_or_question_whatever_commas_it_has():
+    assert wp.clean_scout_subjects({"subjects": "UK rail delays, by operator"}) == [
+        "UK rail delays, by operator"]
+    assert wp.clean_plan_questions({"questions": "Which format, PDF or Word?"}) == [
+        ("Which format, PDF or Word?", [])]
+
+
 def test_plan_questions_are_read_loosely_and_capped():
     raw = {"questions": [{"question": "a?", "options": ["x", "y"]}, "b?", {"question": ""},
                          {"question": "c?"}, {"question": "d?"}]}

@@ -161,6 +161,8 @@ out, so the plan's briefs can be exact.
 - Finish by calling `report` once, on its own, with at most 3 facts, one
   short sentence each."""
 
+HELPER_FAILED = "It hit an error and was stopped."
+
 # Told to a scout near its limit, and in its last report when it reaches one.
 FINISH_UP = "You are at your limit. Call `report` now, on its own, with what you have so far."
 
@@ -237,6 +239,7 @@ class Workflow:
     plan_message: object = None
     plan_card: object = None  # the card plan_message shows now
     plan_lead: str = ""       # the line above the plan
+    sharing: int = 1          # runs now sharing what turns are left
     step_states: dict = field(default_factory=dict)
     results: dict = field(default_factory=dict)
     artifacts: list = field(default_factory=list)
@@ -558,7 +561,7 @@ async def _work(wf: Workflow) -> tuple[str, BrainReport]:
             break
         wave = wp.next_wave(queue, wf.results, _helpers_at_once())
         queue = [step for step in queue if step not in wave]
-        await _together(_run_step(wf, step) for step in wave)
+        await _together(wf, [_run_step(wf, step) for step in wave])
         await _save_progress(wf)
     if wf.cancel_reason:
         for step in queue:
@@ -596,10 +599,15 @@ def _helpers_at_once() -> int:
     return limit if lanes is None else max(1, min(limit, lanes.slots - lanes.chat_reserved))
 
 
-async def _together(runs) -> None:
-    """Runs side by side. Every one finishes (or is cancelled) before an
-    error is raised, so none is left running behind the workflow."""
-    results = await asyncio.gather(*runs, return_exceptions=True)
+async def _together(wf: Workflow, runs: list) -> None:
+    """Runs side by side, sharing the turns left. Every one finishes (or is
+    cancelled) before an error is raised, so none is left running behind the
+    workflow."""
+    wf.sharing = len(runs)
+    try:
+        results = await asyncio.gather(*runs, return_exceptions=True)
+    finally:
+        wf.sharing = 1
     for result in results:
         if isinstance(result, BaseException):
             raise result
@@ -707,7 +715,7 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
     seen: list = []
     if finish_up_at is not None:
         run_config = _finishing_up(run_config, hooks, finish_up_at, seen)
-    turns = max(1, min(max_turns, wf.turns_left()))
+    turns = _turn_limit(wf, max_turns)
     # The reserve is kept back from the steps, for the manager's last runs.
     left = max(30.0, wf.seconds_left() - (FINISH_RESERVE_SECONDS if sandbox else 0))
     seconds = left if seconds is None else min(seconds, left)
@@ -755,6 +763,12 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
         logger.info(f"Workflow {wf.id}: {caller}: {hooks.turns} turn(s), longest prompt "
                     f"{hooks.peak_prompt_tokens} tokens")
     return outcome
+
+
+def _turn_limit(wf: Workflow, max_turns: int) -> int:
+    """A run's turns. wf.turns only rises when a run ends, so runs side by
+    side split what is left, or together they would pass WORKFLOW_MAX_TURNS."""
+    return max(1, min(max_turns, wf.turns_left() // max(1, wf.sharing)))
 
 
 def _finishing_up(run_config, hooks, at: int, seen: list):
@@ -946,9 +960,12 @@ async def _approve(wf: Workflow) -> bool:
                 return True
             until = time.monotonic() + seconds
         wf.approval = asyncio.get_running_loop().create_future()
+        # request_cancel had no future to answer until now, and acts only once.
+        if wf.cancel_reason:
+            wf.approval.set_result(("cancel", None))
         # A change the requester wrote while the plan was being written (or
         # rewritten) is an edit now: _watch only takes them once this waits.
-        early = _waiting_edit(wf)
+        early = None if wf.approval.done() else _waiting_edit(wf)
         if early is not None:
             wf.ledger.mark_presented([early.seq], 0)
             wf.approval.set_result(("edit", early))
@@ -991,11 +1008,17 @@ async def _approve(wf: Workflow) -> bool:
         await _set_state(wf, "revise")
         await _remove_buttons(wf)
         await _post(wf.thread, content="📝 Changing the plan…")
+        before = wf.plan
         wf.plan = await workflow_planning.write_plan(wf, change=event.text)
+        changed = wf.plan is not before  # a failed revision keeps the plan there was
         if wf.ledger is not None and wf.ledger.get(event.seq) is not None:
-            wf.ledger.record_decision([event.seq], "done", "The plan was changed.")
+            wf.ledger.record_decision([event.seq], *(("done", "The plan was changed.") if changed
+                                                     else ("declined", "It could not be changed.")))
         if wf.cancel_reason:
             return False
+        if not changed:
+            wf.revisions -= 1  # nothing was changed, so it costs nothing
+            await _post(wf.thread, content="I couldn't make that change, so the plan is as it was.")
         await _set_state(wf, "planned")
 
 
@@ -1080,14 +1103,19 @@ async def _post(channel, **kwargs):
 
 
 # What a helper's run shares with the workflow: the picture cap covers the
-# whole job, and the content guard's check of the request is made once.
-# Implementers run alone, so two runs never count pictures at once.
-_SHARED_KEYS = ("image_calls", "images_posted", "brain_guard")
+# whole job. Implementers run alone, so two runs never count pictures at once.
+_SHARED_KEYS = ("image_calls", "images_posted")
 
 
 def _helper_ctx(wf: Workflow, **keys) -> dict:
     """A helper's own run context: its folder, files and report are its own,
-    and two helpers run at once (see the module docstring)."""
+    and two helpers run at once (see the module docstring). The content guard's
+    check of the request is started here, on the workflow, so they share it:
+    the moderation endpoint rate-limits hard."""
+    from classes.content_guard import check_web_request
+    request = wf.ctx.get("brain_request")
+    if request and wf.ctx.get("brain_guard") is None:
+        wf.ctx["brain_guard"] = asyncio.ensure_future(check_web_request(request))
     return {**wf.ctx, "brain_report_args": None, "deliverables": [], "delivery_chosen": False,
             "skills_used": [], "skill_saved": False, **keys}
 
@@ -1122,6 +1150,18 @@ async def _run_step(wf: Workflow, step: wp.Step) -> None:
     else:
         progress = BrainProgressHooks(wf.thread, f"{step.id}: {step.brief}",
                                       stream=await progress_enabled(wf.guild_id))
+    try:
+        await _step_work(wf, step, progress, quiet)
+    except Exception:
+        # The workspace went, say. It still fails the job, but no embed or
+        # plan line is left saying it is running.
+        wf.step_states[step.id] = "failed"
+        await progress.finalize(ok=False, note=f"⚠️ {HELPER_FAILED}")
+        await _update_plan_message(wf)
+        raise
+
+
+async def _step_work(wf: Workflow, step: wp.Step, progress, quiet: bool) -> None:
     report, stopped = await _step_attempt(wf, step, progress, answer=None)
     if (report.status == brain_result.NEEDS_INPUT and not stopped and not wf.cancel_reason):
         question = report.say_to_user or "; ".join(report.facts[:2])
@@ -1238,7 +1278,7 @@ async def keep_image(ctx: dict, png: bytes) -> str:
     return f" Saved as {kept} in your folder; the user gets it with the job's files."
 
 
-async def ask_requester(wf: Workflow, question: str, options=None) -> str:
+async def ask_requester(wf: Workflow, question: str, options=None, label: str = "") -> str:
     """One question to the requester in the thread, in the persona's voice,
     with the buttons of the brain's ask_user (classes/brain_question.py). A
     button, or their next message there, answers it (_watch). One at a time,
@@ -1254,7 +1294,8 @@ async def ask_requester(wf: Workflow, question: str, options=None) -> str:
         if wf.cancel_reason or wait <= 0:
             return ""
         text = await voice_question(wf.guild_id, question)
-        message, view = await brain_question.post(wf.ctx, text, options, wait)
+        message, view = await brain_question.post(wf.ctx, text, options, wait,
+                                                  label or brain_question.HEADING_STEP)
         if message is None:
             return ""
         wf.question_after = wf.ledger.revision

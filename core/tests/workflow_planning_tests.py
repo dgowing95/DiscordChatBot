@@ -11,7 +11,7 @@ import pytest
 from agents import RunContextWrapper, function_tool
 from agents.testing import ModelStep, function_call
 
-from classes import brain, brain_inbox, brain_question, thread_inbox, workflows
+from classes import brain, brain_inbox, brain_question, thread_inbox, workflow_planning, workflows
 from classes import workflow_policy as wp
 from classes.common import Common
 from workflows_tests import (  # noqa: F401 (env is a fixture)
@@ -461,6 +461,69 @@ async def test_a_cancelled_scout_gets_no_last_report(env):
     assert wf.record["state"] == wp.CANCELLED and len(env.model.calls) == 2
 
 
+@pytest.mark.asyncio
+async def test_scouts_keep_to_the_helpers_at_once_limit(env, monkeypatch):
+    running, most = [0], [0]
+
+    @function_tool
+    async def look() -> str:
+        """Look."""
+        running[0] += 1
+        most[0] = max(most[0], running[0])
+        await asyncio.sleep(0.01)
+        running[0] -= 1
+        return "ok"
+
+    monkeypatch.setattr(workflows, "_helpers_at_once", lambda: 1)
+    env.subagent_tools = [look]
+    env.model = LaneModel([_discover("One", "Two"), _look("a"), _report(facts=("x",), call_id="b"),
+                           _look("c"), _report(facts=("y",), call_id="d"),
+                           _plan_call(("s1", "implementer", [])), _report(call_id="e"),
+                           _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    assert most[0] == 1 and len(wf.findings) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_while_waiting_for_the_workspace_starts_no_scouts(env, monkeypatch):
+    acquire = brain._acquire_workspace
+
+    @contextlib.asynccontextmanager
+    async def _cancelled_meanwhile(guild_id):
+        workflows.request_cancel(workflows.get(next(iter(workflows._RUNNING))), "stop")
+        async with acquire(guild_id) as lease:
+            yield lease
+
+    monkeypatch.setattr(brain, "_acquire_workspace", _cancelled_meanwhile)
+    env.model = LaneModel([_discover("Rail delays")])
+    wf, _ = await _start(env, automatic=False)
+    await _finish(wf)
+    assert wf.record["state"] == wp.CANCELLED
+    assert "🔎 Rail delays" not in _titles(env)
+
+
+@pytest.mark.asyncio
+async def test_a_scout_that_crashes_closes_its_embed_and_keeps_the_others_findings(env, monkeypatch):
+    work = workflow_planning._scout_work
+
+    async def _second_one_crashes(wf, subject, *args):
+        if subject == "Two":
+            raise RuntimeError("the workspace went")
+        await work(wf, subject, *args)
+
+    monkeypatch.setattr(workflow_planning, "_scout_work", _second_one_crashes)
+    env.model = LaneModel([_discover("One", "Two"), _report(facts=("x",), call_id="a"),
+                           _plan_call(("s1", "implementer", [])), _report(call_id="b"),
+                           _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    assert wf.findings == ["One: x"]
+    embed = next(m for m in env.thread.sent if m.kwargs.get("embed") is not None
+                 and m.kwargs["embed"].title == "🔎 Two")
+    assert workflows.HELPER_FAILED in embed.edits[-1]["embed"].description
+
+
 def test_two_scouts_whole_findings_are_never_cut_again():
     whole = wp.MAX_SUBJECT_CHARS + wp.SCOUT_FACTS * (wp.SCOUT_FACT_CHARS + 1) + len("- : ")
     assert whole <= wp.MAX_FINDINGS_CHARS // wp.MAX_SCOUTS
@@ -525,6 +588,7 @@ async def test_a_button_answers_and_its_line_shows_on_the_question(env):
     await _finish(wf)
     assert wf.answers == [("Metric or imperial?", "Yes")]
     assert "<@5>" in question.kwargs["view"].note
+    assert question.kwargs["view"].text.startswith("-# Planning needs more information\n")
     assert question.edits[-1]["view"].note == "✅ Yes"
 
 

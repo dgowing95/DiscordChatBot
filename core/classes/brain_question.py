@@ -30,6 +30,10 @@ OPTION_CHARS = 80  # Discord's button label limit
 ANSWER_CHARS = 1000
 MAX_QUESTION_CHARS = 1800
 HEADING_CHARS = 120  # a longer question reads badly in a heading's large type
+# The small line above a question, so it is clear why it was asked.
+HEADING_CHAT = "Needs more information"
+HEADING_PLAN = "Planning needs more information"
+HEADING_STEP = "This step needs more information"
 YOU_DECIDE = "You decide"
 # What the "You decide" button hands the brain (classes/brain.py maps it).
 YOU_DECIDE_ANSWER = "(you decide)"
@@ -52,9 +56,11 @@ def clean_options(options) -> list[str]:
     return labels[:MAX_OPTIONS]
 
 
-def question_text(text: str) -> str:
-    """The question as the card shows it: a heading when it is short."""
-    return f"### ❓ {text}" if len(text) <= HEADING_CHARS and "\n" not in text else f"❓ {text}"
+def question_text(text: str, label: str = "") -> str:
+    """The question as the card shows it: under its label, and in large type
+    when it is short."""
+    shown = f"### ❓ {text}" if len(text) <= HEADING_CHARS and "\n" not in text else f"❓ {text}"
+    return f"-# {label}\n{shown}" if label else shown
 
 
 class AnswerModal(discord.ui.Modal, title="Your answer"):
@@ -72,8 +78,9 @@ class AnswerModal(discord.ui.Modal, title="Your answer"):
 class QuestionView(Card):
     """The question and its buttons. `question_id` is set once it is posted."""
 
-    def __init__(self, user_id: int, options, timeout: float, text: str = "", note: str = ""):
-        super().__init__(question_text(text), note=note, timeout=timeout)
+    def __init__(self, user_id: int, options, timeout: float, text: str = "", note: str = "",
+                 label: str = ""):
+        super().__init__(question_text(text, label), note=note, timeout=timeout)
         self.user_id = int(user_id)
         self.question_id = None
         self.closed = False
@@ -129,12 +136,12 @@ class QuestionView(Card):
             await interaction.response.send_message("This question is closed.", ephemeral=True)
 
 
-async def post(ctx: dict, text: str, options, timeout: float):
+async def post(ctx: dict, text: str, options, timeout: float, label: str = HEADING_CHAT):
     """Posts the question (a reply to the request, or a mention when there is
     no source message). Returns (message, view), or (None, None)."""
     message = ctx.get("original_message")
     view = QuestionView(ctx["user_id"], options, timeout, text=str(text)[:MAX_QUESTION_CHARS],
-                        note="" if message is not None else f"<@{ctx['user_id']}>")
+                        note="" if message is not None else f"<@{ctx['user_id']}>", label=label)
     try:
         if message is not None:
             # A request deleted meanwhile still gets its question, just

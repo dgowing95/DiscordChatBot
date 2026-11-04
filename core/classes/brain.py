@@ -423,7 +423,9 @@ async def _workspace_allowed(context: dict) -> bool:
         from classes.content_guard import check_web_request
         task = asyncio.ensure_future(check_web_request(request))
         context["brain_guard"] = task
-    allowed, reason = await task
+    # Shielded: others share this task, and awaiting one directly would cancel
+    # it with the caller. Cancelled, it then fails the next helper to read it.
+    allowed, reason = await asyncio.shield(task)
     if not allowed:
         logger.warning(f"Brain: workspace use blocked by content guard: {reason}")
     return allowed

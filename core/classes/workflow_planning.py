@@ -41,7 +41,7 @@ Why it works this way:
 """
 import logging
 
-from classes import brain_result, llm_lanes, workflows
+from classes import brain_question, brain_result, llm_lanes, workflows
 from classes import workflow_policy as wp
 from classes.brain_result import BrainReport
 from classes.tool_embeds import trim
@@ -182,7 +182,7 @@ async def _discover(wf, raw) -> None:
 
     wf.scouted = True
     subjects = wp.clean_scout_subjects(raw)
-    if not subjects:
+    if not subjects or wf.cancel_reason:
         return
     await workflows._post(wf.thread, content=DISCOVERY_NOTE + (
         "" if wf.record["automatic"] else PLAN_PING_NOTE))
@@ -190,23 +190,27 @@ async def _discover(wf, raw) -> None:
         async with brain._acquire_workspace(wf.guild_id) as lease:
             wf.lease = lease
             try:
-                await workflows._together(_scout(wf, number, subject)
-                                          for number, subject in enumerate(subjects, 1))
+                limit = workflows._helpers_at_once()
+                for start in range(0, len(subjects), limit):
+                    if wf.cancel_reason:  # waiting for the workspace is not a run to stop
+                        break
+                    await workflows._together(wf, [
+                        _scout(wf, number, subject) for number, subject
+                        in enumerate(subjects[start:start + limit], start + 1)])
             finally:
                 wf.lease = None
     except Exception as e:
         logger.warning(f"Workflow {wf.id}: discovery could not run: {e}")
-        wf.findings.append("Discovery could not run, so this rests on the request alone.")
+        if not wf.findings:
+            wf.findings.append("Discovery could not run, so this rests on the request alone.")
     wf.record["findings"] = list(wf.findings)
 
 
 async def _scout(wf, number: int, subject: str) -> None:
     """One scout: its own folder and context, a quick look, a few facts."""
-    from classes import metrics
     from classes.brain import prepare_job
     from classes.brain_progress import HelperProgress
     from classes.common import QuietChannel
-    from classes.tool_functions import get_current_datetime
 
     job_dir, out_dir, _marker = await prepare_job(wf.lease, f"c{wf.thread.id}-w{wf.id}-d{number}")
     ctx = workflows._helper_ctx(wf, session=wf.lease.session, workspace_root=wf.lease.root,
@@ -214,6 +218,17 @@ async def _scout(wf, number: int, subject: str) -> None:
                                 channel=QuietChannel(wf.thread))
     progress = HelperProgress(wf.thread, f"🔎 {subject}", max_turns=wp.SCOUT_MAX_TURNS)
     await progress.start()
+    try:
+        await _scout_work(wf, subject, ctx, job_dir, progress)
+    except Exception:
+        await progress.finalize(ok=False, note=f"⚠️ {workflows.HELPER_FAILED}")
+        raise
+
+
+async def _scout_work(wf, subject: str, ctx: dict, job_dir: str, progress) -> None:
+    from classes import metrics
+    from classes.tool_functions import get_current_datetime
+
     parts = [f"The job being planned (a helper does it later): {wf.record['request']}",
              f"Find out: {wp.scout_question(subject)}"]
     if wf.record.get("inputs"):
@@ -259,7 +274,8 @@ async def _ask(wf, raw) -> None:
 
     wf.asked = True
     for question, options in wp.clean_plan_questions(raw):
-        answer = await workflows.ask_requester(wf, question, options)
+        answer = await workflows.ask_requester(wf, question, options,
+                                               brain_question.HEADING_PLAN)
         if wf.cancel_reason:
             return
         metrics.inc_workflow_plan_question("answered" if answer else "unanswered")
