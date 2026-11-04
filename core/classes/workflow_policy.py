@@ -152,7 +152,7 @@ def _text(value, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def _step_id(value) -> str:
+def clean_step_id(value) -> str:
     """A step's id, safe in a folder name (workflows.step_job_id): a model
     writes it, and "../shared" must not reach a path."""
     text = "".join(str(value or "").split())
@@ -188,7 +188,7 @@ def validate_plan(raw, *, max_steps: int, request: str = "") -> tuple["Plan | No
         if not isinstance(item, dict):
             problems.append(f"Step {index} is not an object.")
             continue
-        step_id = _step_id(item.get("id")) or f"s{index}"
+        step_id = clean_step_id(item.get("id")) or f"s{index}"
         if any(s.id == step_id for s in steps):
             problems.append(f"Two steps have the id {step_id}.")
             continue
@@ -201,9 +201,14 @@ def validate_plan(raw, *, max_steps: int, request: str = "") -> tuple["Plan | No
         if not brief:
             problems.append(f"Step {step_id} has no brief.")
             continue
-        depends = [_step_id(d) for d in _list(item.get("depends_on"))]
-        steps.append(Step(id=step_id, role=role, brief=brief,
-                          depends_on=[d for d in depends if d]))
+        depends = []
+        for dep in _list(item.get("depends_on")):
+            if clean_step_id(dep):
+                depends.append(clean_step_id(dep))
+            elif str(dep or "").strip():  # a blank entry is no dependency at all
+                problems.append(f"Step {step_id} depends on {str(dep)[:40]!r}, which is not a "
+                                "usable step id.")
+        steps.append(Step(id=step_id, role=role, brief=brief, depends_on=depends))
     ids = {s.id for s in steps}
     for step in steps:
         for dep in step.depends_on:

@@ -1083,3 +1083,41 @@ def test_a_step_id_cannot_leave_its_folder():
     assert problems == []
     assert [s.id for s in plan.steps] == ["shared", "a-b"]
     assert plan.steps[1].depends_on == ["shared"]
+
+
+def _after_step(step_id):
+    done = wp.Step(id=step_id, role="researcher", brief="b")
+    return SimpleNamespace(id="w1", results={step_id: object()}, record={"request": "r"},
+                           plan=wp.Plan(goal="g", steps=[done]))
+
+
+def test_a_done_step_is_known_by_its_cleaned_id_when_the_plan_is_revised():
+    plan, unusable = workflows._revised_steps(_after_step("step-1"), [
+        {"id": "step.1", "role": "researcher", "brief": "b"},
+        {"id": "step.2", "role": "implementer", "brief": "c", "depends_on": ["step.1"]}])
+    assert not unusable
+    assert [s.id for s in plan.steps] == ["step-2"]
+    assert plan.steps[0].depends_on == []
+
+
+def test_a_new_step_with_an_unusable_id_does_not_take_a_done_steps_id():
+    plan, unusable = workflows._revised_steps(_after_step("s1"), [
+        {"id": "研究", "role": "implementer", "brief": "c"}])
+    assert not unusable
+    assert [s.id for s in plan.steps] == ["s2"]
+
+
+def test_a_dependency_with_an_unusable_id_is_a_problem_not_dropped():
+    plan, problems = wp.validate_plan({"goal": "g", "steps": [
+        {"id": "a", "role": "researcher", "brief": "b"},
+        {"id": "b", "role": "implementer", "brief": "c", "depends_on": ["研究"]}]}, max_steps=4)
+    assert plan is None
+    assert any("not a usable step id" in p for p in problems)
+
+
+def test_a_blank_dependency_is_ignored():
+    plan, problems = wp.validate_plan({"goal": "g", "steps": [
+        {"id": "a", "role": "researcher", "brief": "b", "depends_on": ["", " ", None]}]},
+        max_steps=4)
+    assert problems == []
+    assert plan.steps[0].depends_on == []

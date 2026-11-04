@@ -1136,22 +1136,22 @@ def _revised_steps(wf: Workflow, items) -> tuple[wp.Plan | None, bool]:
     steps = []
     for item in items if isinstance(items, list) else []:
         if isinstance(item, dict):
-            if str(item.get("id") or "").strip() in wf.results:
+            if wp.clean_step_id(item.get("id")) in wf.results:
                 continue
             item = dict(item)
             deps = item.get("depends_on")
             deps = deps if isinstance(deps, list) else [deps] if deps else []
-            item["depends_on"] = [d for d in deps if str(d).strip() not in wf.results]
+            item["depends_on"] = [d for d in deps if wp.clean_step_id(d) not in wf.results]
         steps.append(item)
     if not steps:
         return None, False
     # validate_plan names a step with no id by its place in this list, which
     # could be a done step's id: it would rerun in that step's folder.
-    taken = set(wf.results) | {str(s.get("id") or "").strip() for s in steps
+    taken = set(wf.results) | {wp.clean_step_id(s.get("id")) for s in steps
                                if isinstance(s, dict)}
     number = len(wf.results)
     for item in steps:
-        if isinstance(item, dict) and not str(item.get("id") or "").strip():
+        if isinstance(item, dict) and not wp.clean_step_id(item.get("id")):
             number += 1
             while f"s{number}" in taken:
                 number += 1
