@@ -251,7 +251,7 @@ async def test_the_question_is_a_reply_with_buttons_and_the_answer_is_returned(p
     await _until(lambda: brain_inbox.waiting(QUESTION_ID))
     reply = ctx["channel"].send.await_args
     assert reply.kwargs["view"].text == (
-        "-# Needs more information\n### ❓ Bar or line chart?") and not reply.args
+        "-# Needs more information\n### Bar or line chart?") and not reply.args
     # A reply to the request, posted even if the request was deleted.
     assert reply.kwargs["reference"] == "ref"
     ctx["original_message"].to_reference.assert_called_once_with(fail_if_not_exists=False)
@@ -281,7 +281,7 @@ async def test_no_source_message_posts_with_a_mention(plain_voice):
     task = asyncio.create_task(_ask(ctx))
     await _until(lambda: brain_inbox.waiting(QUESTION_ID))
     view = ctx["channel"].send.await_args.kwargs["view"]
-    assert view.text.endswith("### ❓ Bar or line chart?") and view.note == "<@5>"
+    assert view.text.endswith("### Bar or line chart?") and view.note == "<@5>"
     brain_inbox.deliver(QUESTION_ID, 5, "bar")
     assert await task == "They answered: bar"
 

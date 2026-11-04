@@ -38,7 +38,7 @@ the same objects:
 | review      | submit_review (the thread's messages between steps)          |
 | finish      | report                                                        |
 | researcher  | web, fetch, message search/read, attach_file, save_messages_to_file, report (+ Shell) |
-| implementer | fetch, generate_image, attach_file, report (+ Shell)          |
+| implementer | fetch, generate_image, attach_file, save_messages_to_file, report (+ Shell) |
 
 No workflow agent can save memories, change the personality, post polls or
 events, set automations, ask inline questions or start another workflow
@@ -117,7 +117,7 @@ def brain_tools(*, automatic: bool = False, voice: bool = False, workflows: bool
         tools = [fetch_url]
         if image_generation_enabled():
             tools.append(generate_image)
-        return tools + [attach_file, report]
+        return tools + [attach_file, save_messages_to_file, report]
 
     tools = [web_search, fetch_url, *message_search_tools(), check_polls, create_poll,
              *event_tools(), change_personality]

@@ -59,7 +59,7 @@ def clean_options(options) -> list[str]:
 def question_text(text: str, label: str = "") -> str:
     """The question as the card shows it: under its label, and in large type
     when it is short."""
-    shown = f"### ❓ {text}" if len(text) <= HEADING_CHARS and "\n" not in text else f"❓ {text}"
+    shown = f"### {text}" if len(text) <= HEADING_CHARS and "\n" not in text else text
     return f"-# {label}\n{shown}" if label else shown
 
 

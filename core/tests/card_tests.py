@@ -78,8 +78,8 @@ def _posted(view):
 
 
 def test_text_of_reads_a_card_back():
-    message = _posted(Card("### ❓ Which one?", note="<@5>", rows=[[_button()]]))
-    assert text_of(message) == "### ❓ Which one?\n-# <@5>"
+    message = _posted(Card("### Which one?", note="<@5>", rows=[[_button()]]))
+    assert text_of(message) == "### Which one?\n-# <@5>"
 
 
 @pytest.mark.parametrize("message", [
@@ -91,7 +91,7 @@ def test_text_of_is_empty_for_any_other_message(message):
 def test_the_bot_sees_in_the_history_what_it_asked():
     handler = MessageHandler.__new__(MessageHandler)
     handler.client = SimpleNamespace(user=SimpleNamespace(id=42))
-    message = _posted(Card("### ❓ Which one?", rows=[[_button()]]))
+    message = _posted(Card("### Which one?", rows=[[_button()]]))
     message.author = SimpleNamespace(id=42, name="bot")
     message.attachments, message.embeds = [], []
     message.poll, message.type = None, discord.MessageType.default
@@ -112,11 +112,11 @@ def test_a_question_has_green_choices_then_answer_and_you_decide_on_their_own_ro
 
 def test_a_label_sits_small_above_the_question_and_stays_when_it_closes():
     view = brain_question.QuestionView(5, [], 60, text="Which?", label="Planning needs more")
-    assert view.text == "-# Planning needs more\n### ❓ Which?"
+    assert view.text == "-# Planning needs more\n### Which?"
     assert view.finished("✅ That").text == view.text
 
 
 def test_a_short_question_is_a_heading_and_a_long_one_is_not():
-    assert brain_question.question_text("Which?") == "### ❓ Which?"
-    assert brain_question.question_text("x" * 200).startswith("❓ x")
-    assert brain_question.question_text("One\nTwo") == "❓ One\nTwo"
+    assert brain_question.question_text("Which?") == "### Which?"
+    assert brain_question.question_text("x" * 200) == "x" * 200
+    assert brain_question.question_text("One\nTwo") == "One\nTwo"
