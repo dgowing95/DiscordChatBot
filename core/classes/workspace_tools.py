@@ -13,7 +13,7 @@ What lives here:
     thread gate and checkpoints the steering code needs;
   - attach_file and the delivery helpers (_deliver: what the user receives);
   - writing chat files into in/ (_write_inputs);
-  - the thread machinery Tier 3 reuses (ensure_sandbox_thread, ask_user,
+  - the thread machinery Tier 3 reuses (ensure_work_thread, ask_in_thread,
     respond_to_updates, say_in_thread, send_preview_to_thread, _converse).
     Nothing calls those until phase 5; they are kept, with their tests, as
     the named exception to "delete, don't deprecate".
@@ -24,7 +24,6 @@ pure helpers below are testable without them.
 import logging
 import io
 import json
-import os
 import posixpath
 import re
 import time
@@ -45,7 +44,7 @@ from agents import (
     set_tracing_disabled,
 )
 from classes import workspace_inputs
-from classes.sandbox_conversation import (
+from classes.workflow_conversation import (
     MAX_CONTINUATIONS,
     MIN_CONTINUATION_TURNS,
     SandboxConversation,
@@ -56,7 +55,6 @@ set_tracing_disabled(True)
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_ASK_USER_TIMEOUT_SECONDS = 300
 
 # Directory (relative to the run's job folder, its working directory) where
 # the brain saves anything it means to return as a file. It is not
@@ -85,20 +83,13 @@ RUN_MARKER_NAME = ".dcb_run_start"
 MAX_ARTIFACT_BYTES = 25_000_000
 
 
-def _positive_int(raw: str | None, default: int) -> int:
-    try:
-        value = int(str(raw).strip())
-        return value if value > 0 else default
-    except (TypeError, ValueError):
-        return default
-
-
-def sandbox_ask_user_timeout() -> int:
-    """Max seconds the ask_user tool waits for a reply before telling the
-    model to proceed on its own (SANDBOX_ASK_USER_TIMEOUT, default 300). Any
-    single call also never waits past the run's own remaining
-    time budget — see ask_user's `deadline` handling."""
-    return _positive_int(os.environ.get("SANDBOX_ASK_USER_TIMEOUT"), DEFAULT_ASK_USER_TIMEOUT_SECONDS)
+def thread_ask_timeout() -> int:
+    """Max seconds ask_in_thread waits for a reply before telling the model
+    to proceed on its own (WORKFLOW_ASK_TIMEOUT, default 300). Any single
+    call also never waits past the run's own remaining time budget — see
+    ask_in_thread's `deadline` handling."""
+    from classes import workflow_policy
+    return workflow_policy.ask_timeout()
 
 
 def _tolerant_tool_invoke(original_invoke):
@@ -154,7 +145,7 @@ def _conversation(ctx):
 
 def _gated_invoke(original_invoke, tool_name: str, *, busy: bool = False):
     """Wraps a tool's on_invoke_tool so it only runs when no thread input is
-    waiting for an answer — see sandbox_conversation's "side effects are
+    waiting for an answer — see workflow_conversation's "side effects are
     gated". A refused call returns the refusal as its result and has no
     side effect. busy marks the run as executing while it runs, which is
     what lets main.py say "received, I'll review this before my next step"
@@ -347,17 +338,17 @@ def _configure_shell_tools(toolset) -> None:
 def _thread_name(task: str) -> str:
     """A Discord thread name derived from the task (Discord caps thread
     names at 100 chars)."""
-    prefix = "🐳 "
+    prefix = "🧵 "
     name = " ".join((task or "").split())
     if not name:
-        return f"{prefix}Sandbox"
+        return f"{prefix}Workflow"
     limit = 100 - len(prefix)
     if len(name) > limit:
         name = name[: limit - 1] + "…"
     return f"{prefix}{name}"
 
 
-async def ensure_sandbox_thread(original_message, task: str):
+async def ensure_work_thread(original_message, task: str):
     """Resolves the Discord channel a sandbox run should post to.
 
     Returns (channel, thread_created). If original_message is already inside
@@ -407,7 +398,7 @@ def _ask_user_context(wrapper: RunContextWrapper[dict]) -> dict:
 
 
 @function_tool
-async def ask_user(
+async def ask_in_thread(
     wrapper: RunContextWrapper[dict],
     question: str,
     blocking: bool = True,
@@ -431,7 +422,7 @@ async def ask_user(
     if ctx.get("thread") is None or conversation is None:
         return "No interactive thread is available right now — proceed using your best judgement."
 
-    timeout = float(sandbox_ask_user_timeout())
+    timeout = float(thread_ask_timeout())
     deadline = ctx.get("deadline")
     if deadline is not None:
         remaining = deadline - time.monotonic()
@@ -502,7 +493,7 @@ async def say_in_thread(wrapper: RunContextWrapper[dict], text: str) -> str:
     if not text:
         return "Nothing to send (the message was empty)."
     try:
-        await thread.send(f"🐳 {text[:1900]}")
+        await thread.send(f"🧵 {text[:1900]}")
     except Exception as e:
         logger.warning(f"Sandbox say_in_thread: failed to send: {e}")
         return "Could not post that to the thread — carry on with the task."
@@ -720,7 +711,7 @@ def build_sandbox_run_config(client, session, input_filter=None, group_id=None) 
     it down, so the workspace, cwd and any running process carry over.
 
     input_filter is SandboxConversation.input_filter — the single path by
-    which thread messages reach the model (see sandbox_conversation.py).
+    which thread messages reach the model (see workflow_conversation.py).
 
     group_id is the same for every pass of one run, so the SDK files a run's
     continuations together rather than as separate runs.

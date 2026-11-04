@@ -398,7 +398,7 @@ class TextLLMHandler:
 
     def __init__(self, messages, guild_id, original_message, client=None,
                  actor_id=None, channel=None, automatic=False, voice=False, request_text=None,
-                 bot_name=None, followup=False, unprompted=False):
+                 bot_name=None, followup=False, unprompted=False, no_tools=False):
         self.original_message = original_message
         self.messages = messages
         self.guild_id = guild_id
@@ -418,6 +418,9 @@ class TextLLMHandler:
         # A reply the bot was not asked for (the random reply chance): the
         # brain gets tighter limits and asks no questions (brain_policy).
         self.unprompted = unprompted
+        # No tools at all: the reply when a workflow ends only voices its
+        # result (classes/workflows.reply_done).
+        self.no_tools = no_tools
         # A turn in a voice call: spoken instructions, thinking off, and no
         # source message (original_message is None; request_text is what the
         # speaker said, for tools that compare their result against it).
@@ -548,7 +551,7 @@ class TextLLMHandler:
     async def get_client(self):
         main_model_client = _get_main_model_client()
         voice = getattr(self, "voice", False)
-        tools = persona_tools()
+        tools = [] if getattr(self, "no_tools", False) else persona_tools()
         instructions = self.system
         if voice:
             # After the personality, and the same for the whole call, so it

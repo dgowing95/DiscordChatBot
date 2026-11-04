@@ -178,12 +178,15 @@ def rank(skills, now: float) -> list:
     return sorted(skills, key=lambda s: (tuple(-v for v in score(s)), s.get("name", "")))
 
 
-def render_index(skills, limit: int, now: float) -> str:
+INDEX_HEADER = "Skills saved in this server (use_skill to open one):"
+
+
+def render_index(skills, limit: int, now: float, header: str = INDEX_HEADER) -> str:
     """The brain's list of this server's skills ('' when there are none)."""
     ordered = rank(skills, now)
     if not ordered:
         return ""
-    lines = ["Skills saved in this server (use_skill to open one):"]
+    lines = [header]
     for skill in ordered[:limit]:
         lines.append(f"- {skill['name']}: {one_line(skill.get('description'), DESCRIPTION_CHARS)}")
     if len(ordered) > limit:

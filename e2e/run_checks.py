@@ -54,6 +54,9 @@ IMAGE_TIMEOUT = 420
 # A workspace task: the container may start cold (and its image be pulled),
 # then a brain run of a few model calls.
 WORKSPACE_TIMEOUT = 420
+# A whole Tier 3 workflow: plan, the approval wait (WORKFLOW_PLAN_APPROVAL_SECONDS
+# is short here), its steps and the reply. start_stack.sh caps it with WORKFLOW_TIMEOUT.
+WORKFLOW_TIMEOUT = 1200
 READY_TIMEOUT = 600
 
 LOG_DIR = Path(os.environ.get("E2E_LOG_DIR", Path(__file__).parent / "logs"))
@@ -157,6 +160,7 @@ class Run:
         self.channel_id = ""
         self.webhook_id = ""
         self.thread_id = ""
+        self.last_trigger_id = ""
         self.redis = redis.Redis(host="127.0.0.1", decode_responses=True)
 
     async def setup(self) -> None:
@@ -207,6 +211,7 @@ class Run:
                     and have.get("guild_id") == self.guild_id}
         before = await outcomes()
         trigger = await self.post(f"<@{self.bot_id}> {content}")
+        self.last_trigger_id = trigger["id"]
 
         async def handled():
             now = await outcomes()
@@ -224,6 +229,19 @@ class Run:
         if not mine:
             raise CheckFailed("the bot handled the message but posted nothing")
         return mine
+
+    async def messages_after(self, message_id: str) -> list[dict]:
+        """Every message after an id, oldest first: a workflow can post more
+        than one page of them."""
+        found = []
+        while True:
+            page = await self.discord.request(
+                "GET", f"/channels/{self.thread_id}/messages",
+                params={"after": message_id, "limit": 100})
+            found.extend(page)
+            if len(page) < 100:
+                return sorted(found, key=lambda m: int(m["id"]))
+            message_id = max(page, key=lambda m: int(m["id"]))["id"]
 
     async def case(self, name: str, check) -> None:
         started = time.monotonic()
@@ -304,6 +322,29 @@ class Run:
                     return f"{attachment['filename']}, {attachment['size']} bytes"
         raise CheckFailed("no .csv attachment in the reply")
 
+    async def workflow(self):
+        """A Tier 3 workflow, by structure only: the brain hands the job over,
+        the plan is posted, no one presses Approve (a webhook cannot), so it
+        starts after the short approval wait, and the end is posted."""
+        ended = lambda: metric(self.session, "discord_bot_workflows_total")
+        before = await ended()
+        messages = await self.ask(
+            "Start a workflow for this big job: research the diameters of Jupiter's four "
+            "largest moons from two sources each, then write a moons.md report with a table.")
+        reply = " ".join(m["content"] for m in messages)
+        await wait_until(lambda: _gt(ended(), before), WORKFLOW_TIMEOUT, "the workflow to end")
+        # From the trigger, not the reply: the plan is posted by the workflow's
+        # own task, so it may come before the reply. `after` is exclusive.
+        posted = await self.messages_after(self.last_trigger_id)
+        titles = [e.get("title", "") for m in posted if m["author"]["id"] == self.bot_id
+                  for e in m.get("embeds", [])]
+        if not any(t.startswith("🧵 Plan") for t in titles):
+            raise CheckFailed(f"no plan embed was posted (embeds: {titles})")
+        closing = [t for t in titles if t.startswith("🧵 Workflow")]
+        if not closing:
+            raise CheckFailed(f"no closing embed was posted (embeds: {titles})")
+        return f"{closing[-1]}; reply: {_quote(reply, 80)}"
+
     async def slash_commands(self):
         # From this run's log, not GET /applications/.../commands: the
         # registered set outlives the process, so an earlier run's sync
@@ -311,7 +352,7 @@ class Run:
         synced = await wait_until(
             lambda: set(re.findall(r"Command '([^']+)' synced", core_log())),
             120, "the slash commands to sync")
-        expected = {"help", "whats_new", "system", "generate_image", "workspace"}
+        expected = {"help", "whats_new", "system", "generate_image", "workspace", "task"}
         if self.voice_channel_id:
             expected.add("voice")
         missing = expected - synced
@@ -438,6 +479,7 @@ async def main() -> int:
             # channel history.)
             await run.case("poll", run.poll)
             await run.case("workspace task", run.workspace)
+            await run.case("workflow", run.workflow)
             await run.case("image", run.image)
             if voice_channel_id:
                 await run.case("voice call", run.voice)

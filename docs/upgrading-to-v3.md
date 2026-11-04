@@ -40,6 +40,7 @@ unless the note says otherwise.
 | `SANDBOX_INPUT_MAX_BYTES` | `WORKSPACE_INPUT_MAX_BYTES` | Default unchanged (25 MB) |
 | `SANDBOX_MAX_TURNS` | `BRAIN_MAX_TURNS` | **Default 10 → 100**, and only a backstop now: the loop guard stops a stuck brain call. Choose again rather than copy the old value |
 | `SANDBOX_TIMEOUT` | `BRAIN_TIMEOUT` | **Default 600 → 1800** seconds, a backstop like `BRAIN_MAX_TURNS`; lane waits count towards it |
+| `SANDBOX_ASK_USER_TIMEOUT` | `WORKFLOW_ASK_TIMEOUT` | Default unchanged (300); used by workflows only |
 | `LLAMA_ARG_CACHE_TYPE_K` | `LLAMA_CACHE_TYPE_K` | docker compose only; compose passes it on as llama.cpp's own `LLAMA_ARG_CACHE_TYPE_K` |
 | `LLAMA_ARG_CACHE_TYPE_V` | `LLAMA_CACHE_TYPE_V` | docker compose only, as above |
 
@@ -155,6 +156,14 @@ persona to put in its own words. What users notice:
   day the bot tidies them: it merges two that do the same job, retires ones unused for 60 days and
   sharpens unclear descriptions (🗑️ / 📗 embeds with "tidy-up"; each can be undone).
 - `/help` describes the brain's tools; the "Run code" entry is now "Code, files and charts".
+- **Big jobs run as workflows** in a thread of their own (`docs/workflows.md`). The brain hands
+  one over when a job has many parts (a report from many sources, a small program), or anyone can
+  start one with `/task`. A plan is posted first, with Approve / Edit / Cancel for the person who
+  asked; no answer in 15 minutes and it starts anyway. The steps run one at a time, files arrive in
+  the thread and in the channel, and the bot replies in the channel when it ends. Saying just
+  "stop" in the thread, or Cancel, stops it. One runs per server at a time; a restart stops it
+  (the thread says so). Thread state is kept under `dcb:workflows:v1:*` and
+  `dcb:workflow_conversation:*` (the old `dcb:sandbox_conversation:*` keys simply expire).
 - A brain call runs in the server's workspace, so **every tool request now needs Docker**, not just
   code tasks. With Docker down the bot still chats but cannot search, remember or draw.
 
@@ -200,6 +209,7 @@ time a call waits for a slot does not count toward its `*_CALL_TIMEOUT_SECONDS`.
 | `sandbox.inputMaxBytes` | `brain.workspace.inputMaxBytes` | |
 | `sandbox.maxTurns` | `brain.maxTurns` | **Default 10 → 100**, see `BRAIN_MAX_TURNS` |
 | `sandbox.timeout` | `brain.timeout` | **Default 600 → 1800**, see `BRAIN_TIMEOUT` |
+| `sandbox.askUserTimeout` | `workflows.askTimeout` | The last `sandbox.` key: the `sandbox:` block is gone |
 | `imagePullSecrets`, `podAnnotations`, `podLabels`, `resources` | removed | Chart scaffolding no template ever used; setting them never had an effect. Per-pod resources are `coreResources`, `llamacppResources`, … as before |
 
 New keys: `contentGuard.enabled` (default true) and `contentGuard.debug` (default false) now reach core
@@ -232,8 +242,9 @@ If you bring your own Secret (`existingSecret`), rename its keys:
 | `OPENAI_API_KEY` | `CONTENT_GUARD_API_KEY` |
 | `SANDBOX_LLM_API_KEY` | `BRAIN_LLM_API_KEY` |
 
-New optional keys: `LLM_API_KEY`, for an LLM server outside the chart that checks a key, and
-`PERSONA_LLM_API_KEY`, for a persona on a server of its own.
+New optional keys: `LLM_API_KEY`, for an LLM server outside the chart that checks a key,
+`PERSONA_LLM_API_KEY`, for a persona on a server of its own, and `SUBAGENT_LLM_API_KEY`, for
+workflow helpers on a server of their own.
 `DISCORD_TOKEN`, `IMAGE_PROMPT_LLM_API_KEY`, `IMAGE_REVIEW_LLM_API_KEY` and `RESEARCH_LLM_API_KEY` are
 unchanged.
 
@@ -249,7 +260,7 @@ unchanged.
 | `discord_bot_workspaces_warm` | New: workspaces running in this core process |
 | `discord_bot_workspace_snapshot_seconds`, `discord_bot_workspace_snapshot_bytes`, `discord_bot_workspace_snapshot_failures_total{reason}` | New: each save's time and size, and saves that failed (`too_large`, `timeout`, `error`) |
 | `discord_bot_workspace_reaped_total` | New: leftover workspace containers removed |
-| `discord_bot_brain_calls_total{tier,status}`, `discord_bot_brain_call_seconds{tier,status}` | New: each brain call and how long it took (`done`, `partial`, `needs_input`, `failed`) |
+| `discord_bot_brain_calls_total{tier,status}`, `discord_bot_brain_call_seconds{tier,status}` | New: each brain call and how long it took (`done`, `partial`, `needs_input`, `failed`, `started_workflow`) |
 | `discord_bot_brain_turns`, `discord_bot_brain_tool_calls` | New: model turns and tool calls per brain call |
 | `discord_bot_brain_loop_stops_total{kind}` | New: brain calls the loop guard stopped (`repeat`, `stale`) |
 | `discord_bot_brain_facts_dropped_total` | New: facts the brain marked must-keep that the persona's reply left out |
@@ -261,3 +272,7 @@ unchanged.
 | `discord_bot_skill_curator_changes_total{kind}`, `discord_bot_skills_live` | New: the tidy-up's changes (`merge`, `retire`, `describe`; `refused` when a skill changed meanwhile or a check said no; `failed` passes), and live skills on every server together |
 | `discord_bot_queue_workers` | New: queue workers running, spares for brain calls included |
 | `discord_bot_llm_call_seconds{caller="brain"}` | New caller: the brain's model calls (the persona's stay `main`) |
+| `discord_bot_sandbox_thread_messages_total`, `discord_bot_sandbox_input_presentation_seconds`, `discord_bot_sandbox_input_response_seconds`, `discord_bot_sandbox_stale_actions_blocked_total`, `discord_bot_sandbox_questions_total`, `discord_bot_sandbox_unresolved_input_total`, `discord_bot_sandbox_continuations_total` | Renamed `discord_bot_workflow_*` (same labels): thread messages now go to workflows. Update dashboards |
+| `discord_bot_workflows_total{trigger,end_state}`, `discord_bot_workflow_seconds{end_state}`, `discord_bot_workflow_subagents`, `discord_bot_workflow_turns` | New: each workflow (`brain`, `slash`, `automation`; `done`, `partial`, `failed`, `cancelled`), its time, steps and model turns |
+| `discord_bot_workflow_plan_approval_total{outcome}`, `discord_bot_workflows_running` | New: how plans were approved (`approved`, `edited`, `cancelled`, `timeout`, `auto`) and workflows running now |
+| `discord_bot_llm_call_seconds{caller="workflow_manager"\|"workflow_subagent"}` | New callers: a workflow's manager and helpers |

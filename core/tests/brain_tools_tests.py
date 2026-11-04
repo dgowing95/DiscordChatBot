@@ -73,3 +73,34 @@ def test_create_event_keeps_its_poll_then_follow_up_advice(all_on):
 
 def test_the_persona_has_exactly_ask_brain():
     assert [t.name for t in persona_tools()] == ["ask_brain"]
+
+
+# --------------------------- Tier 3 ---------------------------
+
+def test_start_workflow_is_offered_only_when_tier_3_is_allowed_and_never_in_voice(all_on):
+    assert "start_workflow" not in _names()
+    assert _names(workflows=True)[-2:] == ["start_workflow", "report"]  # before report
+    assert "start_workflow" in _names(automatic=True, workflows=True)
+    assert "start_workflow" not in _names(voice=True, workflows=True)
+
+
+def test_a_workflows_agents_get_their_own_short_lists(all_on, monkeypatch):
+    monkeypatch.setenv("SKILLS_ENABLED", "1")
+    assert _names(mode="manager") == ["web_search", "fetch_url", "search_messages",
+                                      "read_messages_around", "search_skills", "submit_plan"]
+    assert _names(mode="review") == ["submit_review"]
+    assert _names(mode="finish") == ["report"]
+    assert _names(mode="researcher") == ["web_search", "fetch_url", "search_messages",
+                                         "read_messages_around", "attach_file",
+                                         "save_messages_to_file", "report"]
+    assert _names(mode="implementer") == ["fetch_url", "generate_image", "attach_file", "report"]
+    # Nothing that belongs to a conversation, and no way to start another.
+    for mode in ("manager", "review", "finish", "researcher", "implementer"):
+        names = set(_names(mode=mode))
+        assert not names & (MEMORY | EVENTS | {"ask_user", "start_workflow", "create_poll",
+                                               "change_personality"})
+
+
+def test_an_unknown_mode_is_an_error():
+    with pytest.raises(ValueError):
+        brain_tools(mode="boss")

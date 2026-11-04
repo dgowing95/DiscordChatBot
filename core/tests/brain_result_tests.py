@@ -99,7 +99,16 @@ def test_brain_limits_are_backstops(monkeypatch):
     assert brain_policy.trim_keep_recent(env) == 6
     assert brain_policy.repeat_limit({"BRAIN_REPEAT_LIMIT": "1"}) == 2
     assert brain_policy.brain_max_turns({"BRAIN_MAX_TURNS": "junk"}) == 100
-    assert brain_policy.effective_tier(3, unprompted=True) == brain_policy.TIER_BRAIN
+
+
+def test_only_asked_for_chat_and_allowed_automatic_runs_may_start_a_workflow():
+    tier = brain_policy.effective_tier
+    assert tier(env={}) == brain_policy.TIER_WORKFLOW
+    assert tier(unprompted=True, env={}) == brain_policy.TIER_BRAIN
+    assert tier(voice=True, env={}) == brain_policy.TIER_BRAIN
+    assert tier(automatic=True, env={}) == brain_policy.TIER_WORKFLOW
+    assert tier(automatic=True, env={"WORKFLOW_FROM_AUTOMATIONS": "0"}) == brain_policy.TIER_BRAIN
+    assert tier(env={"WORKFLOW_ENABLED": "false"}) == brain_policy.TIER_BRAIN
 
 
 # --------------------------- the loop guard ---------------------------
@@ -193,3 +202,12 @@ def test_the_name_of_a_posted_file_need_not_be_in_the_reply():
 def test_markdown_bold_inside_a_kept_fact_still_counts():
     report = br.BrainReport(must_keep=["feels like ~15°C", "`out/chart.png`"])
     assert br.missing_tokens("It is 16°C, feels like **~15°C**. Saved out/chart.png", report) == []
+
+
+def test_facts_sent_as_a_json_string_become_a_list():
+    report = br.parse_report_args(
+        {"status": "done", "facts": '["Made date.py", "Made README.md"]'})
+    assert report.facts == ["Made date.py", "Made README.md"]
+    # Text that only looks like a list stays text.
+    assert br.parse_report_args({"facts": "[1] was read\nmore"}).facts == [
+        "[1] was read", "more"]

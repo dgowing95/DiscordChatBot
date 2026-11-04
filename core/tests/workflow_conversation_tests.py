@@ -1,4 +1,4 @@
-"""Tests for classes/sandbox_conversation.py.
+"""Tests for classes/workflow_conversation.py.
 
 The runner-boundary tests drive the REAL openai-agents Runner with the SDK's
 own deterministic ScriptedModel (agents.testing), so they check the
@@ -18,12 +18,12 @@ from agents import Agent, RunConfig, Runner, function_tool
 from agents.testing import ModelStep, ScriptedModel, assistant_message, function_call
 
 from classes import workspace_tools
-from classes import sandbox_conversation as conv_mod
-from classes import sandbox_thread_inbox as inbox
-from classes.sandbox_conversation import SandboxConversation, make_agent_hooks
+from classes import workflow_conversation as conv_mod
+from classes import thread_inbox as inbox
+from classes.workflow_conversation import SandboxConversation, make_agent_hooks
 
 # To run this pytest file from the command line, use:
-# PYTHONPATH=$(pwd) pytest core/tests/sandbox_conversation_tests.py
+# PYTHONPATH=$(pwd) pytest core/tests/workflow_conversation_tests.py
 
 
 def _thread():
@@ -331,7 +331,7 @@ async def test_a_reply_that_cannot_be_sent_is_kept_for_the_closing_message():
     conv.ledger.mark_presented([1], anchor=1)
     out = await conv.respond("1", "answered", "It is 42.")
     assert conv.thread.send.await_count == conv_mod.REPLY_SEND_ATTEMPTS
-    assert conv.unsent_replies == ["🐳 It is 42."]
+    assert conv.unsent_replies == ["🧵 It is 42."]
     assert "closing message" in out
     # the decision itself still stands
     assert conv.ledger.events[0].outcome == "answered"

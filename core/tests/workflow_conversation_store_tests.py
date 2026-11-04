@@ -3,15 +3,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from classes import sandbox_conversation_store as store_mod
-from classes.sandbox_conversation_store import (
+from classes import workflow_conversation_store as store_mod
+from classes.workflow_conversation_store import (
     SandboxConversationStore,
     build_record,
     resume_preamble,
 )
 
 # To run this pytest file from the command line, use:
-# PYTHONPATH=$(pwd) pytest core/tests/sandbox_conversation_store_tests.py
+# PYTHONPATH=$(pwd) pytest core/tests/workflow_conversation_store_tests.py
 
 
 def _rows(*pairs):
@@ -61,7 +61,7 @@ async def test_save_keeps_it_as_long_as_the_job_folder_and_trims_to_size(monkeyp
         await SandboxConversationStore().save(55, record)
 
     key, raw = redis.set.await_args.args
-    assert key == "dcb:sandbox_conversation:55"
+    assert key == "dcb:workflow_conversation:55"
     assert redis.set.await_args.kwargs["ex"] == 7200
     assert len(raw.encode("utf-8")) <= 400
     assert json.loads(raw)["carry"]  # trimmed from the oldest, not emptied

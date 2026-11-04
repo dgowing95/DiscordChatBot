@@ -38,6 +38,8 @@ REMOVED = {
     # The brain (phase 3): new defaults, so an old value must be chosen again
     "SANDBOX_MAX_TURNS": "BRAIN_MAX_TURNS",
     "SANDBOX_TIMEOUT": "BRAIN_TIMEOUT",
+    # Workflows (phase 5)
+    "SANDBOX_ASK_USER_TIMEOUT": "WORKFLOW_ASK_TIMEOUT",
     # Queue
     "WORKER_COUNT": "QUEUE_WORKERS",
     # Content guard

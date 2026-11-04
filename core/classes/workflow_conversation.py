@@ -1,6 +1,6 @@
 """Conversation coordinator for one sandbox run.
 
-Sits between the thread ledger (classes/sandbox_thread_inbox.py, pure state)
+Sits between the thread ledger (classes/thread_inbox.py, pure state)
 and the nested SandboxAgent's runner, and is what makes steering ENFORCED
 rather than hoped for. The old design appended thread messages to whichever
 tool result ran next and relied on the model to act on them; nothing stopped
@@ -14,7 +14,7 @@ that, and correctness depends on none of them being remembered by the model:
    a tool's output where it competed with a page of logs. The SDK rebuilds
    the input list from original input + generated items on every call and
    does NOT keep what a filter added (verified against openai-agents 0.22
-   with its ScriptedModel: see sandbox_conversation_tests), so the ledger is
+   with its ScriptedModel: see workflow_conversation_tests), so the ledger is
    authoritative and every presented message is re-inserted at the position
    it was first shown — its `anchor` — on every call. That keeps it in
    chronological place, exactly once, including across a continuation,
@@ -36,7 +36,7 @@ that, and correctness depends on none of them being remembered by the model:
    tool calls concurrently, so gated tools are serialized under a lock and
    each checks the gate when it gets its turn: a message landing mid-batch
    blocks every later action in that batch. Conversation tools
-   (respond_to_updates, ask_user, say_in_thread) and write_stdin (observing
+   (respond_to_updates, ask_in_thread, say_in_thread) and write_stdin (observing
    or stopping a running process) are never gated, and a respond_to_updates
    in the SAME response counts — acknowledging and acting in one response
    costs no refusal, which matters on a 10-turn budget. The gate cannot make
@@ -65,14 +65,14 @@ import logging
 import re
 import time
 
-from classes import sandbox_thread_inbox as inbox
+from classes import thread_inbox as inbox
 from classes.metrics import (
-    inc_sandbox_continuation,
-    inc_sandbox_question,
-    inc_sandbox_stale_action_blocked,
-    inc_sandbox_unresolved_input,
-    observe_sandbox_input_presentation,
-    observe_sandbox_input_response,
+    inc_workflow_continuation,
+    inc_workflow_question,
+    inc_workflow_stale_action_blocked,
+    inc_workflow_unresolved_input,
+    observe_workflow_input_presentation,
+    observe_workflow_input_response,
 )
 
 logger = logging.getLogger(__name__)
@@ -234,7 +234,7 @@ class SandboxConversation:
             seqs, anchor = self._staged
             self._staged = None
             for e in self.ledger.mark_presented(seqs, anchor):
-                observe_sandbox_input_presentation(e.presented_at - e.received_at)
+                observe_workflow_input_presentation(e.presented_at - e.received_at)
         acked: set[int] = set()
         for item in getattr(response, "output", None) or []:
             if getattr(item, "type", None) != "function_call":
@@ -299,7 +299,7 @@ class SandboxConversation:
 
     def _blocked(self) -> None:
         self.stale_blocked += 1
-        inc_sandbox_stale_action_blocked()
+        inc_workflow_stale_action_blocked()
 
     async def run_gated(self, tool_name: str, invoke, *, busy: bool = False):
         """Runs one gated tool invocation: serialized with the others, and
@@ -348,12 +348,12 @@ class SandboxConversation:
                 return "There are no thread messages waiting for a response."
         updated, unknown = led.record_decision(ids, choice, (reply or "").strip())
         for e in updated:
-            observe_sandbox_input_response(e.addressed_at - e.received_at)
+            observe_workflow_input_response(e.addressed_at - e.received_at)
         parts = []
         if updated:
             text = (reply or "").strip() or _generic_reply(choice, updated)
-            if not text.startswith(("🐳", "👍", "✅", "🚫", "↪", "⏭", "📝")):
-                text = f"🐳 {text}"
+            if not text.startswith(("🧵", "👍", "✅", "🚫", "↪", "⏭", "📝")):
+                text = f"🧵 {text}"
             if await self._post(text):
                 parts.append(f"Recorded '{choice}' for "
                              f"{', '.join(f'#{e.seq}' for e in updated)} and posted your reply.")
@@ -406,13 +406,13 @@ class SandboxConversation:
         except Exception as e:
             logger.warning(f"Sandbox ask_user: failed to send question: {e}")
             led.close_question(q.qid)
-            inc_sandbox_question(mode, "send_failed")
+            inc_workflow_question(mode, "send_failed")
             return ("Could not reach the user (failed to send the question) — proceed "
                     "using your best judgement.")
         # A reply can land while the send is in flight; it was already tagged
         # (deliver() matches on the requester while the question is open).
         if not blocking:
-            inc_sandbox_question(mode, "posted")
+            inc_workflow_question(mode, "posted")
             return ("Question posted. Keep working on anything that does not depend on "
                     "it; a reply arrives as a thread message. Before the step it affects "
                     "(or your final message), use the reply"
@@ -424,12 +424,12 @@ class SandboxConversation:
         finally:
             q.waiting = False
         if got:
-            inc_sandbox_question(mode, "replied")
+            inc_workflow_question(mode, "replied")
             return ("New thread input arrived; you will see it next. Check whether it "
                     "answers your question — it may be a correction or a new request "
                     "instead — and call respond_to_updates for it.")
         q.timed_out = True
-        inc_sandbox_question(mode, "timeout")
+        inc_workflow_question(mode, "timeout")
         if default:
             return (f"No reply within {int(timeout)}s. Go with your stated default "
                     f"({default}) and say so in your final message. A late reply will "
@@ -488,7 +488,7 @@ class SandboxConversation:
 
     def note_continuation(self) -> None:
         self.continuations += 1
-        inc_sandbox_continuation()
+        inc_workflow_continuation()
 
     def finalize(self) -> None:
         """Commits the finalization boundary (see RunLedger.finalize)."""
@@ -530,7 +530,7 @@ def record_exit_metrics(ledger: inbox.RunLedger) -> None:
     after delivery, so messages that arrived as it finished are included."""
     for row in ledger.outcomes():
         if row["status"] in ("accepted", "unacknowledged", "unseen", "late"):
-            inc_sandbox_unresolved_input(row["status"])
+            inc_workflow_unresolved_input(row["status"])
 
 
 def make_agent_hooks(conversation: SandboxConversation):

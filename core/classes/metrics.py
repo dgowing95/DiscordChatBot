@@ -128,25 +128,41 @@ Metrics (scraped by Prometheus from the /metrics HTTP endpoint):
            blocked / http / unsupported / rate_limited / blocked_by_site /
            unavailable / ...). Cached briefly, so each is counted once.
 
-  Sandbox conversation (classes/sandbox_conversation.py; labels are bounded
+  Tier 3 workflows (classes/workflows.py):
+  Counter  discord_bot_workflows_total{trigger,end_state}
+           Workflows ended, by how they started (brain / slash / automation)
+           and how they ended (done / partial / failed / cancelled).
+  Histogram discord_bot_workflow_seconds{end_state}
+           A workflow's wall-clock time.
+  Histogram discord_bot_workflow_subagents
+           Steps (subagent runs) per workflow.
+  Histogram discord_bot_workflow_turns
+           Model turns per workflow, every agent together.
+  Counter  discord_bot_workflow_plan_approval_total{outcome}
+           How plans were approved (approved / edited / cancelled / timeout /
+           auto).
+  Gauge    discord_bot_workflows_running
+           Workflows running in this process.
+
+  Thread conversation (classes/workflow_conversation.py; labels are bounded
   outcome names — never message ids, thread ids or user text):
-  Counter  discord_bot_sandbox_thread_messages_total{outcome}
-           Thread messages offered to a running sandbox, by delivery result
+  Counter  discord_bot_workflow_thread_messages_total{outcome}
+           Thread messages offered to a running workflow, by delivery result
            (accepted / duplicate / too_long / full / attachment_only /
            finishing / ...).
-  Histogram discord_bot_sandbox_input_presentation_seconds
+  Histogram discord_bot_workflow_input_presentation_seconds
            Receipt of a thread message to its first completed model call.
-  Histogram discord_bot_sandbox_input_response_seconds
+  Histogram discord_bot_workflow_input_response_seconds
            Receipt of a thread message to the model's respond_to_updates.
-  Counter  discord_bot_sandbox_stale_actions_blocked_total
+  Counter  discord_bot_workflow_stale_actions_blocked_total
            Tool calls refused because thread input was still unanswered.
-  Counter  discord_bot_sandbox_questions_total{mode,outcome}
+  Counter  discord_bot_workflow_questions_total{mode,outcome}
            ask_user questions by mode (blocking/optional) and outcome
            (posted / replied / timeout / send_failed).
-  Counter  discord_bot_sandbox_unresolved_input_total{status}
+  Counter  discord_bot_workflow_unresolved_input_total{status}
            Messages still unresolved when a run ended, by status
            (accepted / unacknowledged / unseen / late).
-  Counter  discord_bot_sandbox_continuations_total
+  Counter  discord_bot_workflow_continuations_total
            Extra runner passes started because a run tried to finish with
            thread input unanswered (or outdated files attached).
 
@@ -418,7 +434,7 @@ llm_slot_context_available = Gauge(
     "1 when the per-slot context was read from the LLM server on the last attempt, else 0",
 )
 
-# Queue waits and full replies span a quick chat answer to a long sandbox run.
+# Queue waits and full replies span a quick chat answer to a long brain call.
 LATENCY_BUCKETS = (0.1, 0.5, 1, 2.5, 5, 10, 20, 30, 60, 120, 300, 600)
 # Fast phases (history reads, downloads, lock waits, sends).
 STAGE_BUCKETS = (0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60)
@@ -514,46 +530,46 @@ web_fetch_failures_total = Counter(
 
 # Receipt -> presentation is bounded by one model call plus any running
 # command's checkpoint; receipt -> response adds the model's own turn.
-SANDBOX_INPUT_BUCKETS = (1, 2.5, 5, 10, 20, 30, 60, 120, 300, 600)
+WORKFLOW_INPUT_BUCKETS = (1, 2.5, 5, 10, 20, 30, 60, 120, 300, 600)
 
-sandbox_thread_messages_total = Counter(
-    "discord_bot_sandbox_thread_messages_total",
-    "Thread messages offered to a running sandbox, by delivery result",
+workflow_thread_messages_total = Counter(
+    "discord_bot_workflow_thread_messages_total",
+    "Thread messages offered to a running workflow, by delivery result",
     ["outcome"],
 )
 
-sandbox_input_presentation_seconds = Histogram(
-    "discord_bot_sandbox_input_presentation_seconds",
+workflow_input_presentation_seconds = Histogram(
+    "discord_bot_workflow_input_presentation_seconds",
     "Seconds from receiving a thread message to its first completed model call",
-    buckets=SANDBOX_INPUT_BUCKETS,
+    buckets=WORKFLOW_INPUT_BUCKETS,
 )
 
-sandbox_input_response_seconds = Histogram(
-    "discord_bot_sandbox_input_response_seconds",
-    "Seconds from receiving a thread message to the sandbox model responding to it",
-    buckets=SANDBOX_INPUT_BUCKETS,
+workflow_input_response_seconds = Histogram(
+    "discord_bot_workflow_input_response_seconds",
+    "Seconds from receiving a thread message to the workflow's model responding to it",
+    buckets=WORKFLOW_INPUT_BUCKETS,
 )
 
-sandbox_stale_actions_blocked_total = Counter(
-    "discord_bot_sandbox_stale_actions_blocked_total",
-    "Sandbox tool calls refused because thread input was still unanswered",
+workflow_stale_actions_blocked_total = Counter(
+    "discord_bot_workflow_stale_actions_blocked_total",
+    "Workflow tool calls refused because thread input was still unanswered",
 )
 
-sandbox_questions_total = Counter(
-    "discord_bot_sandbox_questions_total",
-    "Sandbox ask_user questions by mode and outcome",
+workflow_questions_total = Counter(
+    "discord_bot_workflow_questions_total",
+    "Questions asked in a workflow's thread, by mode and outcome",
     ["mode", "outcome"],
 )
 
-sandbox_unresolved_input_total = Counter(
-    "discord_bot_sandbox_unresolved_input_total",
-    "Thread messages still unresolved when a sandbox run ended, by status",
+workflow_unresolved_input_total = Counter(
+    "discord_bot_workflow_unresolved_input_total",
+    "Thread messages still unresolved when a workflow ended, by status",
     ["status"],
 )
 
-sandbox_continuations_total = Counter(
-    "discord_bot_sandbox_continuations_total",
-    "Extra sandbox runner passes started to account for thread input",
+workflow_continuations_total = Counter(
+    "discord_bot_workflow_continuations_total",
+    "Extra workflow runner passes started to account for thread input",
 )
 
 # The server workspace (classes/workspace_manager.py).
@@ -789,32 +805,65 @@ def observe_llm_prompt_tokens(guild_id, tokens: int) -> None:
     llm_prompt_tokens.labels(guild_id=_guild_label(guild_id)).observe(tokens)
 
 
-def inc_sandbox_thread_message(outcome: str) -> None:
-    sandbox_thread_messages_total.labels(outcome=str(outcome)).inc()
+def inc_workflow_thread_message(outcome: str) -> None:
+    workflow_thread_messages_total.labels(outcome=str(outcome)).inc()
 
 
-def observe_sandbox_input_presentation(seconds: float) -> None:
-    sandbox_input_presentation_seconds.observe(max(0.0, seconds))
+def observe_workflow_input_presentation(seconds: float) -> None:
+    workflow_input_presentation_seconds.observe(max(0.0, seconds))
 
 
-def observe_sandbox_input_response(seconds: float) -> None:
-    sandbox_input_response_seconds.observe(max(0.0, seconds))
+def observe_workflow_input_response(seconds: float) -> None:
+    workflow_input_response_seconds.observe(max(0.0, seconds))
 
 
-def inc_sandbox_stale_action_blocked() -> None:
-    sandbox_stale_actions_blocked_total.inc()
+def inc_workflow_stale_action_blocked() -> None:
+    workflow_stale_actions_blocked_total.inc()
 
 
-def inc_sandbox_question(mode: str, outcome: str) -> None:
-    sandbox_questions_total.labels(mode=str(mode), outcome=str(outcome)).inc()
+def inc_workflow_question(mode: str, outcome: str) -> None:
+    workflow_questions_total.labels(mode=str(mode), outcome=str(outcome)).inc()
 
 
-def inc_sandbox_unresolved_input(status: str) -> None:
-    sandbox_unresolved_input_total.labels(status=str(status)).inc()
+def inc_workflow_unresolved_input(status: str) -> None:
+    workflow_unresolved_input_total.labels(status=str(status)).inc()
 
 
-def inc_sandbox_continuation() -> None:
-    sandbox_continuations_total.inc()
+def inc_workflow_continuation() -> None:
+    workflow_continuations_total.inc()
+
+
+workflows_total = Counter(
+    "discord_bot_workflows_total",
+    "Tier 3 workflows ended, by trigger and end state", ["trigger", "end_state"])
+workflow_seconds = Histogram(
+    "discord_bot_workflow_seconds", "Wall-clock seconds of one workflow", ["end_state"],
+    buckets=(60, 300, 600, 1200, 1800, 3600, 7200, 14400))
+workflow_subagents = Histogram(
+    "discord_bot_workflow_subagents", "Steps (subagent runs) per workflow",
+    buckets=(0, 1, 2, 3, 4, 6, 8))
+workflow_turns = Histogram(
+    "discord_bot_workflow_turns", "Model turns per workflow, every agent together",
+    buckets=(5, 10, 25, 50, 100, 200, 350, 500))
+workflow_plan_approval_total = Counter(
+    "discord_bot_workflow_plan_approval_total", "How workflow plans were approved", ["outcome"])
+workflows_running_gauge = Gauge("discord_bot_workflows_running", "Workflows running in this process")
+
+
+def observe_workflow(trigger: str, end_state: str, seconds: float, subagents: int,
+                     turns: int) -> None:
+    workflows_total.labels(trigger=str(trigger), end_state=str(end_state)).inc()
+    workflow_seconds.labels(end_state=str(end_state)).observe(max(0.0, seconds))
+    workflow_subagents.observe(max(0, subagents))
+    workflow_turns.observe(max(0, turns))
+
+
+def inc_workflow_plan_approval(outcome: str) -> None:
+    workflow_plan_approval_total.labels(outcome=str(outcome)).inc()
+
+
+def set_workflows_running(count: int) -> None:
+    workflows_running_gauge.set(max(0, count))
 
 
 def set_slot_context(tokens: int | None) -> None:

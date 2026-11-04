@@ -1,14 +1,14 @@
 import asyncio
 
-# sandbox_thread_inbox is imported as classes.* here and classes.* in
+# thread_inbox is imported as classes.* here and classes.* in
 # production (the app runs with cwd=core/); both resolve as namespace packages.
 
 import pytest
 
-from classes import sandbox_thread_inbox as inbox
+from classes import thread_inbox as inbox
 
 # To run this pytest file from the command line, use:
-# PYTHONPATH=$(pwd) pytest core/tests/sandbox_thread_inbox_tests.py
+# PYTHONPATH=$(pwd) pytest core/tests/thread_inbox_tests.py
 
 
 @pytest.fixture(autouse=True)
@@ -327,3 +327,11 @@ def test_a_record_full_of_unresolved_guidance_rejects_new_input():
         ledger.record_decision([i + 1], "will_apply")
     assert ledger.deliver(1000, 1, "ana", "one more") == inbox.FULL
     assert len(ledger.events) == inbox.MAX_RETAINED_EVENTS
+
+
+def test_the_requesters_stop_gets_through_a_full_inbox():
+    ledger = _ledger()
+    for i in range(inbox.MAX_PENDING_MESSAGES):
+        assert ledger.deliver(i + 1, 2, "bo", f"m{i}") == inbox.ACCEPTED
+    assert ledger.deliver(998, 2, "bo", "stop", stop_word=True) == inbox.FULL  # not the requester
+    assert ledger.deliver(999, 1, "ana", "stop", stop_word=True) == inbox.ACCEPTED

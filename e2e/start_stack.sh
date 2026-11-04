@@ -138,6 +138,10 @@ fi
   # No check answers the brain's questions (ask_user), so one it asks anyway
   # only delays that check; kept short. (15 s is the least ask_user waits.)
   export BRAIN_ASK_TIMEOUT=20
+  # A webhook cannot press the plan's Approve, so the workflow check waits
+  # for the plan to start on its own; and a workflow may not outlast the job.
+  # Nobody answers a step's question in its thread either, so that stays short.
+  export WORKFLOW_PLAN_APPROVAL_SECONDS=10 WORKFLOW_TIMEOUT=900 WORKFLOW_ASK_TIMEOUT=20
   export VOICE_ENABLED=1 VOICE_DEV_INJECT=1 VOICE_DEBUG=1 VOICE_IDLE_LEAVE_SECONDS=1800
   export VOICE_BRIDGE_URL=ws://127.0.0.1:8765 VOICE_BRIDGE_TOKEN="$BRIDGE_TOKEN"
   export SPEECH_URL=http://127.0.0.1:8002

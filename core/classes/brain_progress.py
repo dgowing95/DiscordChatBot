@@ -50,7 +50,7 @@ from dataclasses import dataclass, field
 import discord
 from agents import RunHooks
 
-from classes.sandbox_conversation import GATE_REFUSAL_PREFIX
+from classes.workflow_conversation import GATE_REFUSAL_PREFIX
 from classes.tool_embeds import (
     BRAIN_DONE, BRAIN_STOPPED, BRAIN_WORKING, COLOR_BRAIN, COLOR_DONE, COLOR_STOPPED, work_task_text,
 )

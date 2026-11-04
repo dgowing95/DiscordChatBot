@@ -18,11 +18,12 @@ from classes.image_generation import (
     create_image,
     image_generation_enabled,
 )
-from classes import attachment_cache, brain_inbox, help_catalog, sandbox_thread_inbox, settings_check, whats_new
+from classes import attachment_cache, brain_inbox, help_catalog, thread_inbox, settings_check, whats_new
 from classes.common import embed_from_data
 from classes.redis_client import text_client
 from classes import automation_runner, skill_format, voice_gate
 from classes.polls import remember_poll
+from classes.workflows import WorkflowDone, defer_done as workflows_defer_done, reply_done as workflows_reply_done
 from classes.automation_policy import settings as automation_settings
 from classes.voice_policy import settings as voice_settings
 from classes import message_queue as queue_policy
@@ -33,7 +34,7 @@ from classes.metrics import (
     inc_messages_processed,
     inc_messages_received,
     inc_queue_drop,
-    inc_sandbox_thread_message,
+    inc_workflow_thread_message,
     observe_queue_wait,
     set_queue_workers,
     observe_reply_latency,
@@ -85,6 +86,8 @@ class Bot(discord.Client):
             await asyncio.gather(*self.background_tasks, return_exceptions=True)
         while not message_queue.empty():
             item = message_queue.get_nowait()
+            if isinstance(item, WorkflowDone):
+                logger.info("Shutting down with a workflow's completion reply still queued")
             if isinstance(item, automation_runner.AutomationJob) and item.renewal_task:
                 item.renewal_task.cancel()
             message_queue.task_done()
@@ -96,6 +99,10 @@ class Bot(discord.Client):
             await get_bridge().close()
         # Changed workspaces are snapshotted; their containers keep running
         # for the next process to re-attach to.
+        # Running workflows are cancelled but left live, so the next start
+        # marks them interrupted and tells their threads.
+        from classes import workflows
+        await workflows.shutdown()
         from classes.workspace_manager import workspaces
         await workspaces().shutdown()
 
@@ -173,6 +180,10 @@ async def register_commands():
     if skill_format.enabled():
         from classes.skill_commands import register_skill_commands
         register_skill_commands(command_tree)
+    from classes import workflow_policy
+    if workflow_policy.enabled():
+        from classes.task_commands import register_task_commands
+        register_task_commands(command_tree, client)
 
     @command_tree.command(name="system", description="Change the behaviour/personality of the bot")
     async def change_system(ctx, system: str):
@@ -289,6 +300,13 @@ async def on_ready():
             curator = Curator(SkillStore(), client.get_channel, client.user.id)
             client.background_tasks.append(client.loop.create_task(
                 curator.run_forever(lambda: [guild.id for guild in client.guilds])))
+        # Tier 3 workflows: the completion reply rides the queue, the plan's
+        # buttons work across restarts, and any workflow a previous process
+        # left running is marked interrupted (classes/workflows.py).
+        from classes import workflow_views, workflows
+        workflows.configure(queue=message_queue, client=client)
+        client.add_dynamic_items(workflow_views.WorkflowButton)
+        client.background_tasks.append(client.loop.create_task(workflows.interrupt_all(client)))
         if voice_settings()["enabled"]:
             from classes.voice_bridge import start_bridge
             bridge = start_bridge(voice_settings()["bridge_url"], client, voice_settings()["bridge_token"])
@@ -347,12 +365,11 @@ async def on_message(message):
     # Every poll, the bot's own included, is recorded so check_polls can
     # find it after it scrolls out of the history window (no-op otherwise).
     await remember_poll(message)
-    # A thread run in flight takes its thread's messages (steering, ask_user
-    # answers) instead of the persona. Kept for Tier 3: nothing in v3 starts
-    # a thread run yet, so this never matches today.
+    # A workflow running in this thread takes its messages (changes to the
+    # plan, "stop", answers) instead of the persona (classes/workflows.py).
     if (message.author != client.user and not message.author.bot
-            and sandbox_thread_inbox.is_run_active(message.channel.id)):
-        await route_to_sandbox(message)
+            and thread_inbox.is_run_active(message.channel.id)):
+        await route_to_workflow(message)
         return
     # A Discord Reply to the brain's open question (ask_user) by the person
     # it asked is the answer, not a new request. Any other message is
@@ -381,7 +398,7 @@ async def on_message(message):
     guild_id = message.guild.id if message.guild else 0
 
     # Backpressure: the queue is bounded (QUEUE_MAX_SIZE). When it's full the
-    # bot is behind (e.g. a 10-minute sandbox run) — dropping beats answering
+    # bot is behind (e.g. a 10-minute brain job) — dropping beats answering
     # stale messages against stale history. Mentioned messages get a short
     # busy reply so they aren't silently ignored; random-chance messages
     # drop quietly.
@@ -427,66 +444,68 @@ async def answer_brain_question(message) -> None:
         logger.warning(f"Could not acknowledge an answer to the brain: {e}")
 
 
-# What a person sees for each delivery result (sandbox_thread_inbox.deliver).
+# What a person sees for each delivery result (thread_inbox.deliver).
 # A reaction is the receipt; the replies explain every case where the run
 # will NOT act on the message, so nobody mistakes 🚫 for "seen".
-_SANDBOX_REACTIONS = {
-    sandbox_thread_inbox.ACCEPTED: "📨",
-    sandbox_thread_inbox.FINISHING: "⏳",
+_WORKFLOW_REACTIONS = {
+    thread_inbox.ACCEPTED: "📨",
+    thread_inbox.FINISHING: "⏳",
 }
-_SANDBOX_REPLIES = {
-    sandbox_thread_inbox.EMPTY: (
-        "🚫 The running sandbox can only read text — send that as a text message."),
-    sandbox_thread_inbox.FINISHING: (
-        "⏳ This sandbox run is finishing, so that hasn't been applied. Once it "
+_WORKFLOW_REPLIES = {
+    thread_inbox.EMPTY: (
+        "🚫 The running workflow can only read text — send that as a text message."),
+    thread_inbox.FINISHING: (
+        "⏳ This workflow is finishing, so that hasn't been applied. Once it "
         "closes, @mention me in this thread to carry on with it."),
-    sandbox_thread_inbox.ATTACHMENT_ONLY: (
-        "🚫 The running sandbox can't open attachments — paste the relevant part "
+    thread_inbox.ATTACHMENT_ONLY: (
+        "🚫 The running workflow can't open attachments — paste the relevant part "
         "as text instead."),
-    sandbox_thread_inbox.TOO_LONG: (
-        f"🚫 That's too long to pass to the running sandbox (max "
-        f"{sandbox_thread_inbox.MAX_MESSAGE_CHARS} characters) — shorten it or split it up."),
-    sandbox_thread_inbox.FULL: (
-        "🚫 The sandbox has too many unanswered messages right now — give it a "
+    thread_inbox.TOO_LONG: (
+        f"🚫 That's too long to pass to the running workflow (max "
+        f"{thread_inbox.MAX_MESSAGE_CHARS} characters) — shorten it or split it up."),
+    thread_inbox.FULL: (
+        "🚫 The workflow has too many unanswered messages right now — give it a "
         "moment to catch up, then send that again."),
 }
 # How often "received, I'll review it before my next step" may be posted
 # while a command runs: rapid messages get one notice, not one each.
-SANDBOX_RECEIPT_NOTICE_SECONDS = 30
+WORKFLOW_RECEIPT_NOTICE_SECONDS = 30
 
 
-async def route_to_sandbox(message) -> None:
-    """Delivers one thread message to the sandbox run claimed there and
+async def route_to_workflow(message) -> None:
+    """Delivers one thread message to the workflow claimed there and
     acknowledges it accurately: 📨 means the run WILL see it, and says
-    nothing about whether it has been applied — the sandbox answers that
-    itself (respond_to_updates)."""
-    ledger = sandbox_thread_inbox.get_run(message.channel.id)
+    nothing about whether it has been applied — the workflow's manager
+    answers it between steps."""
+    from classes.workflow_policy import is_stop_word
+    ledger = thread_inbox.get_run(message.channel.id)
     reference = getattr(message, "reference", None)
-    outcome = sandbox_thread_inbox.deliver(
+    outcome = thread_inbox.deliver(
         message.channel.id, message.id,
         message.author.id, message.author.display_name, message.content,
         reply_to=getattr(reference, "message_id", None),
         has_attachments=bool(getattr(message, "attachments", None)),
+        stop_word=is_stop_word(message.content or ""),
     )
-    inc_sandbox_thread_message(outcome)
-    if outcome == sandbox_thread_inbox.DUPLICATE:
+    inc_workflow_thread_message(outcome)
+    if outcome == thread_inbox.DUPLICATE:
         return
     try:
-        await message.add_reaction(_SANDBOX_REACTIONS.get(outcome, "🚫"))
+        await message.add_reaction(_WORKFLOW_REACTIONS.get(outcome, "🚫"))
     except Exception as e:
-        logger.warning(f"Sandbox inbox: could not acknowledge {message.id}: {e}")
-    reply = _SANDBOX_REPLIES.get(outcome)
-    if (reply is None and outcome == sandbox_thread_inbox.ACCEPTED and ledger is not None
+        logger.warning(f"Workflow inbox: could not acknowledge {message.id}: {e}")
+    reply = _WORKFLOW_REPLIES.get(outcome)
+    if (reply is None and outcome == thread_inbox.ACCEPTED and ledger is not None
             and ledger.busy_since is not None
-            and time.monotonic() - ledger.last_receipt_notice > SANDBOX_RECEIPT_NOTICE_SECONDS):
+            and time.monotonic() - ledger.last_receipt_notice > WORKFLOW_RECEIPT_NOTICE_SECONDS):
         ledger.last_receipt_notice = time.monotonic()
-        reply = "📨 Received — a command is still running; I'll review this before my next step."
+        reply = "📨 Received — I'll look at this before the next step."
     if reply is None:
         return
     try:
         await message.reply(reply, mention_author=False)
     except Exception as e:
-        logger.warning(f"Sandbox inbox: could not reply to {message.id}: {e}")
+        logger.warning(f"Workflow inbox: could not reply to {message.id}: {e}")
 
 
 VOICE_BUSY_REPLY = "🎙️ I'm in a voice call right now — talk to me there, or use /voice leave."
@@ -659,6 +678,17 @@ async def _process_messages():
             return
         message = await message_queue.get()
         set_message_queue_size(message_queue.qsize())
+        if isinstance(message, WorkflowDone):
+            try:
+                # No text in a guild that is in a voice call: tried again
+                # once the call ends.
+                if voice_gate.active(message.workflow.guild_id):
+                    workflows_defer_done(message)
+                else:
+                    await workflows_reply_done(message, client)
+            finally:
+                message_queue.task_done()
+            continue
         if isinstance(message, automation_runner.AutomationJob):
             try:
                 # Its guild went into a voice call while it waited.

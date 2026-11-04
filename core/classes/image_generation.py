@@ -47,10 +47,13 @@ EDIT_LOOKBACK_MESSAGES = 20
 # subject the image model could not draw (5 calls, 10 generations, ~5.5 min,
 # seen live). Three still allows "draw three versions".
 MAX_IMAGE_CALLS = 3
-TOO_MANY_IMAGES_TEXT = (
-    f"The limit of {MAX_IMAGE_CALLS} picture requests for this reply has been reached, "
-    "so no more can be made now. Tell the user what has already been made, and offer "
-    "to try again if they want.")
+
+
+def too_many_images_text(cap: int = MAX_IMAGE_CALLS, scope: str = "reply") -> str:
+    """What generate_image says past its cap (a workflow has a higher one)."""
+    return (f"The limit of {cap} picture requests for this {scope} has been reached, "
+            "so no more can be made now. Tell the user what has already been made, and offer "
+            "to try again if they want.")
 
 
 def image_generation_enabled() -> bool:
