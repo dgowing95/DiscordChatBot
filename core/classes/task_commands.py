@@ -40,8 +40,12 @@ def register_task_commands(tree, client) -> None:
                                                 message=message)
         if not result.ok:
             try:
-                await message.edit(content=f"🧵 Workflow: {request}\n-# ❌ Not started. "
-                                           f"{_plain(result.text)}"[:2000])
+                # The request is clipped, not the reason: it carries the link
+                # to the workflow already running.
+                await message.edit(
+                    content=(f"🧵 Workflow: {request[:1700]}\n-# ❌ Not started. "
+                             f"{_plain(result.text)}")[:2000],
+                    allowed_mentions=discord.AllowedMentions.none())
             except Exception as e:
                 logger.warning(f"/task: could not say why it did not start: {e}")
 

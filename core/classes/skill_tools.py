@@ -253,7 +253,9 @@ async def search_skills(wrapper: RunContextWrapper[dict], query: str) -> str:
     found = skill_format.search(await SkillStore().list(guild), query)
     if not found:
         return "No saved skill matches that."
-    return "\n".join(f"- {s['name']}: {s['description']}" for s in found) + "\n(use_skill opens one)"
+    text = "\n".join(f"- {s['name']}: {s['description']}" for s in found)
+    # A workflow's manager searches but has no use_skill (brain_tools).
+    return text if ctx.get("workflow_id") else text + "\n(use_skill opens one)"
 
 
 def skill_tools() -> list:

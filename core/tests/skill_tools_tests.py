@@ -173,6 +173,11 @@ async def test_search_skills(store, ctx, allowed):
     await store.save(GUILD, "weekly-chart", "Chart tracker embeds", "s", author_id=1)
     assert "weekly-chart" in await call(skill_tools.search_skills, ctx, query="tracker chart")
     assert "No saved skill" in await call(skill_tools.search_skills, ctx, query="zebra")
+    assert "use_skill" in await call(skill_tools.search_skills, ctx, query="tracker chart")
+    # A workflow's manager has no use_skill, so it is not told to call it.
+    ctx["workflow_id"] = "w1"
+    found = await call(skill_tools.search_skills, ctx, query="tracker chart")
+    assert "weekly-chart" in found and "use_skill" not in found
 
 
 @pytest.mark.asyncio

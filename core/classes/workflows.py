@@ -219,6 +219,9 @@ class Workflow:
 
 
 # workflow id -> its handle, while it runs in this process.
+# The manager reads skills for ideas: it has search_skills, not use_skill.
+MANAGER_SKILLS_HEADER = "Skills saved in this server (how jobs were done here before):"
+
 _RUNNING: dict[str, Workflow] = {}
 # When this process started: a live record created since is its own
 # (interrupt_all must leave it alone).
@@ -414,6 +417,8 @@ async def _run(wf: Workflow) -> None:
             message_queue.unregister_task_run(origin_id, f"workflow:{wf.id}")
         _RUNNING.pop(wf.id, None)
         metrics.set_workflows_running(len(_RUNNING))
+        # After the clean-up that must happen: a second cancel would land here.
+        await asyncio.gather(*helpers, return_exceptions=True)
         if not interrupted:
             await _end(wf, store, end_state, report)
 
@@ -680,7 +685,7 @@ async def _plan(wf: Workflow, change: str = "") -> wp.Plan:
     if change and wf.plan is not None:
         parts.append("Your plan so far:\n" + wp.plan_text(wf.plan))
         parts.append(f"The requester asked to change it: {change}\nWrite the new plan.")
-    index = await _skills_index(wf.guild_id)
+    index = await _skills_index(wf.guild_id, header=MANAGER_SKILLS_HEADER)
     if index:
         parts.append(index)
     parts.append(f"At most {wp.max_steps()} steps.")
@@ -880,13 +885,18 @@ async def _run_step(wf: Workflow, step: wp.Step) -> None:
     report, stopped = await _step_attempt(wf, step, progress, answer=None)
     if (report.status == brain_result.NEEDS_INPUT and not stopped and not wf.cancel_reason):
         question = report.say_to_user or "; ".join(report.facts[:2])
-        answer = await _ask_in_thread(wf, question) if question else ""
+        # An automatic run has nobody to ask, and no ledger means no way to
+        # hear them: never report that as "asked".
+        can_ask = bool(question) and wf.ledger is not None and not wf.record["automatic"]
+        answer = await _ask_in_thread(wf, question) if can_ask else ""
         if answer and not wf.cancel_reason:
             files = report.files_posted
             report, stopped = await _step_attempt(wf, step, progress, answer=(question, answer))
             report.files_posted = files + [f for f in report.files_posted if f not in files]
-        else:
+        elif can_ask:
             report.facts.append(f"The requester was asked: {question} No answer came.")
+        elif question:
+            report.facts.append(f"This needed the requester, who could not be asked: {question}")
     wf.results[step.id] = {"status": report.status, "facts": report.facts,
                            "files": report.files_posted, "note": report.note}
     wf.step_states[step.id] = ("cancelled" if wf.cancel_reason else
@@ -1055,6 +1065,18 @@ def _revised_steps(wf: Workflow, items) -> tuple[wp.Plan | None, bool]:
         steps.append(item)
     if not steps:
         return None, False
+    # validate_plan names a step with no id by its place in this list, which
+    # could be a done step's id: it would rerun in that step's folder.
+    taken = set(wf.results) | {str(s.get("id") or "").strip() for s in steps
+                               if isinstance(s, dict)}
+    number = len(wf.results)
+    for item in steps:
+        if isinstance(item, dict) and not str(item.get("id") or "").strip():
+            number += 1
+            while f"s{number}" in taken:
+                number += 1
+            item["id"] = f"s{number}"
+            taken.add(item["id"])
     plan, problems = wp.validate_plan(
         {"goal": wf.plan.goal, "steps": steps, "deliverables": wf.plan.deliverables,
          "notes": wf.plan.notes},
@@ -1270,7 +1292,9 @@ async def on_button(interaction: discord.Interaction, workflow_id: str, action: 
     pending = wf.approval is not None and not wf.approval.done()
     if action == "approve" and pending and wf.state == wp.AWAITING_APPROVAL:
         await interaction.response.defer()
-        wf.approval.set_result(("approve", None))
+        # The defer is a round trip: a message or Cancel may have answered it.
+        if not wf.approval.done():
+            wf.approval.set_result(("approve", None))
         return
     if action == "edit" and pending and wf.state == wp.AWAITING_APPROVAL:
         await interaction.response.send_message(

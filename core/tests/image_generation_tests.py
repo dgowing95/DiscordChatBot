@@ -502,7 +502,7 @@ async def test_tool_makes_at_most_a_few_pictures_per_reply():
             await _invoke(context, prompt="a fox")
         result, _, _ = await _invoke(context, prompt="a fox")
     assert create.await_count == image_generation.MAX_IMAGE_CALLS
-    assert result == image_generation.TOO_MANY_IMAGES_TEXT
+    assert result == image_generation.too_many_images_text()
 
 
 def test_a_picture_still_wrong_is_not_tried_again_in_the_reply():

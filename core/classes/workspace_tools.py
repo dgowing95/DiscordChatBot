@@ -24,7 +24,6 @@ pure helpers below are testable without them.
 import logging
 import io
 import json
-import os
 import posixpath
 import re
 import time
@@ -82,14 +81,6 @@ RUN_MARKER_NAME = ".dcb_run_start"
 # fast instead of reading a huge file into memory only for Discord to
 # reject the upload.
 MAX_ARTIFACT_BYTES = 25_000_000
-
-
-def _positive_int(raw: str | None, default: int) -> int:
-    try:
-        value = int(str(raw).strip())
-        return value if value > 0 else default
-    except (TypeError, ValueError):
-        return default
 
 
 def thread_ask_timeout() -> int:

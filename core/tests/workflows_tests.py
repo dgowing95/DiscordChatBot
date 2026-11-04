@@ -703,7 +703,7 @@ async def test_a_stop_in_the_last_review_does_not_cancel_finished_work(env):
 
 @pytest.mark.asyncio
 async def test_a_change_written_while_the_plan_is_made_becomes_an_edit(env, monkeypatch):
-    async def _index(guild_id):
+    async def _index(guild_id, header=None):
         # Runs inside the first planning run, after the thread was claimed.
         if not thread_inbox.get_run(env.thread.id).events:
             thread_inbox.deliver(env.thread.id, 9403, 5, "Ana", "prices in EUR please")
@@ -763,3 +763,98 @@ async def test_the_channel_gets_one_copy_of_each_file_the_newest(monkeypatch):
                          artifacts=[a1, b1, a2])
     assert await workflows.post_workflow_copy(wf) == ["report.md", "chart.png"]
     assert sent[0].data == b"v2"
+
+
+# --------------------------- PR review fixes ---------------------------
+
+@pytest.mark.asyncio
+async def test_a_refused_task_keeps_its_reason_and_pings_no_one(monkeypatch):
+    import discord
+    from classes import task_commands, voice_gate
+    commands = {}
+    tree = SimpleNamespace(command=lambda **kw: (lambda f: commands.setdefault(kw["name"], f)))
+    task_commands.register_task_commands(tree, client=None)
+    monkeypatch.setattr(voice_gate, "active", lambda guild_id: False)
+    message = SimpleNamespace(edit=AsyncMock())
+    ctx = SimpleNamespace(guild_id=1, channel=None, user=SimpleNamespace(
+        id=5, display_name="Ana", name="ana"),
+        response=SimpleNamespace(send_message=AsyncMock()),
+        original_response=AsyncMock(return_value=message))
+    link = "https://discord.com/channels/1/500"
+    monkeypatch.setattr(workflows, "start_workflow", AsyncMock(return_value=SimpleNamespace(
+        ok=False, text="A workflow is already running here. " + "x" * 100 + link)))
+    await commands["task"](ctx, "@everyone " + "y" * 1790)
+    kwargs = message.edit.await_args.kwargs
+    assert kwargs["content"].endswith(link) and len(kwargs["content"]) <= 2000
+    assert kwargs["allowed_mentions"].everyone is False
+
+
+@pytest.mark.asyncio
+async def test_new_steps_with_no_id_never_take_a_done_steps_id(env):
+    _thread_message_during_the_step(env, 9500, "add two more parts")
+    env.model = LaneModel([
+        _plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"])),
+        ModelStep(output=[function_call("look", {}, call_id="l")]), _report(call_id="a"),
+        ModelStep(output=[function_call("submit_review", {
+            "replies": [{"id": 1, "reply": "Adding them."}],
+            "steps": [{"role": "researcher", "brief": "part one", "depends_on": ["s1"]},
+                      {"role": "implementer", "brief": "part two"}]}, call_id="rv")]),
+        _report(call_id="b"), _report(call_id="c"), _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    assert len(wf.results) == 3
+    ids = [s.id for s in wf.plan.steps]
+    assert len(ids) == len(set(ids)) == 3 and ids[0] == "s1"
+
+
+@pytest.mark.asyncio
+async def test_an_automatic_step_that_needs_someone_never_says_they_were_asked(env):
+    env.model = LaneModel([
+        _plan_call(("s1", "researcher", [])),
+        _report(status="needs_input", facts=("Which printer?",), call_id="a"),
+        _report(call_id="f")])
+    wf, _ = await _start(env, automatic=True)
+    await _finish(wf)
+    facts = " ".join(wf.results["s1"]["facts"])
+    assert "could not be asked: Which printer?" in facts
+    assert "was asked" not in facts
+    assert not any("Which printer?" in text for text in env.thread.texts())
+
+
+@pytest.mark.asyncio
+async def test_approve_after_the_plan_was_answered_during_the_defer(env):
+    env.model = LaneModel([_plan_call(("s1", "researcher", [])), _report(call_id="a"),
+                           _report(call_id="f")])
+    wf, _ = await _start(env, automatic=False)
+    await _until(lambda: wf.state == wp.AWAITING_APPROVAL and wf.approval is not None)
+
+    async def _answered_meanwhile():
+        wf.approval.set_result(("approve", None))
+
+    interaction = SimpleNamespace(user=SimpleNamespace(id=5), response=SimpleNamespace(
+        defer=AsyncMock(side_effect=_answered_meanwhile), send_message=AsyncMock()))
+    await workflows.on_button(interaction, wf.id, "approve")  # no InvalidStateError
+    await _finish(wf)
+    assert wf.record["state"] == wp.DONE
+
+
+@pytest.mark.asyncio
+async def test_the_manager_is_never_pointed_at_use_skill(env, monkeypatch):
+    index = AsyncMock(return_value="")
+    monkeypatch.setattr(brain, "_skills_index", index)
+    env.model = LaneModel([_plan_call(("s1", "researcher", [])), _report(call_id="a"),
+                           _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    assert "use_skill" not in index.await_args.kwargs["header"]
+
+
+@pytest.mark.asyncio
+async def test_a_workflows_image_limit_names_its_own_cap():
+    from agents.tool_context import ToolContext
+    from classes import tool_functions
+    context = {"image_calls": wp.MAX_IMAGES, "image_cap": wp.MAX_IMAGES}
+    text = await tool_functions.generate_image.on_invoke_tool(
+        ToolContext(context=context, tool_name="generate_image", tool_call_id="i",
+                    tool_arguments='{"prompt": "a boat"}'), '{"prompt": "a boat"}')
+    assert f"limit of {wp.MAX_IMAGES} picture requests for this workflow" in text

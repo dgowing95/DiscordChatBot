@@ -434,7 +434,7 @@ llm_slot_context_available = Gauge(
     "1 when the per-slot context was read from the LLM server on the last attempt, else 0",
 )
 
-# Queue waits and full replies span a quick chat answer to a long sandbox run.
+# Queue waits and full replies span a quick chat answer to a long brain call.
 LATENCY_BUCKETS = (0.1, 0.5, 1, 2.5, 5, 10, 20, 30, 60, 120, 300, 600)
 # Fast phases (history reads, downloads, lock waits, sends).
 STAGE_BUCKETS = (0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60)
@@ -534,7 +534,7 @@ WORKFLOW_INPUT_BUCKETS = (1, 2.5, 5, 10, 20, 30, 60, 120, 300, 600)
 
 workflow_thread_messages_total = Counter(
     "discord_bot_workflow_thread_messages_total",
-    "Thread messages offered to a running sandbox, by delivery result",
+    "Thread messages offered to a running workflow, by delivery result",
     ["outcome"],
 )
 
@@ -546,30 +546,30 @@ workflow_input_presentation_seconds = Histogram(
 
 workflow_input_response_seconds = Histogram(
     "discord_bot_workflow_input_response_seconds",
-    "Seconds from receiving a thread message to the sandbox model responding to it",
+    "Seconds from receiving a thread message to the workflow's model responding to it",
     buckets=WORKFLOW_INPUT_BUCKETS,
 )
 
 workflow_stale_actions_blocked_total = Counter(
     "discord_bot_workflow_stale_actions_blocked_total",
-    "Sandbox tool calls refused because thread input was still unanswered",
+    "Workflow tool calls refused because thread input was still unanswered",
 )
 
 workflow_questions_total = Counter(
     "discord_bot_workflow_questions_total",
-    "Sandbox ask_user questions by mode and outcome",
+    "Questions asked in a workflow's thread, by mode and outcome",
     ["mode", "outcome"],
 )
 
 workflow_unresolved_input_total = Counter(
     "discord_bot_workflow_unresolved_input_total",
-    "Thread messages still unresolved when a sandbox run ended, by status",
+    "Thread messages still unresolved when a workflow ended, by status",
     ["status"],
 )
 
 workflow_continuations_total = Counter(
     "discord_bot_workflow_continuations_total",
-    "Extra sandbox runner passes started to account for thread input",
+    "Extra workflow runner passes started to account for thread input",
 )
 
 # The server workspace (classes/workspace_manager.py).

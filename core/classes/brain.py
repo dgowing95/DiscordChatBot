@@ -1014,17 +1014,18 @@ async def _run_and_deliver(ctx, lease, agent, task, run_config, hooks, progress,
     return out
 
 
-async def _skills_index(guild_id) -> str:
+async def _skills_index(guild_id, header: str | None = None) -> str:
     """The saved skills as the brain's task shows them ('' when there are
-    none or skills are off). Fail-soft: a Redis problem costs the index, not
-    the call."""
+    none or skills are off), under `header` when the reader has other tools.
+    Fail-soft: a Redis problem costs the index, not the call."""
     from classes import skill_format
     if not guild_id or not skill_format.enabled():
         return ""
     try:
         from classes.skill_store import SkillStore
         skills = await SkillStore().list(guild_id)
-        return skill_format.render_index(skills, skill_format.settings()["index_max"], time.time())
+        return skill_format.render_index(skills, skill_format.settings()["index_max"], time.time(),
+                                         header=header or skill_format.INDEX_HEADER)
     except Exception as e:
         logger.warning(f"Brain: could not read the skills index: {e}")
         return ""

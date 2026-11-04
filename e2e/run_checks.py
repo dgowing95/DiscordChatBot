@@ -160,6 +160,7 @@ class Run:
         self.channel_id = ""
         self.webhook_id = ""
         self.thread_id = ""
+        self.last_trigger_id = ""
         self.redis = redis.Redis(host="127.0.0.1", decode_responses=True)
 
     async def setup(self) -> None:
@@ -210,6 +211,7 @@ class Run:
                     and have.get("guild_id") == self.guild_id}
         before = await outcomes()
         trigger = await self.post(f"<@{self.bot_id}> {content}")
+        self.last_trigger_id = trigger["id"]
 
         async def handled():
             now = await outcomes()
@@ -227,6 +229,19 @@ class Run:
         if not mine:
             raise CheckFailed("the bot handled the message but posted nothing")
         return mine
+
+    async def messages_after(self, message_id: str) -> list[dict]:
+        """Every message after an id, oldest first: a workflow can post more
+        than one page of them."""
+        found = []
+        while True:
+            page = await self.discord.request(
+                "GET", f"/channels/{self.thread_id}/messages",
+                params={"after": message_id, "limit": 100})
+            found.extend(page)
+            if len(page) < 100:
+                return sorted(found, key=lambda m: int(m["id"]))
+            message_id = max(page, key=lambda m: int(m["id"]))["id"]
 
     async def case(self, name: str, check) -> None:
         started = time.monotonic()
@@ -318,9 +333,9 @@ class Run:
             "largest moons from two sources each, then write a moons.md report with a table.")
         reply = " ".join(m["content"] for m in messages)
         await wait_until(lambda: _gt(ended(), before), WORKFLOW_TIMEOUT, "the workflow to end")
-        posted = await self.discord.request(
-            "GET", f"/channels/{self.thread_id}/messages", params={"after": messages[0]["id"],
-                                                                   "limit": 100})
+        # From the trigger, not the reply: the plan is posted by the workflow's
+        # own task, so it may come before the reply. `after` is exclusive.
+        posted = await self.messages_after(self.last_trigger_id)
         titles = [e.get("title", "") for m in posted if m["author"]["id"] == self.bot_id
                   for e in m.get("embeds", [])]
         if not any(t.startswith("🧵 Plan") for t in titles):
