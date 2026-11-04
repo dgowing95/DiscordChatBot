@@ -51,6 +51,33 @@ class Common:
 
 logger = logging.getLogger(__name__)
 
+
+class _NoMessage:
+    """What a dropped embed "sent", for a tool that edits its embed later."""
+
+    async def edit(self, **kwargs) -> None:
+        pass
+
+
+class QuietChannel:
+    """The channel a workflow's scouts and researchers run with: a tool's own
+    embed goes nowhere, and everything else is the real channel. Each posts
+    one embed per tool call, dozens in a run, which buried the thread. Their
+    one status embed (brain_progress.HelperProgress) says what they are doing."""
+
+    def __init__(self, channel):
+        self._channel = channel
+
+    def __getattr__(self, name):
+        return getattr(self._channel, name)
+
+    async def send(self, *args, **kwargs):
+        if (not args and kwargs.get("embed") is not None
+                and not kwargs.get("file") and not kwargs.get("files")):
+            return _NoMessage()
+        return await self._channel.send(*args, **kwargs)
+
+
 # Discord's cap on attachments per message.
 MAX_FILES_PER_MESSAGE = 10
 

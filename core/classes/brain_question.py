@@ -11,6 +11,9 @@ Only the requester can use the buttons; anyone else is told so privately.
 When the question closes (answered, no answer in time, or replaced by a
 newer one) its buttons go and a short line says how it ended, so a stale
 question never looks open.
+
+It is a card (classes/card.py), with the choices on one row and "Answer…" and
+"You decide" always on the next: there can be 6 buttons, and a row holds 5.
 """
 import asyncio
 import logging
@@ -18,13 +21,19 @@ import logging
 import discord
 
 from classes import brain_inbox
+from classes.card import Card, button
 
 logger = logging.getLogger(__name__)
 
 MAX_OPTIONS = 4
 OPTION_CHARS = 80  # Discord's button label limit
 ANSWER_CHARS = 1000
-MAX_QUESTION_CHARS = 1800  # leaves room for a mention and the closing line
+MAX_QUESTION_CHARS = 1800
+HEADING_CHARS = 120  # a longer question reads badly in a heading's large type
+# The small line above a question, so it is clear why it was asked.
+HEADING_CHAT = "Needs more information"
+HEADING_PLAN = "Planning needs more information"
+HEADING_STEP = "This step needs more information"
 YOU_DECIDE = "You decide"
 # What the "You decide" button hands the brain (classes/brain.py maps it).
 YOU_DECIDE_ANSWER = "(you decide)"
@@ -47,11 +56,11 @@ def clean_options(options) -> list[str]:
     return labels[:MAX_OPTIONS]
 
 
-def closed_content(content: str, line: str) -> str:
-    """The question with its closing line under it, cut from the question's
-    end (never the line) to fit Discord's 2000 characters."""
-    tail = f"\n-# {line}"[:400]
-    return content[:2000 - len(tail)] + tail
+def question_text(text: str, label: str = "") -> str:
+    """The question as the card shows it: under its label, and in large type
+    when it is short."""
+    shown = f"### {text}" if len(text) <= HEADING_CHARS and "\n" not in text else text
+    return f"-# {label}\n{shown}" if label else shown
 
 
 class AnswerModal(discord.ui.Modal, title="Your answer"):
@@ -66,11 +75,12 @@ class AnswerModal(discord.ui.Modal, title="Your answer"):
         await self.view.answer(interaction, str(self.answer.value), str(self.answer.value))
 
 
-class QuestionView(discord.ui.View):
-    """The question's buttons. `question_id` is set once it is posted."""
+class QuestionView(Card):
+    """The question and its buttons. `question_id` is set once it is posted."""
 
-    def __init__(self, user_id: int, options, timeout: float):
-        super().__init__(timeout=timeout)
+    def __init__(self, user_id: int, options, timeout: float, text: str = "", note: str = "",
+                 label: str = ""):
+        super().__init__(question_text(text, label), note=note, timeout=timeout)
         self.user_id = int(user_id)
         self.question_id = None
         self.closed = False
@@ -79,17 +89,11 @@ class QuestionView(discord.ui.View):
         # message at the same time with a different line.
         self.handling = asyncio.Event()
         self.handled = False
-        for label in clean_options(options):
-            self.add_item(self._button(label, discord.ButtonStyle.primary, self._choose(label)))
-        self.add_item(self._button("Answer…", discord.ButtonStyle.secondary, self._open_box))
-        self.add_item(self._button(YOU_DECIDE, discord.ButtonStyle.secondary,
-                                   self._choose(YOU_DECIDE_ANSWER, shown=YOU_DECIDE)))
-
-    @staticmethod
-    def _button(label, style, callback) -> discord.ui.Button:
-        button = discord.ui.Button(label=label, style=style)
-        button.callback = callback
-        return button
+        self.add_row([button(label, discord.ButtonStyle.success, self._choose(label))
+                      for label in clean_options(options)])
+        self.add_row([button("Answer…", discord.ButtonStyle.secondary, self._open_box),
+                      button(YOU_DECIDE, discord.ButtonStyle.primary,
+                             self._choose(YOU_DECIDE_ANSWER, shown=YOU_DECIDE))])
 
     def _choose(self, answer: str, shown: str | None = None):
         async def _callback(interaction: discord.Interaction) -> None:
@@ -120,9 +124,8 @@ class QuestionView(discord.ui.View):
             outcome = brain_inbox.deliver(self.question_id, interaction.user.id, answer)
         if outcome == brain_inbox.ACCEPTED:
             self.stop()
-            content = getattr(interaction.message, "content", "") or ""
             await interaction.response.edit_message(
-                content=closed_content(content, ANSWERED.format(answer=shown[:200])), view=None)
+                view=self.finished(ANSWERED.format(answer=shown[:200])))
             # Only once the edit worked: otherwise close() (in ask_user)
             # still takes the dead buttons off.
             self.closed = True
@@ -133,23 +136,22 @@ class QuestionView(discord.ui.View):
             await interaction.response.send_message("This question is closed.", ephemeral=True)
 
 
-async def post(ctx: dict, text: str, options, timeout: float):
+async def post(ctx: dict, text: str, options, timeout: float, label: str = HEADING_CHAT):
     """Posts the question (a reply to the request, or a mention when there is
     no source message). Returns (message, view), or (None, None)."""
-    view = QuestionView(ctx["user_id"], options, timeout)
-    text = str(text)[:MAX_QUESTION_CHARS]
     message = ctx.get("original_message")
+    view = QuestionView(ctx["user_id"], options, timeout, text=str(text)[:MAX_QUESTION_CHARS],
+                        note="" if message is not None else f"<@{ctx['user_id']}>", label=label)
     try:
         if message is not None:
             # A request deleted meanwhile still gets its question, just
             # without the reply link (Discord refuses a reply to a missing
             # message by default).
             sent = await ctx["channel"].send(
-                text, view=view, mention_author=True, allowed_mentions=MENTIONS,
+                view=view, mention_author=True, allowed_mentions=MENTIONS,
                 reference=message.to_reference(fail_if_not_exists=False))
         else:
-            sent = await ctx["channel"].send(f"<@{ctx['user_id']}> {text}", view=view,
-                                             allowed_mentions=MENTIONS)
+            sent = await ctx["channel"].send(view=view, allowed_mentions=MENTIONS)
     except Exception as e:
         logger.warning(f"Brain: could not post its question: {e}")
         view.stop()
@@ -174,7 +176,6 @@ async def close(message, view: QuestionView, line: str) -> None:
     try:
         # Bounded: this runs in the finally of a brain call that may be
         # being stopped.
-        await asyncio.wait_for(
-            message.edit(content=closed_content(message.content or "", line), view=None), 10)
+        await asyncio.wait_for(message.edit(view=view.finished(line)), 10)
     except Exception as e:
         logger.info(f"Brain: could not close its question: {e}")

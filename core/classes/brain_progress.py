@@ -40,6 +40,12 @@ Rendering (streamed form):
 
 The pure parts (SandboxTranscript, parse_exec_result) are unit-tested in
 core/tests/brain_progress_tests.py.
+
+A workflow's scouts and researchers have their own, smaller embed
+(HelperProgress): one each, posted when they start, showing only the last thing
+they did. Their tools post nothing (common.QuietChannel). Two can run in one
+thread, so each edits at most every HELPER_EDIT_SECONDS, which keeps the pair
+under the 5 edits a minute.
 """
 import logging
 import json
@@ -52,12 +58,14 @@ from agents import RunHooks
 
 from classes.workflow_conversation import GATE_REFUSAL_PREFIX
 from classes.tool_embeds import (
-    BRAIN_DONE, BRAIN_STOPPED, BRAIN_WORKING, COLOR_BRAIN, COLOR_DONE, COLOR_STOPPED, work_task_text,
+    BRAIN_DONE, BRAIN_STOPPED, BRAIN_WORKING, COLOR_BRAIN, COLOR_DONE, COLOR_STOPPED,
+    HELPER_TITLE_CHARS, helper_ending, helper_line, trim, work_task_text,
 )
 
 logger = logging.getLogger(__name__)
 
 EDIT_INTERVAL_SECONDS = 15.0  # Discord allows 5 edits/minute per channel
+HELPER_EDIT_SECONDS = 30.0    # two helpers share a thread's edits
 BACKOFF_SECONDS = 25.0        # wait before retrying after a failed update
 MAX_BODY_CHARS = 1850         # keeps the message body under Discord's 2000
 MAX_NOTES = 5                 # status notes kept for the body
@@ -365,6 +373,69 @@ class SandboxTranscript:
 # The tools that use the server's workspace: the first of them posts the
 # status embed (D18).
 WORKSPACE_TOOLS = frozenset({"exec_command", "write_stdin", "attach_file", "save_messages_to_file"})
+
+
+class HelperProgress(RunHooks):
+    """A scout's or researcher's one embed: what it is on, its last tool call
+    and its turn. Like the hooks below it never raises, and a failed edit
+    only waits for the next one."""
+
+    def __init__(self, channel, title: str, *, max_turns: int,
+                 edit_interval: float = HELPER_EDIT_SECONDS):
+        self.channel = channel
+        self.title = trim(title, HELPER_TITLE_CHARS)
+        self.max_turns = max_turns
+        self.edit_interval = edit_interval
+        self.turn = 0
+        self.line = ""
+        self._message = None
+        self._last_sent = 0.0
+        self._finalized = False
+
+    def _embed(self, description: str, color: int) -> discord.Embed:
+        embed = discord.Embed(title=self.title, description=description, color=color)
+        if self.turn:
+            embed.set_footer(text=f"Turn {self.turn} of {self.max_turns}")
+        return embed
+
+    async def _send(self, embed: discord.Embed) -> None:
+        self._last_sent = time.monotonic()
+        try:
+            if self._message is None:
+                self._message = await self.channel.send(embed=embed)
+            else:
+                await self._message.edit(embed=embed)
+        except discord.NotFound:
+            self._message = None
+        except Exception as e:
+            logger.warning(f"Helper progress: update failed: {e}")
+
+    async def start(self) -> None:
+        await self._send(self._embed("Starting…", COLOR_BRAIN))
+
+    async def _update(self) -> None:
+        if not self._finalized and time.monotonic() - self._last_sent >= self.edit_interval:
+            await self._send(self._embed(self.line or "Thinking…", COLOR_BRAIN))
+
+    async def on_llm_start(self, context, agent, system_prompt, input_items) -> None:
+        self.turn += 1
+
+    async def on_tool_start(self, context, agent, tool) -> None:
+        try:
+            line = helper_line(getattr(tool, "name", ""), _tool_args(context))
+        except Exception as e:  # a progress error must never kill the run
+            logger.warning(f"Helper progress: ignoring a bad tool call: {e}")
+            return
+        if line:
+            self.line = line
+            await self._update()
+
+    async def finalize(self, ok: bool = True, note: str | None = None, found: int = 0) -> None:
+        if self._finalized:
+            return
+        self._finalized = True
+        await self._send(self._embed(helper_ending(ok, note, found, self.line),
+                                     COLOR_DONE if ok else COLOR_STOPPED))
 
 
 class BrainProgressHooks(RunHooks):

@@ -83,6 +83,17 @@ def test_format_unknown_channel_and_member_nick():
     assert "- Ali," in text and "in <#999>:" in text and "newest first" in text
 
 
+CARD = [{"type": 17, "components": [{"type": 10, "content": "### 🧵 Plan\nChart the cities"},
+                                    {"type": 1, "components": [{"type": 2, "label": "Approve"}]}]}]
+
+
+def test_a_cards_text_is_shown_and_saved():
+    card = _hit(1, content="", components=CARD)
+    text = msf.format_results(_body(card), GUILD_ID, {}, "x")
+    assert "Chart the cities" in text and "(no text)" not in text and "Approve" not in text
+    assert msf.export_record(card, GUILD_ID, {})["content"] == "### 🧵 Plan\nChart the cities"
+
+
 def test_an_embeds_body_and_fields_are_shown():
     # A game-tracker bot's message is nothing but an embed; the title alone
     # says nothing about what happened.

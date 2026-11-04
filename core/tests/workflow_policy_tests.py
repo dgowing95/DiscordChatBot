@@ -64,6 +64,80 @@ def test_steps_run_after_what_they_depend_on():
     assert [s.id for s in wp.order_steps(plan)] == ["s2", "s3", "s1"]
 
 
+def _steps(*items):
+    return [wp.Step(id=i, role=r, brief="b", depends_on=list(d)) for i, r, d in items]
+
+
+def _ids(steps):
+    return [s.id for s in steps]
+
+
+def test_ready_researchers_go_together_up_to_the_limit():
+    queue = _steps(("a", wp.RESEARCHER, ()), ("b", wp.RESEARCHER, ()), ("c", wp.RESEARCHER, ()))
+    assert _ids(wp.next_wave(queue, set(), 2)) == ["a", "b"]
+    assert _ids(wp.next_wave(queue, set(), 1)) == ["a"]
+    assert _ids(wp.next_wave(queue, set(), 9)) == ["a", "b", "c"]
+    assert _ids(wp.next_wave(queue, set(), 0)) == ["a"]
+
+
+def test_a_researcher_waits_for_what_it_depends_on():
+    queue = _steps(("a", wp.RESEARCHER, ()), ("b", wp.RESEARCHER, ("a",)), ("c", wp.RESEARCHER, ()))
+    assert _ids(wp.next_wave(queue, set(), 2)) == ["a", "c"]
+    assert _ids(wp.next_wave(queue[1:2], {"a"}, 2)) == ["b"]
+
+
+def test_an_implementer_runs_alone():
+    first = _steps(("a", wp.IMPLEMENTER, ()), ("b", wp.RESEARCHER, ()))
+    assert _ids(wp.next_wave(first, set(), 2)) == ["a"]
+    between = _steps(("a", wp.RESEARCHER, ()), ("b", wp.IMPLEMENTER, ()), ("c", wp.RESEARCHER, ()))
+    assert _ids(wp.next_wave(between, set(), 2)) == ["a", "c"]
+    two = _steps(("a", wp.IMPLEMENTER, ()), ("b", wp.IMPLEMENTER, ()))
+    assert _ids(wp.next_wave(two, set(), 2)) == ["a"]
+
+
+def test_nothing_ready_still_gives_a_step():
+    stuck = _steps(("a", wp.RESEARCHER, ("x",)), ("b", wp.RESEARCHER, ("a",)))
+    assert _ids(wp.next_wave(stuck, set(), 2)) == ["a"]
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ({"subjects": ["a", " b ", "c"]}, ["a", "b"]),
+    ({"subjects": "one"}, ["one"]),
+    (["a?"], ["a?"]),
+    ({"subjects": ["", None]}, []),
+    ({}, []),
+    (None, []),
+])
+def test_scout_subjects_are_read_loosely_and_capped(raw, expected):
+    assert wp.clean_scout_subjects(raw) == expected
+
+
+def test_a_long_scout_question_is_cut():
+    assert len(wp.clean_scout_subjects(["x" * 900])[0]) == wp.MAX_SUBJECT_CHARS
+
+
+def test_one_string_is_one_subject_or_question_whatever_commas_it_has():
+    assert wp.clean_scout_subjects({"subjects": "UK rail delays, by operator"}) == [
+        "UK rail delays, by operator"]
+    assert wp.clean_plan_questions({"questions": "Which format, PDF or Word?"}) == [
+        ("Which format, PDF or Word?", [])]
+
+
+def test_plan_questions_are_read_loosely_and_capped():
+    raw = {"questions": [{"question": "a?", "options": ["x", "y"]}, "b?", {"question": ""},
+                         {"question": "c?"}, {"question": "d?"}]}
+    assert wp.clean_plan_questions(raw) == [("a?", ["x", "y"]), ("b?", []), ("c?", [])]
+    assert wp.clean_plan_questions({"questions": {"question": "one?"}}) == [("one?", [])]
+    assert wp.clean_plan_questions({"questions": "one?"}) == [("one?", [])]
+    assert wp.clean_plan_questions(None) == []
+
+
+def test_findings_are_lines_within_their_limit():
+    assert wp.findings_text(["a", "b"]) == "- a\n- b"
+    long = wp.findings_text(["x" * 5000, "y" * 5000])
+    assert len(long) <= wp.MAX_FINDINGS_CHARS + 1 and "y" in long
+
+
 def test_the_fallback_is_one_implementer_with_the_whole_request():
     plan = wp.fallback_plan("Build a CSV to chart tool")
     assert [(s.id, s.role, s.brief) for s in plan.steps] == [

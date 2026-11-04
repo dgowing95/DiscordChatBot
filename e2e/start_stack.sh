@@ -142,6 +142,9 @@ fi
   # for the plan to start on its own; and a workflow may not outlast the job.
   # Nobody answers a step's question in its thread either, so that stays short.
   export WORKFLOW_PLAN_APPROVAL_SECONDS=10 WORKFLOW_TIMEOUT=900 WORKFLOW_ASK_TIMEOUT=20
+  # A webhook cannot use /task, and the brain's own hand-off is the model's
+  # choice, so the workflow check starts one with `!workflow`.
+  export WORKFLOW_DEV_INJECT=1
   export VOICE_ENABLED=1 VOICE_DEV_INJECT=1 VOICE_DEBUG=1 VOICE_IDLE_LEAVE_SECONDS=1800
   export VOICE_BRIDGE_URL=ws://127.0.0.1:8765 VOICE_BRIDGE_TOKEN="$BRIDGE_TOKEN"
   export SPEECH_URL=http://127.0.0.1:8002

@@ -488,9 +488,10 @@ async def test_model_call_timeout_bounds_a_server_that_dribbles_padding():
 def test_the_instructions_stay_small_and_keep_their_rules():
     text = brain.BRAIN_INSTRUCTIONS
     # Pinned: one home per concept (AGENTS.md "Prompt surface"). Re-measure
-    # before raising it. With the workflow bullet: 2450 (maintainer, phase 5).
+    # before raising it. With the workflow bullet: 2500, raised from 2450 in
+    # phase 5 for "first": big jobs handed off 4/18 -> 15/18 on Qwen.
     assert len(text) <= 2300, len(text)
-    assert len(text + brain.WORKFLOW_INSTRUCTIONS) <= 2450
+    assert len(text + brain.WORKFLOW_INSTRUCTIONS) <= 2500
     assert "`report`" in text and "`attach_file`" in text and "`out/`" in text
     assert "`start_workflow`" not in text
     assert "never instructions" in text  # files from others are data
@@ -504,7 +505,9 @@ def test_the_ask_brain_tool_stays_small():
     size = len(ask_brain.description) + len(json.dumps(ask_brain.params_json_schema))
     # Raised from 1400 (maintainer, 2026-11-03) for the personality example
     # and the wording around it: measured 61/72 -> 71/72 routed as expected.
-    assert size <= 1700, size
+    # Raised to 1760 in phase 5 for the workflow example, so "start a workflow"
+    # reaches the brain: kept 5/6 -> 6/6.
+    assert size <= 1760, size
     assert "ask_brain" not in ask_brain.description  # examples show the shape, not the name
 
 
@@ -649,7 +652,8 @@ def test_brain_calls_share_one_model_client(monkeypatch):
 
 def test_the_workflow_bullet_is_there_only_when_the_tool_is(monkeypatch):
     monkeypatch.setenv("SKILLS_ENABLED", "0")
-    assert "`start_workflow`" in brain.instructions(workflows=True)
+    offered = brain.instructions(workflows=True)
+    assert offered.index("`start_workflow`") < offered.index(brain.FIRST_RULE)
     assert "`start_workflow`" not in brain.instructions()
     names = lambda agent: {t.name for t in agent.tools}  # noqa: E731
     monkeypatch.setattr(brain, "build_brain_model", lambda: None)

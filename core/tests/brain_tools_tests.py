@@ -86,16 +86,22 @@ def test_start_workflow_is_offered_only_when_tier_3_is_allowed_and_never_in_voic
 
 def test_a_workflows_agents_get_their_own_short_lists(all_on, monkeypatch):
     monkeypatch.setenv("SKILLS_ENABLED", "1")
-    assert _names(mode="manager") == ["web_search", "fetch_url", "search_messages",
-                                      "read_messages_around", "search_skills", "submit_plan"]
+    assert _names(mode="manager") == ["search_skills", "submit_plan"]
+    assert _names(mode="manager", rounds=("discover", "ask_requester")) == [
+        "search_skills", "discover", "ask_requester", "submit_plan"]
+    assert _names(mode="manager", rounds=("ask_requester",)) == [
+        "search_skills", "ask_requester", "submit_plan"]
+    assert _names(mode="scout") == ["web_search", "fetch_url", "search_messages",
+                                    "read_messages_around", "save_messages_to_file", "report"]
     assert _names(mode="review") == ["submit_review"]
     assert _names(mode="finish") == ["report"]
     assert _names(mode="researcher") == ["web_search", "fetch_url", "search_messages",
                                          "read_messages_around", "attach_file",
                                          "save_messages_to_file", "report"]
-    assert _names(mode="implementer") == ["fetch_url", "generate_image", "attach_file", "report"]
+    assert _names(mode="implementer") == ["fetch_url", "generate_image", "attach_file",
+                                          "save_messages_to_file", "report"]
     # Nothing that belongs to a conversation, and no way to start another.
-    for mode in ("manager", "review", "finish", "researcher", "implementer"):
+    for mode in ("manager", "scout", "review", "finish", "researcher", "implementer"):
         names = set(_names(mode=mode))
         assert not names & (MEMORY | EVENTS | {"ask_user", "start_workflow", "create_poll",
                                                "change_personality"})
