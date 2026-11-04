@@ -81,8 +81,6 @@ core/                    # the bot (what runs in production)
     workflow_views.py      # the plan card's Approve / Edit / Cancel buttons (work across restarts)
     task_commands.py       # /task
     thread_inbox.py        # P thread-message ledger (a workflow claims its thread's)
-    workflow_conversation.py        # thread steering with a gate      | for 5b's steering
-    workflow_conversation_store.py  # per-thread loose ends            | into a running helper
     # tools and features
     image_generation.py    # create_image: prompt, generate, check, retry; which image to edit
     image_prompt.py        # request -> SDXL prompt + negative prompt
@@ -682,7 +680,7 @@ reads has a row here and a line in `.env.example`, that every row is read by som
   suite seem to hang on Redis connect timeouts.
 - Stub Redis with fixtures and `unittest.mock`. Anything worth unit-testing goes in a pure module.
 - Test the SDK boundary against the **real `Runner`** with `agents.testing.ScriptedModel`
-  (`brain_tests.py`, `workflow_conversation_tests.py`, `max_turns_wrap_up_tests.py`) rather than mocking
+  (`brain_tests.py`, `workflows_tests.py`, `max_turns_wrap_up_tests.py`) rather than mocking
   `Runner`, so an SDK upgrade that changes the boundary fails a test.
 - Where the tests for the concurrency model live: `message_queue_tests.py` (also `main.py`'s
   `on_message` / `process_messages`; importing `main.py` starts nothing), `task_registry_tests.py`,

@@ -1,53 +1,29 @@
-"""Tracked ledger of what people say to a sandbox run while it happens.
+"""Tracked ledger of what people say in a run's thread while it runs.
 
-A sandbox run happens inside a Discord thread (see classes/sandbox_agent.py's
-ensure_work_thread). While it runs, messages posted in that thread are
-recorded here instead of going to the outer LLM, and the conversation
-coordinator (classes/workflow_conversation.py) shows them to the nested model
-as user input at its next model call. That makes a run steerable ("actually
-make it blue") without restarting it.
-
-This used to be a destructive inbox: messages were drained into whichever
-tool result happened to run next, and reading one counted as handling it.
-Nothing recorded whether the model understood a request, or whether it ever
-saw it at all — pending input was simply discarded when the run ended, and
-the outer model was told "the sandbox received these and adapted" either way.
-So every accepted message is now an EVENT with an explicit stage:
+A workflow claims its thread (classes/workflows.py), and on_message records
+each message there instead of treating it as a new request. Every accepted
+message is an EVENT with an explicit stage, so none is lost or counted as
+handled just because something read it:
 
     received -> presented -> addressed -> resolved
 
-  - received:  accepted from Discord, not yet shown to the model.
-  - presented: included in a model call that completed.
-  - addressed: the model said how it will handle it (decision "will_apply")
-               but has not said the change is made. Acceptance is not
-               evidence of completion, so this stays distinct from resolved.
-  - resolved:  a specific outcome — done, answered, noted, declined,
+  - received:  accepted from Discord, nothing has taken it yet.
+  - presented: taken by the workflow.
+  - addressed: someone said how it will be handled, but not that it is done.
+  - resolved:  a specific outcome: done, answered, noted, declined,
                superseded or deferred.
-
-An event the model kept ignoring past the gate's refusal cap is marked
-UNACKNOWLEDGED instead (see workflow_conversation.MAX_GATE_REFUSALS): it stays
-unresolved and is reported as such, but stops blocking the run.
 
 Deliberately pure: stdlib only, no discord and no SDK imports, so every rule
 here is unit testable without a Discord client. main.py's on_message does
-the Discord half (one deliver call plus a reaction), and
-workflow_conversation.py does the runner half. Every mutating function here is
-synchronous: the bot is one asyncio event loop, so a function with no await
-in it is atomic with respect to every other coroutine — which is what makes
-claim_run a real check-and-set rather than the old check, await, register.
+the Discord half (one deliver call plus a reaction). Every mutating function
+here is synchronous: the bot is one asyncio event loop, so a function with no
+await in it is atomic with respect to every other coroutine, which is what
+makes claim_run a real check-and-set.
 
-This is also the concurrency guard for a thread's job folder. Two runs in one
-thread would work in the same jobs/t<thread id>/ at once and clobber each
-other's files, so a thread with a run claimed never starts a second one — the new request is forwarded into the running
-sandbox instead (main.py returns early; run_code_sandbox has the same guard
-for the paths that bypass on_message).
-
-State lives in a module-level dict, which is correct here and not a shortcut:
-the bot is one process running one event loop, and both the producer
-(on_message) and the consumer (the nested run) live in it. What must outlive
-the run (unapplied follow-ups, an unanswered question) is persisted by
-run_code_sandbox through classes/workflow_conversation_store.py; an abrupt
-crash before that point loses it, since this ledger is process memory.
+A thread with a run claimed never starts a second one: the message goes to
+the running job instead (main.py returns early). State lives in a module-level
+dict, which is correct here: the bot is one process running one event loop,
+and both sides live in it, so a restart loses it.
 
 Stale owners: claim_run records the task that claimed the run, and get_run
 drops an entry whose owner task has already finished. That closes the old
@@ -84,7 +60,7 @@ PRESENTED = "presented"
 ADDRESSED = "addressed"
 RESOLVED = "resolved"
 
-# The decisions the model can record with respond_to_updates, and the stage
+# The decisions that can be recorded for a message, and the stage
 # each one moves an event to. will_apply is the only one that is not an
 # outcome: it is a promise, and the run's report keeps it apart from "done".
 DECISIONS = {
@@ -142,17 +118,11 @@ class ThreadEvent:
     has_attachments: bool = False
     stage: str = RECEIVED
     outcome: str | None = None
-    # The model's own words about it (respond_to_updates' reply).
+    # The reply it got.
     reply: str = ""
-    # Position in the model's input list where this event was first shown.
-    # The SDK rebuilds that list every call and does not keep what a filter
-    # added, so the coordinator re-inserts every presented event at its
-    # anchor on every call — see workflow_conversation.
     anchor: int | None = None
     presented_at: float | None = None
     addressed_at: float | None = None
-    # Responses (not tool calls) whose gated actions were refused over this
-    # event; see workflow_conversation.gate.
     gate_refusals: int = 0
     last_refused_call: int | None = None
     # The open question this may be answering (see OpenQuestion). A candidate
@@ -188,9 +158,6 @@ class RunLedger:
     # Bumped whenever the model accepts or completes a change (will_apply /
     # done), so attachments chosen before it can be recognised as outdated.
     change_revision: int = 0
-    # Set while a gated tool (a shell command) is executing, so main.py can
-    # say "received, I'll look at it before my next step" instead of leaving
-    # a bare reaction while a long command runs.
     busy_since: float | None = None
     last_receipt_notice: float = 0.0
     compacted: int = 0
@@ -210,7 +177,7 @@ class RunLedger:
 
     def _seen_message(self, message_id) -> bool:
         if not message_id:
-            # 0/None are not real ids (run_code_sandbox's forward path can
+            # 0/None are not real ids (a forwarded message can
             # lack one), so they never take part in de-duplication.
             return False
         return any(e.message_id == message_id for e in self.events) or any(
@@ -246,9 +213,8 @@ class RunLedger:
             has_attachments=bool(has_attachments),
         )
         if self.state == FINALIZING:
-            # Past the boundary nothing can be applied any more. Kept, and
-            # persisted by run_code_sandbox, so the next run in this thread
-            # is offered it — never silently dropped, never claimed handled.
+            # Past the boundary nothing can be applied any more. Kept: never
+            # silently dropped, never claimed handled.
             if len(self.follow_ups) >= MAX_FOLLOW_UPS:
                 return FULL
             self.follow_ups.append(event)
@@ -319,7 +285,7 @@ class RunLedger:
         return shown
 
     def record_decision(self, seqs, decision: str, reply: str = ""):
-        """Applies one respond_to_updates decision. Returns (updated, unknown):
+        """Applies one decision. Returns (updated, unknown):
         unknown are ids that were never presented to this run, which the
         tool reports back instead of pretending they were handled."""
         stage = DECISIONS[decision]

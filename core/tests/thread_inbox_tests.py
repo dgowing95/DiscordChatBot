@@ -100,7 +100,7 @@ def test_deliver_deduplicates_by_message_id():
 
 
 def test_a_missing_message_id_never_takes_part_in_deduplication():
-    # run_code_sandbox's forward path can lack an id; two such requests are
+    # a forwarded message can lack an id; two such requests are
     # two requests.
     ledger = _ledger()
     assert ledger.deliver(None, 1, "ana", "a") == inbox.ACCEPTED

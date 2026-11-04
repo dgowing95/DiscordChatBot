@@ -148,27 +148,11 @@ Metrics (scraped by Prometheus from the /metrics HTTP endpoint):
   Gauge    discord_bot_workflows_running
            Workflows running in this process.
 
-  Thread conversation (classes/workflow_conversation.py; labels are bounded
-  outcome names — never message ids, thread ids or user text):
+  Thread messages (labels are bounded outcome names, never ids or user text):
   Counter  discord_bot_workflow_thread_messages_total{outcome}
            Thread messages offered to a running workflow, by delivery result
            (accepted / duplicate / too_long / full / attachment_only /
            finishing / ...).
-  Histogram discord_bot_workflow_input_presentation_seconds
-           Receipt of a thread message to its first completed model call.
-  Histogram discord_bot_workflow_input_response_seconds
-           Receipt of a thread message to the model's respond_to_updates.
-  Counter  discord_bot_workflow_stale_actions_blocked_total
-           Tool calls refused because thread input was still unanswered.
-  Counter  discord_bot_workflow_questions_total{mode,outcome}
-           ask_user questions by mode (blocking/optional) and outcome
-           (posted / replied / timeout / send_failed).
-  Counter  discord_bot_workflow_unresolved_input_total{status}
-           Messages still unresolved when a run ended, by status
-           (accepted / unacknowledged / unseen / late).
-  Counter  discord_bot_workflow_continuations_total
-           Extra runner passes started because a run tried to finish with
-           thread input unanswered (or outdated files attached).
 
   Server workspace (classes/workspace_manager.py):
   Counter  discord_bot_workspace_starts_total{kind}
@@ -542,40 +526,6 @@ workflow_thread_messages_total = Counter(
     ["outcome"],
 )
 
-workflow_input_presentation_seconds = Histogram(
-    "discord_bot_workflow_input_presentation_seconds",
-    "Seconds from receiving a thread message to its first completed model call",
-    buckets=WORKFLOW_INPUT_BUCKETS,
-)
-
-workflow_input_response_seconds = Histogram(
-    "discord_bot_workflow_input_response_seconds",
-    "Seconds from receiving a thread message to the workflow's model responding to it",
-    buckets=WORKFLOW_INPUT_BUCKETS,
-)
-
-workflow_stale_actions_blocked_total = Counter(
-    "discord_bot_workflow_stale_actions_blocked_total",
-    "Workflow tool calls refused because thread input was still unanswered",
-)
-
-workflow_questions_total = Counter(
-    "discord_bot_workflow_questions_total",
-    "Questions asked in a workflow's thread, by mode and outcome",
-    ["mode", "outcome"],
-)
-
-workflow_unresolved_input_total = Counter(
-    "discord_bot_workflow_unresolved_input_total",
-    "Thread messages still unresolved when a workflow ended, by status",
-    ["status"],
-)
-
-workflow_continuations_total = Counter(
-    "discord_bot_workflow_continuations_total",
-    "Extra workflow runner passes started to account for thread input",
-)
-
 # The server workspace (classes/workspace_manager.py).
 workspace_starts_total = Counter(
     "discord_bot_workspace_starts_total",
@@ -811,30 +761,6 @@ def observe_llm_prompt_tokens(guild_id, tokens: int) -> None:
 
 def inc_workflow_thread_message(outcome: str) -> None:
     workflow_thread_messages_total.labels(outcome=str(outcome)).inc()
-
-
-def observe_workflow_input_presentation(seconds: float) -> None:
-    workflow_input_presentation_seconds.observe(max(0.0, seconds))
-
-
-def observe_workflow_input_response(seconds: float) -> None:
-    workflow_input_response_seconds.observe(max(0.0, seconds))
-
-
-def inc_workflow_stale_action_blocked() -> None:
-    workflow_stale_actions_blocked_total.inc()
-
-
-def inc_workflow_question(mode: str, outcome: str) -> None:
-    workflow_questions_total.labels(mode=str(mode), outcome=str(outcome)).inc()
-
-
-def inc_workflow_unresolved_input(status: str) -> None:
-    workflow_unresolved_input_total.labels(status=str(status)).inc()
-
-
-def inc_workflow_continuation() -> None:
-    workflow_continuations_total.inc()
 
 
 workflows_total = Counter(
