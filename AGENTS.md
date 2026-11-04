@@ -389,20 +389,24 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
       the reply ends long before the workflow does.
     - **Started from an empty `contextvars.Context`**, and every agent run sets its lane, so nothing of
       the `ask_brain` call that started it leaks in.
-    - **No brain slot** (`BRAIN_MAX_CONCURRENT`): a workflow may run for hours. It holds the server's
-      workspace lease the whole time, so the workspace is never stopped or reset under it.
+    - **No brain slot** (`BRAIN_MAX_CONCURRENT`): a workflow runs far longer than a brain call. It holds
+      the server's workspace lease from approval to the end, so the workspace is never stopped or reset
+      under it, and at most `WORKSPACE_MAX_WARM` - 1 run per process, so other servers still get one.
     - **Steering**: the workflow claims the thread's ledger (`thread_inbox.claim_run`, inside its own
       task), so `on_message` routes thread messages to it (📨). A bare "stop" from the requester, or
       Cancel, cancels at once (`request_cancel`: a running helper's task is cancelled, files kept);
       while the plan waits, the requester's message is a change to it; everything else waits for the
       review between steps (and once more after the last step), which records an outcome per message.
-      Helpers never see thread messages (5b).
+      The thread is open to the server: only the requester can change the steps, and only their words
+      reach later helpers. Plan edits, thread messages and answers pass the content guard first (the
+      run context's guard only ever saw the request).
     - A helper that reports `needs_input` makes the workflow ask the requester in the thread
       (`_ask_in_thread`, `WORKFLOW_ASK_TIMEOUT`); the step runs once more with the answer.
     - **Folders** `jobs/c<thread id>-w<id>-<step>/`: each helper is told the earlier steps' folders, and
       a later brain call in the thread finds them as that channel's earlier jobs.
     - **Limits cap the cost**: `WORKFLOW_TIMEOUT` (1 h) and `WORKFLOW_MAX_TURNS` (250, every agent's turns
-      together) stop it with what exists (PARTIAL); `SUBAGENT_MAX_TURNS` per helper.
+      together) stop it with what exists (PARTIAL); `SUBAGENT_MAX_TURNS` per helper. The clock
+      restarts when the plan is answered, so waiting on a person is not work time.
     - **Restarts**: resume is out of scope. A workflow cancelled at shutdown stays live in Redis, and
       at startup `interrupt_all` marks this instance's live ones INTERRUPTED and posts a note in their
       threads. The buttons are `DynamicItem`s registered once, so an old one answers "This workflow has
@@ -580,7 +584,7 @@ reads has a row here and a line in `.env.example`, that every row is read by som
 | `WORKFLOW_TIMEOUT` / `WORKFLOW_MAX_TURNS` | backstops on one workflow: wall-clock seconds [3600] and model turns across all its agents [250]; out of either stops it with what exists. Chart: `workflows.timeout` / `maxTurns` |
 | `WORKFLOW_MAX_PER_GUILD` | workflows running at once per server [1]. Chart: `workflows.maxPerGuild` |
 | `SUBAGENT_MODEL` / `SUBAGENT_LLM_HOST` / `SUBAGENT_LLM_API_KEY` | a workflow helper's connection; empty = the brain's, then `LLM_*` (the key only for the same host). Chart: `subagents.model` / `llmHost` / `apiKey` |
-| `SUBAGENT_REASONING_EFFORT` / `SUBAGENT_CALL_TIMEOUT_SECONDS` | like the brain's [medium / 600]. Chart: `subagents.reasoningEffort` / `callTimeout` |
+| `SUBAGENT_REASONING_EFFORT` / `SUBAGENT_CALL_TIMEOUT_SECONDS` | a helper's; empty = the brain's. Chart: `subagents.reasoningEffort` / `callTimeout` |
 | `SUBAGENT_MAX_TURNS` | backstop on one helper's model turns [100]. Chart: `subagents.maxTurns` |
 | `WORKSPACE_SNAPSHOT_TIMEOUT_SECONDS` | seconds for one workspace save, and for all of them at shutdown [120]. Chart: `brain.workspace.snapshotTimeout` |
 | `BRAIN_CALL_TIMEOUT_SECONDS` | like `PERSONA_CALL_TIMEOUT_SECONDS`, for the brain [600]. Chart: `brain.callTimeout` |

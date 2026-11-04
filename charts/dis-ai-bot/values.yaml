@@ -324,10 +324,10 @@ subagents:
   model: ""
   llmHost: ""
   apiKey: ""
-  # Sent as "reasoning_effort" (low/medium/high).
-  reasoningEffort: "medium"
-  # Wall-clock seconds ONE model call may take, like brain.callTimeout.
-  callTimeout: 600
+  # Sent as "reasoning_effort" (low/medium/high). Empty = the brain's.
+  reasoningEffort: ""
+  # Wall-clock seconds ONE model call may take. Empty = brain.callTimeout.
+  callTimeout: ""
   # Backstop on one helper's model turns.
   maxTurns: 100
 

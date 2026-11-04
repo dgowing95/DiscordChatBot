@@ -152,6 +152,13 @@ def _text(value, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _step_id(value) -> str:
+    """A step's id, safe in a folder name (workflows.step_job_id): a model
+    writes it, and "../shared" must not reach a path."""
+    text = "".join(str(value or "").split())
+    return re.sub(r"[^A-Za-z0-9_-]+", "-", text)[:20].strip("-")
+
+
 def _list(value) -> list:
     if value is None:
         return []
@@ -181,7 +188,7 @@ def validate_plan(raw, *, max_steps: int, request: str = "") -> tuple["Plan | No
         if not isinstance(item, dict):
             problems.append(f"Step {index} is not an object.")
             continue
-        step_id = _text(item.get("id") or f"s{index}", 20).replace(" ", "")
+        step_id = _step_id(item.get("id")) or f"s{index}"
         if any(s.id == step_id for s in steps):
             problems.append(f"Two steps have the id {step_id}.")
             continue
@@ -194,7 +201,7 @@ def validate_plan(raw, *, max_steps: int, request: str = "") -> tuple["Plan | No
         if not brief:
             problems.append(f"Step {step_id} has no brief.")
             continue
-        depends = [_text(d, 20).replace(" ", "") for d in _list(item.get("depends_on"))]
+        depends = [_step_id(d) for d in _list(item.get("depends_on"))]
         steps.append(Step(id=step_id, role=role, brief=brief,
                           depends_on=[d for d in depends if d]))
     ids = {s.id for s in steps}

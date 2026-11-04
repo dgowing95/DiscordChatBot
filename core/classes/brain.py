@@ -98,7 +98,7 @@ MEMORY_CHARS = 1500
 _BRAIN_KEYS = ("session", "out_dir", "job_dir", "workspace_root", "deliverables",
                "delivery_chosen", "brain_request", "brain_report_args", "brain_guard", "requester",
                "brain_deadline", "brain_questions", "skills_used", "skill_saved",
-               "brain_workflow")
+               "brain_workflow", "brain_inputs")
 
 # The brain's instructions. ONE home per concept (AGENTS.md "Prompt
 # surface"): if something here needs saying again, edit the existing bullet.
@@ -875,6 +875,7 @@ async def _run_in_workspace(ctx, lease, request, inputs, problems, hooks_box) ->
         "workspace_root": lease.root,
         "deliverables": [],
         "delivery_chosen": False,
+        "brain_inputs": given,
         "brain_request": request,
         "brain_report_args": None,
         "brain_guard": None,

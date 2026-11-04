@@ -33,7 +33,8 @@ rule starts at once.
 - Each step is done by a helper, one at a time. The plan shows each step's state (⏳ waiting,
   ▶️ running, ✅ done). Files a step makes are posted in the thread.
 - Write in the thread to steer it. Your message gets 📨 and the bot answers it before the next step,
-  changing the remaining steps if you ask.
+  changing the remaining steps if you ask. Anyone in the server can write there, but only the person
+  who asked can change the steps.
 - If a helper needs to know something, it asks you in the thread. Your next message there is the
   answer.
 - Say just **stop** in the thread, or press **Cancel** on the plan, to stop it. Files made so far

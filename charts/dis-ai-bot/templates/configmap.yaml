@@ -155,8 +155,12 @@ data:
   {{- if .Values.subagents.llmHost }}
   SUBAGENT_LLM_HOST: {{ .Values.subagents.llmHost | quote }}
   {{- end }}
+  {{- if .Values.subagents.reasoningEffort }}
   SUBAGENT_REASONING_EFFORT: {{ .Values.subagents.reasoningEffort | quote }}
+  {{- end }}
+  {{- if .Values.subagents.callTimeout }}
   SUBAGENT_CALL_TIMEOUT_SECONDS: {{ .Values.subagents.callTimeout | toString | quote }}
+  {{- end }}
   SUBAGENT_MAX_TURNS: {{ .Values.subagents.maxTurns | toString | quote }}
   # The server workspace container runs on the node's Docker daemon, through
   # the socket mounted in core.yaml.

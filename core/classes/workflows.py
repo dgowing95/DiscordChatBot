@@ -38,32 +38,41 @@ Why things are the way they are:
   subagent lane), and the workflow's task starts from an empty
   contextvars.Context, so nothing is inherited from the ask_brain call that
   started it.
-- **No brain slot.** A workflow can run for hours, so it does not hold one of
-  the BRAIN_MAX_CONCURRENT slots ordinary brain calls share. Its own cap is
-  WORKFLOW_MAX_PER_GUILD (classes/workflow_store.py).
-- **The workspace lease is held for the whole workflow**, so the workspace
-  is never stopped or reset under it; /workspace reset waits for it.
+- **No brain slot.** A workflow runs far longer than a brain call, so it does
+  not hold one of the BRAIN_MAX_CONCURRENT slots ordinary brain calls share.
+  Its own caps are WORKFLOW_MAX_PER_GUILD (classes/workflow_store.py) and,
+  across the process, one less than WORKSPACE_MAX_WARM: a running workflow
+  pins its workspace, so a server without one must still be able to get in.
+- **The workspace lease is held from approval to the end**, so the workspace
+  is never stopped or reset under the steps; /workspace reset waits for it.
+  Planning and the approval wait use no workspace, so they hold none.
 - **Steering**: the workflow claims the thread's ledger
   (classes/thread_inbox.py), so main.on_message routes thread messages to it
   (📨). The requester saying just "stop" (or the Cancel button) cancels at
   once: a running subagent is cancelled and its files are kept. Everything
   else waits for the manager's review between steps, which records an
-  outcome for each message. Subagents never see thread messages in 5a.
+  outcome for each message. The thread is open to the server, so only the
+  requester can change the steps, and only their words reach later helpers.
+- **New text passes the content guard.** The guard in the run context only
+  ever saw the request, so a plan edit, a thread message or an answer is
+  checked before it can reach a helper with a shell (_allowed).
 - **Limits cap the cost**: WORKFLOW_TIMEOUT (1 h) and WORKFLOW_MAX_TURNS (250) stop a
   workflow bigger than the biggest job seen, with what exists (PARTIAL), never "retry".
+  The clock counts work: it restarts when the plan is answered.
 - **A restart interrupts**: resume is out of scope. At startup every live
   workflow becomes INTERRUPTED and its thread is told (interrupt_all).
 """
 import asyncio
 import contextvars
 import logging
+import posixpath
 import time
 import uuid
 from dataclasses import dataclass, field
 
 import discord
 
-from classes import brain_result, llm_lanes
+from classes import brain_result, llm_lanes, workspace_lifecycle
 from classes import workflow_policy as wp
 from classes.brain_result import BrainReport
 
@@ -218,10 +227,10 @@ class Workflow:
         return max(0, wp.max_turns() - self.turns)
 
 
-# workflow id -> its handle, while it runs in this process.
 # The manager reads skills for ideas: it has search_skills, not use_skill.
 MANAGER_SKILLS_HEADER = "Skills saved in this server (how jobs were done here before):"
 
+# workflow id -> its handle, while it runs in this process.
 _RUNNING: dict[str, Workflow] = {}
 # When this process started: a live record created since is its own
 # (interrupt_all must leave it alone).
@@ -270,6 +279,9 @@ async def start_workflow(ctx: dict, request: str, *, trigger: str, reason: str =
     requester = ctx.get("user_id")
     if not guild_id or not requester:
         return StartResult(False, text="A workflow needs a server and a person who asked.")
+    if len(_RUNNING) >= max(1, workspace_lifecycle.max_warm() - 1):
+        return StartResult(False, text="The bot is running as many workflows as it can right "
+                                       "now. Try again later. Say so.")
     store = _store()
     workflow_id = uuid.uuid4().hex[:10]
     try:
@@ -295,6 +307,7 @@ async def start_workflow(ctx: dict, request: str, *, trigger: str, reason: str =
         "draft": [" ".join(str(d).split())[:300] for d in (draft or [])][:wp.DEFAULT_MAX_STEPS],
         "trigger": trigger, "automatic": bool(ctx.get("automatic")),
         "origin_channel_id": getattr(ctx.get("channel"), "id", None),
+        "inputs": _chat_files(ctx),
         "thread_id": thread.id, "thread_url": thread.jump_url,
         "state": wp.PLANNING, "plan": None, "steps": {}, "turns": 0,
         "created_at": time.time(), "instance": instance(),
@@ -313,6 +326,17 @@ async def start_workflow(ctx: dict, request: str, *, trigger: str, reason: str =
     metrics.set_workflows_running(len(_RUNNING))
     logger.info(f"Workflow {workflow_id}: started ({trigger}) in {thread.jump_url}")
     return StartResult(True, thread_url=thread.jump_url)
+
+
+def _chat_files(ctx: dict) -> str:
+    """Where the files from the chat are, when the brain handed the job over:
+    they went to its own job's in/, which the helpers would not otherwise
+    look in. '' when there are none."""
+    names, job_dir = ctx.get("brain_inputs"), ctx.get("job_dir")
+    if not names or not job_dir:
+        return ""
+    folder = posixpath.basename(str(job_dir).rstrip("/"))
+    return f"Files from the chat, in ../{folder}/in/: " + ", ".join(names)
 
 
 async def _busy_text(store, guild_id) -> str:
@@ -393,8 +417,7 @@ async def _run(wf: Workflow) -> None:
                                         run_key=f"workflow:{wf.id}")
     interrupted = False
     try:
-        end_state, report = await asyncio.wait_for(
-            _body(wf), wp.timeout() + FINISH_RESERVE_SECONDS + 60)
+        end_state, report = await _body(wf)
     except asyncio.TimeoutError:
         end_state, report = wp.PARTIAL, _report_from_steps(
             wf, "It ran out of time and was stopped.")
@@ -450,53 +473,58 @@ async def _end(wf: Workflow, store, end_state: str, report: BrainReport) -> None
 async def _body(wf: Workflow) -> tuple[str, BrainReport]:
     from classes.brain import _acquire_workspace
 
+    wf.plan = await _plan(wf)
+    await _set_state(wf, "planned")
+    if not await _approve(wf):
+        return wp.CANCELLED, _report_from_steps(wf, _cancel_note(wf))
     async with _acquire_workspace(wf.guild_id) as lease:
         wf.lease = lease
         wf.ctx.update({"session": lease.session, "workspace_root": lease.root})
-        wf.plan = await _plan(wf)
-        await _set_state(wf, "planned")
-        if not await _approve(wf):
-            return wp.CANCELLED, _report_from_steps(wf, _cancel_note(wf))
-        queue = wp.order_steps(wf.plan)
-        stopped = None
-        while queue:
-            if wf.cancel_reason:
-                break
-            if wf.seconds_left() < FINISH_RESERVE_SECONDS:
-                stopped = "It ran out of time and was stopped."
-                break
-            if wf.turns_left() <= 0:
-                stopped = "It ran out of steps and was stopped."
-                break
-            queue = await _review(wf, queue)
-            if not queue or wf.cancel_reason:
-                break
-            step = queue.pop(0)
-            await _run_step(wf, step)
+        return await asyncio.wait_for(_work(wf), wp.timeout() + FINISH_RESERVE_SECONDS + 60)
+
+
+async def _work(wf: Workflow) -> tuple[str, BrainReport]:
+    """The approved plan: its steps, then the finish."""
+    queue = wp.order_steps(wf.plan)
+    stopped = None
+    while queue:
         if wf.cancel_reason:
-            for step in queue:
-                wf.step_states[step.id] = "skipped"
-            return wp.CANCELLED, _report_from_steps(wf, _cancel_note(wf))
+            break
+        if wf.seconds_left() < FINISH_RESERVE_SECONDS:
+            stopped = "It ran out of time and was stopped."
+            break
+        if wf.turns_left() <= 0:
+            stopped = "It ran out of steps and was stopped."
+            break
+        queue = await _review(wf, queue)
+        if not queue or wf.cancel_reason:
+            break
+        step = queue.pop(0)
+        await _run_step(wf, step)
+    if wf.cancel_reason:
         for step in queue:
             wf.step_states[step.id] = "skipped"
-        # Messages sent during the last step get their answer too: 📨 said
-        # they would be seen.
-        await _review(wf, [])
-        if wf.cancel_reason:
-            return wp.CANCELLED, _report_from_steps(wf, _cancel_note(wf))
-        report = await _finish(wf, stopped)
-        if wf.cancel_reason:
-            # Stopped while the final report was written: what the steps made
-            # is kept and reported, but it was cancelled.
-            return wp.CANCELLED, _report_from_steps(wf, _cancel_note(wf))
-        all_done = all(r.get("status") == brain_result.DONE for r in wf.results.values())
-        if stopped is None and all_done and report.status == brain_result.DONE:
-            await _set_state(wf, "finish")
-            return wp.DONE, report
-        if report.status == brain_result.DONE:
-            report.status = brain_result.PARTIAL
-        await _set_state(wf, "partial")
-        return wp.PARTIAL, report
+        return wp.CANCELLED, _report_from_steps(wf, _cancel_note(wf))
+    for step in queue:
+        wf.step_states[step.id] = "skipped"
+    # Messages sent during the last step get their answer too: 📨 said
+    # they would be seen.
+    await _review(wf, [])
+    if wf.cancel_reason:
+        return wp.CANCELLED, _report_from_steps(wf, _cancel_note(wf))
+    report = await _finish(wf, stopped)
+    if wf.cancel_reason:
+        # Stopped while the final report was written: what the steps made
+        # is kept and reported, but it was cancelled.
+        return wp.CANCELLED, _report_from_steps(wf, _cancel_note(wf))
+    all_done = all(r.get("status") == brain_result.DONE for r in wf.results.values())
+    if stopped is None and all_done and report.status == brain_result.DONE:
+        await _set_state(wf, "finish")
+        return wp.DONE, report
+    if report.status == brain_result.DONE:
+        report.status = brain_result.PARTIAL
+    await _set_state(wf, "partial")
+    return wp.PARTIAL, report
 
 
 async def _set_state(wf: Workflow, event: str) -> None:
@@ -576,7 +604,12 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
             call_model_input_filter=brain.input_filter(guard, brain_policy.trim_keep_recent()),
             group_id=f"workflow-{wf.id}")
     turns = max(1, min(max_turns, wf.turns_left()))
-    seconds = max(30.0, wf.seconds_left() - FINISH_RESERVE_SECONDS)
+    # The reserve is kept back from the steps, for the manager's last runs.
+    seconds = max(30.0, wf.seconds_left() - (FINISH_RESERVE_SECONDS if sandbox else 0))
+    if wf.cancel_reason:
+        # request_cancel can only stop a run that exists. No await from here
+        # to wf.current, so a cancel lands on one side or the other.
+        return _Outcome(stopped="It was cancelled.")
 
     async def _go():
         llm_lanes.current_lane.set(lane)
@@ -682,6 +715,8 @@ async def _plan(wf: Workflow, change: str = "") -> wp.Plan:
     if wf.record.get("draft") and wf.plan is None:
         parts.append("A first idea of the steps (yours to change):\n"
                      + "\n".join(f"- {d}" for d in wf.record["draft"]))
+    if wf.record.get("inputs"):
+        parts.append(wf.record["inputs"])
     if change and wf.plan is not None:
         parts.append("Your plan so far:\n" + wp.plan_text(wf.plan))
         parts.append(f"The requester asked to change it: {change}\nWrite the new plan.")
@@ -741,25 +776,29 @@ async def _approve(wf: Workflow) -> bool:
         await _set_state(wf, "approve")
         return True
     seconds = wp.plan_approval_seconds()
+    until = None  # when the posted plan's wait ends; None = post it
     # Says where the plan is: the rewording call cannot see it, and told only
     # "my plan" a small model asked for the plan or refused (seen on Strata).
     line = await voice_question(wf.guild_id, "Shall I go ahead with the plan below?")
     while True:
-        await _remove_buttons(wf)
-        content = (f"<@{wf.requester_id}> {line}\n-# Approve, Edit or Cancel. With no answer in "
-                   f"{_minutes(seconds)} it starts anyway.")
-        wf.plan_message = await _post(
-            wf.thread, content=content[:2000], embed=_plan_embed(wf),
-            view=workflow_views.approval_view(wf.id),
-            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
-        if wf.plan_message is None:
-            # No buttons to press: say so rather than wait in silence.
-            metrics.inc_workflow_plan_approval("timeout")
-            await _post(wf.thread, content="I couldn't post the plan with its buttons, so I've "
-                                           "started. Say stop here to cancel.\n"
-                                           + wp.plan_text(wf.plan)[:1800])
-            await _set_state(wf, "approve")
-            return True
+        if until is None:
+            await _remove_buttons(wf)
+            content = (f"<@{wf.requester_id}> {line}\n-# Approve, Edit or Cancel. With no answer "
+                       f"in {_minutes(seconds)} it starts anyway.")
+            wf.plan_message = await _post(
+                wf.thread, content=content[:2000], embed=_plan_embed(wf),
+                view=workflow_views.approval_view(wf.id),
+                allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
+            if wf.plan_message is None:
+                # No buttons to press: say so rather than wait in silence.
+                metrics.inc_workflow_plan_approval("timeout")
+                await _post(wf.thread, content="I couldn't post the plan with its buttons, so "
+                                               "I've started. Say stop here to cancel.\n"
+                                               + wp.plan_text(wf.plan)[:1800])
+                await _set_state(wf, "approve")
+                wf.started = time.monotonic()
+                return True
+            until = time.monotonic() + seconds
         wf.approval = asyncio.get_running_loop().create_future()
         # A change the requester wrote while the plan was being written (or
         # rewritten) is an edit now: _watch only takes them once this waits.
@@ -768,9 +807,12 @@ async def _approve(wf: Workflow) -> bool:
             wf.ledger.mark_presented([early.seq], 0)
             wf.approval.set_result(("edit", early))
         try:
-            action, event = await asyncio.wait_for(asyncio.shield(wf.approval), seconds)
+            action, event = await asyncio.wait_for(asyncio.shield(wf.approval),
+                                                   max(0.1, until - time.monotonic()))
         except asyncio.TimeoutError:
             action, event = "timeout", None
+        # The clock counts work: waiting on a person never comes out of it.
+        wf.started = time.monotonic()
         if action == "approve":
             metrics.inc_workflow_plan_approval("approved" if not wf.revisions else "edited")
             await _set_state(wf, "approve")
@@ -787,12 +829,18 @@ async def _approve(wf: Workflow) -> bool:
             metrics.inc_workflow_plan_approval("cancelled")
             await _remove_buttons(wf)
             return False
-        # An edit: the requester's message in the thread.
+        # An edit: the requester's message in the thread. A refused one keeps
+        # the plan's wait running: writing again must not extend it.
         if wf.revisions >= wp.plan_revisions():
             wf.ledger.record_decision([event.seq], "declined", "No more changes.")
             await _post(wf.thread, content="That's as many changes as I can make to the plan. "
                                            "Press Approve or Cancel.")
             continue
+        if not await _allowed(wf, event.text):
+            wf.ledger.record_decision([event.seq], "declined", "Blocked by the content guard.")
+            await _post(wf.thread, content="I can't make that change to the plan.")
+            continue
+        until = None
         wf.revisions += 1
         await _set_state(wf, "revise")
         await _remove_buttons(wf)
@@ -844,6 +892,15 @@ async def _update_plan_message(wf: Workflow, final: bool = False, content: str |
         logger.info(f"Workflow {wf.id}: could not update the plan: {e}")
 
 
+async def _allowed(wf: Workflow, text: str) -> bool:
+    """Whether new text passes the content guard (fail-open like the guard)."""
+    from classes.content_guard import check_web_request
+    allowed, reason = await check_web_request(text)
+    if not allowed:
+        logger.warning(f"Workflow {wf.id}: thread text blocked by the content guard: {reason}")
+    return allowed
+
+
 def _waiting_edit(wf: Workflow):
     """The requester's oldest thread message not yet taken (stop words
     are _watch's), or None."""
@@ -891,6 +948,8 @@ async def _run_step(wf: Workflow, step: wp.Step) -> None:
         # hear them: never report that as "asked".
         can_ask = bool(question) and wf.ledger is not None and not wf.record["automatic"]
         answer = await _ask_in_thread(wf, question) if can_ask else ""
+        if answer and not await _allowed(wf, answer):
+            answer = ""
         if answer and not wf.cancel_reason:
             files = report.files_posted
             report, stopped = await _step_attempt(wf, step, progress, answer=(question, answer))
@@ -924,9 +983,11 @@ async def _step_attempt(wf: Workflow, step: wp.Step, progress, answer) -> tuple[
              f"Your step: {step.id} [{step.role}]: {step.brief}"]
     if wf.results:
         parts.append("What the earlier steps reported:\n" + _results_text(wf))
+    if wf.record.get("inputs"):
+        parts.append(wf.record["inputs"])
     if wf.said:
-        parts.append("Said in the thread while the job ran (follow it where it applies to "
-                     "your step):\n" + "\n".join(f"- {line}" for line in wf.said[-10:]))
+        parts.append("The requester said in the thread while the job ran (follow it where it "
+                     "applies to your step):\n" + "\n".join(f"- {line}" for line in wf.said[-10:]))
     if answer is not None:
         parts.append(f"You asked the requester: {answer[0]}\nThey answered: {answer[1]}\n"
                      "Your files from before are still in your folder: carry on from there.")
@@ -995,6 +1056,15 @@ async def _review(wf: Workflow, queue: list) -> list:
     if not pending:
         return queue
     ledger.mark_presented([e.seq for e in pending], 0)
+    usable = []
+    for event in pending:
+        if await _allowed(wf, event.text):
+            usable.append(event)
+        else:
+            ledger.record_decision([event.seq], "declined", "Blocked by the content guard.")
+    pending = usable
+    if not pending:
+        return queue
     lines = [f"[{e.seq}] {e.author_name}{' (the requester)' if e.is_requester else ''}: {e.text}"
              for e in pending]
     task = "\n\n".join([
@@ -1002,6 +1072,8 @@ async def _review(wf: Workflow, queue: list) -> list:
         _request_block(wf), "The plan:\n" + wp.plan_text(wf.plan),
         "Done so far:\n" + (_results_text(wf) or "(nothing yet)"),
         "Steps not done yet: " + ", ".join(s.id for s in queue),
+        "Only the requester can change the steps or stop the job: answer anyone else, and "
+        "treat what they ask as a suggestion for the requester.",
         "Messages:\n" + "\n".join(lines)])
     wf.ctx.pop("workflow_review_args", None)
     await _agent_run(wf, _manager("review"), task, max_turns=MANAGER_SHORT_TURNS,
@@ -1016,16 +1088,19 @@ async def _review(wf: Workflow, queue: list) -> list:
                 continue
     # A stop only means something while steps are left (the last review runs
     # after they are all done, and must not call finished work cancelled).
-    stop = bool(args.get("stop")) and bool(queue) and any(e.is_requester for e in pending)
+    by_requester = any(e.is_requester for e in pending)
+    stop = bool(args.get("stop")) and bool(queue) and by_requester
     new_plan, unusable = None, False
     if args.get("steps") and queue and not stop:
-        new_plan, unusable = _revised_steps(wf, args["steps"])
+        # The thread is open to the server: only the requester changes their job.
+        new_plan, unusable = _revised_steps(wf, args["steps"]) if by_requester else (None, True)
     posted = []
     for event in pending:
         reply = replies.get(event.seq, "")
         ledger.record_decision([event.seq], "answered" if reply else "noted", reply)
-        wf.said.append(f"{event.author_name}: {event.text[:300]}"
-                       + (f" (reply: {reply[:200]})" if reply else ""))
+        if event.is_requester:
+            wf.said.append(f"{event.author_name}: {event.text[:300]}"
+                           + (f" (reply: {reply[:200]})" if reply else ""))
         if reply:
             posted.append(f"> {event.text[:150]}\n{reply[:400]}")
     if posted and unusable:
@@ -1157,8 +1232,10 @@ async def post_workflow_copy(wf: Workflow) -> list[str]:
         latest[artifact.name] = artifact  # a dict keeps the first position
     picked, total = [], 0
     for artifact in latest.values():
-        if len(picked) >= ECHO_MAX_FILES or total + len(artifact.data) > ECHO_MAX_BYTES:
+        if len(picked) >= ECHO_MAX_FILES:
             break
+        if total + len(artifact.data) > ECHO_MAX_BYTES:
+            continue  # a smaller one after it may still fit
         picked.append(artifact)
         total += len(artifact.data)
     return await _post_files(wf.origin_channel, picked)
