@@ -54,7 +54,7 @@ core/                    # the bot (what runs in production)
     brain_result.py        # P BrainReport and what the persona is told
     brain_policy.py        # P BRAIN_* limits (unprompted replies, questions, slots)
     brain_inbox.py         # P questions the brain is waiting on, one per question message
-    brain_question.py      # the question in Discord: choice / Answer… / You decide buttons
+    brain_question.py      # the question in Discord (buttons) and ask(): the one flow of ask_user and ask_requester
     persona_voice.py       # the brain's question reworded in the persona's voice
     skill_format.py        # P skills: SKILLS_* settings, name/limit checks, SKILL.md, the index and its ranking
     skill_store.py         # skills in Redis: every version kept, soft delete, revert, export

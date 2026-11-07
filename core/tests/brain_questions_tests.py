@@ -629,3 +629,26 @@ async def test_time_used_by_the_reword_and_post_is_counted(plain_voice):
     assert out == brain.NO_ONE_TO_ASK
     assert not brain_inbox.waiting(QUESTION_ID)
     sent.edit.assert_awaited_once()  # the posted question was closed
+
+
+@pytest.mark.asyncio
+async def test_a_workflow_question_counts_the_time_the_reword_and_post_took(monkeypatch):
+    from classes import workflows
+    ctx, sent = _ctx(original_message=None)
+    left = {"seconds": 600.0}
+
+    async def slow_reword(guild_id, question):
+        left["seconds"] = 0  # the reword ate what the workflow had left
+        return question
+
+    monkeypatch.setattr(workflows, "_step_reserve_seconds", lambda wf: 0)
+    wf = SimpleNamespace(ledger=SimpleNamespace(revision=0), record={"automatic": False},
+                         cancel_reason=None, seconds_left=lambda: left["seconds"],
+                         asking=asyncio.Lock(), ctx=ctx, question=None, question_id=None,
+                         question_after=0, id="w1", thread=ctx["channel"], guild_id=1,
+                         requester_id=5)
+    with patch.object(persona_voice, "voice_question", AsyncMock(side_effect=slow_reword)):
+        answer = await asyncio.wait_for(workflows.ask_requester(wf, "Which year?"), 5)
+    assert answer == ""
+    assert not brain_inbox.waiting(QUESTION_ID) and wf.question_id is None
+    sent.edit.assert_awaited_once()  # the posted question was closed, not left open

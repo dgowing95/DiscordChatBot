@@ -361,8 +361,9 @@ WORKSPACE_TOOLS = frozenset({"exec_command", "write_stdin", "attach_file", "save
 
 class HelperProgress(RunHooks):
     """A scout's or researcher's one embed: what it is on, its last tool call
-    and its turn. Like the hooks below it never raises, and a failed edit
-    only waits for the next one."""
+    and its turn, out of `max_turns` (workflows._agent_run sets the run's real
+    share). Like the hooks below it never raises, and a failed edit only waits
+    for the next one."""
 
     def __init__(self, channel, title: str, *, max_turns: int,
                  edit_interval: float = HELPER_EDIT_SECONDS):

@@ -845,6 +845,10 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
         run_config = _finishing_up(run_config, hooks, finish_up_at, seen, finish_up,
                                    wf.over_tokens if holds_back else None)
     turns = _turn_limit(wf, max_turns, _held_turns(wf) if holds_back else 0)
+    if isinstance(getattr(progress, "max_turns", None), int):
+        # A helper's embed counts to the turns it really has (its share, after
+        # any earlier run of the same step), not the setting.
+        progress.max_turns = progress.turn + turns
     # The reserves are kept back from the steps, for the check and the
     # manager's last runs.
     reserve = _step_reserve_seconds(wf) if holds_back else FINISH_RESERVE_SECONDS if sandbox else 0
@@ -1113,7 +1117,6 @@ async def _approve(wf: Workflow) -> bool:
     line = await voice_question(wf.guild_id, "Shall I go ahead with the plan below?")
     while True:
         if until is None:
-            await _remove_buttons(wf)
             wf.plan_lead = f"<@{wf.requester_id}> {line}"
             await _post_plan(wf, workflow_views.approval_buttons(wf.id),
                              note=f"Approve, Edit or Cancel. With no answer in {_minutes(seconds)} "
@@ -1176,6 +1179,10 @@ async def _approve(wf: Workflow) -> bool:
         wf.revisions += 1
         await _set_state(wf, "revise")
         await _remove_buttons(wf)
+        # The old card is closed for good: the plan, changed or not, is posted
+        # again. A cancel before that must not put a plan the requester never
+        # saw on the old card (_end updates wf.plan_message).
+        wf.plan_message = wf.plan_card = None
         await _post(wf.thread, content="📝 Changing the plan…")
         before = wf.plan
         wf.plan = await workflow_planning.write_plan(wf, change=event.text)
@@ -1285,14 +1292,11 @@ _SHARED_KEYS = ("image_calls", "images_posted")
 def _helper_ctx(wf: Workflow, **keys) -> dict:
     """A helper's own run context: its folder, files and report are its own,
     and two helpers run at once (see the module docstring). The content guard's
-    check of the request is started here, on the workflow, so they share it:
-    the moderation endpoint rate-limits hard."""
-    from classes.content_guard import check_web_request
-    request = wf.ctx.get("brain_request")
-    if request and wf.ctx.get("brain_guard") is None:
-        wf.ctx["brain_guard"] = asyncio.ensure_future(check_web_request(request))
+    check of the request is kept on the workflow (`brain_guard_home`), so they
+    share it, and it starts at the first workspace action like a brain call's
+    (brain._workspace_allowed): the moderation endpoint rate-limits hard."""
     return {**wf.ctx, "brain_report_args": None, "deliverables": [], "delivery_chosen": False,
-            "skills_used": [], "skill_saved": False, **keys}
+            "skills_used": [], "skill_saved": False, "brain_guard_home": wf.ctx, **keys}
 
 
 def _keep_shared(wf: Workflow, ctx: dict) -> None:
@@ -1503,37 +1507,30 @@ async def ask_requester(wf: Workflow, question: str, options=None, label: str = 
     button, or their next message there, answers it (_watch). One at a time,
     since two helpers may need them at once. '' when no usable answer came
     within WORKFLOW_ASK_TIMEOUT."""
-    from classes import brain_inbox, brain_question
-    from classes.persona_voice import voice_question
+    from classes import brain_question
 
     if wf.ledger is None or wf.record["automatic"]:
         return ""
-    async with wf.asking:
-        wait = min(wp.ask_timeout(), wf.seconds_left() - _step_reserve_seconds(wf))
-        if wf.cancel_reason or wait <= 0:
-            return ""
-        text = await voice_question(wf.guild_id, question)
-        message, view = await brain_question.post(wf.ctx, text, options, wait,
-                                                  label or brain_question.HEADING_STEP)
-        if message is None:
-            return ""
+
+    def _wait_left():
+        if wf.cancel_reason:
+            return None
+        return min(wp.ask_timeout(), wf.seconds_left() - _step_reserve_seconds(wf))
+
+    def _asked(message, future):
+        # From here _watch takes the requester's next thread message as the answer.
         wf.question_after = wf.ledger.revision
         wf.question_id = message.id
-        wf.question = brain_inbox.ask(message.id, wf.thread.id, wf.requester_id)
-        line = brain_question.CLOSED
+        wf.question = future
+
+    async with wf.asking:
         try:
-            answer = await asyncio.wait_for(asyncio.shield(wf.question), wait)
-            if answer:
-                shown = (brain_question.YOU_DECIDE if answer == brain_question.YOU_DECIDE_ANSWER
-                         else answer)
-                line = brain_question.ANSWERED.format(answer=shown[:200])
-        except asyncio.TimeoutError:
-            line = brain_question.TIMED_OUT
-            return ""
+            result = await brain_question.ask(wf.ctx, question, options, _wait_left,
+                                              label or brain_question.HEADING_STEP,
+                                              on_asked=_asked)
         finally:
-            brain_inbox.cancel(message.id, wf.question)
             wf.question_id = wf.question = None
-            await brain_question.close(message, view, line)
+    answer = result.answer if result.state == brain_question.ANSWERED_STATE else ""
     if answer == brain_question.YOU_DECIDE_ANSWER:
         return brain_question.YOU_DECIDE
     if answer and not await _allowed(wf, answer):
