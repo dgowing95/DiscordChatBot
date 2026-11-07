@@ -50,6 +50,8 @@ class Lanes:
     def __init__(self, slots: int = 1, chat_reserved: int = 1):
         self.slots = 1
         self.chat_reserved = 0
+        # Tokens one slot holds, from the server's /props (None: not reported).
+        self.slot_context: int | None = None
         self._in_use = {lane: 0 for lane in PRIORITY}
         self._waiting = {lane: deque() for lane in PRIORITY}
         self.configure(slots, chat_reserved)
@@ -184,14 +186,26 @@ def lanes_for(host_key: str) -> Lanes | None:
     return _registry.get(host_key)
 
 
-def configure_host(host_key: str, slots: int, chat_reserved: int) -> Lanes:
-    """Lane a host (its /props answered), or update its slot count."""
+def configure_host(host_key: str, slots: int, chat_reserved: int,
+                   slot_context: int | None = None) -> Lanes:
+    """Lane a host (its /props answered), or update its slot count and the
+    tokens one of its slots holds."""
     lanes = _registry.get(host_key)
     if lanes is None:
         lanes = _registry[host_key] = Lanes(slots, chat_reserved)
     else:
         lanes.configure(slots, chat_reserved)
+    if slot_context:
+        lanes.slot_context = slot_context
     return lanes
+
+
+def slot_context_for(host_key: str) -> int | None:
+    """Tokens one slot of this host holds, or None: a remote API (not laned)
+    or a server that did not say. The context guard's limit
+    (context_trim.ContextWatch)."""
+    lanes = _registry.get(host_key)
+    return None if lanes is None else lanes.slot_context
 
 
 def all_lanes() -> dict[str, Lanes]:

@@ -7,6 +7,17 @@ import asyncio
 import pytest
 
 from classes import llm_lanes
+
+
+def test_each_laned_server_keeps_its_own_slot_context(monkeypatch):
+    monkeypatch.setattr(llm_lanes, "_registry", {})
+    llm_lanes.configure_host("local", 4, 1, 64_000)
+    llm_lanes.configure_host("other", 2, 1, 128_000)
+    assert llm_lanes.slot_context_for("local") == 64_000
+    assert llm_lanes.slot_context_for("other") == 128_000
+    llm_lanes.configure_host("local", 4, 1, None)  # a read without it keeps the last one
+    assert llm_lanes.slot_context_for("local") == 64_000
+    assert llm_lanes.slot_context_for("https://openrouter.ai/api") is None  # not laned
 from classes.llm_lanes import BACKGROUND, BRAIN, CHAT, SUBAGENT, Lanes
 
 

@@ -63,7 +63,7 @@ core/                    # the bot (what runs in production)
     skill_reflection.py    # after a long job, one background call decides whether to save a skill
     skill_curator.py       # the daily tidy-up: merge, retire, describe (its rules are pure)
     loop_guard.py          # P stops a brain run that repeats itself (also a page or search asked again)
-    context_trim.py        # P cuts old tool outputs in a long brain run
+    context_trim.py        # P cuts old tool outputs in a long brain run; keeps a local run in its slot
     brain_progress.py      # the "Working on it" status embed and live command output
     workspace_tools.py     # shell wrappers, attach_file and delivery, in/ files, thread tools
     workspace_inputs.py    # P which chat files go to a brain call's in/
@@ -248,6 +248,10 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
    - **Limits are loop guards.** `loop_guard.py` warns once and stops on the second loop;
      `BRAIN_MAX_TURNS` and `BRAIN_TIMEOUT` are only backstops. A stopped call is a `partial` report with
      whatever files it attached, and the persona is told not to ask again in that reply.
+   - **A run on a self-hosted server stays inside its slot** (`context_trim.ContextWatch`, the brain's
+     runs and every workflow agent): against that server's per-slot context from its `/props`
+     (`llm_lanes.slot_context_for`), old tool outputs are cut harder past 75% and the run is told to
+     finish past 90%. A remote API reports no limit, so its runs are never squeezed.
    - **Every call needs the workspace**: `SandboxAgent` binds its session before the first model call,
      so a lazy start is not possible. `WORKSPACE_PREWARM` starts a cold one while the persona thinks.
    - **The content guard runs at the first workspace action**, once per call, not on every `ask_brain`.

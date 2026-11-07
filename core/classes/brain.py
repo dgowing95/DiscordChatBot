@@ -568,6 +568,8 @@ class BrainHooks(RunHooks):
         self.peak_prompt_tokens = 0
         # Called with each response's tokens, in and out (workflows count them).
         self.on_tokens = None
+        # The run's prompt against its server's slot (context_trim.ContextWatch).
+        self.context_watch = None
 
     async def on_llm_start(self, context, agent, system_prompt, input_items) -> None:
         self.turns += 1
@@ -579,6 +581,8 @@ class BrainHooks(RunHooks):
         tokens = getattr(usage, "input_tokens", None)
         if isinstance(tokens, int):
             self.peak_prompt_tokens = max(self.peak_prompt_tokens, tokens)
+        if self.context_watch is not None:
+            self.context_watch.seen(tokens)
         if self.on_tokens is not None:
             self.on_tokens(response_tokens(response))
         for part in self.parts:
@@ -605,18 +609,23 @@ class BrainHooks(RunHooks):
         self.parts[0].abandon_llm_call(outcome)
 
 
-def input_filter(guard: LoopGuard, keep_recent: int):
+def input_filter(guard: LoopGuard, keep_recent: int, watch=None):
     """The run's call_model_input_filter: old tool outputs trimmed
-    (context_trim), then the loop guard's note, once, at the end. Never
-    raises: the SDK fails the whole run on a filter error."""
+    (context_trim), harder once `watch` (a context_trim.ContextWatch) says the
+    prompt nears its slot, then the loop guard's note, once, and the watch's,
+    at the end. Never raises: the SDK fails the whole run on a filter error."""
     def _filter(data):
         from agents.run_config import ModelInputData
         items = list(data.model_data.input)
         try:
-            items = context_trim.trim_items(items, keep_recent)
-            note = guard.note()
-            if note:
-                items.append({"role": "user", "content": note})
+            if watch is None:
+                items = context_trim.trim_items(items, keep_recent)
+            else:
+                items = context_trim.trim_items(items, watch.keep_recent(keep_recent),
+                                                watch.batch())
+            for note in (guard.note(), None if watch is None else watch.note()):
+                if note:
+                    items.append({"role": "user", "content": note})
         except Exception as e:
             logger.warning(f"Brain: input filter failed, sending input unchanged: {e}")
         return ModelInputData(input=items, instructions=data.model_data.instructions)
@@ -869,14 +878,21 @@ async def _run_brain(ctx: dict, request: str, files, hooks_box: dict) -> BrainRe
                   + tool_note([], problems).strip().replace("\n", " ")).strip())
 
 
-def _run_config(lease, guard: LoopGuard) -> RunConfig:
+def context_watch(role: str):
+    """A ContextWatch for a run on `role`'s server: its per-slot context when
+    it is self-hosted and said, else no limit (a remote API's is far larger
+    than any run, and it reports none)."""
+    return context_trim.ContextWatch(llm_lanes.slot_context_for(role_config(role).host_key))
+
+
+def _run_config(lease, guard: LoopGuard, watch=None) -> RunConfig:
     """The run's config: the workspace's live session (caller-owned, so the
     SDK never stops or deletes it) and the input filter. A seam for the
     tests, which run the real Runner without Docker."""
     from agents.sandbox import SandboxRunConfig
     return RunConfig(
         sandbox=SandboxRunConfig(client=lease.sandbox_client, session=lease.session),
-        call_model_input_filter=input_filter(guard, brain_policy.trim_keep_recent()),
+        call_model_input_filter=input_filter(guard, brain_policy.trim_keep_recent(), watch),
         group_id=f"brain-{uuid.uuid4().hex}",
     )
 
@@ -935,10 +951,11 @@ async def _run_in_workspace(ctx, lease, request, inputs, problems, hooks_box) ->
                                   files=given)
     guard = LoopGuard(brain_policy.repeat_limit())
     hooks = BrainHooks(ToolMetricsHooks(guild_id, caller="brain"), progress, guard)
+    hooks.context_watch = context_watch(BRAIN)
     hooks_box["hooks"] = hooks
     agent = build_brain_agent(automatic=bool(ctx.get("automatic")), voice=bool(ctx.get("voice")),
                               workflows=tier >= brain_policy.TIER_WORKFLOW)
-    run_config = _run_config(lease, guard)
+    run_config = _run_config(lease, guard, hooks.context_watch)
 
     try:
         return await _run_and_deliver(ctx, lease, agent, task, run_config, hooks, progress,

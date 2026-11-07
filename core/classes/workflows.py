@@ -824,11 +824,16 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
     guard = LoopGuard(brain_policy.repeat_limit())
     hooks = brain.BrainHooks(ToolMetricsHooks(wf.guild_id, caller=caller), progress or RunHooks(),
                              guard)
+    # Helpers run on the subagent role's server, the manager on the brain's.
+    from classes import llm_roles
+    hooks.context_watch = brain.context_watch(
+        llm_roles.SUBAGENT if lane == llm_lanes.SUBAGENT else llm_roles.BRAIN)
     if sandbox:
-        run_config = brain._run_config(wf.lease, guard)
+        run_config = brain._run_config(wf.lease, guard, hooks.context_watch)
     else:
         run_config = RunConfig(
-            call_model_input_filter=brain.input_filter(guard, brain_policy.trim_keep_recent()),
+            call_model_input_filter=brain.input_filter(guard, brain_policy.trim_keep_recent(),
+                                                       hooks.context_watch),
             group_id=f"workflow-{wf.id}")
     hooks.on_tokens = wf.add_tokens
     if steer is not None:

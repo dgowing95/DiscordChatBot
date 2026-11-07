@@ -131,8 +131,8 @@ def env(monkeypatch):
                      tools=[*ns.subagent_tools, attach_file, brain.report],
                      tool_use_behavior={"stop_at_tool_names": ["report"]})
 
-    def _config(lease, guard):
-        return RunConfig(call_model_input_filter=brain.input_filter(guard, 6),
+    def _config(lease, guard, watch=None):
+        return RunConfig(call_model_input_filter=brain.input_filter(guard, 6, watch),
                          tracing_disabled=True)
 
     async def _open_thread(ctx, request, message):
@@ -789,6 +789,24 @@ async def test_a_message_after_the_last_review_is_told_it_was_not_applied(env, m
 
 
 @pytest.mark.asyncio
+async def test_each_run_watches_the_context_of_its_own_server(env, monkeypatch):
+    roles = []
+    real = brain.context_watch
+
+    def watch(role):
+        roles.append(role)
+        return real(role)
+
+    monkeypatch.setattr(brain, "context_watch", watch)
+    env.model = LaneModel([_plan_call(("s1", "implementer", [])), _report(call_id="a"),
+                           _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    # The manager on the brain's server, the helper on the subagent role's.
+    assert roles == ["brain", "subagent", "brain"]
+
+
+@pytest.mark.asyncio
 async def test_a_cancelled_step_closes_its_embed(monkeypatch):
     calls = []
 
@@ -860,21 +878,49 @@ def test_a_message_stays_out_of_the_trim_and_a_filter_error_costs_only_the_messa
     seen = {}
 
     def inner(data):
-        seen["items"] = list(data["items"])
-        return ModelInputData(input=data["items"], instructions="i")
+        seen["items"] = list(data.model_data.input)
+        return ModelInputData(input=data.model_data.input, instructions="i")
+
+    def call(*items):
+        return SimpleNamespace(model_data=SimpleNamespace(input=list(items)))
 
     wf = SimpleNamespace(id="a1", steering=[(1, "old", None), (2, "new", None),
                                             (3, "not for s1", {"s2"})])
     steered = workflow_steering.steered(Config(inner), wf, 1, "s1").call_model_input_filter
-    sent = steered({"items": ["a", "b"]})
+    sent = steered(call("a", "b"))
     assert "old" not in json.dumps(sent.input) and "not for s1" not in json.dumps(sent.input)
     assert sent.input[:2] == ["a", "b"] and "new" in sent.input[2]["content"]
     assert seen["items"] == ["a", "b"]  # the trim saw only the run's own items
-    later = steered({"items": ["a", "b", "c"]})
+    later = steered(call("a", "b", "c"))
     assert later.input[:2] == ["a", "b"] and "new" in later.input[2]["content"]
     assert later.input[3] == "c"
     wf.steering = None  # anything going wrong in there
-    assert steered({"items": ["a"]}).input == ["a"]
+    assert steered(call("a")).input == ["a"]
+
+
+def test_a_message_keeps_its_place_when_a_note_is_added_at_the_end():
+    # The loop guard's or the context watch's note is added on every call and
+    # not kept: a message shown after it must not move past the model's reply.
+    from agents.run_config import ModelInputData
+    from dataclasses import dataclass
+
+    @dataclass
+    class Config:
+        call_model_input_filter: object
+
+    def inner(data):
+        return ModelInputData(input=[*data.model_data.input, "NOTE"], instructions="i")
+
+    def call(*items):
+        return SimpleNamespace(model_data=SimpleNamespace(input=list(items)))
+
+    wf = SimpleNamespace(id="a1", steering=[(1, "new", None)])
+    steered = workflow_steering.steered(Config(inner), wf, 0, "s1").call_model_input_filter
+    first = steered(call("a", "b"))
+    assert first.input[:2] == ["a", "b"] and "new" in first.input[2]["content"]
+    assert first.input[3] == "NOTE"
+    later = steered(call("a", "b", "reply", "c"))
+    assert "new" in later.input[2]["content"] and later.input[3:] == ["reply", "c", "NOTE"]
 
 
 # --------------------------- budgets ---------------------------
@@ -1140,7 +1186,7 @@ async def test_the_brains_start_workflow_ends_its_run_with_the_thread_link(monke
 
     monkeypatch.setattr(brain, "_acquire_workspace", _acquire)
     monkeypatch.setattr(brain, "build_brain_agent", _agent)
-    monkeypatch.setattr(brain, "_run_config", lambda lease, guard: RunConfig(
+    monkeypatch.setattr(brain, "_run_config", lambda lease, guard, watch=None: RunConfig(
         tracing_disabled=True))
     monkeypatch.setattr(brain, "_skills_index", AsyncMock(return_value=""))
     monkeypatch.setattr("classes.workspace_commands.progress_enabled",

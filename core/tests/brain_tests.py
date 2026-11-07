@@ -113,8 +113,8 @@ def _brain(model, session=None, extra_tools=(), restore_failed=False):
                      tools=[*extra_tools, attach_file, brain.ask_user, brain.report],
                      tool_use_behavior={"stop_at_tool_names": ["report"]})
 
-    def _config(lease, guard):
-        return RunConfig(call_model_input_filter=brain.input_filter(guard, 6),
+    def _config(lease, guard, watch=None):
+        return RunConfig(call_model_input_filter=brain.input_filter(guard, 6, watch),
                          tracing_disabled=True)
 
     with patch.object(brain, "_acquire_workspace", _acquire), \
@@ -252,6 +252,57 @@ async def test_the_loop_guard_warns_then_stops_a_repeating_run():
     # the warning reached the model once, at the call after the third repeat
     assert "You are repeating `lookup`" in json.dumps(model.calls[3].input)
     assert "You are repeating" not in json.dumps(model.calls[2].input)
+
+
+@pytest.mark.asyncio
+async def test_a_run_nearing_its_slot_is_squeezed_and_told_to_finish(monkeypatch):
+    from agents.usage import Usage
+    from classes import context_trim, llm_lanes
+
+    @function_tool
+    async def lookup(q: str) -> str:
+        """Looks something up."""
+        return q + ":" + "x" * 5000  # each new, so the loop guard stays quiet
+
+    # The brain's server is self-hosted with 64k-token slots, as its /props said.
+    monkeypatch.setattr(llm_lanes, "_registry", {})
+    llm_lanes.configure_host(brain.role_config(brain.BRAIN).host_key, 4, 1, 64_000)
+    big = [ModelStep(output=[function_call("lookup", {"q": str(i)}, call_id=f"l{i}")],
+                     usage=Usage(requests=1, input_tokens=10_000 + 1_000 * i, output_tokens=50))
+           for i in range(10)]
+    full = ModelStep(output=[function_call("lookup", {"q": "last"}, call_id="l10")],
+                     usage=Usage(requests=1, input_tokens=59_000, output_tokens=50))
+    model = ScriptedModel(big + [full, ModelStep(output=[_report_call()])])
+    with _brain(model, extra_tools=[lookup]):
+        report = await brain.run_brain(_ctx(), "find x")
+    assert report.status == brain_result.DONE
+    before, after = json.dumps(model.calls[10].input), json.dumps(model.calls[11].input)
+    assert context_trim.FINISH_NOTE not in before
+    assert context_trim.FINISH_NOTE in after
+    # Squeezed: old outputs cut down to SQUEEZE_KEEP (in steps of BATCH), not 6.
+    whole = lambda text: text.count("x" * 5000)  # noqa: E731
+    assert whole(after) < whole(before)
+    assert whole(after) <= context_trim.SQUEEZE_KEEP + context_trim.BATCH - 1
+
+
+@pytest.mark.asyncio
+async def test_a_run_on_a_remote_api_is_never_squeezed(monkeypatch):
+    from agents.usage import Usage
+    from classes import context_trim, llm_lanes
+
+    @function_tool
+    async def lookup(q: str) -> str:
+        """Looks something up."""
+        return "found"
+
+    monkeypatch.setattr(llm_lanes, "_registry", {})  # nothing laned: a remote API
+    model = ScriptedModel([
+        ModelStep(output=[function_call("lookup", {"q": "a"}, call_id="l1")],
+                  usage=Usage(requests=1, input_tokens=900_000, output_tokens=50)),
+        ModelStep(output=[_report_call()])])
+    with _brain(model, extra_tools=[lookup]):
+        await brain.run_brain(_ctx(), "find x")
+    assert context_trim.FINISH_NOTE not in json.dumps(model.calls[1].input)
 
 
 @pytest.mark.asyncio
