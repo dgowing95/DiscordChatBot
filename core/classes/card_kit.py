@@ -29,6 +29,7 @@ where a card's container id says what it is (KIND_IDS): a NOTICE is shown to
 the model as a status card, not as something it said; an ANNOUNCE (What's
 New) is left out; a CARD (a question, a plan) reads as its text, as before.
 """
+import re
 from dataclasses import dataclass, field
 
 # --- colours: the state of the thing ------------------------------------------
@@ -390,7 +391,21 @@ def plain(texts) -> str:
     return "\n".join(lines)
 
 
+_CODE_BLOCK = re.compile(r"```.*?```", re.DOTALL)
+# A live command's own status line (brain_progress): part of its log.
+_LOG_LINE = re.compile(r"^-# (✅ Finished|❌ Failed|⏳ Running|⏳ Starting|⌨ typed in)")
+
+
 def notice_for_history(author: str, texts) -> str:
     """How a notice card reads in a prompt: plainly a status card, so the model
-    does not take it for something it said (it copies its earlier replies)."""
-    return f"[Status card posted by '{author}', not a chat message]\n{plain(texts)}"
+    does not take it for something it said (it copies its earlier replies).
+    Code blocks and command status lines (a live run's commands and output)
+    are left out: they would fill later prompts and push out the real
+    conversation, as the embed fields they used to be in never did. "" when
+    nothing is left (a message that only continued the commands)."""
+    kept = []
+    for text in texts:
+        text = _CODE_BLOCK.sub("", str(text or ""))
+        kept.append("\n".join(line for line in text.split("\n") if not _LOG_LINE.match(line.strip())))
+    body = plain(kept)
+    return f"[Status card posted by '{author}', not a chat message]\n{body}" if body else ""

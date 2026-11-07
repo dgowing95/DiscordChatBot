@@ -209,7 +209,13 @@ class LiveCard:
         under Discord's edit rate."""
         files = dict(files or {})
         ok = True
-        for index, view in enumerate(views(spec, timeout)):
+        built = views(spec, timeout)
+        if len(built) < len(self.messages):
+            # Shorter than before (a footer or a button row that had spilled
+            # over is gone): the messages it no longer needs must not stay up
+            # saying "Thinking…" or offering a dead Cancel.
+            ok = await self._drop(len(built), spec.colour)
+        for index, view in enumerate(built):
             payload = view.to_components()
             if index < len(self.messages):
                 if self._shown[index] == payload or (
@@ -240,6 +246,26 @@ class LiveCard:
                 return False
             self.messages.append(message)
             self._shown.append(payload)
+        return ok
+
+    async def _drop(self, keep: int, colour: int) -> bool:
+        """Removes the messages past the first `keep`: deleted, or (when that
+        fails) emptied to a small grey line, since a card is never edited to
+        no view. True when all went."""
+        ok = True
+        for message in self.messages[keep:]:
+            try:
+                await message.delete()
+            except discord.NotFound:
+                pass
+            except Exception as e:
+                logger.info(f"Could not delete a card's extra message ({e!r}); emptying it")
+                try:
+                    await message.edit(view=KitView([K.Text(K.small("⋯"))], colour=K.CLOSED))
+                except Exception as e:
+                    logger.info(f"Could not empty a card's extra message: {e!r}")
+                    ok = False
+        del self.messages[keep:], self._shown[keep:]
         return ok
 
     def forget(self) -> None:

@@ -399,10 +399,10 @@ class MessageHandler:
         if kind == card_kit.ANNOUNCE:
             return entries
         if kind == card_kit.NOTICE:
-            entries.append({'role': role, 'content': card_kit.notice_for_history(
-                message.author.name, texts_of(message))})
-            if image_parts:
-                entries[-1]['content'] = [*image_parts, {"type": "text", "text": entries[-1]['content']}]
+            text = card_kit.notice_for_history(message.author.name, texts_of(message))
+            if text or image_parts:
+                entries.append({'role': role, 'content': [*image_parts, {"type": "text", "text": text}]
+                                if image_parts else text})
             return entries
         if message.content or text_of(message) or image_parts or always or files:
             text = f"Message from '{message.author.name}': {self.clean_message_content(message)}{files}"

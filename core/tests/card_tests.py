@@ -204,3 +204,52 @@ async def test_send_card_answers_an_interaction_then_follows_up_and_keeps_files_
     second = interaction.followup.send.await_args.kwargs
     assert first["ephemeral"] and second["ephemeral"] and second["wait"]
     assert "files" not in first and [f.filename for f in second["files"]] == ["a.md"]
+
+
+def _progress_views():
+    from classes.brain_progress import PROGRESS_HINT, SandboxTranscript
+    t = SandboxTranscript("chart the messages", files=["a.csv"], started=1000, hint=PROGRESS_HINT)
+    for i in range(12):
+        block = t.add_command(f"python step_{i}.py")
+        t.add_output("OUTPUT_LINE\n" * 60, 0, block=block)
+    t.add_note("⚠️ It kept repeating itself.")
+    return views(t.render())
+
+
+def test_a_live_runs_commands_and_output_stay_out_of_the_prompt():
+    built = _progress_views()
+    assert len(built) > 2
+    entries = [e for v in built for e in _handler()._format_group(_from_bot(v), [])]
+    text = "\n".join(e["content"] for e in entries)
+    assert "OUTPUT_LINE" not in text and "step_3.py" not in text and "Finished" not in text
+    assert "chart the messages" in text and "It kept repeating itself." in text
+    # a message that only went on with the commands adds nothing at all
+    assert len(entries) < len(built)
+
+
+@pytest.mark.asyncio
+async def test_a_card_that_gets_shorter_takes_down_the_messages_it_no_longer_needs():
+    from classes.card import LiveCard
+    sent = []
+
+    async def send(**kwargs):
+        message = MagicMock()
+        message.edit, message.delete = AsyncMock(), AsyncMock()
+        sent.append(message)
+        return message
+
+    channel = MagicMock()
+    channel.send = AsyncMock(side_effect=send)
+    live = LiveCard(channel)
+    long_one = K.CardSpec(label="🧠 Working", body=[K.Text("word " * 900)], footer="💭 Thinking…")
+    await live.show(long_one)
+    assert len(sent) == 2
+    await live.show(K.CardSpec(label="🧠 Done", body=[K.Text("word " * 100)], colour=K.OK))
+    sent[1].delete.assert_awaited_once()
+    assert len(live.messages) == 1
+    # when it cannot be deleted, it is emptied to a grey line instead
+    sent[0].delete = AsyncMock(side_effect=RuntimeError("no permission"))
+    live.messages.append(sent[0])
+    live._shown.append(None)
+    await live._drop(1, K.OK)
+    assert sent[0].edit.await_args.kwargs["view"].colour == K.CLOSED

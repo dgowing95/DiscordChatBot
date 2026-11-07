@@ -150,3 +150,12 @@ def test_a_helpers_ending():
     assert te.helper_ending(True, None, 3) == "✅ Finished · found 3 facts"
     assert te.helper_ending(False, None, 1) == "⚠️ Not finished · found 1 fact"
     assert te.helper_ending(False, "⚠️ Stopped", 0) == "⚠️ Stopped · found 0 facts"
+
+
+@pytest.mark.parametrize("url", ["https://example.com/" + "a" * 600, "ftp://example.com/file"])
+def test_a_link_discord_would_refuse_as_a_button_still_gets_its_card(url):
+    # Discord refuses the whole message for a link button over 512 characters
+    # or not http(s): the card would be lost, not just the button.
+    [block] = te.page_card(url).body
+    assert isinstance(block, K.Text) and "Reading a page" in block.content
+    assert te.can_link("https://example.com/a") and not te.can_link(url)

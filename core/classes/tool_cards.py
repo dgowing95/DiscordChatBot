@@ -159,12 +159,22 @@ def web_search_card(query: str, sources=None, read: bool = True) -> CardSpec:
     return CardSpec(label=WEB_SEARCHED, body=body)
 
 
+def can_link(url: str) -> bool:
+    """Whether Discord takes `url` for a link button: http(s), at most
+    MAX_URL characters. It refuses the whole message otherwise."""
+    return url.startswith(("https://", "http://")) and len(url) <= K.MAX_URL
+
+
 def page_card(url: str, part: int = 1, title: str = "") -> CardSpec:
-    """The page being read, with an Open button. Its own title once read."""
+    """The page being read, with an Open button (when Discord would take the
+    link for one). Its own title once read."""
     link = page_link(url)
     text = f"{K.bold(title)}\n{K.small(link)}" if title else link
-    return CardSpec(body=[Section((K.small(reading_page_title(part)), text),
-                                  Link("Open", link_target(url), "↗️"))])
+    texts = (K.small(reading_page_title(part)), text)
+    target = link_target(url)
+    if not can_link(target):
+        return CardSpec(body=[Text("\n".join(texts))])
+    return CardSpec(body=[Section(texts, Link("Open", target, "↗️"))])
 
 
 def memory_card(fact: str, who: str = "") -> CardSpec:

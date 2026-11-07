@@ -63,9 +63,7 @@ class RestoreButton(discord.ui.DynamicItem[discord.ui.Button], template=RESTORE_
         try:
             await SkillStore().restore(interaction.guild_id, self.name, interaction.user.id)
         except SkillError as e:
-            await card.send_card(interaction, card_kit.CardSpec(
-                label="❌ Not restored", body=[card_kit.Text(str(e))], colour=card_kit.FAIL),
-                ephemeral=True)
+            await card.reply(interaction, card_kit.error(str(e), "❌ Not restored"))
             return
         # The card it was on loses its button, and says who restored it.
         texts = card.texts_of(interaction.message)
