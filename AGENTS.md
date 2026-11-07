@@ -673,11 +673,13 @@ reads has a row here and a line in `.env.example`, that every row is read by som
   pushes it. That tag push starts `release.yaml` (tests -> five images -> chart -> GitHub release); its
   `workflow_dispatch` trigger is only for re-running a release against an existing tag. Dependabot's
   auto-merged PRs are releases like any other.
-- **A new major version** is set by `.github/release-major` (one number). When it is greater than the
-  latest tag's major, the next tag is `v<major>.0` (so merging `v3` released `v3.0`, not `v2.102`);
-  equal, the minor is bumped as always; smaller, Auto Tag fails rather than tag backwards. Never make a
-  major tag by hand: it races the job, which skips only a HEAD that is already tagged. To start v4, the
-  PR that releases it sets the file to `4`.
+- **A new major version** is set by `.github/release-major` (one number; the rule is
+  `.github/scripts/next_tag.sh`, pinned by `release_tag_tests.py`). One more than the latest tag's
+  major: the next tag is `v<major>.0` (so merging `v3` released `v3.0`, not `v2.102`); equal, the
+  minor is bumped as always; anything else (smaller, a jump of two, `08`, not a number) fails the job
+  rather than tag a typo. Never make a major tag by hand: it races the job, which skips only a HEAD
+  that is already tagged. To start v4, the PR that releases it sets the file to `4`. The tag is worked
+  out in a step with no token; only the step that creates it gets `TAG_PUSH_TOKEN`.
 - The chart `.tgz` is published as a GitHub release asset (`dchatbot-vX.Y.tgz`) and as an OCI artifact
   at `oci://ghcr.io/dgowing95/charts/dchatbot` (tag = the git tag), which is what ArgoCD and
   `helm install oci://...` resolve. Both carry `appVersion` = the tag, which picks the `core-<tag>` /
