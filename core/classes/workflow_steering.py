@@ -110,7 +110,12 @@ def _for_step(targets, step_id: str | None) -> bool:
 def steered(run_config, wf, start: int, step_id: str):
     """The run's input filter, plus what is for this step from `start` in
     wf.steering on, each as its own user message. Never raises: the SDK fails
-    the whole run on a filter error, and a run is worth more than one message."""
+    the whole run on a filter error, and a run is worth more than one message.
+
+    A message's place is counted in the run's own items, before the notes the
+    inner filter adds at the end (the loop guard's, the context watch's): those
+    are not kept between calls, so counting them would move the message past
+    the model's next reply."""
     from agents.run_config import ModelInputData
     inner = run_config.call_model_input_filter
     placed: list[tuple[int, str]] = []  # where each was first shown, and its text
@@ -121,10 +126,11 @@ def steered(run_config, wf, start: int, step_id: str):
         sent = inner(data)
         try:
             items = list(sent.input)
+            own = min(len(data.model_data.input), len(items))
             for _seq, text, targets in wf.steering[read:]:
                 read += 1
                 if _for_step(targets, step_id):
-                    placed.append((len(items), text))
+                    placed.append((own, text))
             if not placed:
                 return sent
             merged = []

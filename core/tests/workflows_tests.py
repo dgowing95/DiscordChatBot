@@ -878,21 +878,49 @@ def test_a_message_stays_out_of_the_trim_and_a_filter_error_costs_only_the_messa
     seen = {}
 
     def inner(data):
-        seen["items"] = list(data["items"])
-        return ModelInputData(input=data["items"], instructions="i")
+        seen["items"] = list(data.model_data.input)
+        return ModelInputData(input=data.model_data.input, instructions="i")
+
+    def call(*items):
+        return SimpleNamespace(model_data=SimpleNamespace(input=list(items)))
 
     wf = SimpleNamespace(id="a1", steering=[(1, "old", None), (2, "new", None),
                                             (3, "not for s1", {"s2"})])
     steered = workflow_steering.steered(Config(inner), wf, 1, "s1").call_model_input_filter
-    sent = steered({"items": ["a", "b"]})
+    sent = steered(call("a", "b"))
     assert "old" not in json.dumps(sent.input) and "not for s1" not in json.dumps(sent.input)
     assert sent.input[:2] == ["a", "b"] and "new" in sent.input[2]["content"]
     assert seen["items"] == ["a", "b"]  # the trim saw only the run's own items
-    later = steered({"items": ["a", "b", "c"]})
+    later = steered(call("a", "b", "c"))
     assert later.input[:2] == ["a", "b"] and "new" in later.input[2]["content"]
     assert later.input[3] == "c"
     wf.steering = None  # anything going wrong in there
-    assert steered({"items": ["a"]}).input == ["a"]
+    assert steered(call("a")).input == ["a"]
+
+
+def test_a_message_keeps_its_place_when_a_note_is_added_at_the_end():
+    # The loop guard's or the context watch's note is added on every call and
+    # not kept: a message shown after it must not move past the model's reply.
+    from agents.run_config import ModelInputData
+    from dataclasses import dataclass
+
+    @dataclass
+    class Config:
+        call_model_input_filter: object
+
+    def inner(data):
+        return ModelInputData(input=[*data.model_data.input, "NOTE"], instructions="i")
+
+    def call(*items):
+        return SimpleNamespace(model_data=SimpleNamespace(input=list(items)))
+
+    wf = SimpleNamespace(id="a1", steering=[(1, "new", None)])
+    steered = workflow_steering.steered(Config(inner), wf, 0, "s1").call_model_input_filter
+    first = steered(call("a", "b"))
+    assert first.input[:2] == ["a", "b"] and "new" in first.input[2]["content"]
+    assert first.input[3] == "NOTE"
+    later = steered(call("a", "b", "reply", "c"))
+    assert "new" in later.input[2]["content"] and later.input[3:] == ["reply", "c", "NOTE"]
 
 
 # --------------------------- budgets ---------------------------
