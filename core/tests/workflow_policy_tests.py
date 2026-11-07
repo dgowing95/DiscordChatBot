@@ -327,6 +327,20 @@ def test_a_research_check_never_fails_on_a_file_later_steps_make():
     assert wp.research_verdict(None, later) is None
 
 
+def test_file_names_are_found_inside_free_text_deliverables():
+    later = wp.made_later(["cities.md (with a table)", "the report out/report.md.",
+                           "version v1.0 notes", "e.g. a summary", "cities.md"])
+    assert later == ["cities.md", "report.md"]
+
+
+def test_a_research_check_keeps_a_fail_on_a_file_with_a_similar_name():
+    verdict = {"checks": [{"deliverable": "flowchart.png", "ok": False, "note": "wrong"},
+                          {"deliverable": "out/chart.png.", "ok": False, "note": "missing"}],
+               "redo_step": "s1"}
+    kept = wp.research_verdict(verdict, ["chart.png"])
+    assert [c["deliverable"] for c in kept["checks"]] == ["flowchart.png"]
+
+
 def test_the_researcher_a_research_check_sends_back():
     s1, s2 = _chain_plan().steps[:2]
     assert wp.research_redo([s1, s2], "s2") == s2

@@ -399,12 +399,12 @@ async def test_no_research_check_without_an_implementer_or_room(researched, monk
     monkeypatch.delenv("WORKFLOW_MAX_TURNS", raising=False)
     monkeypatch.delenv("WORKFLOW_TIMEOUT", raising=False)
     # 40 held back leaves 15: fewer than a check (8) and a re-run (10) need.
-    assert workflow_verify.research_due(short, plan.steps[:1], plan.steps[1:]) == []
+    assert workflow_verify.research_due(short, plan.steps[1:]) == []
     short.turns_left = lambda: 100
-    assert workflow_verify.research_due(short, plan.steps[:1], plan.steps[1:]) == plan.steps[:1]
+    assert workflow_verify.research_due(short, plan.steps[1:]) == plan.steps[:1]
     # One that stopped at a limit would never be sent back: no check for it.
     short.at_limit = {"s1"}
-    assert workflow_verify.research_due(short, plan.steps[:1], plan.steps[1:]) == []
+    assert workflow_verify.research_due(short, plan.steps[1:]) == []
 
 
 @pytest.mark.asyncio

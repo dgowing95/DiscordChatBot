@@ -641,7 +641,7 @@ async def _work(wf: Workflow) -> tuple[str, BrainReport]:
         await _together(wf, [_run_step(wf, step) for step in wave])
         await _save_progress(wf)
         # What researchers found is checked before an implementer uses it.
-        research = workflow_verify.research_due(wf, wave, queue)
+        research = workflow_verify.research_due(wf, queue)
         if research:
             await workflow_verify.check_research(wf, research)
     if wf.cancel_reason:

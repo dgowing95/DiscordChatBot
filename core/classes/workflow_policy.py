@@ -444,24 +444,43 @@ def research_to_check(ran: list[Step], queue: list[Step], results: dict, checked
             and (results.get(step.id) or {}).get("status") not in (None, "failed")]
 
 
+_FILE_NAME = re.compile(r"[\w/-]*[\w-]{2}\.[A-Za-z][A-Za-z0-9]{0,7}")
+
+
 def made_later(deliverables: list[str]) -> list[str]:
     """The files the user gets, by name ("cities.md"), from a plan's
     deliverables: what a research check must not judge, since later steps
-    make them. A description ("a short table") names no file."""
-    return [d.strip() for d in deliverables
-            if "." in d.strip() and " " not in d.strip() and len(d.strip()) > 2]
+    make them. A deliverable is free text, so every file name in it counts
+    ("cities.md (with a table)"); a description ("a short table", "v1.0")
+    names none. A path counts by its last part."""
+    names = []
+    for deliverable in deliverables:
+        for word in deliverable.split():
+            word = word.strip("()[]{},;:'\"`").rstrip(".")
+            if _FILE_NAME.fullmatch(word):
+                name = word.rsplit("/", 1)[-1]
+                if name not in names:
+                    names.append(name)
+    return names
+
+
+def _names_file(text: str, name: str) -> bool:
+    """`name` appears in `text` as a whole file name: "chart.png" is in
+    "out/chart.png." but not in "flowchart.png" or "chart.png5"."""
+    pattern = r"(?<![\w.-])" + re.escape(name.lower()) + r"(?![\w-]|\.\w)"
+    return re.search(pattern, text.lower()) is not None
 
 
 def research_verdict(verdict: dict | None, later: list[str]) -> dict | None:
     """A research check's verdict without its checks of `later` files: one
     once failed the research because cities.md did not exist yet, and sent a
     sound researcher back. None when nothing else was checked ("not
-    checked", never a pass)."""
+    checked", never a pass). A check is dropped only when it names one of
+    those files whole, so a real fail is never dropped by a similar name."""
     if verdict is None:
         return None
-    names = [name.lower() for name in later]
     checks = [check for check in verdict["checks"]
-              if not any(name in check["deliverable"].lower() for name in names)]
+              if not any(_names_file(check["deliverable"], name) for name in later)]
     return dict(verdict, checks=checks) if checks else None
 
 

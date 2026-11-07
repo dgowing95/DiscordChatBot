@@ -138,7 +138,7 @@ def _state(verdict: dict | None) -> str:
             else PASSED)
 
 
-def research_due(wf, wave: list, queue: list) -> list:
+def research_due(wf, queue: list) -> list:
     """The researchers to check now, if any (wp.research_to_check)."""
     if wf.cancel_reason or wf.over_tokens():
         return []
