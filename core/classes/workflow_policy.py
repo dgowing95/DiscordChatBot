@@ -444,7 +444,7 @@ def research_to_check(ran: list[Step], queue: list[Step], results: dict, checked
             and (results.get(step.id) or {}).get("status") not in (None, "failed")]
 
 
-_FILE_NAME = re.compile(r"[\w/-]*[\w-]{2}\.[A-Za-z][A-Za-z0-9]{0,7}")
+_FILE_NAME = re.compile(r"[\w-]*[\w-]{2}\.[A-Za-z][A-Za-z0-9]{0,7}")
 
 
 def made_later(deliverables: list[str]) -> list[str]:
@@ -456,11 +456,9 @@ def made_later(deliverables: list[str]) -> list[str]:
     names = []
     for deliverable in deliverables:
         for word in deliverable.split():
-            word = word.strip("()[]{},;:'\"`").rstrip(".")
-            if _FILE_NAME.fullmatch(word):
-                name = word.rsplit("/", 1)[-1]
-                if name not in names:
-                    names.append(name)
+            name = word.strip("()[]{},;:'\"`.").rsplit("/", 1)[-1]
+            if _FILE_NAME.fullmatch(name) and name not in names:
+                names.append(name)
     return names
 
 

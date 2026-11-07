@@ -329,8 +329,9 @@ def test_a_research_check_never_fails_on_a_file_later_steps_make():
 
 def test_file_names_are_found_inside_free_text_deliverables():
     later = wp.made_later(["cities.md (with a table)", "the report out/report.md.",
-                           "version v1.0 notes", "e.g. a summary", "cities.md"])
-    assert later == ["cities.md", "report.md"]
+                           "version v1.0 notes", "e.g. a summary", "cities.md",
+                           "the table (towns.csv).", "charts/2026.11/population.png"])
+    assert later == ["cities.md", "report.md", "towns.csv", "population.png"]
 
 
 def test_a_research_check_keeps_a_fail_on_a_file_with_a_similar_name():
