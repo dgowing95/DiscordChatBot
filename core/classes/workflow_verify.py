@@ -12,11 +12,13 @@ Why it works this way:
   to check, or no room to.
 - **Research is checked before it is built on** (maintainer, 2026-11-07). A
   check only at the end once found a wrong figure in a researcher's report,
-  sent the researcher back, and left the file made from it wrong. So after a
-  wave of researchers, while an implementer is still to come, a check looks at
-  what they found (check_research), and a wrong one runs again at once. It is
-  not checked a second time: the check at the end covers it. It runs in the
-  steps' budget, not the reserves, and only with room for it and a re-run.
+  sent the researcher back, and left the file made from it wrong. So once the
+  next step is an implementer, a check looks at what every researcher not yet
+  checked found (check_research, wp.research_to_check), and a wrong one runs
+  again at once. It is not checked a second time: the check at the end covers
+  it. It runs in the steps' budget, not the reserves, and only with room for
+  it and a re-run. It is told which files later steps make, and a fail about
+  one of them is dropped (wp.research_verdict): they cannot exist yet.
 - **One send-back at the end, and code does it.** The verifier names the step,
   code runs it once more in its own folder with the notes, then every step
   that depends on it and every implementer that ran after it (wp.redo_chain:
@@ -137,11 +139,13 @@ def _state(verdict: dict | None) -> str:
 
 
 def research_due(wf, wave: list, queue: list) -> list:
-    """The researchers of the wave that just ran to check now, if any."""
+    """The researchers to check now, if any (wp.research_to_check)."""
     if wf.cancel_reason or wf.over_tokens():
         return []
+    ran = [step for step in wf.plan.steps if step.id in wf.results]
     # One stopped at a limit is never sent back, so a check of it changes nothing.
-    steps = [step for step in wp.research_to_check(wave, queue, wf.results)
+    steps = [step for step in wp.research_to_check(ran, queue, wf.results, wf.research_checked,
+                                                   workflows._helpers_at_once())
              if step.id not in wf.at_limit]
     if steps and not _room(wf, CHECK_TURNS, CHECK_SECONDS):
         logger.info(f"Workflow {wf.id}: the research is not checked: too little is left")
@@ -152,7 +156,9 @@ def research_due(wf, wave: list, queue: list) -> list:
 async def check_research(wf, steps: list) -> None:
     """What `steps` found, checked before an implementer builds on it. A wrong
     one runs again at once, and is not checked again here."""
-    verdict = await _check(wf, f"r{wf.wave}", RESEARCH_TITLE, steps)
+    wf.research_checked.update(step.id for step in steps)
+    verdict = wp.research_verdict(await _check(wf, f"r{wf.wave}", RESEARCH_TITLE, steps),
+                                  wp.made_later(wf.plan.deliverables))
     if wf.cancel_reason:
         return
     state = _state(verdict)
@@ -284,9 +290,12 @@ async def _verdict(wf, ctx: dict, job_dir: str, progress,
     else:
         ids = ", ".join(step.id for step in research)
         folders = ", ".join(f"../{workflows.step_job_id(wf, step.id)}/" for step in research)
+        later = wp.made_later(wf.plan.deliverables)
         intro = [f"Check what {ids} found, before later steps build on it. Nothing is made "
                  "for the user yet: judge these steps' facts and files against the request, "
-                 "and check a fact or two at its source.", workflows._request_block(wf)]
+                 "and check a fact or two at its source."
+                 + (f" Later steps make {', '.join(later)}: do not check for those, they cannot exist yet."
+                    if later else ""), workflows._request_block(wf)]
         where = f"Their folders: {folders}"
     parts = intro + [
         "The plan:\n" + wp.plan_text(wf.plan),

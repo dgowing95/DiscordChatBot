@@ -386,7 +386,7 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
     | Approval | the plan card with Approve / Edit / Cancel (`workflow_views.py`), requester only | - | a button, a thread message (a change), or `WORKFLOW_PLAN_APPROVAL_SECONDS` |
     | Steps, in waves (`next_wave`): researchers side by side, an implementer alone | a helper per step (a SandboxAgent, `SUBAGENT_INSTRUCTIONS`, mode researcher / implementer) | subagent | `report` |
     | Between steps | the manager answers waiting thread messages, may change the remaining steps | brain | `submit_review` |
-    | After a wave of researchers, while an implementer is to come | a verifier checks what they found; a wrong one runs again at once | subagent | `submit_verdict` |
+    | Before the first implementer after researchers | a verifier checks what every researcher not yet checked found; a wrong one runs again at once | subagent | `submit_verdict` |
     | Check | a verifier (`workflow_verify.py`, mode verifier) compares the work with the request; one failed step and the steps built on it run again, then one more check | subagent | `submit_verdict` |
     | Finish | the manager's final report; files echoed in the origin channel | brain | `report` |
     | Reply | `WorkflowDone` on the queue; the persona with NO tools, in the origin channel | chat | - |
@@ -434,8 +434,10 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
       posts. Code runs the step it names once more, then every step that depends on it and every
       implementer that ran after it (`wp.redo_chain`), in waves, while there is room, and checks again; a second fail is PARTIAL
       with the notes, and no verdict changes nothing but says so. Research is checked before it is
-      built on (`check_research`, in the steps' budget, not the reserves): a wrong researcher runs
-      again at once and is left to the end check after that. Verifier and
+      built on (`check_research`, in the steps' budget, not the reserves), once the next step is an
+      implementer, not after each wave (one helper slot means a wave per researcher): a wrong
+      researcher runs again at once and is left to the end check after that. A fail about a file
+      later steps make is dropped (`wp.research_verdict`). Verifier and
       implementers see pictures through `view_image`: one vision call on `IMAGE_REVIEW_*`, so their
       own model needs no vision.
     - **One way to ask** (`workflows.ask_requester`): the buttons of the brain's `ask_user`, or the

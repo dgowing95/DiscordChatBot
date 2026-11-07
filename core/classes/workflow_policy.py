@@ -429,15 +429,40 @@ def redo_chain(plan: Plan, results: dict, step_id: str, waves: dict) -> list[Ste
     return [step for step in ordered if step.id in chain]
 
 
-def research_to_check(wave: list[Step], queue: list[Step], results: dict) -> list[Step]:
-    """The researchers of a wave that just ran whose findings are checked
-    before an implementer builds on them: those that made something, when an
-    implementer is still to come. A research-only job is left to the check at
-    the end, which looks at all of it."""
-    if not any(step.role == IMPLEMENTER for step in queue):
+def research_to_check(ran: list[Step], queue: list[Step], results: dict, checked,
+                      limit: int) -> list[Step]:
+    """The researchers checked now, before an implementer builds on them:
+    once the next wave is an implementer, every one that ran (`ran`, in plan
+    order), made something and is not in `checked`. Not after each wave of
+    researchers: on a server with one helper slot each researcher is a wave of
+    its own, and the first was checked while the second had not run (Strata,
+    2026-11-07). A research-only job is left to the check at the end."""
+    upcoming = next_wave(queue, set(results), limit) if queue else []
+    if not upcoming or upcoming[0].role != IMPLEMENTER:
         return []
-    return [step for step in wave if step.role == RESEARCHER
+    return [step for step in ran if step.role == RESEARCHER and step.id not in checked
             and (results.get(step.id) or {}).get("status") not in (None, "failed")]
+
+
+def made_later(deliverables: list[str]) -> list[str]:
+    """The files the user gets, by name ("cities.md"), from a plan's
+    deliverables: what a research check must not judge, since later steps
+    make them. A description ("a short table") names no file."""
+    return [d.strip() for d in deliverables
+            if "." in d.strip() and " " not in d.strip() and len(d.strip()) > 2]
+
+
+def research_verdict(verdict: dict | None, later: list[str]) -> dict | None:
+    """A research check's verdict without its checks of `later` files: one
+    once failed the research because cities.md did not exist yet, and sent a
+    sound researcher back. None when nothing else was checked ("not
+    checked", never a pass)."""
+    if verdict is None:
+        return None
+    names = [name.lower() for name in later]
+    checks = [check for check in verdict["checks"]
+              if not any(name in check["deliverable"].lower() for name in names)]
+    return dict(verdict, checks=checks) if checks else None
 
 
 def research_redo(checked: list[Step], wanted: str) -> Step | None:

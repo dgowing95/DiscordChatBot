@@ -297,13 +297,34 @@ def test_a_send_back_reaches_a_file_the_plan_did_not_link():
     assert [s.id for s in wp.redo_chain(plan, ran, "s1", waves)] == ["s1", "s3"]
 
 
-def test_research_is_checked_only_when_an_implementer_is_still_to_come():
+def test_research_is_checked_only_when_the_next_step_is_an_implementer():
     plan = _chain_plan()
     s1, s2, s3 = plan.steps[:3]
     done = {"s1": {"status": "done"}, "s2": {"status": "failed"}}
-    assert wp.research_to_check([s1, s2], [s3], done) == [s1]  # s2 made nothing
-    assert wp.research_to_check([s1, s2], [], done) == []        # the check at the end has it
-    assert wp.research_to_check([s3], [plan.steps[3]], {"s3": {"status": "done"}}) == []
+    assert wp.research_to_check([s1, s2], [s3], done, set(), 2) == [s1]  # s2 made nothing
+    assert wp.research_to_check([s1, s2], [], done, set(), 2) == []  # the end check has it
+    assert wp.research_to_check([s1], [s3], done, {"s1"}, 2) == []  # checked already
+
+
+def test_one_helper_slot_checks_the_research_once_after_the_last_researcher():
+    s1, s2, s3 = _chain_plan().steps[:3]
+    # One slot: s1 ran alone and s2 is next, so nothing is checked yet.
+    assert wp.research_to_check([s1], [s2, s3], {"s1": {"status": "done"}}, set(), 1) == []
+    both = {"s1": {"status": "done"}, "s2": {"status": "done"}}
+    assert wp.research_to_check([s1, s2], [s3], both, set(), 1) == [s1, s2]
+
+
+def test_a_research_check_never_fails_on_a_file_later_steps_make():
+    later = wp.made_later(["cities.md", "a short comparison table", "chart.png"])
+    assert later == ["cities.md", "chart.png"]
+    early = {"checks": [{"deliverable": "cities.md (final deliverable)", "ok": False,
+                         "note": "not produced yet"}], "redo_step": "s1"}
+    assert wp.research_verdict(early, later) is None  # nothing about the research: not checked
+    mixed = {"checks": early["checks"] + [{"deliverable": "s1: Oslo population", "ok": False,
+                                           "note": "2024 figure"}], "redo_step": "s1"}
+    kept = wp.research_verdict(mixed, later)
+    assert [c["deliverable"] for c in kept["checks"]] == ["s1: Oslo population"]
+    assert wp.research_verdict(None, later) is None
 
 
 def test_the_researcher_a_research_check_sends_back():

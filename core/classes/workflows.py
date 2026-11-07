@@ -25,8 +25,8 @@ one with /task. It runs like this:
    (submit_review) and may change the remaining steps.
 4. **Check** (classes/workflow_verify.py). A verifier compares what was made
    with what was asked, and a step may be sent back once, with the steps
-   built on it. What researchers found is checked too, after their wave,
-   before an implementer builds on it.
+   built on it. What researchers found is checked too, once the next step
+   is an implementer, before it builds on it.
 5. **Finish.** The manager writes the final report, the files are echoed in
    the channel the request came from, and a WorkflowDone item goes on the
    bot's queue: the persona, with no tools, tells the requester there.
@@ -289,6 +289,7 @@ class Workflow:
     checked: bool = False     # the first check is over: half the reserves are spent
     at_limit: set = field(default_factory=set)  # steps whose last run stopped at a limit
     first_wave: dict = field(default_factory=dict)  # step id -> the wave it first ran in
+    research_checked: set = field(default_factory=set)  # researchers a research check looked at
     finishing: bool = False   # past the last review: no thread message is read now
     skill_reviewed: bool = False
     # The plan stage's rounds (classes/workflow_planning.py): done yet, and
