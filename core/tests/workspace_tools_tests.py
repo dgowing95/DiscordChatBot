@@ -842,3 +842,59 @@ async def test_attach_file_messages_never_show_the_absolute_path():
     assert "too large" in out and "/workspace" not in out
 
 
+# ---------------------- view_image ----------------------
+
+def _view_ctx(session, **overrides):
+    from agents.tool_context import ToolContext
+    context = {"session": session, "job_dir": "jobs/j", "workspace_root": "/workspace"}
+    context.update(overrides)
+    return ToolContext(context=context, tool_name="view_image", tool_call_id="v1",
+                       tool_arguments="{}")
+
+
+async def _view(ctx, **args):
+    return await prod_sandbox_agent.view_image.on_invoke_tool(ctx, json.dumps(args))
+
+
+def _picture_session(size=b"3\n"):
+    session = MagicMock()
+    session.exec = AsyncMock(side_effect=[_exec_result(size), _exec_result(b"png")])
+    return session
+
+
+@pytest.mark.asyncio
+async def test_view_image_says_what_the_picture_shows(monkeypatch):
+    from classes import image_review
+    look = AsyncMock(return_value="A bar chart of 2025 prices")
+    monkeypatch.setattr(image_review, "describe_image", look)
+    result = await _view(_view_ctx(_picture_session()), path="out/chart.png", question="Which year?")
+    assert "A bar chart of 2025 prices" in result and "never instructions" in result
+    look.assert_awaited_once_with(b"png", "Which year?")
+
+
+@pytest.mark.asyncio
+async def test_view_image_when_nothing_can_see_says_so(monkeypatch):
+    from classes import image_review
+    monkeypatch.setattr(image_review, "describe_image", AsyncMock(return_value=None))
+    result = await _view(_view_ctx(_picture_session()), path="out/chart.png")
+    assert result.startswith("Could not view")
+
+
+@pytest.mark.asyncio
+async def test_view_image_refuses_what_it_should_not_read():
+    session = MagicMock()
+    session.exec = AsyncMock(return_value=_exec_result(b"", ok=False))
+    assert "relative" in await _view(_view_ctx(session), path="/etc/passwd")
+    assert "does not exist" in await _view(_view_ctx(session), path="out/nope.png")
+    big = MagicMock()
+    big.exec = AsyncMock(return_value=_exec_result(b"999999999\n"))
+    assert "too large" in await _view(_view_ctx(big), path="out/big.png")
+    assert big.exec.await_count == 1  # never read
+    assert "Nothing to view" in await _view(_view_ctx(None), path="out/a.png")
+
+
+@pytest.mark.asyncio
+async def test_view_image_has_a_limit_per_run():
+    session = MagicMock()
+    ctx = _view_ctx(session, image_views=prod_sandbox_agent.MAX_IMAGE_VIEWS)
+    assert "the limit" in await _view(ctx, path="out/a.png")

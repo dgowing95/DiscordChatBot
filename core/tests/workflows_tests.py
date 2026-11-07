@@ -22,9 +22,12 @@ from agents.testing import ModelStep, ScriptedModel, assistant_message, function
 from brain_tests import _Lease, _Session
 from workflow_store_tests import FakeRedis
 
-from classes import brain, brain_result, llm_lanes, thread_inbox, workflows
+from classes import (brain, brain_result, llm_lanes, thread_inbox, workflow_steering,
+                     workflow_verify, workflows)
 from classes import workflow_policy as wp
 from classes.workflow_store import WorkflowStore
+
+real_due = workflow_verify.due
 
 
 # --------------------------- fakes ---------------------------
@@ -95,7 +98,8 @@ def _report(status="done", facts=("found it",), call_id="r1"):
 def env(monkeypatch):
     """Patches every seam; returns a namespace the test fills with a model."""
     for name in ("WORKFLOW_PLAN_APPROVAL_SECONDS", "SUBAGENT_MAX_TURNS", "WORKFLOW_TIMEOUT",
-                 "WORKFLOW_ENABLED", "WORKFLOW_PLAN_REVISIONS"):
+                 "WORKFLOW_ENABLED", "WORKFLOW_PLAN_REVISIONS", "WORKFLOW_MAX_TURNS",
+                 "WORKFLOW_MAX_TOKENS"):
         monkeypatch.delenv(name, raising=False)
     ns = SimpleNamespace(model=None, thread=FakeChannel(500), origin=FakeChannel(77),
                          session=_Session(), redis=FakeRedis(), queue=asyncio.Queue(10),
@@ -115,8 +119,13 @@ def env(monkeypatch):
                      tool_use_behavior={"stop_at_tool_names": [stop, *rounds]})
 
     def _subagent(role):
+        from classes.workflow_tools import submit_verdict
         from classes.workspace_tools import attach_file
         brain._guard_workspace_tools()
+        if role == wp.VERIFIER:
+            return Agent(name="Helper", model=ns.model, instructions="verifier",
+                         tools=[*ns.subagent_tools, submit_verdict],
+                         tool_use_behavior={"stop_at_tool_names": ["submit_verdict"]})
         return Agent(name="Helper", model=ns.model, instructions="helper",
                      tools=[*ns.subagent_tools, attach_file, brain.report],
                      tool_use_behavior={"stop_at_tool_names": ["report"]})
@@ -135,6 +144,10 @@ def env(monkeypatch):
     monkeypatch.setattr(workflows, "_subagent", _subagent)
     monkeypatch.setattr(workflows, "_open_thread", _open_thread)
     monkeypatch.setattr(workflows, "_store", lambda: store)
+    # The check has its own tests (workflow_verify_tests.py), and every script
+    # here would need two more steps.
+    monkeypatch.setattr(workflow_verify, "due", lambda wf: False)
+    monkeypatch.setattr(workflow_steering, "route", AsyncMock(return_value=None))
     monkeypatch.setattr("classes.persona_voice.voice_question",
                         AsyncMock(side_effect=lambda guild, text: f"(voiced) {text}"))
     monkeypatch.setattr("classes.workspace_commands.progress_enabled",
@@ -518,6 +531,457 @@ async def test_a_thread_message_reaches_the_manager_between_steps_with_an_outcom
     assert wf.record["state"] == wp.DONE
 
 
+# --------------------------- steering a running helper ---------------------------
+
+def _says_while_looking(env, author_id, text):
+    """A `look` tool that posts in the thread once, then gives the workflow's
+    watcher time to take it."""
+    thread_id, said = env.thread.id, []
+
+    @function_tool
+    async def look() -> str:
+        """Look."""
+        if not said:
+            said.append(True)
+            thread_inbox.deliver(thread_id, 9700, author_id, "Ana", text)
+            await asyncio.sleep(0.05)
+        return "ok"
+
+    env.subagent_tools = [look]
+
+
+def _positions(call, text):
+    return [i for i, item in enumerate(call.input) if text in json.dumps(item)]
+
+
+@pytest.mark.asyncio
+async def test_a_message_reaches_a_running_helper_on_every_later_call_in_one_place(env):
+    _says_while_looking(env, 5, "use euros")
+    env.model = LaneModel([
+        _plan_call(("s1", "researcher", [])), _look_call("l1"), _look_call("l2"),
+        _report(call_id="a"),
+        ModelStep(output=[function_call("submit_review", {
+            "replies": [{"id": 1, "reply": "Euros it is."}]}, call_id="rv")]),
+        _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    assert _positions(env.model.calls[1], "use euros") == []
+    first = _positions(env.model.calls[2], "use euros")
+    assert len(first) == 1
+    # The SDK rebuilt the input, and it is back where it was, once.
+    assert _positions(env.model.calls[3], "use euros") == first
+    # A helper seeing it does not answer it: the review still does.
+    assert "use euros" in json.dumps(env.model.calls[4].input)
+    assert wf.ledger.events[0].outcome == "answered"
+    assert any("Euros it is." in text for text in env.thread.texts())
+
+
+@pytest.mark.asyncio
+async def test_both_running_helpers_get_it_and_a_later_one_gets_it_once(env):
+    both_here = asyncio.Barrier(2)
+    thread_id = env.thread.id
+    said = []
+
+    @function_tool
+    async def look() -> str:
+        """Look."""
+        await asyncio.wait_for(both_here.wait(), 5)
+        if not said:
+            said.append(True)
+            thread_inbox.deliver(thread_id, 9701, 5, "Ana", "use euros")
+        await asyncio.sleep(0.05)
+        return "ok"
+
+    env.subagent_tools = [look]
+    env.model = LaneModel([
+        _plan_call(("s1", "researcher", []), ("s2", "researcher", []),
+                   ("s3", "implementer", ["s1", "s2"])),
+        _look_call("l1"), _look_call("l2"), _report(call_id="a"), _report(call_id="b"),
+        ModelStep(output=[function_call("submit_review", {"replies": []}, call_id="rv")]),
+        _report(call_id="c"), _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    assert len(_positions(env.model.calls[3], "use euros")) == 1
+    assert len(_positions(env.model.calls[4], "use euros")) == 1
+    assert len(_positions(env.model.calls[6], "use euros")) == 1  # s3, in its task
+    assert wf.record["state"] == wp.DONE
+
+
+@pytest.mark.asyncio
+async def test_a_message_not_answered_yet_is_in_a_later_runs_task(env):
+    wf = workflows.Workflow(record={"requester_name": "Ana"}, ctx={}, thread=FakeChannel(500),
+                            origin_channel=None)
+    wf.steering = [(1, "use euros", None), (2, "and pounds", None)]
+    wf.reviewed = {1}
+    wf.said = [(1, "Ana: use euros (reply: ok)")]
+    text = workflow_steering.said_text(wf)
+    assert "Ana: and pounds" in text and text.count("use euros") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_message_reaches_only_the_steps_it_is_about(env, monkeypatch):
+    monkeypatch.setattr(workflow_steering, "route", AsyncMock(return_value={"s1"}))
+    both_here = asyncio.Barrier(2)
+    thread_id = env.thread.id
+    said = []
+
+    @function_tool
+    async def look() -> str:
+        """Look."""
+        await asyncio.wait_for(both_here.wait(), 5)
+        if not said:
+            said.append(True)
+            thread_inbox.deliver(thread_id, 9702, 5, "Ana", "make the graph green")
+        await asyncio.sleep(0.05)
+        return "ok"
+
+    env.subagent_tools = [look]
+    env.model = LaneModel([
+        _plan_call(("s1", "researcher", []), ("s2", "researcher", []),
+                   ("s3", "implementer", ["s1", "s2"])),
+        _look_call("l1"), _look_call("l2"), _report(call_id="a"), _report(call_id="b"),
+        ModelStep(output=[function_call("submit_review", {
+            "replies": [{"id": 1, "reply": "Green it is."}]}, call_id="rv")]),
+        _report(call_id="c"), _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    helpers = [env.model.calls[3], env.model.calls[4]]
+    seen = [len(_positions(call, "make the graph green")) for call in helpers]
+    assert sorted(seen) == [0, 1]  # one of the two running helpers
+    assert _positions(env.model.calls[6], "make the graph green") == []  # s3, later
+    assert "make the graph green" in json.dumps(env.model.calls[5].input)  # the review
+    assert wf.ledger.events[0].outcome == "answered"
+
+
+def _routing_wf(states, results=()):
+    steps = [wp.Step(id=s, role="implementer", brief=f"do {s}") for s in ("s1", "s2", "s3")]
+    return SimpleNamespace(id="a1", step_states=states, results=dict.fromkeys(results, {}),
+                           plan=wp.Plan(goal="g", steps=steps, deliverables=[], notes=""))
+
+
+@pytest.mark.asyncio
+async def test_routing_picks_from_the_steps_not_finished(monkeypatch):
+    monkeypatch.undo()
+    complete = AsyncMock(return_value='Sure: {"steps": ["s2"]}')
+    monkeypatch.setattr(workflow_steering._llm, "complete", complete)
+    wf = _routing_wf({"s1": "done", "s2": "running"}, ["s1"])
+    assert await workflow_steering.route(wf, "make the graph green") == {"s2"}
+    sent = complete.await_args.args[0][1]["content"]
+    assert "s2 [implementer]" in sent and "s3 [implementer]" in sent and "s1 [" not in sent
+    assert "make the graph green" in sent
+
+
+@pytest.mark.asyncio
+async def test_with_one_step_left_there_is_nothing_to_choose(monkeypatch):
+    monkeypatch.undo()
+    complete = AsyncMock()
+    monkeypatch.setattr(workflow_steering._llm, "complete", complete)
+    wf = _routing_wf({}, ["s1", "s2"])
+    assert await workflow_steering.route(wf, "hello") is None
+    complete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", ["no idea", '{"steps": ["s9"]}', '{"steps": "s2"}'])
+async def test_an_unusable_route_goes_to_every_step(monkeypatch, answer):
+    monkeypatch.undo()
+    monkeypatch.setattr(workflow_steering._llm, "complete", AsyncMock(return_value=answer))
+    assert await workflow_steering.route(_routing_wf({}), "hello") is None
+
+
+@pytest.mark.asyncio
+async def test_a_failed_route_goes_to_every_step(monkeypatch):
+    monkeypatch.undo()
+    monkeypatch.setattr(workflow_steering._llm, "complete",
+                        AsyncMock(side_effect=RuntimeError("down")))
+    assert await workflow_steering.route(_routing_wf({}), "hello") is None
+
+
+def test_a_message_about_no_step_goes_to_none():
+    assert wp.clean_route({"steps": []}, ["s1", "s2"]) == set()
+    assert wp.clean_route({"steps": ["s1", "s2"]}, ["s1", "s2"]) == {"s1", "s2"}
+
+
+def test_a_later_step_reads_only_what_is_for_it():
+    wf = workflows.Workflow(record={"requester_name": "Ana"}, ctx={}, thread=FakeChannel(500),
+                            origin_channel=None)
+    wf.said = [(1, "Ana: make the graph green"), (2, "Ana: use euros")]
+    wf.routes = {1: {"s2"}, 2: None}
+    assert "green" not in workflow_steering.said_text(wf, "s3")
+    assert "euros" in workflow_steering.said_text(wf, "s3")
+    assert "green" in workflow_steering.said_text(wf, "s2")
+    assert "green" in workflow_steering.said_text(wf)  # the check reads it all
+
+
+def test_the_routing_prompt_stays_small():
+    assert len(workflow_steering.ROUTE_PROMPT) <= 500
+
+
+@pytest.mark.asyncio
+async def test_someone_elses_message_never_reaches_a_helper(env):
+    _says_while_looking(env, 6, "use euros")
+    env.model = LaneModel([
+        _plan_call(("s1", "researcher", [])), _look_call("l1"), _report(call_id="a"),
+        ModelStep(output=[function_call("submit_review", {"replies": []}, call_id="rv")]),
+        _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    assert wf.steering == []
+    assert _positions(env.model.calls[2], "use euros") == []
+
+
+@pytest.mark.asyncio
+async def test_a_blocked_message_never_reaches_a_helper(env, monkeypatch):
+    _blocks(monkeypatch, "forbidden")
+    _says_while_looking(env, 5, "do something forbidden")
+    env.model = LaneModel([
+        _plan_call(("s1", "researcher", [])), _look_call("l1"), _report(call_id="a"),
+        _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    assert wf.steering == []
+    assert _positions(env.model.calls[2], "forbidden") == []
+    assert wf.ledger.events[0].outcome == "declined"
+
+
+def test_a_message_stays_out_of_the_trim_and_a_filter_error_costs_only_the_message():
+    from agents.run_config import ModelInputData
+    from dataclasses import dataclass
+
+    @dataclass
+    class Config:
+        call_model_input_filter: object
+
+    seen = {}
+
+    def inner(data):
+        seen["items"] = list(data["items"])
+        return ModelInputData(input=data["items"], instructions="i")
+
+    wf = SimpleNamespace(id="a1", steering=[(1, "old", None), (2, "new", None),
+                                            (3, "not for s1", {"s2"})])
+    steered = workflow_steering.steered(Config(inner), wf, 1, "s1").call_model_input_filter
+    sent = steered({"items": ["a", "b"]})
+    assert "old" not in json.dumps(sent.input) and "not for s1" not in json.dumps(sent.input)
+    assert sent.input[:2] == ["a", "b"] and "new" in sent.input[2]["content"]
+    assert seen["items"] == ["a", "b"]  # the trim saw only the run's own items
+    later = steered({"items": ["a", "b", "c"]})
+    assert later.input[:2] == ["a", "b"] and "new" in later.input[2]["content"]
+    assert later.input[3] == "c"
+    wf.steering = None  # anything going wrong in there
+    assert steered({"items": ["a"]}).input == ["a"]
+
+
+# --------------------------- budgets ---------------------------
+
+def test_a_helper_leaves_the_reserve_and_the_manager_may_use_it():
+    wf = SimpleNamespace(turns_left=lambda: 100, sharing=1, promised=0)
+    assert workflows._turn_limit(wf, 100, 40) == 60
+    assert workflows._turn_limit(wf, 100) == 100
+    wf.turns_left = lambda: 30
+    assert workflows._turn_limit(wf, 100, 40) == 1
+
+
+def test_half_the_reserves_are_spent_once_the_first_check_is_over(monkeypatch):
+    monkeypatch.delenv("WORKFLOW_MAX_TURNS", raising=False)
+    monkeypatch.delenv("WORKFLOW_TIMEOUT", raising=False)
+    wf = SimpleNamespace(checked=False)
+    assert workflows._held_turns(wf) == 40 and workflows._step_reserve_seconds(wf) == 480
+    wf.checked = True
+    assert workflows._held_turns(wf) == 20 and workflows._step_reserve_seconds(wf) == 330
+
+
+@pytest.mark.asyncio
+async def test_a_helper_past_the_token_limit_is_told_to_finish(env, monkeypatch):
+    monkeypatch.setenv("WORKFLOW_MAX_TOKENS", "100")
+
+    @function_tool
+    async def look() -> str:
+        """Look."""
+        next(iter(workflows._RUNNING.values())).add_tokens(500)
+        return "ok"
+
+    env.subagent_tools = [look]
+    env.model = LaneModel([_plan_call(("s1", "researcher", [])), _look_call("l1"),
+                           _report(call_id="a"), _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    assert workflows.FINISH_UP in json.dumps(env.model.calls[2].input)
+    assert wf.record["tokens"] >= 500
+
+
+@pytest.mark.asyncio
+async def test_tokens_are_counted_from_each_response():
+    hooks = brain.BrainHooks(MagicMock(on_llm_end=AsyncMock()), MagicMock(on_llm_end=AsyncMock()),
+                             None)
+    seen = []
+    hooks.on_tokens = seen.append
+    usage = SimpleNamespace(input_tokens=100, output_tokens=20)
+    await hooks.on_llm_end(None, None, SimpleNamespace(usage=usage))
+    await hooks.on_llm_end(None, None, SimpleNamespace(usage=None))
+    assert seen == [120, 0]
+
+
+def test_no_token_limit_by_default(monkeypatch):
+    monkeypatch.delenv("WORKFLOW_MAX_TOKENS", raising=False)
+    wf = workflows.Workflow(record={}, ctx={}, thread=None, origin_channel=None)
+    wf.add_tokens(10**9)
+    assert not wf.over_tokens()
+
+
+# --------------------------- stops, and the channel ---------------------------
+
+@pytest.mark.asyncio
+async def test_every_stop_is_logged_with_its_reason(env, monkeypatch, caplog):
+    monkeypatch.setenv("SUBAGENT_MAX_TURNS", "1")
+
+    @function_tool
+    async def look() -> str:
+        """Look."""
+        return "ok"
+
+    env.subagent_tools = [look]
+    env.model = LaneModel([_plan_call(("s1", "researcher", [])), _look_call("l1"),
+                           _report(call_id="f")])
+    with caplog.at_level("INFO", logger="classes.workflows"):
+        wf, _ = await _start(env)
+        await _finish(wf)
+    assert "workflow_subagent: 1 turn(s)" in caplog.text
+    assert "stopped: It ran out of steps" in caplog.text
+    assert "s1 ended partial: It ran out of steps" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_helper_that_only_reports_partial_was_not_stopped(env):
+    env.model = LaneModel([_plan_call(("s1", "implementer", [])),
+                           _report(status="partial", call_id="a"), _report(call_id="f")])
+    calls = []
+
+    class Progress:
+        async def finalize(self, **kwargs):
+            calls.append(kwargs)
+
+    wf, _ = await _start(env)
+    await _finish(wf)
+    wf2 = SimpleNamespace(cancel_reason="", ledger=None, record={"automatic": True}, id="a1",
+                          results={}, step_states={})
+    report = brain_result.BrainReport(status=brain_result.PARTIAL)
+
+    async def attempt(*args):
+        return report, None
+
+    original = workflows._step_attempt
+    workflows._step_attempt = attempt
+    update = workflows._update_plan_message
+    workflows._update_plan_message = AsyncMock()
+    try:
+        await workflows._step_work(wf2, wp.Step(id="s1", role="implementer", brief="b"),
+                                   Progress(), False)
+    finally:
+        workflows._step_attempt = original
+        workflows._update_plan_message = update
+    assert calls == [{"ok": False, "note": None, "stopped": False}]
+
+
+def test_this_channel_means_where_it_was_asked():
+    origin, thread = FakeChannel(77), FakeChannel(500)
+    origin.name = "general"
+    wf = SimpleNamespace(origin_channel=origin, thread=thread, record={"request": "count"})
+    assert "#general (channel id 77)" in workflows.asked_in(wf)
+    assert "not this job's thread" in workflows._request_block(wf)
+    wf.origin_channel = thread
+    assert workflows.asked_in(wf) == ""
+    wf.origin_channel = None
+    assert workflows.asked_in(wf) == ""
+
+
+@pytest.mark.asyncio
+async def test_two_steps_of_a_wave_keep_their_same_named_files(monkeypatch):
+    from classes.workspace_tools import SandboxArtifact
+    sent = []
+
+    async def _post_files(channel, artifacts):
+        sent.extend(artifacts)
+        return [a.name for a in artifacts]
+
+    monkeypatch.setattr(brain, "_post_files", _post_files)
+    files = [SandboxArtifact("data.csv", b"one", step="s1", wave=1),
+             SandboxArtifact("data.csv", b"two", step="s2", wave=1)]
+    wf = SimpleNamespace(origin_channel=FakeChannel(77), thread=FakeChannel(500), artifacts=files)
+    assert await workflows.post_workflow_copy(wf) == ["s1-data.csv", "s2-data.csv"]
+    assert [a.data for a in sent] == [b"one", b"two"]
+
+
+# --------------------------- the skill review ---------------------------
+
+def _ended(state="done", automatic=False, tool_calls=9):
+    wf = workflows.Workflow(record={"id": "a1", "guild_id": 1, "requester_id": 5, "state": state,
+                                    "request": "count things", "automatic": automatic},
+                            ctx={}, thread=FakeChannel(500), origin_channel=FakeChannel(77))
+    wf.plan = wp.Plan(goal="g", steps=[wp.Step(id="s1", role="implementer", brief="b")],
+                      deliverables=[], notes="")
+    wf.results = {"s1": {"status": "done", "facts": ["counted 3"]}}
+    wf.tool_calls = tool_calls
+    return wf
+
+
+@pytest.fixture
+def reviews(monkeypatch):
+    from classes import skill_reflection
+    started = []
+    monkeypatch.setattr(skill_reflection, "start", started.extend)
+    monkeypatch.setattr(skill_reflection, "should_reflect",
+                        lambda status, tool_calls, skill_saved: tool_calls >= 6)
+    store = MagicMock(list=AsyncMock(return_value=[{"name": "old-skill"}]))
+    monkeypatch.setattr("classes.skill_store.SkillStore", lambda: store)
+    return started
+
+
+@pytest.mark.asyncio
+async def test_a_long_workflow_gets_a_skill_review_once(reviews):
+    wf = _ended()
+    report = brain_result.BrainReport(status=brain_result.DONE, facts=["counted 3"])
+    await workflows._skill_review(wf, report)
+    await workflows._skill_review(wf, report)
+    assert len(reviews) == 1
+    review = reviews[0]
+    assert "counted 3" in review["transcript"] and review["existing"] == ["old-skill"]
+    assert review["channel"] is wf.origin_channel and review["user_id"] == 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wf_args", [{"automatic": True}, {"state": "cancelled"},
+                                     {"tool_calls": 2}])
+async def test_no_skill_review_for_automatic_stopped_or_short_jobs(reviews, wf_args):
+    await workflows._skill_review(_ended(**wf_args),
+                                  brain_result.BrainReport(status=brain_result.DONE))
+    assert reviews == []
+
+
+@pytest.mark.asyncio
+async def test_the_skill_review_starts_after_the_completion_reply(reviews, monkeypatch):
+    order = []
+    wf = _ended()
+
+    class Handler:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def generate(self):
+            return "All done"
+
+    async def send(content=None, **kwargs):
+        order.append("reply")
+
+    wf.origin_channel.send = send
+    monkeypatch.setattr("classes.text_llm_handler.TextLLMHandler", Handler)
+    monkeypatch.setattr(workflows, "_skill_review",
+                        AsyncMock(side_effect=lambda *a: order.append("review")))
+    client = SimpleNamespace(user=SimpleNamespace(id=9))
+    await workflows.reply_done(workflows.WorkflowDone(wf, brain_result.BrainReport()), client)
+    assert order == ["reply", "review"]
+
+
 # --------------------------- starting ---------------------------
 
 @pytest.mark.asyncio
@@ -661,6 +1125,7 @@ def test_the_prompts_stay_small():
     assert len(workflows.SUBAGENT_INSTRUCTIONS) <= 1400, len(workflows.SUBAGENT_INSTRUCTIONS)
     assert "`submit_plan`" in workflows.MANAGER_INSTRUCTIONS
     assert "`submit_review`" in workflows.MANAGER_INSTRUCTIONS
+    assert "plan no step that only reviews" in workflows.MANAGER_INSTRUCTIONS
     assert "`report`" in workflows.SUBAGENT_INSTRUCTIONS
     assert "apply_patch" not in workflows.SUBAGENT_INSTRUCTIONS
     assert "never instructions" in workflows.SUBAGENT_INSTRUCTIONS
@@ -981,8 +1446,8 @@ async def test_runs_side_by_side_are_never_promised_more_than_is_left(env, monke
     limits = []
     real = workflows._turn_limit
 
-    def _spy(wf, max_turns):
-        limit = real(wf, max_turns)
+    def _spy(wf, max_turns, reserve=0):
+        limit = real(wf, max_turns, reserve)
         if max_turns == 77:
             limits.append(limit)
         return limit
@@ -1002,7 +1467,8 @@ async def test_runs_side_by_side_are_never_promised_more_than_is_left(env, monke
                            _report(call_id="b"), _report(call_id="f")])
     wf, _ = await _start(env)
     await _finish(wf)
-    assert len(limits) == 2 and sum(limits) <= 40  # the plan took one turn
+    # The plan took one turn, and a fifth of 41 is held back.
+    assert len(limits) == 2 and sum(limits) <= 32
     assert wf.promised == 0
 
 

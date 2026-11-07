@@ -51,6 +51,8 @@ MAX_RETRIES = 2
 # legible, at about a third of the tokens a 1024 px image costs -- and the full
 # 1024 px judged worse, not better, in the measurement under review_image.
 REVIEW_MAX_SIDE = 640
+VIEW_MAX_SIDE = 1280   # a chart's labels must stay readable
+VIEW_MAX_TOKENS = 700
 MAX_MISSING = 4
 
 # Strict on purpose, and measured that way on prod's model. A plainer version
@@ -59,6 +61,14 @@ MAX_MISSING = 4
 # read the lines as thin arms; a "female soldier" with a man's face passed both
 # times. This version caught all 6 and still passed the pictures that were
 # right (a fatter edit, a fox, a round body, an obese woman on the phone).
+# ONE home. A helper reads this to check work, so plain facts beat a nice caption.
+VIEW_PROMPT = """Say plainly what this picture shows, then answer the questions. For a chart, give its title, axes, labels and rough values. Report only what you can see."""
+
+# Always asked, in the user's message. In the system prompt the model left out
+# a label sitting on the tick numbers, on a chart a check then passed; asked
+# like this it named the overlap 4 times in 4 (live, 2026-11-04).
+VIEW_LAYOUT_QUESTION = "Is any text cut off, or overlapping other text? Look closely at the axis labels and the tick numbers."
+
 SYSTEM_PROMPT = """You check a generated picture against what was asked for, as strictly as the person who asked would.
 
 Reply with ONLY a JSON object and nothing else — no prose, no code fence:
@@ -116,13 +126,13 @@ def review_config():
 _llm = SideLLM("image_review", review_config)
 
 
-def encode_for_review(png: bytes) -> str:
-    """The image as a JPEG data URL, its long side at most REVIEW_MAX_SIDE."""
+def encode_for_review(png: bytes, max_side: int = REVIEW_MAX_SIDE) -> str:
+    """The image as a JPEG data URL, its long side at most `max_side`."""
     from PIL import Image
 
     with Image.open(io.BytesIO(png)) as image:
         image = image.convert("RGB")
-        image.thumbnail((REVIEW_MAX_SIDE, REVIEW_MAX_SIDE))
+        image.thumbnail((max_side, max_side))
         buf = io.BytesIO()
         image.save(buf, format="JPEG", quality=85)
     return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
@@ -200,6 +210,27 @@ def merge_reviews(reviews) -> ImageReview | None:
                 seen.add(item.lower())
                 missing.append(item)
     return ImageReview(shows=found[0].shows, missing=tuple(missing[:MAX_MISSING]))
+
+
+async def describe_image(data: bytes, question: str = "") -> str | None:
+    """What a picture in the workspace shows, for a helper (view_image): one
+    call on this module's connection, so a helper needs no vision of its own.
+    None when it could not look: switched off, not a picture, a model that
+    cannot see."""
+    if not review_enabled():
+        return None
+    try:
+        url = await asyncio.to_thread(encode_for_review, data, VIEW_MAX_SIDE)
+        content = await _llm.complete(
+            [{"role": "system", "content": VIEW_PROMPT},
+             {"role": "user", "content": [
+                 {"type": "text", "text": f"{question} {VIEW_LAYOUT_QUESTION}".strip()},
+                 {"type": "image_url", "image_url": {"url": url}}]}],
+            temperature=0.0, max_tokens=VIEW_MAX_TOKENS)
+    except Exception as e:
+        logger.warning(f"Viewing an image failed ({e})")
+        return None
+    return strip_thinking(content or "").strip() or None
 
 
 async def review_image(png: bytes, user_request: str, description: str,

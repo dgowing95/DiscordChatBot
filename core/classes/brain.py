@@ -528,6 +528,14 @@ def _loop_stop(error: BaseException) -> "LoopStopped | None":
     return None
 
 
+def response_tokens(response) -> int:
+    """A model response's tokens, in and out; 0 when a server sends none."""
+    usage = getattr(response, "usage", None)
+    return sum(tokens for tokens in (getattr(usage, "input_tokens", None),
+                                     getattr(usage, "output_tokens", None))
+               if isinstance(tokens, int))
+
+
 class BrainHooks(RunHooks):
     """The brain run's hooks, in one object (Runner.run takes one): per-tool
     metrics (ToolMetricsHooks, so the moved tools are still counted), the
@@ -542,6 +550,8 @@ class BrainHooks(RunHooks):
         self.tool_calls = 0
         # The longest prompt of the run: what a slot's context has to hold.
         self.peak_prompt_tokens = 0
+        # Called with each response's tokens, in and out (workflows count them).
+        self.on_tokens = None
 
     async def on_llm_start(self, context, agent, system_prompt, input_items) -> None:
         self.turns += 1
@@ -549,9 +559,12 @@ class BrainHooks(RunHooks):
             await part.on_llm_start(context, agent, system_prompt, input_items)
 
     async def on_llm_end(self, context, agent, response) -> None:
-        tokens = getattr(getattr(response, "usage", None), "input_tokens", None)
+        usage = getattr(response, "usage", None)
+        tokens = getattr(usage, "input_tokens", None)
         if isinstance(tokens, int):
             self.peak_prompt_tokens = max(self.peak_prompt_tokens, tokens)
+        if self.on_tokens is not None:
+            self.on_tokens(response_tokens(response))
         for part in self.parts:
             await part.on_llm_end(context, agent, response)
 

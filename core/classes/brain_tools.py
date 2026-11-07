@@ -37,8 +37,11 @@ the same objects:
 | scout       | web, fetch, message search/read, save_messages_to_file, report (+ Shell) |
 | review      | submit_review (the thread's messages between steps)          |
 | finish      | report                                                        |
+| verifier    | fetch, view_image, submit_verdict (+ Shell)                   |
 | researcher  | web, fetch, message search/read, attach_file, save_messages_to_file, report (+ Shell) |
-| implementer | fetch, generate_image, attach_file, save_messages_to_file, report (+ Shell) |
+| implementer | fetch, generate_image, attach_file, save_messages_to_file, view_image, report (+ Shell) |
+
+view_image is there while IMAGE_REVIEW_ENABLED is on: it uses that connection.
 
 No workflow agent can save memories, change the personality, post polls or
 events, set automations, ask inline questions or start another workflow
@@ -57,9 +60,10 @@ MANAGER = "manager"
 SCOUT = "scout"
 REVIEW = "review"
 FINISH = "finish"
+VERIFIER = "verifier"
 RESEARCHER = "researcher"
 IMPLEMENTER = "implementer"
-MODES = (BRAIN, MANAGER, SCOUT, REVIEW, FINISH, RESEARCHER, IMPLEMENTER)
+MODES = (BRAIN, MANAGER, SCOUT, REVIEW, FINISH, VERIFIER, RESEARCHER, IMPLEMENTER)
 
 
 def brain_tools(*, automatic: bool = False, voice: bool = False, workflows: bool = False,
@@ -90,8 +94,10 @@ def brain_tools(*, automatic: bool = False, voice: bool = False, workflows: bool
         start_workflow,
         submit_plan,
         submit_review,
+        submit_verdict,
     )
-    from classes.workspace_tools import attach_file
+    from classes.image_review import review_enabled
+    from classes.workspace_tools import attach_file, view_image
 
     if mode not in MODES:
         raise ValueError(f"unknown brain_tools mode {mode!r}")
@@ -110,6 +116,8 @@ def brain_tools(*, automatic: bool = False, voice: bool = False, workflows: bool
         return [submit_review]
     if mode == FINISH:
         return [report]
+    if mode == VERIFIER:
+        return [fetch_url, *([view_image] if review_enabled() else []), submit_verdict]
     if mode == RESEARCHER:
         return [web_search, fetch_url, *message_search_tools(), attach_file,
                 save_messages_to_file, report]
@@ -117,7 +125,8 @@ def brain_tools(*, automatic: bool = False, voice: bool = False, workflows: bool
         tools = [fetch_url]
         if image_generation_enabled():
             tools.append(generate_image)
-        return tools + [attach_file, save_messages_to_file, report]
+        tools += [attach_file, save_messages_to_file]
+        return tools + ([view_image] if review_enabled() else []) + [report]
 
     tools = [web_search, fetch_url, *message_search_tools(), check_polls, create_poll,
              *event_tools(), change_personality]

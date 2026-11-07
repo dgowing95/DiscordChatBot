@@ -145,6 +145,11 @@ Metrics (scraped by Prometheus from the /metrics HTTP endpoint):
            How scouts ended (done / reported_at_limit / stopped).
   Counter  discord_bot_workflow_plan_questions_total{outcome}
            Questions before the plan (answered / unanswered).
+  Histogram discord_bot_workflow_tokens
+           Tokens, in and out, one workflow used.
+  Counter  discord_bot_workflow_verdicts_total{outcome}
+           Checks of finished work (passed / failed / not_checked), and
+           steps run again because of one (sent_back).
   Gauge    discord_bot_workflows_running
            Workflows running in this process.
 
@@ -775,6 +780,12 @@ workflow_subagents = Histogram(
 workflow_turns = Histogram(
     "discord_bot_workflow_turns", "Model turns per workflow, every agent together",
     buckets=(5, 10, 25, 50, 100, 200, 350, 500))
+workflow_tokens = Histogram(
+    "discord_bot_workflow_tokens", "Tokens, in and out, per workflow, every agent together",
+    buckets=(10_000, 50_000, 100_000, 500_000, 1_000_000, 2_000_000, 5_000_000, 10_000_000,
+             20_000_000, 50_000_000))
+workflow_verdicts_total = Counter(
+    "discord_bot_workflow_verdicts_total", "Checks of finished workflow work", ["outcome"])
 workflow_plan_approval_total = Counter(
     "discord_bot_workflow_plan_approval_total", "How workflow plans were approved", ["outcome"])
 workflow_scouts_total = Counter(
@@ -786,15 +797,20 @@ workflows_running_gauge = Gauge("discord_bot_workflows_running", "Workflows runn
 
 
 def observe_workflow(trigger: str, end_state: str, seconds: float, subagents: int,
-                     turns: int) -> None:
+                     turns: int, tokens: int = 0) -> None:
     workflows_total.labels(trigger=str(trigger), end_state=str(end_state)).inc()
     workflow_seconds.labels(end_state=str(end_state)).observe(max(0.0, seconds))
     workflow_subagents.observe(max(0, subagents))
     workflow_turns.observe(max(0, turns))
+    workflow_tokens.observe(max(0, tokens))
 
 
 def inc_workflow_plan_approval(outcome: str) -> None:
     workflow_plan_approval_total.labels(outcome=str(outcome)).inc()
+
+
+def inc_workflow_verdict(outcome: str) -> None:
+    workflow_verdicts_total.labels(outcome=str(outcome)).inc()
 
 
 def inc_workflow_scout(outcome: str) -> None:

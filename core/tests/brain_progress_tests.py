@@ -21,7 +21,8 @@ from classes.brain_progress import (
     parse_exec_result,
 )
 from classes.tool_embeds import (
-    BRAIN_DONE, BRAIN_STOPPED, BRAIN_WORKING, COLOR_BRAIN, COLOR_DONE, COLOR_STOPPED, work_task_text,
+    BRAIN_DONE, BRAIN_NOT_FINISHED, BRAIN_STOPPED, BRAIN_WORKING, COLOR_BRAIN, COLOR_DONE,
+    COLOR_STOPPED, work_task_text,
 )
 
 # To run this pytest file from the command line, use:
@@ -356,6 +357,16 @@ async def test_a_stopped_call_is_titled_and_coloured_as_stopped():
     content, embed = _last_flush(message)
     assert embed.title == BRAIN_STOPPED and embed.color.value == COLOR_STOPPED
     assert "ran out of time" in content
+
+
+@pytest.mark.asyncio
+async def test_a_helper_nothing_stopped_is_not_called_stopped():
+    channel, message = _channel_with_message()
+    hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
+    await _begin(hooks)
+    await hooks.finalize(ok=False, stopped=False)
+    _, embed = _last_flush(message)
+    assert embed.title == BRAIN_NOT_FINISHED
 
 
 @pytest.mark.asyncio

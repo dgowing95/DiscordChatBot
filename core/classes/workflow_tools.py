@@ -8,6 +8,8 @@
   submit_plan     the manager's: the plan, which ends its planning run
   submit_review   the manager's, between steps: a reply to each thread
                   message, and optionally new remaining steps
+  submit_verdict  the verifier's: what it found in the finished work
+                  (classes/workflow_verify.py)
 
 Each one only RECORDS its arguments in the run context, and the code that
 started the run reads them after it: a tool's return value becomes the run's
@@ -128,6 +130,29 @@ async def submit_review(wrapper: RunContextWrapper[dict], replies: list[ReplyArg
         stop: True only if the requester asks to stop the whole job.
     """
     _ctx(wrapper)["workflow_review_args"] = {"replies": replies, "steps": steps, "stop": stop}
+    return RECORDED
+
+
+class CheckArg(TypedDict, total=False):
+    deliverable: str
+    ok: bool
+    note: str
+
+
+@function_tool
+async def submit_verdict(wrapper: RunContextWrapper[dict], checks: list[CheckArg],
+                         redo_step: str = "") -> str:
+    """Give your verdict. E.g. `submit_verdict(checks=[{"deliverable":
+    "report.md", "ok": true, "note": "5 sections, links work"}, {"deliverable":
+    "prices.csv", "ok": false, "note": "Has 2024 prices, the request said
+    2025"}], redo_step="s2")`.
+
+    Args:
+        checks: One per thing the user gets: its name, whether it is right,
+            and in a few words what you saw.
+        redo_step: The step to run again, only when a check failed.
+    """
+    _ctx(wrapper)["workflow_verdict_args"] = {"checks": checks, "redo_step": redo_step}
     return RECORDED
 
 

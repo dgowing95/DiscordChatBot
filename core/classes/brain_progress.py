@@ -57,7 +57,8 @@ import discord
 from agents import RunHooks
 
 from classes.tool_embeds import (
-    BRAIN_DONE, BRAIN_STOPPED, BRAIN_WORKING, COLOR_BRAIN, COLOR_DONE, COLOR_STOPPED,
+    BRAIN_DONE, BRAIN_NOT_FINISHED, BRAIN_STOPPED, BRAIN_WORKING, COLOR_BRAIN, COLOR_DONE,
+    COLOR_STOPPED,
     HELPER_TITLE_CHARS, helper_ending, helper_line, trim, work_task_text,
 )
 
@@ -461,17 +462,19 @@ class BrainProgressHooks(RunHooks):
         self._started = True
         await self._flush(force=True)
 
-    async def finalize(self, ok: bool = True, note: str | None = None) -> None:
+    async def finalize(self, ok: bool = True, note: str | None = None,
+                       stopped: bool = True) -> None:
         """Flush the final state once the call is over. Nothing when the
-        embed never went out."""
+        embed never went out. `stopped` False: nothing stopped it, it only
+        reported that it did not finish."""
         if self._finalized:
             return
         self._finalized = True
         if not self._started:
             return
         self.transcript.set_thinking(False)
-        self.transcript.set_final(BRAIN_DONE if ok else BRAIN_STOPPED,
-                                  COLOR_DONE if ok else COLOR_STOPPED)
+        title = BRAIN_DONE if ok else BRAIN_STOPPED if stopped else BRAIN_NOT_FINISHED
+        self.transcript.set_final(title, COLOR_DONE if ok else COLOR_STOPPED)
         if note:
             self.transcript.add_note(note)
         await self._flush(force=True)

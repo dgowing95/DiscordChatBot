@@ -62,7 +62,7 @@ core/                    # the bot (what runs in production)
     skill_commands.py      # the /skills group (list, show, history, edit, delete, restore, revert, export)
     skill_reflection.py    # after a long job, one background call decides whether to save a skill
     skill_curator.py       # the daily tidy-up: merge, retire, describe (its rules are pure)
-    loop_guard.py          # P stops a brain run that repeats itself
+    loop_guard.py          # P stops a brain run that repeats itself (also a page or search asked again)
     context_trim.py        # P cuts old tool outputs in a long brain run
     brain_progress.py      # the "Working on it" status embed and live command output
     workspace_tools.py     # shell wrappers, attach_file and delivery, in/ files, thread tools
@@ -74,10 +74,12 @@ core/                    # the bot (what runs in production)
     # Tier 3 workflows (runtime item 13)
     workflows.py           # start, approval, steps, questions, finish, the completion reply
     workflow_planning.py   # the plan stage: scouts, questions before the plan, submit_plan
+    workflow_verify.py     # the check of the finished work, one send-back
+    workflow_steering.py   # the requester's messages reaching the steps they are about
     workflow_policy.py     # P plans, waves, states, WORKFLOW_* / SUBAGENT_* settings
     workflow_store.py      # records and each server's running slot, in Redis
     workflow_tools.py      # start_workflow (brain); discover, ask_requester, submit_plan,
-                           #   submit_review (manager)
+                           #   submit_review (manager); submit_verdict (verifier)
     workflow_views.py      # the plan card's Approve / Edit / Cancel buttons (work across restarts)
     task_commands.py       # /task
     thread_inbox.py        # P thread-message ledger (a workflow claims its thread's)
@@ -384,6 +386,7 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
     | Approval | the plan card with Approve / Edit / Cancel (`workflow_views.py`), requester only | - | a button, a thread message (a change), or `WORKFLOW_PLAN_APPROVAL_SECONDS` |
     | Steps, in waves (`next_wave`): researchers side by side, an implementer alone | a helper per step (a SandboxAgent, `SUBAGENT_INSTRUCTIONS`, mode researcher / implementer) | subagent | `report` |
     | Between steps | the manager answers waiting thread messages, may change the remaining steps | brain | `submit_review` |
+    | Check | a verifier (`workflow_verify.py`, mode verifier) compares the work with the request; one failed step runs again, then one more check | subagent | `submit_verdict` |
     | Finish | the manager's final report; files echoed in the origin channel | brain | `report` |
     | Reply | `WorkflowDone` on the queue; the persona with NO tools, in the origin channel | chat | - |
 
@@ -417,11 +420,20 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
       task), so `on_message` routes thread messages to it (📨). A bare "stop" from the requester, or
       Cancel, cancels at once (`request_cancel`: every running helper's task is cancelled, files kept);
       with a question open their message answers it; while the plan is being written it goes into the
-      next run; while the plan waits it is a change to it; everything else waits for the
-      review between steps (and once more after the last step), which records an outcome per message.
-      The thread is open to the server: only the requester can change the steps, and only their words
-      reach later helpers. Plan edits, thread messages and answers pass the content guard first (the
-      run context's guard only ever saw the request).
+      next run; while the plan waits it is a change to it; while the work runs it also goes to the steps
+      it is about (`workflow_steering.py`: one call picks them from the steps not finished, all of them
+      if it fails), at a helper's next model call (the SDK drops what a filter adds, so each run puts it
+      back where it was first shown, after the trim). Every message waits for the review between
+      steps (and once more after the last step), which answers it and records an outcome. The thread
+      is open to the server: only the requester can change the steps, and only their words reach
+      helpers. Plan edits, thread messages and answers pass the content guard first (the run context's
+      guard only ever saw the request).
+    - **The check** (`workflow_verify.py`): every job that finished, unless a limit or a cancel stopped
+      it or it made nothing. The verifier has the shell, `fetch_url` and `view_image`, and nothing that
+      posts. Code runs the step it names once more, in a wave of its own, and checks again; a second
+      fail is PARTIAL with the notes, and no verdict changes nothing but says so. Verifier and
+      implementers see pictures through `view_image`: one vision call on `IMAGE_REVIEW_*`, so their
+      own model needs no vision.
     - **One way to ask** (`workflows.ask_requester`): the buttons of the brain's `ask_user`, or the
       requester's next thread message (a Discord Reply lands there too, since the thread is claimed).
       One question at a time, `WORKFLOW_ASK_TIMEOUT` each. A helper that reports `needs_input` asks this
@@ -430,9 +442,11 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
       `_deliver` would post again, and reaches the channel with the job's files.
     - **Folders** `jobs/c<thread id>-w<id>-<step>/`: each helper is told the earlier steps' folders, and
       a later brain call in the thread finds them as that channel's earlier jobs.
-    - **Limits cap the cost**: `WORKFLOW_TIMEOUT` (1 h) and `WORKFLOW_MAX_TURNS` (250, every agent's turns
-      together) stop it with what exists (PARTIAL); `SUBAGENT_MAX_TURNS` per helper. The clock
-      restarts when the plan is answered, so waiting on a person is not work time.
+    - **Limits cap the cost**: `WORKFLOW_TIMEOUT` (1 h), `WORKFLOW_MAX_TURNS` (300) and
+      `WORKFLOW_MAX_TOKENS` (off; every agent together) stop it with what exists (PARTIAL);
+      `SUBAGENT_MAX_TURNS` per helper. Helpers leave 40 turns (`wp.turn_reserve`) and 300 seconds more
+      than the final report's for the check. The clock restarts when the plan is answered, so waiting
+      on a person is not work time.
     - **Restarts**: resume is out of scope. A workflow cancelled at shutdown stays live in Redis, and
       at startup `interrupt_all` marks this instance's live ones INTERRUPTED and posts a note in their
       threads. The buttons are `DynamicItem`s registered once, so an old one answers "This workflow has
@@ -490,9 +504,11 @@ are the ones that actually change behaviour). The persona's *system* prompt is n
   their own homes, pinned by `skill_tools_tests.py`: `SKILLS_INSTRUCTIONS` ~270 characters (ceiling
   400, added to the brain's prompt only when skills are on), `REFLECTION_PROMPT` ~730 (ceiling
   1000, the one prompt of the after-job review) and `CURATOR_PROMPT` ~860 (ceiling 1000, the
-  tidy-up's). Workflows' are pinned by `workflows_tests.py`: `MANAGER_INSTRUCTIONS` ~1260 (ceiling
+  tidy-up's). Workflows' are pinned by `workflows_tests.py`: `MANAGER_INSTRUCTIONS` ~1350 (ceiling
   1400; every manager run: plan, review, finish; `MANAGER_IMAGE_LINE` ~100 is added when the bot can
-  draw) and `SUBAGENT_INSTRUCTIONS` ~1170 (ceiling 1400, plus one `ROLE_LINES` line per helper), and
+  draw) and `SUBAGENT_INSTRUCTIONS` ~1170 (ceiling 1400, plus one `ROLE_LINES` line per helper), by
+  `workflow_verify_tests.py`: `VERIFIER_INSTRUCTIONS` ~760 (ceiling 1000), `ROUTE_PROMPT` ~360
+  (ceiling 500, `workflow_steering.py`), and
   by `workflow_planning_tests.py`: `SCOUT_INSTRUCTIONS` ~890 (ceiling 900) and `discover`'s docstring
   (ceiling 650), the home of "the shape, not the answers". The other workflow tools' docstrings
   (`workflow_tools.py`) and the tasks `workflows.py` and `workflow_planning.py` build are the rest of
@@ -575,12 +591,12 @@ reads has a row here and a line in `.env.example`, that every row is read by som
 | `IMAGE_GEN_TIMEOUT` | seconds core waits on the diffusion service [300] |
 | `IMAGE_PROMPT_REWRITE_ENABLED` | `0` sends image requests verbatim [on]. Chart: `diffusion.promptRewrite.enabled` |
 | `IMAGE_PROMPT_MODEL` / `IMAGE_PROMPT_LLM_HOST` / `IMAGE_PROMPT_LLM_API_KEY` / `IMAGE_PROMPT_TIMEOUT` | the rewrite's connection; empty = the brain's, then `LLM_*` (the key only for the same host); timeout [60]. Chart: `diffusion.promptRewrite.*` |
-| `IMAGE_REVIEW_ENABLED` | `0` posts generated images unchecked [on]. Chart: `diffusion.review.enabled` |
+| `IMAGE_REVIEW_ENABLED` | `0` posts generated images unchecked and removes workflow helpers' `view_image` [on]. Chart: `diffusion.review.enabled` |
 | `IMAGE_REVIEW_RETRIES` | extra attempts when something asked for is missing [1, max 2; 0 = check only]. Chart: `diffusion.review.retries` |
 | `IMAGE_REVIEW_MODEL` / `IMAGE_REVIEW_LLM_HOST` / `IMAGE_REVIEW_LLM_API_KEY` / `IMAGE_REVIEW_TIMEOUT` | the check's connection (a vision model), falling back like `IMAGE_PROMPT_*`. Chart: `diffusion.review.*` |
 | `BRAIN_MAX_TURNS` | backstop on model turns per brain call [100]. Chart: `brain.maxTurns` |
 | `BRAIN_TIMEOUT` | backstop on a brain call's seconds, lane waits included [1800]. Chart: `brain.timeout` |
-| `BRAIN_REPEAT_LIMIT` | loop guard: the same call this many times in a row, or eight calls that bring nothing new, warns; a second time stops the call [3, min 2]. Chart: `brain.repeatLimit` |
+| `BRAIN_REPEAT_LIMIT` | loop guard: the same call this many times in a row, eight calls that bring nothing new, or the same page or search this many times in one run, warns; a second time stops the call [3, min 2]. Chart: `brain.repeatLimit` |
 | `BRAIN_UNPROMPTED_MAX_TURNS` / `BRAIN_UNPROMPTED_TIMEOUT` | backstops for a brain call in a reply the bot was not asked for (the random reply chance): nobody is waiting on it [40 / 180]. Chart: `brain.unprompted.maxTurns` / `timeout` |
 | `BRAIN_ASK_TIMEOUT` | seconds `ask_user` waits for the requester's answer in the channel, cut to what the call has left [120]. Chart: `brain.askTimeout` |
 | `SKILLS_ENABLED` | `0`/`false` turns skills off: no skill tools for the brain, no `/skills`, no index in its task; saved skills are kept (default: on). Chart: `skills.enabled` |
@@ -610,7 +626,7 @@ reads has a row here and a line in `.env.example`, that every row is read by som
 | `WORKFLOW_PLAN_APPROVAL_SECONDS` | seconds a plan waits for Approve before it starts anyway [900]. Chart: `workflows.planApprovalSeconds` |
 | `WORKFLOW_PLAN_REVISIONS` | changes a plan may get before it must be approved or cancelled [3]. Chart: `workflows.planRevisions` |
 | `WORKFLOW_MAX_STEPS` | steps in one plan [8]. Chart: `workflows.maxSteps` |
-| `WORKFLOW_TIMEOUT` / `WORKFLOW_MAX_TURNS` | backstops on one workflow: wall-clock seconds [3600] and model turns across all its agents [250]; out of either stops it with what exists. Chart: `workflows.timeout` / `maxTurns` |
+| `WORKFLOW_TIMEOUT` / `WORKFLOW_MAX_TURNS` / `WORKFLOW_MAX_TOKENS` | backstops on one workflow: wall-clock seconds [3600], model turns [300] and tokens in and out [0 = off] across all its agents; out of any stops it with what exists. Chart: `workflows.timeout` / `maxTurns` / `maxTokens` |
 | `WORKFLOW_MAX_PER_GUILD` | workflows running at once per server [1]. Chart: `workflows.maxPerGuild` |
 | `WORKFLOW_DEV_INJECT` | local testing and E2E only, never in the chart: `!workflow <request>` starts a workflow directly, since a webhook cannot use `/task` |
 | `SUBAGENT_MODEL` / `SUBAGENT_LLM_HOST` / `SUBAGENT_LLM_API_KEY` | a workflow helper's connection; empty = the brain's, then `LLM_*` (the key only for the same host). Chart: `subagents.model` / `llmHost` / `apiKey` |

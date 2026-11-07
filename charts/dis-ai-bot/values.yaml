@@ -311,10 +311,12 @@ workflows:
   planRevisions: 3
   # Steps in one plan.
   maxSteps: 8
-  # Caps on ONE workflow: wall-clock seconds (1 h) and model
-  # turns across all its agents. Running out stops it with what exists.
+  # Caps on ONE workflow: wall-clock seconds (1 h), model turns across all
+  # its agents, and tokens in and out (0 = off). Running out stops it with
+  # what exists.
   timeout: 3600
-  maxTurns: 250
+  maxTurns: 300
+  maxTokens: 0
   # Workflows running at once in one server.
   maxPerGuild: 1
 

@@ -287,6 +287,19 @@ async def test_no_source_message_posts_with_a_mention(plain_voice):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("source", [None, "message"])
+async def test_a_name_in_a_question_pings_nobody_but_the_person_asked(plain_voice, source):
+    ctx, _sent = _ctx() if source else _ctx(original_message=None)
+    task = asyncio.create_task(_ask(ctx))
+    await _until(lambda: brain_inbox.waiting(QUESTION_ID))
+    mentions = ctx["channel"].send.await_args.kwargs["allowed_mentions"]
+    assert [user.id for user in mentions.users] == [5]
+    assert mentions.roles is False and mentions.everyone is False
+    brain_inbox.deliver(QUESTION_ID, 5, "bar")
+    await task
+
+
+@pytest.mark.asyncio
 async def test_no_answer_in_time_says_to_assume_and_closes_the_question(plain_voice, monkeypatch):
     monkeypatch.setenv("BRAIN_ASK_TIMEOUT", "1")
     monkeypatch.setattr(brain, "MIN_ASK_SECONDS", 0.01)
