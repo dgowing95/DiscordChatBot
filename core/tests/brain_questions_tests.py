@@ -134,6 +134,8 @@ def _interaction(user_id=5, content="Bar or line?"):
     interaction.response.edit_message = AsyncMock()
     interaction.response.send_message = AsyncMock()
     interaction.response.send_modal = AsyncMock()
+    interaction.response.is_done = MagicMock(return_value=False)
+    interaction.original_response = AsyncMock()
     return interaction
 
 
@@ -154,7 +156,7 @@ async def test_a_choice_button_answers_and_closes_the_question():
     await view.buttons[1].callback(interaction)
     assert future.result() == "Line"
     finished = interaction.response.edit_message.await_args.kwargs["view"]
-    assert finished.buttons == [] and finished.note == "✅ Line"
+    assert finished.buttons == [] and finished.outcome == "✅ **Line**"
     assert view.closed
 
 
@@ -166,7 +168,7 @@ async def test_you_decide_hands_the_brain_its_marker():
     interaction = _interaction()
     await view.buttons[-1].callback(interaction)
     assert future.result() == brain_question.YOU_DECIDE_ANSWER
-    assert interaction.response.edit_message.await_args.kwargs["view"].note == "✅ You decide"
+    assert interaction.response.edit_message.await_args.kwargs["view"].outcome == "✅ **You decide**"
 
 
 @pytest.mark.asyncio
@@ -250,8 +252,8 @@ async def test_the_question_is_a_reply_with_buttons_and_the_answer_is_returned(p
     task = asyncio.create_task(_ask(ctx, options=["Bar", "Line"]))
     await _until(lambda: brain_inbox.waiting(QUESTION_ID))
     reply = ctx["channel"].send.await_args
-    assert reply.kwargs["view"].text == (
-        "-# Needs more information\n### Bar or line chart?") and not reply.args
+    assert reply.kwargs["view"].text == "### Bar or line chart?" and not reply.args
+    assert reply.kwargs["view"].label == "❓ Needs more information · for <@5>"
     # A reply to the request, posted even if the request was deleted.
     assert reply.kwargs["reference"] == "ref"
     ctx["original_message"].to_reference.assert_called_once_with(fail_if_not_exists=False)
@@ -263,7 +265,7 @@ async def test_the_question_is_a_reply_with_buttons_and_the_answer_is_returned(p
     assert _count("answered") == before + 1
     # Answered without a button (a Reply): the buttons come off here.
     finished = sent.edit.await_args.kwargs["view"]
-    assert finished.buttons == [] and finished.note == "✅ line please"
+    assert finished.buttons == [] and finished.outcome == "✅ **line please**"
 
 
 @pytest.mark.asyncio
@@ -281,7 +283,7 @@ async def test_no_source_message_posts_with_a_mention(plain_voice):
     task = asyncio.create_task(_ask(ctx))
     await _until(lambda: brain_inbox.waiting(QUESTION_ID))
     view = ctx["channel"].send.await_args.kwargs["view"]
-    assert view.text.endswith("### Bar or line chart?") and view.note == "<@5>"
+    assert view.text == "### Bar or line chart?" and "<@5>" in view.label
     brain_inbox.deliver(QUESTION_ID, 5, "bar")
     assert await task == "They answered: bar"
 
@@ -309,7 +311,7 @@ async def test_no_answer_in_time_says_to_assume_and_closes_the_question(plain_vo
     assert result.startswith("No answer within 1 seconds")
     assert not brain_inbox.waiting(QUESTION_ID)
     assert _count("timeout") == before + 1
-    assert sent.edit.await_args.kwargs["view"].note == brain_question.TIMED_OUT
+    assert sent.edit.await_args.kwargs["view"].outcome == brain_question.TIMED_OUT
 
 
 @pytest.mark.asyncio
@@ -465,6 +467,7 @@ def _message(author_id=5, content="line please", reply_to=QUESTION_ID, forward=F
     message.author = MagicMock(id=author_id)
     message.guild = MagicMock(id=1)
     message.channel = MagicMock(id=77)
+    message.channel.send = AsyncMock()
     message.mentions = []
     import discord
     kind = discord.MessageReferenceType.forward if forward else discord.MessageReferenceType.default
@@ -529,7 +532,7 @@ async def test_a_forward_of_the_question_is_not_the_answer(kwargs):
     message = _message(content="", **kwargs)
     handle = await _on_message(message)
     assert not future.done()
-    message.reply.assert_not_awaited()
+    message.channel.send.assert_not_awaited()
     handle.assert_awaited_once()
 
 
@@ -539,7 +542,11 @@ async def test_an_attachment_only_reply_gets_a_note_and_the_question_stays_open(
     message = _message(content="")
     await _on_message(message)
     assert not future.done()
-    message.reply.assert_awaited_once()
+    # A card replying to their message, without pinging them.
+    message.channel.send.assert_awaited_once()
+    sent = message.channel.send.await_args.kwargs
+    assert sent["reference"] is message and sent["mention_author"] is False
+    assert "answer as text" in sent["view"].blocks[-1].content
     message.add_reaction.assert_not_awaited()
 
 
@@ -588,13 +595,13 @@ async def test_a_failed_button_edit_still_gets_the_question_closed(plain_voice):
         await view.buttons[-1].callback(interaction)
     await task
     sent.edit.assert_awaited_once()
-    assert sent.edit.await_args.kwargs["view"].note == "✅ You decide"
+    assert sent.edit.await_args.kwargs["view"].outcome == "✅ **You decide**"
 
 
 def test_the_closing_line_survives_a_long_question():
     view = brain_question.QuestionView(5, [], 60, text="x" * brain_question.MAX_QUESTION_CHARS)
     finished = view.finished("⌛ No answer in time")
-    assert finished.note == "⌛ No answer in time" and finished.text == view.text
+    assert finished.outcome == "⌛ No answer in time" and finished.text == view.text
 
 
 @pytest.mark.asyncio

@@ -109,10 +109,19 @@ def _message(content="hi", guild_id=42, channel_id=77, user_id=777,
     typing_cm.__aenter__ = AsyncMock(return_value=None)
     typing_cm.__aexit__ = AsyncMock(return_value=False)
     channel.typing = MagicMock(return_value=typing_cm)
+    channel.send = AsyncMock()
     msg.channel = channel
     msg.mentions = [] if mentions is None else mentions
     msg.reply = AsyncMock()
     return msg
+
+
+def _replied(msg) -> str:
+    """The text of the card the bot sent back as a reply to `msg`."""
+    from card_checks import view_text
+    kwargs = msg.channel.send.await_args.kwargs
+    assert kwargs["reference"] is msg
+    return view_text(kwargs["view"])
 
 
 def _counter(metric, **labels):
@@ -162,8 +171,9 @@ async def test_on_message_drops_mention_with_busy_reply_when_full():
     assert _counter(metrics.messages_received_total,
                     guild_id="42") == received_before
     # a mention is not silently ignored: short busy reply
-    msg.reply.assert_awaited_once()
-    assert "working through my queue" in msg.reply.await_args.args[0]
+    msg.channel.send.assert_awaited_once()
+    assert "working through my queue" in _replied(msg)
+    assert msg.channel.send.await_args.kwargs["mention_author"] is True
 
 
 @pytest.mark.asyncio
@@ -299,7 +309,7 @@ async def test_an_attachment_only_message_is_not_acknowledged_as_read(claimed_th
         await main_mod.on_message(msg)
 
     msg.add_reaction.assert_awaited_once_with("🚫")
-    assert "can't open attachments" in msg.reply.await_args.args[0]
+    assert "can't open attachments" in _replied(msg)
     assert claimed_thread.events == []
 
 
@@ -323,7 +333,7 @@ async def test_an_empty_message_is_explained_too(claimed_thread):
         await main_mod.on_message(msg)
 
     msg.add_reaction.assert_awaited_once_with("🚫")
-    assert "only read text" in msg.reply.await_args.args[0]
+    assert "only read text" in _replied(msg)
 
 
 # ------------------------- enqueue timestamps (queue-wait metrics) -------------------------

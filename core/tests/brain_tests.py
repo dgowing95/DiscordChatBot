@@ -203,8 +203,10 @@ async def test_an_attached_file_is_posted_in_the_channel_and_named_as_posted():
         session.files = _AnyPath(b"png!")
         report = await brain.run_brain(ctx, "chart it")
     assert report.files_posted == ["chart.png"]
-    sent = [c for c in ctx["channel"].send.await_args_list if "file" in c.kwargs]
-    assert len(sent) == 1 and sent[0].kwargs["file"].filename == "chart.png"
+    sent = [c for c in ctx["channel"].send.await_args_list if c.kwargs.get("files")]
+    assert len(sent) == 1 and [f.filename for f in sent[0].kwargs["files"]] == ["chart.png"]
+    # the picture is shown inside its card
+    assert "attachment://chart.png" in str(sent[0].kwargs["view"].to_components())
     text = brain_result.tool_result_for_persona(report)
     assert "Already posted in the channel: chart.png" in text
 
@@ -379,7 +381,8 @@ async def test_a_lost_workspace_is_said_once_to_the_user_and_to_the_persona():
     with _brain(model, restore_failed=True):
         report = await brain.run_brain(ctx, "x")
     assert "could not be restored" in report.note
-    assert any("couldn't be restored" in str(c.args) for c in ctx["channel"].send.await_args_list)
+    from card_checks import sent_text
+    assert "couldn't be restored" in sent_text(ctx["channel"].send)
 
 
 @pytest.mark.asyncio
@@ -650,10 +653,10 @@ async def test_an_unmapped_error_stops_the_run_but_still_delivers_its_files():
     assert report.status == brain_result.PARTIAL
     assert report.files_posted == ["a.txt"]
     assert "error" in report.note
-    embeds = [c.kwargs["embeds"][0] for c in ctx["channel"].send.await_args_list if c.kwargs.get("embeds")]
+    from card_checks import label_of
     edits = ctx["channel"].send.return_value.edit.await_args_list
-    last = edits[-1].kwargs["embeds"][0] if edits else embeds[-1]
-    assert last.title == "🧠 Stopped"
+    status = [e.kwargs["view"] for e in edits if label_of(e.kwargs["view"]).startswith("🧠")]
+    assert label_of(status[-1]) == "🧠 Stopped"
 
 
 @pytest.mark.asyncio

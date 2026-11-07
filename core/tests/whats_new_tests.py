@@ -19,7 +19,8 @@ import pytest
 
 from classes import message_queue as mq
 from classes import whats_new
-from classes.common import embed_from_data
+from classes import card_kit as K
+from card_checks import label_of, view_text
 from classes.message_handler import MessageHandler
 
 
@@ -98,12 +99,13 @@ def test_app_version_and_enabled(monkeypatch):
         assert not whats_new.whats_new_enabled()
 
 
-def test_embed_data_round_trips_to_discord_embed():
-    data = whats_new.notes_embed_data("v2.53", [("A", "b")])
-    embed = embed_from_data(data)
-    assert embed.title == "✨ What's new in v2.53"
-    assert [(f.name, f.value) for f in embed.fields] == [("A", "b")]
-    assert embed.footer.text == whats_new.ANNOUNCEMENT_FOOTER
+def test_the_notes_card_has_a_heading_per_feature_and_is_kept_out_of_prompts():
+    spec = whats_new.notes_card("v2.53", [("A", "It does a.\nHow to use: ask."), ("B", "b")])
+    assert spec.label == "✨ What's new · v2.53" and spec.kind == K.ANNOUNCE
+    assert spec.footer == whats_new.ANNOUNCEMENT_FOOTER
+    texts = [b.content for b in spec.body if isinstance(b, K.Text)]
+    assert texts == ["### A\nIt does a.\n-# **How to use:** ask.", "### B\nb"]
+    assert isinstance(spec.body[1], K.Gap)
 
 
 # ---------------------------------------------------------------------------
@@ -170,8 +172,8 @@ def test_announces_once_per_guild_per_version(announce):
     assert first.channel.send.await_count == 1
     assert second.channel.send.await_count == 0
     assert other_guild.channel.send.await_count == 1
-    embed = first.channel.send.await_args.kwargs["embed"]
-    assert embed.title == "✨ What's new in v2.53"
+    view = first.channel.send.await_args.kwargs["view"]
+    assert label_of(view) == "✨ What's new" and "v2.53" in view_text(view) and view.kind == K.ANNOUNCE
     assert redis.data[whats_new.seen_key(42)] == "v2.53"
 
 
@@ -287,7 +289,9 @@ def _bot_message(embeds, author_id=1):
 
 def test_announcement_embed_left_out_of_prompt():
     handler = _history_handler()
-    announcement = embed_from_data(whats_new.notes_embed_data("v2.53", [("A", "b")]))
+    # an announcement from before the cards: an embed marked by its footer
+    announcement = discord.Embed(title="✨ What's new in v2.53").set_footer(
+        text=whats_new.ANNOUNCEMENT_FOOTER)
     tool = discord.Embed(title="Tool Usage", description="searching")
     entries = handler._format_group(_bot_message([announcement, tool]), [])
     assert len(entries) == 1
@@ -296,6 +300,6 @@ def test_announcement_embed_left_out_of_prompt():
 
 def test_same_footer_from_someone_else_is_kept():
     handler = _history_handler()
-    embed = embed_from_data(whats_new.notes_embed_data("v2.53", [("A", "b")]))
+    embed = discord.Embed(title="✨ What's new in v2.53").set_footer(text=whats_new.ANNOUNCEMENT_FOOTER)
     entries = handler._format_group(_bot_message([embed], author_id=99), [])
     assert len(entries) == 1

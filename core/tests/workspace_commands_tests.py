@@ -7,7 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from classes import workspace_commands as wc
+from classes import card, card_kit as K, workspace_commands as wc
+from card_checks import interaction, replied, replied_text, view_text
 
 
 class FakeConfig:
@@ -71,31 +72,37 @@ async def test_a_config_failure_is_off():
         assert await wc.progress_enabled(1) is False
 
 
-# ---------------------- status text ----------------------
+# ---------------------- status card ----------------------
+
+def _text(spec) -> str:
+    return "\n".join(b.content for c in K.split(spec) for b in c if isinstance(b, K.Text))
+
 
 def test_status_of_a_stopped_workspace_that_was_never_saved():
-    text = wc.status_text({"warm": False, "last_snapshot_at": None})
-    assert "Stopped" in text and "Not saved yet" in text
+    spec = wc.status_card({"warm": False, "last_snapshot_at": None})
+    assert spec.title == "⚪ Stopped" and "**Last saved** not yet" in _text(spec)
 
 
 def test_status_of_a_workspace_waiting_after_a_restart():
-    text = wc.status_text({"warm": False, "waiting": True, "last_snapshot_at": 1})
-    assert "Waiting" in text and "Stopped" not in text
+    spec = wc.status_card({"warm": False, "waiting": True, "last_snapshot_at": 1})
+    assert spec.title == "🟡 Waiting" and "Stopped" not in _text(spec)
 
 
 def test_status_of_a_running_busy_workspace():
-    text = wc.status_text({"warm": True, "started_at": 1000, "busy": 2, "jobs": 4,
+    spec = wc.status_card({"warm": True, "started_at": 1000, "busy": 2, "jobs": 4,
                            "last_snapshot_at": 1500, "snapshot_bytes": 3 * 1024 * 1024},
                           now=1000 + 600)
-    assert "Running** for 10 min" in text and "2 task(s)" in text
-    assert "Task folders: 4" in text
+    text = _text(spec)
+    assert spec.title == "🟢 Running"
+    assert "**Up for** 10 min · **in use by** 2 tasks" in text
+    assert "**Task folders** 4" in text
     assert "<t:1500:R>" in text and "3.0 MB" in text
 
 
 def test_status_warns_when_the_workspace_is_too_big_to_save():
-    text = wc.status_text({"warm": False, "last_snapshot_at": 1, "snapshot_bytes": 10,
+    spec = wc.status_card({"warm": False, "last_snapshot_at": 1, "snapshot_bytes": 10,
                            "snapshot_too_large": True})
-    assert "too big to save" in text and "/workspace reset" in text
+    assert "too big to save" in _text(spec)
 
 
 # ---------------------- the commands ----------------------
@@ -117,14 +124,12 @@ def _commands():
 
 
 def _interaction(manage=True):
-    ctx = MagicMock()
-    ctx.guild_id = 7
-    ctx.user.id = 99
-    ctx.permissions = SimpleNamespace(manage_guild=manage)
-    ctx.response.send_message = AsyncMock()
-    ctx.response.defer = AsyncMock()
-    ctx.followup.send = AsyncMock()
-    return ctx
+    return interaction(guild_id=7, user=SimpleNamespace(id=99),
+                       permissions=SimpleNamespace(manage_guild=manage))
+
+
+def _button(view, label):
+    return next(b for b in view.buttons if b.label.startswith(label))
 
 
 def test_the_group_has_status_reset_and_progress():
@@ -136,21 +141,47 @@ def test_the_group_has_status_reset_and_progress():
 async def test_status_and_reset_need_manage_server(name):
     ctx = _interaction(manage=False)
     await _commands()[name].callback(ctx)
-    text = ctx.response.send_message.await_args.args[0]
-    assert "Manage Server" in text
+    assert "Manage Server" in replied_text(ctx)
     assert ctx.response.send_message.await_args.kwargs["ephemeral"] is True
 
 
 @pytest.mark.asyncio
-async def test_status_replies_ephemerally_with_the_workspaces_state():
+async def test_status_replies_privately_with_the_state_and_its_buttons():
     ctx = _interaction()
     fake = MagicMock()
     fake.status = AsyncMock(return_value={"warm": False, "last_snapshot_at": None})
-    with patch("classes.workspace_manager.workspaces", return_value=fake):
+    ctx.response.is_done = MagicMock(return_value=True)  # it deferred first
+    config, p = _config()
+    with p, patch("classes.workspace_manager.workspaces", return_value=fake):
         await _commands()["status"].callback(ctx)
     fake.status.assert_awaited_once_with(7)
-    assert "Stopped" in ctx.followup.send.await_args.args[0]
+    view = ctx.followup.send.await_args.kwargs["view"]
+    assert "Stopped" in view_text(view)
     assert ctx.followup.send.await_args.kwargs["ephemeral"] is True
+    assert [b.label for b in view.buttons] == ["Live progress: off", "Reset…"]
+
+
+@pytest.mark.asyncio
+async def test_the_panels_buttons_toggle_progress_and_ask_before_a_reset():
+    fake = MagicMock()
+    fake.status = AsyncMock(return_value={"warm": False, "last_snapshot_at": None})
+    config, p = _config()
+    with p, patch.object(wc, "configManager", return_value=config), \
+            patch("classes.workspace_manager.workspaces", return_value=fake):
+        panel = card.views(await wc._status_panel(7, 99))[0]
+        press = _interaction()
+        await _button(panel, "Live progress").callback(press)
+        assert config.data["workspace_progress"] == "True"
+        updated = press.response.edit_message.await_args.kwargs["view"]
+        assert _button(updated, "Live progress").label == "Live progress: on"
+        reset = _interaction(manage=False)
+        await _button(panel, "Reset").callback(reset)
+        reset.response.edit_message.assert_not_awaited()  # checked again on the press
+        allowed = _interaction()
+        await _button(panel, "Reset").callback(allowed)
+    confirm = allowed.response.edit_message.await_args.kwargs["view"]
+    assert "every file" in view_text(confirm)
+    fake.reset.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -161,26 +192,27 @@ async def test_reset_asks_for_confirmation_first():
     with patch("classes.workspace_manager.workspaces", return_value=fake):
         await _commands()["reset"].callback(ctx)
     fake.reset.assert_not_awaited()
-    kwargs = ctx.response.send_message.await_args.kwargs
-    assert kwargs["ephemeral"] is True and isinstance(kwargs["view"], wc._ResetConfirm)
+    assert ctx.response.send_message.await_args.kwargs["ephemeral"] is True
+    view = replied(ctx)
+    assert [b.label for b in view.buttons] == ["Reset", "Cancel"]
 
 
 @pytest.mark.asyncio
 async def test_the_confirm_button_resets_and_only_for_the_person_who_asked():
-    view = wc._ResetConfirm(user_id=99)
+    view = card.views(wc._confirm_card(user_id=99))[0]
     fake = MagicMock()
     fake.reset = AsyncMock(return_value="now")
     stranger = _interaction()
-    stranger.user.id = 5
+    stranger.user = SimpleNamespace(id=5)
+    unmanaged = _interaction(manage=False)
     with patch("classes.workspace_manager.workspaces", return_value=fake):
-        await view.confirm.callback(stranger)
+        await _button(view, "Reset").callback(stranger)
+        await _button(view, "Reset").callback(unmanaged)
         fake.reset.assert_not_awaited()
         ctx = _interaction()
-        ctx.response.edit_message = AsyncMock()
-        ctx.edit_original_response = AsyncMock()
-        await view.confirm.callback(ctx)
+        await _button(view, "Reset").callback(ctx)
     fake.reset.assert_awaited_once_with(7)
-    assert "was reset" in ctx.edit_original_response.await_args.kwargs["content"]
+    assert "Workspace reset" in view_text(ctx.edit_original_response.await_args.kwargs["view"])
 
 
 @pytest.mark.asyncio
@@ -191,3 +223,4 @@ async def test_progress_stores_the_setting():
         await _commands()["progress"].callback(ctx, True)
     assert config.data["workspace_progress"] == "True"
     assert ctx.response.send_message.await_args.kwargs["ephemeral"] is True
+    assert "Live progress on" in replied_text(ctx)

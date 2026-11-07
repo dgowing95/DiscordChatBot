@@ -94,9 +94,8 @@ import discord
 from classes import brain_result, llm_lanes, workspace_lifecycle
 from classes import workflow_policy as wp
 from classes.brain_result import BrainReport
-from classes.card import Card
+from classes import card as cards, card_kit as K
 from classes.common import QuietChannel
-from classes.tool_embeds import COLOR_DONE
 
 logger = logging.getLogger(__name__)
 
@@ -123,13 +122,14 @@ STEER_WAIT_SECONDS = 30  # the review waits this long at most for a message's ro
 STOPPED_NOTE = "⚠️ Stopped."
 # For a thread message that came after the last review, while the final
 # report was written: 📨 said it would be seen, and nothing will see it now.
-LATE_REPLY = ("⏳ That came as this workflow was finishing, so it hasn't been applied. "
+LATE_LABEL = "⏳ Too late for this job"
+LATE_REPLY = ("That came as this workflow was finishing, so it hasn't been applied. "
               "@mention me in this thread to carry on with it.")
 # A helper's pictures, in its folder beside out/ (keep_image).
 IMAGES_DIR = "images"
 
-INTERRUPTED_NOTE = ("⚠️ Stopped by a restart. Ask again to start over; files so far are in "
-                    "this thread.")
+INTERRUPTED_LABEL = "⚠️ Stopped by a restart"
+INTERRUPTED_NOTE = "Ask again to start over; files so far are in this thread."
 
 # The manager's instructions: every run of it (plan, review, finish). ONE
 # home (AGENTS.md "Prompt surface"); sized and pinned (workflows_tests.py).
@@ -141,9 +141,10 @@ which of these you are doing now.
   A helper works alone with no memory of the chat, so each brief says what
   to find or make and what to hand on. E.g. `submit_plan(goal="Compare the
   3 cheapest 3D printers", deliverables=["comparison.md"], steps=[{"id":
-  "s1", "role": "researcher", "brief": "Find the price and specs of ...",
-  "depends_on": []}, {"id": "s2", "role": "implementer", "brief": "Write
-  comparison.md from s1's facts ...", "depends_on": ["s1"]}])`.
+  "s1", "title": "Find prices", "role": "researcher", "brief": "Find the
+  price and specs of ...", "depends_on": []}, {"id": "s2", "title": "Write it
+  up", "role": "implementer", "brief": "Write comparison.md from s1's facts
+  ...", "depends_on": ["s1"]}])`.
 - A researcher reads the web and this server's messages and reports facts
   with sources. Researchers run side by side: give each its own part, and
   leave depends_on empty when it needs nothing first. An implementer writes
@@ -261,9 +262,10 @@ class Workflow:
     tokens: int = 0           # in and out, every agent together
     tool_calls: int = 0
     wave: int = 0             # which wave of steps is running
-    plan_message: object = None
-    plan_card: object = None  # the card plan_message shows now
-    plan_lead: str = ""       # the line above the plan
+    plan_message: object = None  # the plan card's first message
+    plan_card: object = None     # the CardSpec it shows now
+    plan_live: object = None     # its card.LiveCard (a long plan is several messages)
+    plan_lead: str = ""          # the line above the plan
     sharing: int = 1          # runs yet to start, sharing what turns are left
     promised: int = 0         # turns given to the runs going now
     step_states: dict = field(default_factory=dict)
@@ -474,8 +476,8 @@ async def _open_thread(ctx: dict, request: str, message):
         channel = ctx.get("channel")
         if channel is None:
             return None
-        message = await channel.send(f"🧵 Workflow: {request[:1800]}",
-                                     allowed_mentions=discord.AllowedMentions.none())
+        sent = await cards.send_card(channel, starter_card(request))
+        message = sent[0]
     thread, _created = await ensure_work_thread(message, request)
     if not isinstance(thread, discord.Thread) or thread_inbox.is_run_active(thread.id):
         return None
@@ -564,8 +566,8 @@ async def _tell_late(wf: Workflow, event) -> None:
     try:
         reference = (None if event.message_id is None else discord.MessageReference(
             message_id=event.message_id, channel_id=wf.thread.id, fail_if_not_exists=False))
-        await asyncio.wait_for(wf.thread.send(
-            LATE_REPLY, reference=reference, allowed_mentions=discord.AllowedMentions.none()), 10)
+        await asyncio.wait_for(cards.send_card(wf.thread, K.heads_up(LATE_LABEL, LATE_REPLY),
+                                               reference=reference), 10)
     except Exception as e:
         logger.warning(f"Workflow {wf.id}: could not say a late message was not applied: {e}")
 
@@ -590,8 +592,8 @@ async def _end(wf: Workflow, store, end_state: str, report: BrainReport) -> None
         await store.release(wf.guild_id, wf.id)
     except Exception as e:
         logger.warning(f"Workflow {wf.id}: could not free its slot: {e}")
-    await _update_plan_message(wf, final=True, content=_ENDED.get(end_state))
-    await _post(wf.thread, embed=_closing_embed(end_state, report))
+    await _update_plan_message(wf, final=True, content=_ENDED.get(end_state), end_state=end_state)
+    await _post_card(wf.thread, closing_card(end_state, report, wf.plan))
     report.files_posted = await post_workflow_copy(wf)
     metrics.observe_workflow(wf.record["trigger"], end_state, time.monotonic() - wf.started,
                              len(wf.results), wf.turns, wf.tokens)
@@ -1106,7 +1108,7 @@ async def _approve(wf: Workflow) -> bool:
         return False
     if wf.record["automatic"]:
         wf.plan_lead = "Started automatically."
-        await _post_plan(wf, workflow_views.running_buttons(wf.id))
+        await _post_plan(wf, "running")
         metrics.inc_workflow_plan_approval("auto")
         await _set_state(wf, "approve")
         return True
@@ -1118,11 +1120,12 @@ async def _approve(wf: Workflow) -> bool:
     while True:
         if until is None:
             wf.plan_lead = f"<@{wf.requester_id}> {line}"
-            await _post_plan(wf, workflow_views.approval_buttons(wf.id),
-                             note=f"Approve, Edit or Cancel. With no answer in {_minutes(seconds)} "
-                                  "it starts anyway.")
+            await _post_plan(wf, "approval",
+                             note=f"Starts by itself <t:{int(time.time() + seconds)}:R> if "
+                                  "there's no answer")
             if wf.plan_message is None:
                 # No buttons to press: say so rather than wait in silence.
+                # Plain text: the card itself is what could not be posted.
                 metrics.inc_workflow_plan_approval("timeout")
                 await _post(wf.thread, content="I couldn't post the plan with its buttons, so "
                                                "I've started. Say stop here to cancel.\n"
@@ -1157,8 +1160,9 @@ async def _approve(wf: Workflow) -> bool:
             metrics.inc_workflow_plan_approval("timeout")
             await _set_state(wf, "approve")
             await _update_plan_message(wf, content="⌛ Started without an answer.")
-            await _post(wf.thread, content=f"No answer in {_minutes(seconds)}, so I've started. "
-                                           "Cancel is on the plan above.")
+            await _post_card(wf.thread, K.heads_up(
+                "⌛ Started without an answer",
+                f"No answer in {_minutes(seconds)}, so I've started. Cancel is on the plan above."))
             return True
         if action == "cancel":
             metrics.inc_workflow_plan_approval("cancelled")
@@ -1168,12 +1172,14 @@ async def _approve(wf: Workflow) -> bool:
         # the plan's wait running: writing again must not extend it.
         if max(wf.revisions, wf.failed_revisions) >= wp.plan_revisions():
             wf.ledger.record_decision([event.seq], "declined", "No more changes.")
-            await _post(wf.thread, content="That's as many changes as I can make to the plan. "
-                                           "Press Approve or Cancel.")
+            await _post_card(wf.thread, K.heads_up(
+                "📝 No more changes", "That's as many changes as I can make to the plan. "
+                                     "Press Approve or Cancel."))
             continue
         if not await _allowed(wf, event.text):
             wf.ledger.record_decision([event.seq], "declined", "Blocked by the content guard.")
-            await _post(wf.thread, content="I can't make that change to the plan.")
+            await _post_card(wf.thread, K.error("I can't make that change to the plan.",
+                                                "🚫 Not changed"))
             continue
         until = None
         wf.revisions += 1
@@ -1182,8 +1188,8 @@ async def _approve(wf: Workflow) -> bool:
         # The old card is closed for good: the plan, changed or not, is posted
         # again. A cancel before that must not put a plan the requester never
         # saw on the old card (_end updates wf.plan_message).
-        wf.plan_message = wf.plan_card = None
-        await _post(wf.thread, content="📝 Changing the plan…")
+        wf.plan_message = wf.plan_card = wf.plan_live = None
+        await _post_card(wf.thread, K.info("📝 Changing the plan…"))
         before = wf.plan
         wf.plan = await workflow_planning.write_plan(wf, change=event.text)
         changed = wf.plan is not before  # a failed revision keeps the plan there was
@@ -1195,7 +1201,8 @@ async def _approve(wf: Workflow) -> bool:
         if not changed:
             wf.revisions -= 1  # nothing was changed, so it costs no revision
             wf.failed_revisions += 1
-            await _post(wf.thread, content="I couldn't make that change, so the plan is as it was.")
+            await _post_card(wf.thread, K.heads_up(
+                "📝 Plan unchanged", "I couldn't make that change, so the plan is as it was."))
         await _set_state(wf, "planned")
 
 
@@ -1204,53 +1211,77 @@ def _minutes(seconds: float) -> str:
     return "1 minute" if minutes == 1 else f"{minutes} minutes"
 
 
-def _plan_view(wf: Workflow, buttons=(), note: str = "", **options) -> Card:
-    """The plan as a card (classes/card.py): the line above it, then the plan
-    with each step's state."""
-    data = wp.render_plan(wf.plan, wf.step_states)
-    steps = "\n\n".join(f"**{name}**\n{value or '-'}" for name, value in data["fields"])
-    text = f"{wf.plan_lead}\n### {data['title']}\n{data['description']}\n\n{steps}"
-    return Card(text.strip(), note=note, rows=[buttons], **options)
+def _plan_buttons(wf: Workflow, buttons: str | None) -> list:
+    from classes import workflow_views
+    if buttons == "approval":
+        return workflow_views.approval_buttons(wf.id)
+    if buttons == "running":
+        return workflow_views.running_buttons(wf.id)
+    return []
 
 
-async def _post_plan(wf: Workflow, buttons, note: str = "") -> None:
-    wf.plan_card = _plan_view(wf, buttons, note)
+def _plan_spec(wf: Workflow, buttons: str | None = None, note: str = "", *,
+               label: str | None = None, colour: int | None = None) -> K.CardSpec:
+    """The plan as a card (classes/card_kit.py): the line above it, the goal,
+    then each step with its state, in full; its buttons (fresh each time)
+    under them. A long plan goes over several messages."""
+    if label is None:
+        done, total = wp.steps_done(wf.step_states), len(wf.plan.steps)
+        label = (PLAN_TO_APPROVE if buttons == "approval"
+                 else f"🧵 Big job · {done} of {total} step{'s' if total != 1 else ''} done")
+    body = ([K.Text(wf.plan_lead)] if wf.plan_lead else []) + wp.plan_blocks(wf.plan, wf.step_states)
+    rows = _plan_buttons(wf, buttons)
+    if rows:
+        body += [K.Divider(), K.Buttons(tuple(rows))]
+    return K.CardSpec(label=label, title=wf.plan.title or PLAN_TITLE, heading=2, body=body,
+                      footer=note, kind=K.CARD,
+                      colour=colour if colour is not None else K.ASK if buttons == "approval" else K.WORKING)
+
+
+async def _post_plan(wf: Workflow, buttons: str | None, note: str = "") -> None:
+    wf.plan_card = _plan_spec(wf, buttons, note)
     # The card holds what the model wrote, and a mention in a card notifies.
-    wf.plan_message = await _post(
-        wf.thread, view=wf.plan_card,
-        allowed_mentions=discord.AllowedMentions(users=[discord.Object(wf.requester_id)],
-                                                 roles=False, everyone=False))
+    wf.plan_live = cards.LiveCard(wf.thread, mentions=discord.AllowedMentions(
+        users=[discord.Object(wf.requester_id)], roles=False, everyone=False))
+    await wf.plan_live.show(wf.plan_card)
+    wf.plan_message = wf.plan_live.message
 
 
+PLAN_TITLE = "The plan"
+PLAN_TO_APPROVE = "🧵 Big job · plan to approve"
 PLAN_CLOSED = "This plan is closed."
 
 
 async def _remove_buttons(wf: Workflow) -> None:
     """The plan as it was posted, with no buttons: wf.plan may be a newer one
     by now, which gets a message of its own."""
-    if wf.plan_message is None or wf.plan_card is None:
+    if wf.plan_live is None or wf.plan_card is None or wf.plan_message is None:
         return
-    try:
-        wf.plan_card = wf.plan_card.finished(PLAN_CLOSED)
-        await wf.plan_message.edit(view=wf.plan_card)
-    except Exception as e:
-        logger.info(f"Workflow {wf.id}: could not take the buttons off: {e}")
+    wf.plan_card = K.finished(wf.plan_card, PLAN_CLOSED)
+    if not await wf.plan_live.show(wf.plan_card):
+        logger.info(f"Workflow {wf.id}: could not take the buttons off")
 
 
-async def _update_plan_message(wf: Workflow, final: bool = False, content: str | None = None) -> None:
+_END_LABELS = {wp.DONE: "🧵 Big job · finished", wp.PARTIAL: "🧵 Big job · partly done",
+               wp.FAILED: "🧵 Big job · failed", wp.CANCELLED: "🧵 Big job · cancelled"}
+_END_COLOURS = {wp.DONE: K.OK, wp.PARTIAL: K.WARN, wp.FAILED: K.FAIL, wp.CANCELLED: K.CLOSED}
+
+
+async def _update_plan_message(wf: Workflow, final: bool = False, content: str | None = None,
+                               end_state: str | None = None) -> None:
     """The plan card with each step's state; Cancel stays on it while the
     workflow runs. `content` replaces the question above it once answered."""
-    from classes import workflow_views
-    if wf.plan_message is None or wf.plan is None:
+    if wf.plan_live is None or wf.plan_message is None or wf.plan is None:
         return
     if content is not None:
         wf.plan_lead = content
-    try:
-        wf.plan_card = (_plan_view(wf, colour=COLOR_DONE) if final else
-                        _plan_view(wf, workflow_views.running_buttons(wf.id)))
-        await wf.plan_message.edit(view=wf.plan_card)
-    except Exception as e:
-        logger.info(f"Workflow {wf.id}: could not update the plan: {e}")
+    if final:
+        wf.plan_card = _plan_spec(wf, label=_END_LABELS.get(end_state, "🧵 Big job · over"),
+                                  colour=_END_COLOURS.get(end_state, K.CLOSED))
+    else:
+        wf.plan_card = _plan_spec(wf, "running")
+    if not await wf.plan_live.show(wf.plan_card, edit_last_only=False):
+        logger.info(f"Workflow {wf.id}: could not update the plan")
 
 
 async def _allowed(wf: Workflow, text: str) -> bool:
@@ -1276,6 +1307,17 @@ def _waiting_edit(wf: Workflow):
 async def _post(channel, **kwargs):
     try:
         return await channel.send(**kwargs)
+    except Exception as e:
+        logger.warning(f"Workflow: could not post in its thread: {e}")
+        return None
+
+
+async def _post_card(channel, spec: K.CardSpec, **kwargs):
+    """A card in the thread (or the request's channel). Fail-soft: the first
+    message, or None."""
+    try:
+        sent = await cards.send_card(channel, spec, **kwargs)
+        return sent[0] if sent else None
     except Exception as e:
         logger.warning(f"Workflow: could not post in its thread: {e}")
         return None
@@ -1344,11 +1386,13 @@ async def _run_step(wf: Workflow, step: wp.Step, retry: str | None = None) -> No
     await _update_plan_message(wf)
     quiet = step.role == wp.RESEARCHER
     if quiet:
-        progress = HelperProgress(wf.thread, f"🔬 {step.id}: {step.brief}",
+        progress = HelperProgress(wf.thread, wp.step_label(wf.plan, step),
+                                  title=wp.step_title(step), brief=step.brief,
                                   max_turns=wp.subagent_max_turns())
         await progress.start()
     else:
-        progress = BrainProgressHooks(wf.thread, f"{step.id}: {step.brief}",
+        progress = BrainProgressHooks(wf.thread, step.brief, label=wp.step_label(wf.plan, step),
+                                      title=wp.step_title(step),
                                       stream=await progress_enabled(wf.guild_id))
     try:
         await _step_work(wf, step, progress, quiet, retry)
@@ -1534,7 +1578,8 @@ async def ask_requester(wf: Workflow, question: str, options=None, label: str = 
     if answer == brain_question.YOU_DECIDE_ANSWER:
         return brain_question.YOU_DECIDE
     if answer and not await _allowed(wf, answer):
-        await _post(wf.thread, content="I can't use that answer, so I'll carry on without it.")
+        await _post_card(wf.thread, K.heads_up(
+            "🚫 Answer not used", "I can't use that answer, so I'll carry on without it."))
         return ""
     return answer or ""
 
@@ -1561,7 +1606,7 @@ async def _review(wf: Workflow, queue: list) -> list:
             ledger.record_decision([event.seq], "declined", "Blocked by the content guard.")
     if len(usable) < len(pending):
         # 📨 said it would be seen: say what became of it.
-        await _post(wf.thread, content="I can't act on that message.")
+        await _post_card(wf.thread, K.error("I can't act on that message.", "🚫 Not passed on"))
     pending = usable
     if not pending:
         return queue
@@ -1657,7 +1702,7 @@ def _revised_steps(wf: Workflow, items) -> tuple[wp.Plan | None, bool]:
             taken.add(item["id"])
     plan, problems = wp.validate_plan(
         {"goal": wf.plan.goal, "steps": steps, "deliverables": wf.plan.deliverables,
-         "notes": wf.plan.notes},
+         "notes": wf.plan.notes, "title": wf.plan.title},
         max_steps=max(1, wp.max_steps() - len(wf.results)), request=wf.record["request"])
     if plan is None:
         logger.info(f"Workflow {wf.id}: new steps not usable: {problems}")
@@ -1703,20 +1748,17 @@ def _report_from_steps(wf: Workflow, note: str) -> BrainReport:
 
 # --- the end ----------------------------------------------------------------------
 
-_END_TITLES = {
-    wp.DONE: ("🧵 Workflow done", 0x2ECC71),
-    wp.PARTIAL: ("🧵 Workflow partly done", 0xF1C40F),
-    wp.FAILED: ("🧵 Workflow failed", 0xE74C3C),
-    wp.CANCELLED: ("🧵 Workflow cancelled", 0x95A5A6),
-}
-
-
-def _closing_embed(end_state: str, report: BrainReport) -> discord.Embed:
-    title, color = _END_TITLES.get(end_state, _END_TITLES[wp.FAILED])
-    lines = [f"- {fact}" for fact in report.facts[:8]]
-    if report.note:
-        lines.append(f"-# {report.note}")
-    return discord.Embed(title=title, description="\n".join(lines)[:3500] or None, color=color)
+def closing_card(end_state: str, report: BrainReport, plan=None) -> K.CardSpec:
+    """The thread's last card: how the job ended and what it found, every
+    fact of the report."""
+    heads = {wp.DONE: "✅ Done", wp.PARTIAL: "🟡 Partly done", wp.FAILED: "❌ Failed",
+             wp.CANCELLED: "⏹️ Cancelled"}
+    head = heads.get(end_state, heads[wp.FAILED])
+    title = f"{head}: {plan.title}" if plan is not None and plan.title else head
+    body = [K.Text("\n".join(f"- {K.safe(fact)}" for fact in report.facts))] if report.facts else []
+    return K.CardSpec(label=_END_LABELS.get(end_state, _END_LABELS[wp.FAILED]), title=title,
+                      body=body, footer=report.note or "",
+                      colour=_END_COLOURS.get(end_state, K.FAIL))
 
 
 async def post_workflow_copy(wf: Workflow) -> list[str]:
@@ -1805,10 +1847,10 @@ def _keep(task) -> None:
 
 async def _plain_done(wf: Workflow) -> None:
     if wf.origin_channel is not None:
-        await _post(wf.origin_channel,
-                    content=f"<@{wf.requester_id}> The workflow has ended: {wf.thread_url}",
-                    allowed_mentions=discord.AllowedMentions(users=True, roles=False,
-                                                             everyone=False))
+        await _post_card(wf.origin_channel, K.info(
+            "🧵 Big job · over", f"<@{wf.requester_id}> The workflow has ended: {wf.thread_url}"),
+            mentions=discord.AllowedMentions(users=[discord.Object(wf.requester_id)],
+                                             roles=False, everyone=False))
 
 
 async def _skill_review(wf: Workflow, report: BrainReport) -> None:
@@ -1818,7 +1860,7 @@ async def _skill_review(wf: Workflow, report: BrainReport) -> None:
     call's, never for automatic work. Fail-soft."""
     from classes import skill_reflection
     from classes.skill_store import SkillStore
-    from classes.tool_embeds import trim
+    from classes.tool_cards import trim
     try:
         if (wf.skill_reviewed or wf.record["automatic"] or wf.plan is None
                 or wf.record.get("state") not in (wp.DONE, wp.PARTIAL)
@@ -1895,15 +1937,14 @@ async def on_button(interaction: discord.Interaction, workflow_id: str, action: 
     requester may press one; a stopped workflow's buttons say so."""
     wf = get(workflow_id)
     if wf is None or wf.state in wp.END_STATES:
-        await interaction.response.send_message("This workflow has stopped.", ephemeral=True)
+        await cards.reply(interaction, K.info("🧵 This workflow has stopped"))
         return
     if interaction.user.id != wf.requester_id:
-        await interaction.response.send_message(
-            f"Only <@{wf.requester_id}> can use these buttons.", ephemeral=True,
-            allowed_mentions=discord.AllowedMentions.none())
+        await cards.reply(interaction, K.error(f"Only <@{wf.requester_id}> can use these buttons.",
+                                               "🔒 Not your plan"))
         return
     if action == "cancel":
-        await interaction.response.send_message("Stopping the workflow…", ephemeral=True)
+        await cards.reply(interaction, K.info("⏹️ Stopping the workflow…"))
         request_cancel(wf, "the requester pressed Cancel")
         return
     pending = wf.approval is not None and not wf.approval.done()
@@ -1914,11 +1955,11 @@ async def on_button(interaction: discord.Interaction, workflow_id: str, action: 
             wf.approval.set_result(("approve", None))
         return
     if action == "edit" and pending and wf.state == wp.AWAITING_APPROVAL:
-        await interaction.response.send_message(
-            "Reply in this thread with what to change.", ephemeral=True)
+        await cards.reply(interaction, K.info("✏️ Edit the plan",
+                                              "Reply in this thread with what to change."))
         return
-    await interaction.response.send_message("That isn't waiting for an answer any more.",
-                                            ephemeral=True)
+    await cards.reply(interaction, K.info("🧵 Nothing to answer",
+                                          "That isn't waiting for an answer any more."))
 
 
 # --- restarts and shutdown ----------------------------------------------------------
@@ -1938,7 +1979,7 @@ async def interrupt_all(client) -> int:
         try:
             thread = client.get_channel(record["thread_id"]) or await client.fetch_channel(
                 record["thread_id"])
-            await thread.send(INTERRUPTED_NOTE)
+            await cards.send_card(thread, K.heads_up(INTERRUPTED_LABEL, INTERRUPTED_NOTE))
         except Exception as e:
             logger.info(f"Workflow {record.get('id')}: could not post the restart note: {e}")
     if records:
@@ -1954,3 +1995,9 @@ async def shutdown() -> None:
         task.cancel()
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def starter_card(request: str, note: str = "") -> K.CardSpec:
+    """The message a workflow's thread is opened from: the request, as asked."""
+    return K.CardSpec(label="🧵 Big job", body=[K.Text(K.quote(request))], footer=note,
+                      colour=K.ACTIVE)

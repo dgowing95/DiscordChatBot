@@ -1,6 +1,6 @@
 """/task: start a Tier 3 workflow directly (classes/workflows.py).
 
-It posts the request publicly ("🧵 Workflow: ..."), which is the message the
+It posts the request publicly as a card ("🧵 Big job"), the message the
 workflow's thread opens from, then starts the workflow. The brain can start
 one too (start_workflow); /task is the way to ask for one outright. When it
 cannot start (one already runs in the server, threads are not allowed
@@ -11,12 +11,14 @@ import logging
 import discord
 from discord import app_commands
 
+from classes import card, card_kit as K
+
 logger = logging.getLogger(__name__)
 
 MAX_REQUEST_CHARS = 1800
 PLAN_COMING = "A plan will appear in the thread for you to approve."
-VOICE_BUSY_REPLY = ("🎙️ I'm in a voice call right now, so I can't start a big job. "
-                    "Try again after /voice leave.")
+VOICE_BUSY_LABEL = "🎙️ In a voice call"
+VOICE_BUSY_REPLY = "I'm in a voice call right now, so I can't start a big job. Try again after /voice leave."
 
 
 def register_task_commands(tree, client) -> None:
@@ -29,11 +31,10 @@ def register_task_commands(tree, client) -> None:
         # so no new workflow either. One already running carries on in its
         # thread: its agents are on lanes below the call's.
         if voice_gate.active(ctx.guild_id):
-            await ctx.response.send_message(VOICE_BUSY_REPLY, ephemeral=True)
+            await card.reply(ctx, K.heads_up(VOICE_BUSY_LABEL, VOICE_BUSY_REPLY))
             return
-        await ctx.response.send_message(f"🧵 Workflow: {request}\n-# {PLAN_COMING}",
-                                        allowed_mentions=discord.AllowedMentions.none())
-        message = await ctx.original_response()
+        message = (await card.reply(ctx, workflows.starter_card(request, PLAN_COMING),
+                                    ephemeral=False))[0]
         run_ctx = {"guild_id": ctx.guild_id, "user_id": ctx.user.id,
                    "requester_name": getattr(ctx.user, "display_name", None) or ctx.user.name,
                    "channel": ctx.channel, "discord_client": client}
@@ -43,10 +44,9 @@ def register_task_commands(tree, client) -> None:
             try:
                 # The request is clipped, not the reason: it carries the link
                 # to the workflow already running.
-                await message.edit(
-                    content=(f"🧵 Workflow: {request[:1700]}\n-# ❌ Not started. "
-                             f"{_plain(result.text)}")[:2000],
-                    allowed_mentions=discord.AllowedMentions.none())
+                spec = workflows.starter_card(request, f"❌ Not started. {_plain(result.text)}")
+                spec.colour = K.FAIL
+                await message.edit(view=card.views(spec)[0], allowed_mentions=card.NO_MENTIONS)
             except Exception as e:
                 logger.warning(f"/task: could not say why it did not start: {e}")
 

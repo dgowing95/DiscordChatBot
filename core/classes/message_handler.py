@@ -12,7 +12,8 @@ from PIL import Image
 pillow_heif.register_heif_opener()
 from classes.text_llm_handler import TextLLMHandler, slot_context_tokens
 from classes import attachment_cache, history_policy, reply_policy
-from classes.card import text_of
+from classes.card import kind_of, text_of, texts_of
+from classes import card_kit
 from classes.workspace_inputs import attachment_note
 from classes.history_policy import (
     ANCHORED,
@@ -197,9 +198,10 @@ def is_reset(message) -> bool:
 
 
 def is_announcement(embed, message, client) -> bool:
-    """The bot's own What's New embed (marked by its footer). Kept out of the
-    prompt: a release announcement is not part of the conversation, and it
-    would shift anchored-mode prompt prefixes."""
+    """The bot's own What's New embed from before the cards (marked by its
+    footer). Kept out of the prompt: a release announcement is not part of the
+    conversation, and it would shift anchored-mode prompt prefixes. Today's
+    is a card marked card_kit.ANNOUNCE (see _format_group)."""
     footer = getattr(getattr(embed, "footer", None), "text", None)
     return footer == ANNOUNCEMENT_FOOTER and message.author.id == client.user.id
 
@@ -390,6 +392,18 @@ class MessageHandler:
         files = ""
         if role == "user":
             files = attachment_note([(a.filename, a.size) for a in message.attachments or []])
+        # The bot's own cards (classes/card_kit.py): a status card reads as one,
+        # not as something it said (the model copies its earlier replies'
+        # shape); its What's New announcement is left out.
+        kind = kind_of(message) if message.author.id == self.client.user.id else None
+        if kind == card_kit.ANNOUNCE:
+            return entries
+        if kind == card_kit.NOTICE:
+            entries.append({'role': role, 'content': card_kit.notice_for_history(
+                message.author.name, texts_of(message))})
+            if image_parts:
+                entries[-1]['content'] = [*image_parts, {"type": "text", "text": entries[-1]['content']}]
+            return entries
         if message.content or text_of(message) or image_parts or always or files:
             text = f"Message from '{message.author.name}': {self.clean_message_content(message)}{files}"
             # With images the content becomes a list of parts (base64 images + text);

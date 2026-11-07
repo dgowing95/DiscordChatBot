@@ -263,9 +263,12 @@ async def execute(job, client):
                 logger.exception("Could not record automation failure")
         if channel and not send_started:
             try:
-                await channel.send(f"⏸️ An automatic {kind} was suspended: {exc}. Resume it with /{kind} resume."
-                                   if isinstance(exc, AccessLost) else
-                                   "❌ An automatic run failed. Check its status with /schedule or /rule.")
+                from classes import card, card_kit as K
+                await card.send_card(channel, K.heads_up(
+                    f"⏸️ Automatic {kind} suspended", f"{exc}.", footer=f"Resume it with /{kind} resume")
+                    if isinstance(exc, AccessLost) else
+                    K.error("An automatic run failed.", "❌ Automatic run failed",
+                            footer="Check its status with /schedule or /rule"))
             except Exception:
                 logger.warning("Could not send the failure notice for %s", [r["id"] for r in rows], exc_info=True)
     finally:

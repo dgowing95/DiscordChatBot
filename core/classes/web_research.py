@@ -49,15 +49,21 @@ async def read_pages(results, timeout: float) -> dict:
             if task in done and task.result()}
 
 
-async def research(question: str, today: str) -> str:
-    """The text web_search returns for `question`."""
+async def research(question: str, today: str, seen: dict | None = None) -> str:
+    """The text web_search returns for `question`. `seen`, when given, is
+    filled with what the search card shows afterwards: "sources", (title,
+    url) pairs, and "read", whether they were read or only found."""
+    seen = {} if seen is None else seen
     results = await search(question)
+    seen.update(sources=[(r.title, r.url) for r in results], read=False)
     if not results:
         return rf.no_results_text(question)
     config = rf.settings()
     if not config["enabled"]:
         return rf.results_text(question, results)
     pages = await read_pages(rf.pick_pages(results, config["pages"]), config["fetch_timeout"])
+    if pages:
+        seen.update(sources=[(r.title, r.url) for r in results if r.url in pages], read=True)
     if not pages:
         # A brief from snippets alone adds a call and says nothing new.
         return rf.results_text(question, results, "none of the pages could be read")

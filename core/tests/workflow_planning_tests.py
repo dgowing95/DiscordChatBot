@@ -13,7 +13,8 @@ from agents.testing import ModelStep, function_call
 
 from classes import brain, brain_inbox, brain_question, thread_inbox, workflow_planning, workflows
 from classes import workflow_policy as wp
-from classes.common import Common
+from classes import card, card_kit as K
+from card_checks import label_of, view_text
 from workflows_tests import (  # noqa: F401 (env is a fixture)
     LaneModel,
     _blocks,
@@ -154,7 +155,7 @@ async def test_the_requester_is_told_a_plan_is_coming_without_a_ping(env):
     await _finish(wf)
     note = next(m for m in env.thread.sent if "Checking a few things" in (m.kwargs["content"] or ""))
     assert "ready to approve" in note.kwargs["content"] and "<@" not in note.kwargs["content"]
-    assert "<@5>" in env.thread.plans()[0].kwargs["view"].text
+    assert "<@5>" in view_text(env.thread.plans()[0].kwargs["view"])
 
 
 @pytest.mark.asyncio
@@ -328,18 +329,26 @@ def test_the_manager_hears_about_pictures_only_when_the_bot_can_draw(monkeypatch
 def _noisy_tool():
     @function_tool
     async def noisy(wrapper: RunContextWrapper[dict]) -> str:
-        """Posts its embed, as a real lookup does."""
-        await Common.send_tool_discord_embed(wrapper.context["channel"], "text", title="NOISE")
+        """Posts its notice, as a real lookup does."""
+        await card.notice(wrapper.context["channel"], K.info("NOISE", "text"))
         return "ok"
     return noisy
 
 
 def _titles(env):
-    return [m.kwargs["embed"].title for m in env.thread.sent if m.kwargs.get("embed") is not None]
+    """Each card's label (without details), as the thread shows them."""
+    return [label_of(m.kwargs["view"]) for m in env.thread.sent if m.kwargs.get("view") is not None]
+
+
+def _scout_card(env, subject):
+    """The scout's card for `subject`, or None."""
+    return next((m for m in env.thread.sent if m.kwargs.get("view") is not None
+                 and label_of(m.kwargs["view"]) == workflow_planning.SCOUT_LABEL
+                 and f"### {subject}" in view_text(m.kwargs["view"])), None)
 
 
 @pytest.mark.asyncio
-async def test_a_scout_posts_one_embed_and_its_tools_post_none(env):
+async def test_a_scout_posts_one_card_and_its_tools_post_none(env):
     env.subagent_tools = [_noisy_tool()]
     env.model = LaneModel([_discover("Nordic cities"),
                            ModelStep(output=[function_call("noisy", {}, call_id="n")]),
@@ -349,16 +358,14 @@ async def test_a_scout_posts_one_embed_and_its_tools_post_none(env):
     wf, _ = await _start(env)
     await _finish(wf)
     titles = _titles(env)
-    assert titles.count("🔎 Nordic cities") == 1 and "NOISE" not in titles
-    embed = next(m for m in env.thread.sent if m.kwargs.get("embed") is not None
-                 and m.kwargs["embed"].title == "🔎 Nordic cities")
-    ending = embed.edits[-1]["embed"]
-    assert "2 facts" in ending.description and "Last: 🔧 noisy" in ending.description
-    assert ending.footer.text == f"Turn 2 of {wp.SCOUT_MAX_TURNS}"
+    assert titles.count(workflow_planning.SCOUT_LABEL) == 1 and "NOISE" not in titles
+    ending = view_text(_scout_card(env, "Nordic cities").edits[-1]["view"])
+    assert "found 2 facts" in ending and "Last: 🔧 noisy" in ending
+    assert ending.endswith("2 turns")
 
 
 @pytest.mark.asyncio
-async def test_a_researcher_posts_one_embed_and_an_implementer_keeps_its_own(env):
+async def test_a_researcher_posts_one_card_and_an_implementer_keeps_its_own(env):
     env.subagent_tools = [_noisy_tool()]
     env.model = LaneModel([_plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"])),
                            ModelStep(output=[function_call("noisy", {}, call_id="n1")]),
@@ -369,7 +376,7 @@ async def test_a_researcher_posts_one_embed_and_an_implementer_keeps_its_own(env
     await _finish(wf)
     titles = _titles(env)
     assert titles.count("NOISE") == 1  # the implementer's
-    assert sum(1 for t in titles if (t or "").startswith("🔬 s1")) == 1
+    assert titles.count("🔬 Research") == 1
 
 
 @pytest.mark.asyncio
@@ -411,10 +418,8 @@ async def test_a_scout_out_of_turns_still_reports_what_it_saw(env, monkeypatch):
     assert _tools_of(last) == ["report"] and last.model_settings.tool_choice == "required"
     assert workflows.FINISH_UP in _text_of(last)
     assert wf.findings == ["Rail delays: ORR portal"]
-    embed = next(m for m in env.thread.sent if m.kwargs.get("embed") is not None
-                 and m.kwargs["embed"].title == "🔎 Rail delays")
-    assert "ran out of steps" in embed.edits[-1]["embed"].description
-    assert "1 fact" in embed.edits[-1]["embed"].description
+    ending = view_text(_scout_card(env, "Rail delays").edits[-1]["view"])
+    assert "ran out of steps" in ending and "found 1 fact" in ending
 
 
 @pytest.mark.asyncio
@@ -500,7 +505,7 @@ async def test_a_cancel_while_waiting_for_the_workspace_starts_no_scouts(env, mo
     wf, _ = await _start(env, automatic=False)
     await _finish(wf)
     assert wf.record["state"] == wp.CANCELLED
-    assert "🔎 Rail delays" not in _titles(env)
+    assert _scout_card(env, "Rail delays") is None
 
 
 @pytest.mark.asyncio
@@ -519,9 +524,7 @@ async def test_a_scout_that_crashes_closes_its_embed_and_keeps_the_others_findin
     wf, _ = await _start(env)
     await _finish(wf)
     assert wf.findings == ["One: x"]
-    embed = next(m for m in env.thread.sent if m.kwargs.get("embed") is not None
-                 and m.kwargs["embed"].title == "🔎 Two")
-    assert workflows.HELPER_FAILED in embed.edits[-1]["embed"].description
+    assert workflows.HELPER_FAILED in view_text(_scout_card(env, "Two").edits[-1]["view"])
 
 
 @pytest.mark.asyncio
@@ -573,8 +576,9 @@ async def test_a_finished_plan_card_says_how_it_ended(env):
     await call
     await _finish(wf)
     final = env.thread.plans()[-1].edits[-1]["view"]
-    assert final.text.startswith("🛑 Cancelled.") and final.buttons == []
-    assert "Working on it" not in final.text
+    text = view_text(final)
+    assert text.startswith("-# 🧵 Big job · cancelled") and "🛑 Cancelled." in text
+    assert final.buttons == [] and "Working on it" not in text
 
 
 def test_the_manager_can_only_name_a_subject():
@@ -597,9 +601,9 @@ async def test_a_button_answers_and_its_line_shows_on_the_question(env):
     await _approve(wf)
     await _finish(wf)
     assert wf.answers == [("Metric or imperial?", "Yes")]
-    assert "<@5>" in question.kwargs["view"].note
-    assert question.kwargs["view"].text.startswith("-# Planning needs more information\n")
-    assert question.edits[-1]["view"].note == "✅ Yes"
+    assert "<@5>" in question.kwargs["view"].label
+    assert question.kwargs["view"].label.startswith("❓ Planning needs more information")
+    assert question.edits[-1]["view"].outcome == "✅ **Yes**"
 
 
 @pytest.mark.asyncio
@@ -837,7 +841,7 @@ async def test_a_helpers_picture_is_kept_for_the_channel_and_the_next_step(env):
     assert any(name.endswith("/images/image-1.png") for name in env.session.files)
     assert "Saved as images/image-1.png" in _text_of(env.model.calls[2])
     assert "images/image-1.png" in _text_of(env.model.calls[3])  # the next step hears of it
-    names = [m.kwargs["file"].filename for m in env.origin.sent if m.kwargs.get("file")]
+    names = [f.filename for m in env.origin.sent for f in m.kwargs.get("files") or []]
     assert names == ["image-1.png"]
 
 

@@ -52,6 +52,7 @@ def _keeping(key: str):
 
 class StepArg(TypedDict, total=False):
     id: str
+    title: str
     role: str
     brief: str
     depends_on: list[str]
@@ -102,18 +103,21 @@ async def ask_requester(wrapper: RunContextWrapper[dict], questions: list[Questi
 
 @function_tool(failure_error_function=_keeping("workflow_plan_args"))
 async def submit_plan(wrapper: RunContextWrapper[dict], goal: str, steps: list[StepArg],
-                      deliverables: list[str] | None = None, notes: str = "") -> str:
+                      deliverables: list[str] | None = None, notes: str = "",
+                      title: str = "") -> str:
     """Submit the plan. Call it once, last, on its own.
 
     Args:
         goal: What the whole job delivers, in one sentence.
-        steps: In order. Each: id ("s1"...), role ("researcher" or
-            "implementer"), brief (the helper's whole job: what to find or
-            make, what to hand on) and depends_on (ids it needs first).
+        steps: In order. Each: id ("s1"...), title (2-5 words, e.g. "Find
+            2026 reviews"), role ("researcher" or "implementer"), brief (the
+            helper's whole job: what to find or make, what to hand on) and
+            depends_on (ids it needs first).
         deliverables: What the user gets, e.g. "report.md", "a chart".
         notes: Decisions every helper should know.
+        title: The whole job in 2-5 words, e.g. "Compare budget keyboards".
     """
-    _ctx(wrapper)["workflow_plan_args"] = {"goal": goal, "steps": steps,
+    _ctx(wrapper)["workflow_plan_args"] = {"goal": goal, "steps": steps, "title": title,
                                            "deliverables": deliverables, "notes": notes}
     return RECORDED
 

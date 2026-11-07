@@ -3,9 +3,8 @@ import asyncio
 import io
 
 from agents import FunctionTool, function_tool,RunContextWrapper
-from classes.common import Common
 from classes.content_guard import check_web_request
-from classes import tool_embeds
+from classes import card, tool_cards
 import discord
 
 logger = logging.getLogger(__name__)
@@ -20,15 +19,10 @@ async def add_emoji_to_message(message: discord.Message, emoji: str) -> None:
     except Exception as e:
         logger.warning(f"Failed to add emoji {emoji} to message {message.id}: {e}")
     
-async def _tool_notice(wrapper: RunContextWrapper[dict], title: str, text: str,
-                       color: int = tool_embeds.COLOR_WEB) -> None:
-    """The embed a lookup posts where it was asked. Skipped when the run has
-    no channel: a brain call may have no thread (its tests, and any caller
-    that passes none), and a lookup must still work there rather than fail
-    on None.send."""
-    channel = wrapper.context.get("channel")
-    if channel is not None:
-        await Common.send_tool_discord_embed(channel, text, color, title)
+async def _tool_notice(wrapper: RunContextWrapper[dict], spec) -> "card.LiveCard | None":
+    """The notice card a tool posts where it was asked (card.notice: skipped
+    when the run has no channel, and never raises)."""
+    return await card.notice(wrapper.context.get("channel"), spec)
 
 
 @function_tool
@@ -52,13 +46,18 @@ async def web_search(wrapper: RunContextWrapper[dict], search_request: str) -> s
         return ("I can't perform that search — it was blocked by the safety "
                 "guard. Please rephrase with a safe, non-harmful query.")
 
-    await _tool_notice(wrapper, tool_embeds.WEB_SEARCH, search_request)
+    live = await _tool_notice(wrapper, tool_cards.web_search_card(search_request))
     from classes import web_research
+    seen = {}
     try:
-        return await web_research.research(search_request, await get_current_datetime())
+        result = await web_research.research(search_request, await get_current_datetime(), seen)
     except Exception as e:
         logger.warning(f"An error occurred while searching: {e}")
         return "Error fetching search results."
+    if live is not None and "sources" in seen:
+        # The same card, now saying what it read.
+        live.show_soon(tool_cards.web_search_card(search_request, seen["sources"], seen["read"]))
+    return result
     
 @function_tool
 async def fetch_url(wrapper: RunContextWrapper[dict], url: str, part: int = 1) -> str:
@@ -80,7 +79,7 @@ async def fetch_url(wrapper: RunContextWrapper[dict], url: str, part: int = 1) -
         return ("I can't fetch that URL — it was blocked by the safety "
                 "guard.")
 
-    await _tool_notice(wrapper, tool_embeds.reading_page_title(part), tool_embeds.page_link(url))
+    live = await _tool_notice(wrapper, tool_cards.page_card(url, part))
     try:
         page = await web_reader.read(url)
     except web_reader.FetchError as e:
@@ -91,6 +90,8 @@ async def fetch_url(wrapper: RunContextWrapper[dict], url: str, part: int = 1) -
         return "Error fetching URL content."
 
     logger.info(f"Fetched content from {url} ({page.source}, {len(page.text)} chars).")
+    if live is not None and page.title:
+        live.show_soon(tool_cards.page_card(url, part, page.title))
     return paginate(page.text, part, settings()["part_chars"])
 
 async def get_current_datetime() -> str:
@@ -138,8 +139,8 @@ async def store_memory(wrapper: RunContextWrapper[dict], data: str) -> str:
         user_memory = UserMemory(user_id, guild_id)
         await user_memory.append(data)
         await add_emoji_to_message(wrapper.context.get("original_message"), "💾")
-        await Common.send_tool_discord_embed(
-            wrapper.context["channel"], data, tool_embeds.COLOR_MEMORY, tool_embeds.REMEMBERED)
+        await card.notice(wrapper.context.get("channel"), tool_cards.memory_card(
+            data, f"<@{user_id}>" if user_id else ""))
         
         response_message = "Data stored successfully."
     except Exception as e:
@@ -252,20 +253,16 @@ async def generate_image(wrapper: RunContextWrapper[dict], prompt: str,
             return ("There is no earlier picture of mine in this channel to edit, so "
                     "nothing was made. Call generate_image again with edit_previous "
                     "false and a description of the whole picture.")
-    title = tool_embeds.EDITING if source is not None else tool_embeds.DRAWING
+    editing = source is not None
 
     # The prompt the image model is given, not the requested one, is what the
-    # embed shows: it is the thing worth seeing when the result does not match
+    # card shows: it is the thing worth seeing when the result does not match
     # what was asked for.
-    embed = None
+    live = None
 
     async def announce(first_prompt):
-        nonlocal embed
-        try:
-            embed = await Common.send_tool_discord_embed(
-                channel, first_prompt, tool_embeds.COLOR_IMAGE, title)
-        except Exception as e:
-            logger.warning(f"Could not post the image tool embed: {e}")
+        nonlocal live
+        live = await card.notice(channel, tool_cards.drawing_card(first_prompt, editing))
 
     # What was asked, for the check of the finished picture: the message, or
     # in a voice call (no message) what the speaker said.
@@ -277,17 +274,20 @@ async def generate_image(wrapper: RunContextWrapper[dict], prompt: str,
         logger.warning(f"Image generation failed: {e}")
         return ("Image generation failed. Tell the user the image service is "
                 "unavailable right now and do not retry.")
-    if embed is not None and result.attempts > 1:
-        # Only the final image is posted, so the embed must describe that one.
-        await Common.edit_tool_discord_embed(
-            embed, result.prompt, tool_embeds.COLOR_IMAGE, title)
-    try:
-        await channel.send(
-            file=discord.File(io.BytesIO(result.png), filename=GENERATED_IMAGE_FILENAME)
-        )
-    except Exception as e:
-        logger.warning(f"Image generated but failed to send to Discord: {e}")
-        return "The image was generated but could not be sent to the channel."
+    # The picture goes into its own card, with the prompt it was drawn from
+    # (the final one: only the final image is posted). It stays a real
+    # attachment named GENERATED_IMAGE_FILENAME, which the next edit finds.
+    finished = tool_cards.image_card(result.prompt, editing, GENERATED_IMAGE_FILENAME)
+    files = {GENERATED_IMAGE_FILENAME: result.png}
+    posted = live is not None and not live.dropped and await live.show(finished, files=files)
+    if not posted:
+        # No card to fill (it failed, or a quiet helper's channel dropped
+        # it): the finished card is sent as a new message.
+        try:
+            await card.send_card(channel, finished, files=files)
+        except Exception as e:
+            logger.warning(f"Image generated but failed to send to Discord: {e}")
+            return "The image was generated but could not be sent to the channel."
     # Counted only once sent: the brain's report lists it as already posted.
     context["images_posted"] = context.get("images_posted", 0) + 1
     kept = ""
@@ -364,9 +364,7 @@ async def change_personality(wrapper: RunContextWrapper[dict], personality: str)
         await configmanager.update_setting("system", personality, wrapper.context.get("guild_id"))
         logger.info(f"Changed personality to: {personality}")
 
-        await Common.send_tool_discord_embed(
-            wrapper.context["channel"], personality, tool_embeds.COLOR_PERSONA,
-            tool_embeds.PERSONALITY)
+        await card.notice(wrapper.context.get("channel"), tool_cards.personality_card(personality))
         return True
     except Exception as e:
         logger.warning(f"An error occurred while changing personality: {e}")

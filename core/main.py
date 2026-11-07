@@ -19,7 +19,7 @@ from classes.image_generation import (
     image_generation_enabled,
 )
 from classes import attachment_cache, brain_inbox, help_catalog, thread_inbox, settings_check, whats_new
-from classes.common import embed_from_data
+from classes import card, card_kit as K, tool_cards
 from classes.redis_client import text_client
 from classes import automation_runner, skill_format, voice_gate
 from classes.polls import remember_poll
@@ -188,51 +188,55 @@ async def register_commands():
     @command_tree.command(name="system", description="Change the behaviour/personality of the bot")
     async def change_system(ctx, system: str):
         await config.update_setting("system", system, ctx.guild.id)
-        await ctx.response.send_message(content=f"System updated to: \"{system}\"")
+        await card.reply(ctx, K.done("🎭 Personality updated", K.quote(system),
+                                     footer="See it any time with /get_system"), ephemeral=False)
 
     @command_tree.command(name="get_system", description="See the existing behaviour/personality of the bot")
     async def get_system(ctx):
         system = await config.get_setting("system", ctx.guild.id)
-        await ctx.response.send_message(content=f"System is currently: \"{system}\"")
+        await card.reply(ctx, K.info("🎭 Current personality", K.quote(system or "(none set)"),
+                                     footer="Change it with /system"), ephemeral=False)
 
     @command_tree.command(name="temperature", description="Change the randomness of responses, max of 2.0 is max random")
     async def change_temperature(ctx, temperature: float):
         await config.update_setting("temperature", temperature, ctx.guild.id)
-        await ctx.response.send_message(content=f"Temperature updated to: \"{temperature}\"")
+        await card.reply(ctx, K.done("⚙️ Setting changed", f"**Temperature** is now **{temperature}**",
+                                     footer="0 is predictable, 2 is very random"), ephemeral=False)
 
     @command_tree.command(name="chance", description="Change the chance (0-50%) that the bot replies without being mentioned, default 5%")
     async def change_chance(ctx, chance: discord.app_commands.Range[int, 0, 50]):
         await config.update_setting("response_chance", chance, ctx.guild.id)
-        await ctx.response.send_message(content=f"Response chance updated to: \"{chance}%\"")
+        await card.reply(ctx, K.done("⚙️ Setting changed", f"**Reply chance** is now **{chance}%**",
+                                     footer="How often I join in without being mentioned"),
+                         ephemeral=False)
 
     @command_tree.command(name="get_chance", description="See the current chance that the bot replies without being mentioned")
     async def get_chance(ctx):
         chance = await config.get_setting("response_chance", ctx.guild.id) or 5
-        await ctx.response.send_message(content=f"Response chance is currently: \"{chance}%\"")
+        await card.reply(ctx, K.info("⚙️ Reply chance", f"**{chance}%**",
+                                     footer="How often I join in without being mentioned · "
+                                            "change it with /chance"), ephemeral=False)
     
     # Ephemeral, so neither reply ever lands in channel.history (and so in a
     # prompt), and nobody else's channel fills up with a help listing.
     @command_tree.command(name="help", description="See everything the bot can do")
     async def help_cmd(ctx):
-        data = help_catalog.help_embed_data(image_generation_enabled())
-        await ctx.response.send_message(embed=embed_from_data(data), ephemeral=True)
+        avatar = getattr(getattr(client.user, "display_avatar", None), "url", None)
+        await card.reply(ctx, help_catalog.help_card(image_generation_enabled(), avatar))
 
     @command_tree.command(name="whats_new", description="See the new features in the current version")
     async def whats_new_cmd(ctx):
         version = whats_new.app_version()
         notes = whats_new.load_notes() if version else []
         if notes:
-            await ctx.response.send_message(
-                embed=embed_from_data(whats_new.notes_embed_data(version, notes)), ephemeral=True)
+            await card.reply(ctx, whats_new.notes_card(version, notes))
         elif version:
-            await ctx.response.send_message(
-                content=f"No new features in {version}. Try /help to see everything I can do.",
-                ephemeral=True)
+            await card.reply(ctx, K.info(f"✨ What's new · {version}", "No new features in this version.",
+                                         footer="/help shows everything I can do"))
         else:
-            await ctx.response.send_message(
-                content="I don't know which version I'm running (a development build), "
-                        "so there are no release notes. Try /help.",
-                ephemeral=True)
+            await card.reply(ctx, K.info("✨ What's new", "I don't know which version I'm running (a "
+                                                         "development build), so there are no release notes.",
+                                         footer="/help shows everything I can do"))
 
     # Only offered when the diffusion service is enabled (IMAGE_GEN_ENABLED;
     # set from the helm chart's diffusion.enabled).
@@ -243,7 +247,7 @@ async def register_commands():
             # Its prompt rewrite and image check use the LLM, which is the
             # call's while the bot is in voice here.
             if voice_gate.active(ctx.guild_id):
-                await ctx.response.send_message(VOICE_BUSY_REPLY, ephemeral=True)
+                await card.reply(ctx, K.heads_up(VOICE_BUSY_LABEL, VOICE_BUSY_REPLY))
                 return
             # Image generation is slow (queue + GPU): defer first (spinner) so
             # the command doesn't time out, then respond to the deferred
@@ -262,12 +266,13 @@ async def register_commands():
                 result = await create_image(prompt, prompt)
             except Exception as e:
                 logger.warning(f"Image generation failed: {e}")
-                await ctx.edit_original_response(
-                    content="❌ Image generation failed — the image service may be down or busy. Try again later."
-                )
+                await ctx.edit_original_response(view=card.views(K.error(
+                    "The image service may be down or busy. Try again in a minute.",
+                    "❌ Couldn't make the image"))[0])
                 return
+            # The picture in its card, a real attachment the next edit finds.
             await ctx.edit_original_response(
-                content="🎨",
+                view=card.views(tool_cards.image_card(prompt, filename=GENERATED_IMAGE_FILENAME))[0],
                 attachments=[discord.File(io.BytesIO(result.png), filename=GENERATED_IMAGE_FILENAME)],
             )
 
@@ -306,6 +311,12 @@ async def on_ready():
         from classes import workflow_views, workflows
         workflows.configure(queue=message_queue, client=client)
         client.add_dynamic_items(workflow_views.WorkflowButton)
+        # The Restore button on a deleted or retired skill's card.
+        from classes.skill_tools import RestoreButton
+        client.add_dynamic_items(RestoreButton)
+        # The Leave button on a voice call's card.
+        from classes.voice_commands import LeaveButton
+        client.add_dynamic_items(LeaveButton)
         client.background_tasks.append(client.loop.create_task(workflows.interrupt_all(client)))
         if voice_settings()["enabled"]:
             from classes.voice_bridge import start_bridge
@@ -407,7 +418,9 @@ async def on_message(message):
         inc_queue_drop(guild_id)
         if client.user in message.mentions:
             try:
-                await message.reply("⏳ I'm still working through my queue — try me again in a moment.")
+                await card.send_card(message.channel, K.heads_up(
+                    "⏳ Busy", "I'm still working through my queue. Try me again in a moment."),
+                    reference=message, mention_author=True)
             except Exception as e:
                 logger.warning(f"Could not send busy reply to {message.id}: {e}")
         return
@@ -439,7 +452,9 @@ async def answer_brain_question(message) -> None:
         if outcome == brain_inbox.ACCEPTED:
             await message.add_reaction("✅")
         elif outcome == brain_inbox.EMPTY:
-            await message.reply("I need your answer as text, please.", mention_author=False)
+            await card.send_card(message.channel, K.heads_up(
+                "✏️ Answer in words", "I need your answer as text, please."),
+                reference=message, mention_author=False)
     except Exception as e:
         logger.warning(f"Could not acknowledge an answer to the brain: {e}")
 
@@ -490,12 +505,14 @@ async def route_to_workflow(message) -> None:
     if reply is None:
         return
     try:
-        await message.reply(reply, mention_author=False)
+        await card.send_card(message.channel, K.heads_up("🚫 Not passed on", reply),
+                             reference=message, mention_author=False)
     except Exception as e:
         logger.warning(f"Workflow inbox: could not reply to {message.id}: {e}")
 
 
-VOICE_BUSY_REPLY = "🎙️ I'm in a voice call right now — talk to me there, or use /voice leave."
+VOICE_BUSY_LABEL = "🎙️ In a voice call"
+VOICE_BUSY_REPLY = "I'm in a voice call right now. Talk to me there, or use /voice leave."
 # How often the "in a call" notice may be posted per channel.
 VOICE_NOTICE_SECONDS = 60
 _voice_notice_at: dict[int, float] = {}
@@ -510,7 +527,8 @@ async def voice_busy_notice(message) -> None:
         return
     _voice_notice_at[message.channel.id] = now
     try:
-        await message.reply(VOICE_BUSY_REPLY, mention_author=False)
+        await card.send_card(message.channel, K.heads_up(VOICE_BUSY_LABEL, VOICE_BUSY_REPLY),
+                             reference=message, mention_author=False)
     except Exception as e:
         logger.warning(f"Could not send the in-a-call notice: {e}")
 
@@ -532,7 +550,8 @@ async def workflow_dev_inject(message) -> bool:
     result = await workflows.start_workflow(context, content.partition(" ")[2],
                                             trigger=workflows.TRIGGER_SLASH, message=message)
     if not result.ok:
-        await message.reply(f"❌ {result.text}", mention_author=False)
+        await card.send_card(message.channel, K.error(result.text), reference=message,
+                             mention_author=False)
     return True
 
 
@@ -558,7 +577,8 @@ async def voice_dev_inject(message) -> bool:
                 await session.heard(message.author.id, message.author.display_name, argument)
     except Exception as e:
         logger.warning(f"Voice dev inject failed: {e}")
-        await message.reply(f"❌ {e}", mention_author=False)
+        await card.send_card(message.channel, K.error(str(e)), reference=message,
+                             mention_author=False)
     return True
 
 
@@ -609,7 +629,7 @@ async def random_chance_reply(message) -> bool:
 
 
 async def maybe_announce_whats_new(message) -> None:
-    """Posts this version's What's New embed in the message's channel the
+    """Posts this version's What's New card in the message's channel the
     first time a guild triggers the bot on it (see classes/whats_new.py).
 
     One atomic SET ... GET claims the announcement, so two workers handling
@@ -634,10 +654,10 @@ async def maybe_announce_whats_new(message) -> None:
         previous = await redis.set(key, version, get=True)
         if previous == version:
             return
-        embed = embed_from_data(whats_new.notes_embed_data(version, notes))
+        spec = whats_new.notes_card(version, notes)
         try:
             async with get_channel_lock(message.channel.id):
-                await message.channel.send(embed=embed)
+                await card.send_card(message.channel, spec)
         except Exception:
             if previous is None:
                 await redis.delete(key)

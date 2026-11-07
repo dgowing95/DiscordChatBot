@@ -11,7 +11,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from agents.tool_context import ToolContext
 
-from classes import skill_commands, skill_reflection, skill_tools, tool_embeds
+from classes import card_kit as K, skill_commands, skill_reflection, skill_tools, tool_cards
+from card_checks import interaction, labels, replied, replied_text, sent_views, view_text
 from classes.skill_store import SkillStore
 from skill_store_tests import FakeRedis
 
@@ -74,7 +75,7 @@ async def call(tool, context, **args):
 
 
 def titles(channel):
-    return [c.kwargs["embed"].title for c in channel.send.call_args_list]
+    return labels(channel)
 
 
 @pytest.mark.asyncio
@@ -87,12 +88,12 @@ async def test_save_skill_stores_posts_an_embed_and_marks_the_call(store, ctx, a
     assert skill["files"] == {"scripts/chart.py": "print('hi')"} and skill["updated_by"] == 5
     assert skill["last_channel_id"] == 77  # saved here: somewhere for the tidy-up's embeds
     assert ctx["skill_saved"] is True
-    assert titles(ctx["channel"]) == [tool_embeds.SKILL_SAVED]
+    assert titles(ctx["channel"]) == [tool_cards.SKILL_SAVED]
     # No files given: the update keeps the script.
     out = await call(skill_tools.save_skill, ctx, name="weekly-chart", description="Charts tracker embeds",
                      steps="1. new steps", note="simpler")
     assert "updated" in out
-    assert titles(ctx["channel"])[-1] == tool_embeds.SKILL_UPDATED
+    assert titles(ctx["channel"])[-1] == tool_cards.SKILL_UPDATED
     assert (await store.get(GUILD, "weekly-chart"))["files"] == {"scripts/chart.py": "print('hi')"}
     # An empty list removes them.
     await call(skill_tools.save_skill, ctx, name="weekly-chart", description="Charts tracker embeds",
@@ -143,7 +144,7 @@ async def test_use_skill_writes_it_fresh_and_records_the_use(store, ctx, allowed
     skill = await store.get(GUILD, "weekly-chart")
     assert skill["uses"] == 1 and skill["last_channel_id"] == 77
     assert ctx["skills_used"] == ["weekly-chart"]
-    assert titles(ctx["channel"]) == [tool_embeds.SKILL_USED]
+    assert titles(ctx["channel"]) == [tool_cards.SKILL_USED]
 
 
 @pytest.mark.asyncio
@@ -305,8 +306,9 @@ async def test_reflect_creates_a_skill_and_posts_the_embed(store, ctx, allowed):
         assert await skill_reflection.reflect(_review(ctx["channel"])) == "create"
     skill = await store.get(GUILD, "chart-it")
     assert skill["source"] == "reflection" and skill["updated_by"] == 5
-    embed = ctx["channel"].send.call_args.kwargs["embed"]
-    assert embed.title == tool_embeds.SKILL_SAVED and embed.footer.text == tool_embeds.SKILL_FOOTER_REFLECTION
+    view = ctx["channel"].send.call_args.kwargs["view"]
+    assert titles(ctx["channel"])[-1] == tool_cards.SKILL_SAVED
+    assert tool_cards.SKILL_FOOTER_REFLECTION in view_text(view)
 
 
 @pytest.mark.asyncio
@@ -328,7 +330,7 @@ async def test_reflect_update_of_an_existing_name(store, ctx, allowed):
         assert await skill_reflection.reflect(_review(ctx["channel"])) == "update"
     updated = await store.get(GUILD, "chart-it")
     assert updated["body"] == "1. new" and updated["files"] == {"scripts/run.py": "x=1"}
-    assert ctx["channel"].send.call_args.kwargs["embed"].title == tool_embeds.SKILL_UPDATED
+    assert titles(ctx["channel"])[-1] == tool_cards.SKILL_UPDATED
 
 
 @pytest.mark.asyncio
@@ -351,13 +353,8 @@ async def test_a_queued_review_is_left_on_the_context_only_for_long_jobs(store, 
 # -------------------------------- /skills ---------------------------------
 
 def _interaction(channel):
-    ctx = MagicMock()
-    ctx.guild_id, ctx.channel, ctx.user = GUILD, channel, SimpleNamespace(id=9)
-    ctx.channel_id = channel.id
-    ctx.response.send_message = AsyncMock()
-    ctx.response.send_modal = AsyncMock()
-    ctx.guild = SimpleNamespace(filesize_limit=10 * 1024 * 1024)
-    return ctx
+    return interaction(guild_id=GUILD, channel=channel, user=SimpleNamespace(id=9),
+                       channel_id=channel.id, guild=SimpleNamespace(filesize_limit=10 * 1024 * 1024))
 
 
 def _commands():
@@ -381,25 +378,26 @@ async def test_list_show_and_history(store, ctx, allowed):
     cmds = _commands()
     one = _interaction(ctx["channel"])
     await cmds["list"](one)
-    assert "No skills" in one.response.send_message.call_args.args[0]
+    assert "No skills" in replied_text(one)
     await store.save(GUILD, "weekly-chart", "Charts things", "1. do it", author_id=3)
     await store.save(GUILD, "weekly-chart", "Charts things", "1. do it better", author_id=4, note="better")
     two = _interaction(ctx["channel"])
     await cmds["list"](two)
-    assert "weekly-chart" in two.response.send_message.call_args.kwargs["embed"].description
+    assert "weekly-chart" in replied_text(two)
+    assert two.response.send_message.call_args.kwargs["ephemeral"] is False  # the list is public
     three = _interaction(ctx["channel"])
     await cmds["show"](three, "Weekly Chart", None)
-    assert "1. do it better" in three.response.send_message.call_args.args[0]
+    assert "1. do it better" in replied_text(three)
     four = _interaction(ctx["channel"])
     await cmds["show"](four, "weekly-chart", 1)
-    assert "1. do it\n" in four.response.send_message.call_args.args[0]
+    assert "1. do it\n" in replied_text(four)
     five = _interaction(ctx["channel"])
     await cmds["history"](five, "weekly-chart")
-    text = five.response.send_message.call_args.kwargs["embed"].description
-    assert "v2" in text and "(current)" in text and "<@4>" in text and "better" in text
+    text = replied_text(five)
+    assert "v2" in text and "· current" in text and "<@4>" in text and "better" in text
     six = _interaction(ctx["channel"])
     await cmds["show"](six, "nope", None)
-    assert "No such" in six.response.send_message.call_args.args[0]
+    assert "No such" in replied_text(six)
 
 
 @pytest.mark.asyncio
@@ -407,7 +405,7 @@ async def test_a_long_skill_is_shown_as_a_file(store, ctx, allowed):
     await store.save(GUILD, "long-one", "d", "x" * 5000, author_id=1)
     one = _interaction(ctx["channel"])
     await _commands()["show"](one, "long-one", None)
-    assert one.response.send_message.call_args.kwargs["file"].filename == "long-one.md"
+    assert [f.filename for f in one.response.send_message.call_args.kwargs["files"]] == ["long-one.md"]
 
 
 @pytest.mark.asyncio
@@ -416,18 +414,18 @@ async def test_delete_restore_revert_each_post_their_embed(store, ctx, allowed):
     await store.save(GUILD, "weekly-chart", "d", "first", author_id=1)
     await store.save(GUILD, "weekly-chart", "d", "second", author_id=1)
     seen = []
-    for name, args, title in (("revert", ("weekly-chart", 1), tool_embeds.SKILL_REVERTED),
-                              ("delete", ("weekly-chart",), tool_embeds.SKILL_DELETED),
-                              ("restore", ("weekly-chart",), tool_embeds.SKILL_RESTORED)):
+    for name, args, title in (("revert", ("weekly-chart", 1), tool_cards.SKILL_REVERTED),
+                              ("delete", ("weekly-chart",), tool_cards.SKILL_DELETED),
+                              ("restore", ("weekly-chart",), tool_cards.SKILL_RESTORED)):
         interaction = _interaction(ctx["channel"])
         await cmds[name](interaction, *args)
-        assert interaction.response.send_message.call_args.args == ("Done.",)
+        assert "Done" in replied_text(interaction)
         seen.append(titles(ctx["channel"])[-1])
         assert seen[-1] == title
     assert (await store.get(GUILD, "weekly-chart"))["body"] == "first"
     bad = _interaction(ctx["channel"])
     await cmds["delete"](bad, "nope")
-    assert "No skill named" in bad.response.send_message.call_args.args[0]
+    assert "No skill named" in replied_text(bad)
     assert len(titles(ctx["channel"])) == 3
 
 
@@ -445,10 +443,10 @@ async def test_edit_opens_a_filled_modal_and_saves_with_a_public_embed(store, ct
     await modal.on_submit(submit)
     skill = await store.get(GUILD, "weekly-chart")
     assert skill["body"] == "1. new" and skill["files"] == {"scripts/a.py": "x"} and skill["source"] == "command"
-    assert titles(ctx["channel"]) == [tool_embeds.SKILL_UPDATED]
+    assert titles(ctx["channel"]) == [tool_cards.SKILL_UPDATED]
     again = _interaction(ctx["channel"])
     await modal.on_submit(again)
-    assert "Nothing changed" in again.response.send_message.call_args.args[0]
+    assert "Nothing changed" in replied_text(again)
 
 
 @pytest.mark.asyncio
@@ -457,7 +455,7 @@ async def test_edit_refuses_a_body_too_big_for_the_box(store, ctx, allowed):
     one = _interaction(ctx["channel"])
     await _commands()["edit"](one, "huge-one")
     one.response.send_modal.assert_not_called()
-    assert "too long" in one.response.send_message.call_args.args[0]
+    assert "longer than the edit box" in replied_text(one)
 
 
 @pytest.mark.asyncio
@@ -465,12 +463,12 @@ async def test_export_sends_a_zip(store, ctx, allowed):
     await store.save(GUILD, "weekly-chart", "d", "s", author_id=1)
     one = _interaction(ctx["channel"])
     await _commands()["export"](one)
-    assert one.response.send_message.call_args.kwargs["file"].filename == "skills.zip"
+    assert [f.filename for f in one.response.send_message.call_args.kwargs["files"]] == ["skills.zip"]
     small = _interaction(ctx["channel"])
     small.guild = SimpleNamespace(filesize_limit=10)
     await _commands()["export"](small)
-    assert "file" not in small.response.send_message.call_args.kwargs
-    assert "more than this server can upload" in small.response.send_message.call_args.args[0]
+    assert "files" not in small.response.send_message.call_args.kwargs
+    assert "more than this server can upload" in replied_text(small)
 
 
 @pytest.mark.asyncio
@@ -480,7 +478,9 @@ async def test_history_of_many_versions_fits_discord(store, ctx, allowed):
                          note="a fairly long note about what changed here")
     one = _interaction(ctx["channel"])
     await _commands()["history"](one, "weekly-chart")
-    assert len(one.response.send_message.call_args.kwargs["embed"].description) <= 4096
+    views = sent_views(one.response.send_message) + sent_views(one.followup.send)
+    assert all(v.content_length() <= K.MAX_TEXT for v in views)
+    assert sum(view_text(v).count("**v") for v in views) == 50  # every version, none cut
 
 
 @pytest.mark.asyncio

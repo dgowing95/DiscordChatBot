@@ -1039,8 +1039,11 @@ async def _run_and_deliver(ctx, lease, agent, task, run_config, hooks, progress,
         notes.append("The server's saved workspace could not be restored, so it started "
                      "empty: files kept from earlier requests were lost. Tell the user.")
         try:
-            await channel.send("⚠️ This server's saved workspace couldn't be restored, so it "
-                               "started empty. Files kept from earlier requests are gone.")
+            from classes import card, card_kit as K
+            await card.send_card(channel, K.heads_up(
+                "⚠️ Workspace started empty", "This server's saved workspace couldn't be restored, "
+                                             "so it started empty. Files kept from earlier requests "
+                                             "are gone."))
         except Exception as e:
             logger.warning(f"Brain: failed to post the lost-workspace notice: {e}")
     note = tool_note(given, problems).strip()
@@ -1122,6 +1125,21 @@ async def _record_skill_successes(ctx: dict) -> None:
         logger.warning(f"Brain: could not record a skill's success: {e}")
 
 
+_PICTURES = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+
+
+def file_card(name: str, caption: str = ""):
+    """A file the brain made, in its card: the caption it wrote, then the
+    file (a picture shown, anything else as a download). It stays a real
+    attachment: later calls find chat files by name."""
+    from classes import card_kit as K
+    shown = (K.Gallery((f"attachment://{name}",)) if name.lower().endswith(_PICTURES)
+             else K.FileRef(name))
+    caption = (caption or "").strip()
+    return K.CardSpec(label=f"📎 {name}", body=([K.Text(K.safe(caption))] if caption else []) + [shown],
+                      colour=K.OK)
+
+
 async def _post_files(channel, artifacts) -> list[str]:
     """Sends each file to the channel (its caption beside it) and returns
     the names actually sent. Under the channel's lock, like a reply's
@@ -1132,12 +1150,15 @@ async def _post_files(channel, artifacts) -> list[str]:
     sent = []
     if not artifacts:
         return sent
+    from classes import card
     async with get_channel_lock(channel.id):
         for artifact in artifacts:
             try:
-                await channel.send(content=(artifact.caption or "").strip()[:1900] or None,
-                                   file=discord.File(io.BytesIO(artifact.data),
-                                                     filename=artifact.name))
+                # Uploaded under a name Discord keeps as it is, which the
+                # card's attachment:// link must match exactly.
+                name = card.safe_filename(artifact.name)
+                await card.send_card(channel, file_card(name, artifact.caption),
+                                     files={name: artifact.data})
                 sent.append(artifact.name)
             except Exception as e:
                 logger.warning(f"Brain: file {artifact.name} was made but could not be sent: {e}")

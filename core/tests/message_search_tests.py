@@ -154,9 +154,9 @@ async def _search(context, **arguments):
 
 
 @pytest.fixture(autouse=True)
-def no_embeds(monkeypatch):
-    from classes.common import Common
-    monkeypatch.setattr(Common, "send_tool_discord_embed", AsyncMock())
+def no_cards(monkeypatch):
+    from classes import card
+    monkeypatch.setattr(card, "notice", AsyncMock())
 
 
 @pytest.mark.asyncio

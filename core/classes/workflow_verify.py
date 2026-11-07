@@ -71,8 +71,10 @@ PASSED = "passed"
 FAILED = "failed"
 NOT_CHECKED = "not_checked"
 
-CHECKING_TITLE = "🔍 Checking the result"
-RESEARCH_TITLE = "🔍 Checking the research"
+CHECKING_TITLE = "🔍 Checking the result · before you get it"
+RESEARCH_TITLE = "🔍 Checking the research · before it is built on"
+CHECK_BRIEFS = {CHECKING_TITLE: "Comparing the finished work with what was asked for",
+                RESEARCH_TITLE: "Making sure what the research found holds up"}
 NOT_CHECKED_NOTE = "The result could not be checked."
 FINISH_UP = ("You are at your limit. Call `submit_verdict` now, on its own, with what you have "
              "checked so far.")
@@ -247,7 +249,8 @@ async def _check(wf, label: str, title: str = CHECKING_TITLE,
     from classes.brain_progress import HelperProgress
     from classes.common import QuietChannel
 
-    progress = HelperProgress(wf.thread, title, max_turns=CHECK_TURNS)
+    progress = HelperProgress(wf.thread, title, max_turns=CHECK_TURNS,
+                              brief=CHECK_BRIEFS.get(title, ""))
     await progress.start()
     try:
         job_dir, out_dir, _marker = await prepare_job(wf.lease, _job_id(wf, label))
