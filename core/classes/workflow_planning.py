@@ -39,6 +39,7 @@ Why it works this way:
 - **What the requester writes while the plan is being written** goes into the
   next round (_take_messages), rather than costing a plan edit afterwards.
 """
+import asyncio
 import logging
 
 from classes import brain_question, brain_result, llm_lanes, workflows
@@ -139,7 +140,7 @@ async def _task(wf, change: str, problems: list, rounds: tuple) -> str:
         parts.append(learned + "\nThe helpers get this too. Their steps still do the work.")
     if wf.said:
         parts.append("The requester said while you planned:\n"
-                     + "\n".join(f"- {line}" for line in wf.said[-10:]))
+                     + "\n".join(f"- {line}" for _seq, line in wf.said[-10:]))
     if change and wf.plan is not None:
         parts.append("Your plan so far:\n" + wp.plan_text(wf.plan))
         parts.append(f"The requester asked to change it: {change}\nWrite the new plan.")
@@ -166,7 +167,7 @@ async def _take_messages(wf) -> None:
         wf.ledger.mark_presented([event.seq], 0)
         if await workflows._allowed(wf, event.text):
             wf.ledger.record_decision([event.seq], "noted", "Taken into the plan.")
-            wf.said.append(f"{event.author_name}: {event.text[:300]}")
+            wf.said.append((event.seq, f"{event.author_name}: {event.text[:300]}"))
         else:
             wf.ledger.record_decision([event.seq], "declined", "Blocked by the content guard.")
             await workflows._post(wf.thread, content="I can't act on that message.")
@@ -222,6 +223,9 @@ async def _scout(wf, number: int, subject: str) -> None:
     await progress.start()
     try:
         await _scout_work(wf, subject, ctx, job_dir, progress)
+    except asyncio.CancelledError:
+        await workflows.close_progress(progress)
+        raise
     except Exception:
         await progress.finalize(ok=False, note=f"⚠️ {workflows.HELPER_FAILED}")
         raise
@@ -233,6 +237,8 @@ async def _scout_work(wf, subject: str, ctx: dict, job_dir: str, progress) -> No
 
     parts = [f"The job being planned (a helper does it later): {wf.record['request']}",
              f"Find out: {wp.scout_question(subject)}"]
+    if workflows.asked_in(wf):
+        parts.append(workflows.asked_in(wf))
     if wf.record.get("inputs"):
         parts.append(wf.record["inputs"])
     parts.append(f"Your folder (the working directory, already open): {job_dir}/")

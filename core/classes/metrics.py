@@ -145,30 +145,20 @@ Metrics (scraped by Prometheus from the /metrics HTTP endpoint):
            How scouts ended (done / reported_at_limit / stopped).
   Counter  discord_bot_workflow_plan_questions_total{outcome}
            Questions before the plan (answered / unanswered).
+  Histogram discord_bot_workflow_tokens
+           Tokens, in and out, one workflow used.
+  Counter  discord_bot_workflow_verdicts_total{outcome}
+           Checks of finished work (passed / failed / not_checked), and
+           send-backs from one (sent_back); the research checks as
+           research_passed / _failed / _not_checked / _sent_back.
   Gauge    discord_bot_workflows_running
            Workflows running in this process.
 
-  Thread conversation (classes/workflow_conversation.py; labels are bounded
-  outcome names — never message ids, thread ids or user text):
+  Thread messages (labels are bounded outcome names, never ids or user text):
   Counter  discord_bot_workflow_thread_messages_total{outcome}
            Thread messages offered to a running workflow, by delivery result
            (accepted / duplicate / too_long / full / attachment_only /
            finishing / ...).
-  Histogram discord_bot_workflow_input_presentation_seconds
-           Receipt of a thread message to its first completed model call.
-  Histogram discord_bot_workflow_input_response_seconds
-           Receipt of a thread message to the model's respond_to_updates.
-  Counter  discord_bot_workflow_stale_actions_blocked_total
-           Tool calls refused because thread input was still unanswered.
-  Counter  discord_bot_workflow_questions_total{mode,outcome}
-           ask_user questions by mode (blocking/optional) and outcome
-           (posted / replied / timeout / send_failed).
-  Counter  discord_bot_workflow_unresolved_input_total{status}
-           Messages still unresolved when a run ended, by status
-           (accepted / unacknowledged / unseen / late).
-  Counter  discord_bot_workflow_continuations_total
-           Extra runner passes started because a run tried to finish with
-           thread input unanswered (or outdated files attached).
 
   Server workspace (classes/workspace_manager.py):
   Counter  discord_bot_workspace_starts_total{kind}
@@ -532,48 +522,10 @@ web_fetch_failures_total = Counter(
     ["reason"],
 )
 
-# Receipt -> presentation is bounded by one model call plus any running
-# command's checkpoint; receipt -> response adds the model's own turn.
-WORKFLOW_INPUT_BUCKETS = (1, 2.5, 5, 10, 20, 30, 60, 120, 300, 600)
-
 workflow_thread_messages_total = Counter(
     "discord_bot_workflow_thread_messages_total",
     "Thread messages offered to a running workflow, by delivery result",
     ["outcome"],
-)
-
-workflow_input_presentation_seconds = Histogram(
-    "discord_bot_workflow_input_presentation_seconds",
-    "Seconds from receiving a thread message to its first completed model call",
-    buckets=WORKFLOW_INPUT_BUCKETS,
-)
-
-workflow_input_response_seconds = Histogram(
-    "discord_bot_workflow_input_response_seconds",
-    "Seconds from receiving a thread message to the workflow's model responding to it",
-    buckets=WORKFLOW_INPUT_BUCKETS,
-)
-
-workflow_stale_actions_blocked_total = Counter(
-    "discord_bot_workflow_stale_actions_blocked_total",
-    "Workflow tool calls refused because thread input was still unanswered",
-)
-
-workflow_questions_total = Counter(
-    "discord_bot_workflow_questions_total",
-    "Questions asked in a workflow's thread, by mode and outcome",
-    ["mode", "outcome"],
-)
-
-workflow_unresolved_input_total = Counter(
-    "discord_bot_workflow_unresolved_input_total",
-    "Thread messages still unresolved when a workflow ended, by status",
-    ["status"],
-)
-
-workflow_continuations_total = Counter(
-    "discord_bot_workflow_continuations_total",
-    "Extra workflow runner passes started to account for thread input",
 )
 
 # The server workspace (classes/workspace_manager.py).
@@ -813,30 +765,6 @@ def inc_workflow_thread_message(outcome: str) -> None:
     workflow_thread_messages_total.labels(outcome=str(outcome)).inc()
 
 
-def observe_workflow_input_presentation(seconds: float) -> None:
-    workflow_input_presentation_seconds.observe(max(0.0, seconds))
-
-
-def observe_workflow_input_response(seconds: float) -> None:
-    workflow_input_response_seconds.observe(max(0.0, seconds))
-
-
-def inc_workflow_stale_action_blocked() -> None:
-    workflow_stale_actions_blocked_total.inc()
-
-
-def inc_workflow_question(mode: str, outcome: str) -> None:
-    workflow_questions_total.labels(mode=str(mode), outcome=str(outcome)).inc()
-
-
-def inc_workflow_unresolved_input(status: str) -> None:
-    workflow_unresolved_input_total.labels(status=str(status)).inc()
-
-
-def inc_workflow_continuation() -> None:
-    workflow_continuations_total.inc()
-
-
 workflows_total = Counter(
     "discord_bot_workflows_total",
     "Tier 3 workflows ended, by trigger and end state", ["trigger", "end_state"])
@@ -849,6 +777,12 @@ workflow_subagents = Histogram(
 workflow_turns = Histogram(
     "discord_bot_workflow_turns", "Model turns per workflow, every agent together",
     buckets=(5, 10, 25, 50, 100, 200, 350, 500))
+workflow_tokens = Histogram(
+    "discord_bot_workflow_tokens", "Tokens, in and out, per workflow, every agent together",
+    buckets=(10_000, 50_000, 100_000, 500_000, 1_000_000, 2_000_000, 5_000_000, 10_000_000,
+             20_000_000, 50_000_000))
+workflow_verdicts_total = Counter(
+    "discord_bot_workflow_verdicts_total", "Checks of finished workflow work", ["outcome"])
 workflow_plan_approval_total = Counter(
     "discord_bot_workflow_plan_approval_total", "How workflow plans were approved", ["outcome"])
 workflow_scouts_total = Counter(
@@ -860,15 +794,20 @@ workflows_running_gauge = Gauge("discord_bot_workflows_running", "Workflows runn
 
 
 def observe_workflow(trigger: str, end_state: str, seconds: float, subagents: int,
-                     turns: int) -> None:
+                     turns: int, tokens: int = 0) -> None:
     workflows_total.labels(trigger=str(trigger), end_state=str(end_state)).inc()
     workflow_seconds.labels(end_state=str(end_state)).observe(max(0.0, seconds))
     workflow_subagents.observe(max(0, subagents))
     workflow_turns.observe(max(0, turns))
+    workflow_tokens.observe(max(0, tokens))
 
 
 def inc_workflow_plan_approval(outcome: str) -> None:
     workflow_plan_approval_total.labels(outcome=str(outcome)).inc()
+
+
+def inc_workflow_verdict(outcome: str) -> None:
+    workflow_verdicts_total.labels(outcome=str(outcome)).inc()
 
 
 def inc_workflow_scout(outcome: str) -> None:

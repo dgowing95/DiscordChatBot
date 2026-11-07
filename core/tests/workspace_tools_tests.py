@@ -20,16 +20,6 @@ import classes.workspace_tools as prod_sandbox_agent
 import classes.tool_functions as prod_tool_functions
 
 
-@pytest.fixture(autouse=True)
-def _no_conversation_record_redis():
-    """No test here should reach a real Redis for a thread's conversation
-    record."""
-    store = MagicMock(load=AsyncMock(return_value=None), save=AsyncMock())
-    with patch("classes.workflow_conversation_store.SandboxConversationStore",
-               return_value=store):
-        yield store
-
-
 # ---------------------- sandbox LLM (model / host / api key) ----------------------
 
 def _clear_llm_env(monkeypatch):
@@ -341,8 +331,6 @@ async def test_collect_artifacts_skip_notes_handle_filenames_with_spaces():
 # ---------------------- tool registration in the LLM agent ----------------------
 
 
-# ---------------------- run_code_sandbox tool behaviour ----------------------
-
 
 _EMBED_PARAMS = ("channel", "description", "color", "title", "footer")
 
@@ -497,89 +485,6 @@ def test_thread_name_falls_back_when_task_empty():
     assert prod_sandbox_agent._thread_name("") == "🧵 Workflow"
 
 
-# ---------------------- ask_user / thread_ask_timeout ----------------------
-
-def test_ask_user_timeout_default(monkeypatch):
-    monkeypatch.delenv("WORKFLOW_ASK_TIMEOUT", raising=False)
-    assert sandbox_agent.thread_ask_timeout() == 300
-
-
-def test_ask_user_timeout_override(monkeypatch):
-    monkeypatch.setenv("WORKFLOW_ASK_TIMEOUT", "45")
-    assert sandbox_agent.thread_ask_timeout() == 45
-
-
-def _ask_user_ctx(**overrides):
-    from agents.tool_context import ToolContext
-    ctx = {
-        "thread": _thread_mock(),
-        "requesting_user_id": 42,
-        "conversation": MagicMock(ask=AsyncMock(return_value="asked")),
-    }
-    ctx.update(overrides)
-    return ToolContext(
-        context=ctx,
-        tool_name="ask_in_thread",
-        tool_call_id="a1",
-        tool_arguments=json.dumps({"question": "png or jpg?"}),
-    )
-
-
-@pytest.mark.asyncio
-async def test_ask_user_hands_the_question_to_the_conversation():
-    ctx = _ask_user_ctx()
-    result = await prod_sandbox_agent.ask_in_thread.on_invoke_tool(
-        ctx, json.dumps({"question": "png or jpg?", "blocking": False,
-                         "choices": ["png", "jpg"], "default": "png"}))
-
-    ask = ctx.context["conversation"].ask
-    assert result == "asked"
-    assert ask.await_args.args[0] == "png or jpg?"
-    assert ask.await_args.kwargs["blocking"] is False
-    assert ask.await_args.kwargs["choices"] == ["png", "jpg"]
-    assert ask.await_args.kwargs["default"] == "png"
-
-
-@pytest.mark.asyncio
-async def test_ask_user_blocks_by_default():
-    ctx = _ask_user_ctx()
-    await prod_sandbox_agent.ask_in_thread.on_invoke_tool(ctx, json.dumps({"question": "q"}))
-    assert ctx.context["conversation"].ask.await_args.kwargs["blocking"] is True
-
-
-@pytest.mark.asyncio
-async def test_ask_user_without_thread_context_tells_model_to_proceed():
-    # No thread available at all (the no-thread fallback) must degrade
-    # gracefully, never raise.
-    ctx = _ask_user_ctx(thread=None, conversation=None)
-    result = await prod_sandbox_agent.ask_in_thread.on_invoke_tool(ctx, json.dumps({"question": "q"}))
-    assert "proceed using your best judgement" in result.lower()
-
-
-@pytest.mark.asyncio
-async def test_ask_user_uses_full_timeout_without_a_deadline(monkeypatch):
-    monkeypatch.setenv("WORKFLOW_ASK_TIMEOUT", "45")
-    ctx = _ask_user_ctx(deadline=None)
-
-    await prod_sandbox_agent.ask_in_thread.on_invoke_tool(ctx, json.dumps({"question": "q"}))
-
-    assert ctx.context["conversation"].ask.await_args.kwargs["timeout"] == 45.0
-
-
-# ---------------------- send_preview_to_thread ----------------------
-
-def _preview_ctx(**overrides):
-    from agents.tool_context import ToolContext
-    ctx = {"thread": _thread_mock(), "session": MagicMock()}
-    ctx.update(overrides)
-    return ToolContext(
-        context=ctx,
-        tool_name="send_preview_to_thread",
-        tool_call_id="p1",
-        tool_arguments=json.dumps({"path": "out/plot.png"}),
-    )
-
-
 def _attach_ctx(**overrides):
     from agents.tool_context import ToolContext
     ctx = {"thread": _thread_mock(), "session": MagicMock(), "deliverables": []}
@@ -607,7 +512,7 @@ async def test_attach_file_records_the_file_for_delivery():
     result = await _attach(ctx, path="out/plot.png", caption="the final one")
 
     assert ctx.context["deliverables"] == [
-        {"path": "out/plot.png", "size": 512, "caption": "the final one", "change_revision": 0}
+        {"path": "out/plot.png", "size": 512, "caption": "the final one"}
     ]
     assert "plot.png" in result
     session.exec.assert_awaited_once_with(
@@ -625,7 +530,7 @@ async def test_attach_file_replaces_an_earlier_version_of_the_same_path():
     result = await _attach(ctx, path="out/plot.png", caption="fixed")
 
     assert ctx.context["deliverables"] == [
-        {"path": "out/plot.png", "size": 20, "caption": "fixed", "change_revision": 0}
+        {"path": "out/plot.png", "size": 20, "caption": "fixed"}
     ]
     assert "Replaced" in result
 
@@ -680,72 +585,6 @@ async def test_attach_file_refuses_past_the_file_cap():
 
 
 @pytest.mark.asyncio
-async def test_send_preview_to_thread_sends_the_file():
-    thread = _thread_mock()
-    thread.send = AsyncMock()
-    session = MagicMock()
-    session.exec = AsyncMock(return_value=_exec_result(b"PNGDATA"))
-    ctx = _preview_ctx(thread=thread, session=session)
-
-    result = await prod_sandbox_agent.send_preview_to_thread.on_invoke_tool(
-        ctx, json.dumps({"path": "out/plot.png", "caption": "in progress"})
-    )
-
-    thread.send.assert_awaited_once()
-    _, kwargs = thread.send.await_args
-    # basename, not the flattened out_plot.png: the agent named this file
-    # itself, so it should arrive under the name it used (_attachment_name).
-    assert kwargs["file"].filename == "plot.png"
-    assert kwargs["content"] == "in progress"
-    assert "sent" in result.lower()
-
-
-@pytest.mark.asyncio
-async def test_send_preview_to_thread_rejects_absolute_path():
-    ctx = _preview_ctx()
-    result = await prod_sandbox_agent.send_preview_to_thread.on_invoke_tool(
-        ctx, json.dumps({"path": "/etc/passwd"})
-    )
-    assert "relative" in result.lower()
-
-
-@pytest.mark.asyncio
-async def test_send_preview_to_thread_reports_read_failure():
-    session = MagicMock()
-    session.exec = AsyncMock(return_value=_exec_result(b"", ok=False))
-    ctx = _preview_ctx(session=session)
-    result = await prod_sandbox_agent.send_preview_to_thread.on_invoke_tool(
-        ctx, json.dumps({"path": "out/missing.png"})
-    )
-    assert "could not read" in result.lower()
-
-
-@pytest.mark.asyncio
-async def test_send_preview_to_thread_enforces_size_cap():
-    session = MagicMock()
-    huge = b"x" * (sandbox_agent.MAX_ARTIFACT_BYTES + 1)
-    session.exec = AsyncMock(return_value=_exec_result(huge))
-    ctx = _preview_ctx(session=session)
-    result = await prod_sandbox_agent.send_preview_to_thread.on_invoke_tool(
-        ctx, json.dumps({"path": "out/huge.bin"})
-    )
-    assert "too large" in result.lower()
-
-
-@pytest.mark.asyncio
-async def test_send_preview_to_thread_checks_the_size_before_reading():
-    session = MagicMock()
-    size = str(sandbox_agent.MAX_ARTIFACT_BYTES + 1).encode()
-    session.exec = AsyncMock(return_value=_exec_result(size))
-    ctx = _preview_ctx(session=session)
-    result = await prod_sandbox_agent.send_preview_to_thread.on_invoke_tool(
-        ctx, json.dumps({"path": "out/huge.bin"})
-    )
-    assert "too large" in result.lower()
-    assert session.exec.await_count == 1  # stat only: the file is never read
-
-
-@pytest.mark.asyncio
 async def test_a_file_that_grew_after_it_was_attached_is_not_read_or_sent():
     session = MagicMock()
     big = str(sandbox_agent.MAX_ARTIFACT_BYTES + 1).encode()
@@ -784,19 +623,8 @@ async def test_removing_every_attachment_sends_nothing_rather_than_sweeping():
         assert (await prod_sandbox_agent._deliver(session, [], "/w/out", None))[0] == ["swept"]
 
 
-@pytest.mark.asyncio
-async def test_send_preview_to_thread_without_context_is_graceful():
-    ctx = _preview_ctx(thread=None, session=None)
-    result = await prod_sandbox_agent.send_preview_to_thread.on_invoke_tool(
-        ctx, json.dumps({"path": "out/plot.png"})
-    )
-    assert "no thread" in result.lower()
-
-
 # ---------------------- the brain's call timeout ----------------------
 
-
-# ---------------------- run_code_sandbox tool: thread wiring ----------------------
 
 
 # ---------------------- workspace origin: fresh vs resumed ----------------------
@@ -808,184 +636,10 @@ async def test_send_preview_to_thread_without_context_is_graceful():
 # ---------------------- unrestorable snapshot recovery ----------------------
 
 
-# ---------------------- shell tools: gate and checkpoints ----------------------
-# Thread messages no longer ride on shell output (one delivery path: the
-# model input filter — see workflow_conversation_tests). What the shell
-# wrappers own now is refusing a NEW command while input is unanswered, and
-# yielding a long command early when someone posts.
-
-def _gate_conversation(thread_id=7):
-    from classes import thread_inbox as inbox
-    ledger = inbox.RunLedger(thread_id=thread_id, requester_id=1)
-    return prod_sandbox_agent.SandboxConversation(ledger, _thread_mock(thread_id=thread_id))
-
-
-@pytest.mark.asyncio
-async def test_a_new_command_is_refused_while_a_message_is_unanswered():
-    conv = _gate_conversation()
-    conv.ledger.deliver(1, 1, "ana", "make it blue")
-    conv.ledger.mark_presented([1], anchor=1)
-    exec_tool = MagicMock()
-    inner = AsyncMock(return_value="exit 0")
-    exec_tool.on_invoke_tool = inner
-    toolset = MagicMock(exec_command=exec_tool, write_stdin=None)
-    prod_sandbox_agent._configure_shell_tools(toolset)
-
-    out = await exec_tool.on_invoke_tool(MagicMock(context={"conversation": conv}), '{"cmd": "ls"}')
-
-    inner.assert_not_awaited()
-    assert "Not run" in out and "#1" in out
-
-
-@pytest.mark.asyncio
-async def test_write_stdin_is_never_gated():
-    # Observing or stopping a running command is what the model may need to
-    # do while it reviews new input, so only NEW work is held back.
-    conv = _gate_conversation()
-    conv.ledger.deliver(1, 1, "ana", "make it blue")
-    conv.ledger.mark_presented([1], anchor=1)
-    exec_tool, stdin_tool = MagicMock(), MagicMock()
-    exec_tool.on_invoke_tool = AsyncMock(return_value="exit 0")
-    stdin_tool.on_invoke_tool = AsyncMock(return_value="polled")
-    toolset = MagicMock(exec_command=exec_tool, write_stdin=stdin_tool)
-    prod_sandbox_agent._configure_shell_tools(toolset)
-
-    out = await stdin_tool.on_invoke_tool(
-        MagicMock(context={"conversation": conv}), '{"session_id": 3}')
-
-    assert out == "polled"
-
-
-@pytest.mark.asyncio
-async def test_a_rejected_tool_call_is_still_tolerated_under_the_gate():
-    from pydantic import BaseModel, ValidationError
-
-    class _Args(BaseModel):
-        cmd: str
-
-    try:
-        _Args.model_validate_json("{}")
-    except ValidationError as e:
-        err = e
-    exec_tool = MagicMock()
-    exec_tool.on_invoke_tool = AsyncMock(side_effect=err)
-    toolset = MagicMock(exec_command=exec_tool, write_stdin=None)
-    prod_sandbox_agent._configure_shell_tools(toolset)
-
-    out = await exec_tool.on_invoke_tool(
-        MagicMock(context={"conversation": _gate_conversation()}), "{}")
-
-    assert "Tool call rejected" in out
-
-
-def _running(session_id=5, output="partial"):
-    return (f"Chunk ID: x\nWall time: 5.0 seconds\nProcess running with session ID "
-            f"{session_id}\nOutput:\n{output}")
-
-
-@pytest.mark.asyncio
-async def test_a_long_command_is_waited_on_in_checkpoint_slices(monkeypatch):
-    monkeypatch.setattr(prod_sandbox_agent, "SHELL_CHECKPOINT_SECONDS", 0.05)
-    conv = _gate_conversation()
-    exec_invoke = AsyncMock(return_value=_running())
-    polls = iter([_running(output="more"), "Chunk ID: y\nProcess exited with code 0\nOutput:\ndone"])
-    poll_invoke = AsyncMock(side_effect=lambda ctx, raw: next(polls))
-    wrapped = prod_sandbox_agent._with_shell_checkpoints(exec_invoke, poll_invoke)
-
-    out = await wrapped(MagicMock(context={"conversation": conv}),
-                        json.dumps({"cmd": "pip install x", "yield_time_ms": 60_000}))
-
-    # the first slice is clamped to the checkpoint, the rest are polls
-    assert json.loads(exec_invoke.await_args.args[1])["yield_time_ms"] == 50
-    assert poll_invoke.await_count == 2
-    assert json.loads(poll_invoke.await_args.args[1])["session_id"] == 5
-    # merged into ONE SDK-shaped result: the last slice's status, all output
-    from classes.brain_progress import parse_exec_result
-    parsed = parse_exec_result(out)
-    assert parsed == {"output": "partialmoredone", "exit_code": 0, "process_id": None}
-
-
-@pytest.mark.asyncio
-async def test_a_long_command_hands_back_early_when_someone_posts(monkeypatch):
-    monkeypatch.setattr(prod_sandbox_agent, "SHELL_CHECKPOINT_SECONDS", 0.05)
-    conv = _gate_conversation()
-    conv.ledger.state = "running"
-    exec_invoke = AsyncMock(return_value=_running())
-
-    async def _poll(ctx, raw):
-        conv.ledger.deliver(9, 1, "ana", "stop, use the other dataset")
-        return _running(output="still going")
-
-    poll_invoke = AsyncMock(side_effect=_poll)
-    wrapped = prod_sandbox_agent._with_shell_checkpoints(exec_invoke, poll_invoke)
-
-    out = await wrapped(MagicMock(context={"conversation": conv}),
-                        json.dumps({"cmd": "make", "yield_time_ms": 600_000}))
-
-    assert poll_invoke.await_count == 1
-    assert "still running as session 5" in out
-
-
-@pytest.mark.asyncio
-async def test_a_short_command_is_not_sliced():
-    exec_invoke = AsyncMock(return_value="exit 0")
-    poll_invoke = AsyncMock()
-    wrapped = prod_sandbox_agent._with_shell_checkpoints(exec_invoke, poll_invoke)
-
-    raw = json.dumps({"cmd": "ls", "yield_time_ms": 2000})
-    out = await wrapped(MagicMock(context={"conversation": _gate_conversation()}), raw)
-
-    assert out == "exit 0"
-    exec_invoke.assert_awaited_once()
-    assert exec_invoke.await_args.args[1] == raw
-    poll_invoke.assert_not_awaited()
-
-
-# ---------------------- say_in_thread ----------------------
-
 def _nested_tool_context(context):
     from agents.tool_context import ToolContext
     return ToolContext(context=context, tool_name="t", tool_call_id="t1", tool_arguments="{}")
 
-
-@pytest.mark.asyncio
-async def test_say_in_thread_posts_and_returns_immediately():
-    thread = _thread_mock(thread_id=7)
-    thread.send = AsyncMock()
-    out = await prod_sandbox_agent.say_in_thread.on_invoke_tool(
-        _nested_tool_context({"thread": thread}), json.dumps({"text": "trying another way"}))
-    thread.send.assert_awaited_once()
-    assert "trying another way" in thread.send.await_args.args[0]
-    assert "Posted" in out
-
-
-@pytest.mark.asyncio
-async def test_say_in_thread_reports_a_send_failure_without_raising():
-    thread = _thread_mock(thread_id=7)
-    thread.send = AsyncMock(side_effect=RuntimeError("no perms"))
-    out = await prod_sandbox_agent.say_in_thread.on_invoke_tool(
-        _nested_tool_context({"thread": thread}), json.dumps({"text": "hello"}))
-    assert "Could not post" in out
-
-
-@pytest.mark.asyncio
-async def test_say_in_thread_rejects_an_empty_message():
-    thread = _thread_mock(thread_id=7)
-    thread.send = AsyncMock()
-    out = await prod_sandbox_agent.say_in_thread.on_invoke_tool(
-        _nested_tool_context({"thread": thread}), json.dumps({"text": "   "}))
-    thread.send.assert_not_awaited()
-    assert "empty" in out
-
-
-@pytest.mark.asyncio
-async def test_say_in_thread_degrades_without_a_thread():
-    out = await prod_sandbox_agent.say_in_thread.on_invoke_tool(
-        _nested_tool_context({}), json.dumps({"text": "hello"}))
-    assert "No thread" in out
-
-
-# ---------------------- run_code_sandbox: origin badge & thread routing ----------------------
 
 def _warm(warm, calls=None):
     """Patches the server workspaces so is_warm answers `warm` (calls, when
@@ -999,10 +653,6 @@ def _warm(warm, calls=None):
     return patch("classes.workspace_manager.workspaces", return_value=fake)
 
 
-# ---------------------- run_code_sandbox: one run per thread ----------------------
-
-
-# ---------------------- run_code_sandbox: resume-mismatch correction ----------------------
 
 
 # ---------------------- closing note ----------------------
@@ -1044,19 +694,6 @@ async def test_ensure_work_thread_reuses_a_thread_already_started_off_the_messag
 # and collided with the follow-up preamble's "run `ls -R .` first". We measure
 # it and tell the model the answer instead, on the same carrier as thread
 # messages and for the same reason.
-
-
-def test_run_config_carries_the_input_filter_and_one_group_id():
-    # One group id for every pass of a run: Memory files each Runner.run
-    # under it, so a fresh id per continuation would cost an extra
-    # extraction call at teardown.
-    def _filter(data):
-        return data
-
-    config = prod_sandbox_agent.build_sandbox_run_config(
-        MagicMock(), MagicMock(), input_filter=_filter, group_id="sandbox-abc")
-    assert config.call_model_input_filter is _filter
-    assert config.group_id == "sandbox-abc"
 
 
 # ------------- the main agent's shared tools, in the sandbox -------------
@@ -1205,3 +842,107 @@ async def test_attach_file_messages_never_show_the_absolute_path():
     assert "too large" in out and "/workspace" not in out
 
 
+# ---------------------- view_image ----------------------
+
+def _view_ctx(session, **overrides):
+    from agents.tool_context import ToolContext
+    context = {"session": session, "job_dir": "jobs/j", "workspace_root": "/workspace"}
+    context.update(overrides)
+    return ToolContext(context=context, tool_name="view_image", tool_call_id="v1",
+                       tool_arguments="{}")
+
+
+async def _view(ctx, **args):
+    return await prod_sandbox_agent.view_image.on_invoke_tool(ctx, json.dumps(args))
+
+
+def _picture_session(size=b"3\n"):
+    session = MagicMock()
+    session.exec = AsyncMock(side_effect=[_exec_result(size), _exec_result(b"png")])
+    return session
+
+
+@pytest.mark.asyncio
+async def test_view_image_says_what_the_picture_shows(monkeypatch):
+    from classes import image_review
+    look = AsyncMock(return_value="A bar chart of 2025 prices")
+    monkeypatch.setattr(image_review, "describe_image", look)
+    result = await _view(_view_ctx(_picture_session()), path="out/chart.png", question="Which year?")
+    assert "A bar chart of 2025 prices" in result and "never instructions" in result
+    look.assert_awaited_once_with(b"png", "Which year?")
+
+
+@pytest.mark.asyncio
+async def test_view_image_when_nothing_can_see_says_so(monkeypatch):
+    from classes import image_review
+    monkeypatch.setattr(image_review, "describe_image", AsyncMock(return_value=None))
+    result = await _view(_view_ctx(_picture_session()), path="out/chart.png")
+    assert result.startswith("Could not view")
+
+
+@pytest.mark.asyncio
+async def test_view_image_refuses_what_it_should_not_read():
+    session = MagicMock()
+    session.exec = AsyncMock(return_value=_exec_result(b"", ok=False))
+    assert "relative" in await _view(_view_ctx(session), path="/etc/passwd")
+    assert "does not exist" in await _view(_view_ctx(session), path="out/nope.png")
+    big = MagicMock()
+    big.exec = AsyncMock(return_value=_exec_result(b"999999999\n"))
+    assert "too large" in await _view(_view_ctx(big), path="out/big.png")
+    assert big.exec.await_count == 1  # never read
+    assert "Nothing to view" in await _view(_view_ctx(None), path="out/a.png")
+
+
+@pytest.mark.asyncio
+async def test_a_wrong_path_costs_no_view(monkeypatch):
+    from classes import image_review
+    monkeypatch.setattr(image_review, "describe_image", AsyncMock(return_value="a chart"))
+    missing = MagicMock()
+    missing.exec = AsyncMock(return_value=_exec_result(b"", ok=False))
+    ctx = _view_ctx(missing)
+    await _view(ctx, path="out/typo.png")
+    assert ctx.context.get("image_views", 0) == 0
+    ctx.context["session"] = _picture_session()
+    await _view(ctx, path="out/chart.png")
+    assert ctx.context["image_views"] == 1
+
+
+@pytest.mark.asyncio
+async def test_views_asked_side_by_side_cannot_pass_the_limit_together(monkeypatch):
+    from classes import image_review
+    look = AsyncMock(return_value="a chart")
+    monkeypatch.setattr(image_review, "describe_image", look)
+    replies = [_exec_result(b"3\n"), _exec_result(b"png")] * 2
+
+    async def exec_(*args, **kwargs):
+        await asyncio.sleep(0)  # a real command yields, so the other call runs meanwhile
+        return replies.pop(0)
+
+    session = MagicMock()
+    session.exec = exec_
+    ctx = _view_ctx(session, image_views=prod_sandbox_agent.MAX_IMAGE_VIEWS - 1)
+    # One turn's tool calls run at once (the SDK gathers them).
+    answers = await asyncio.gather(_view(ctx, path="out/a.png"), _view(ctx, path="out/b.png"))
+    assert look.await_count == 1
+    assert sum("the limit" in answer for answer in answers) == 1
+    assert ctx.context["image_views"] == prod_sandbox_agent.MAX_IMAGE_VIEWS
+
+
+@pytest.mark.asyncio
+async def test_a_blocked_request_cannot_read_the_workspace_through_view_image(monkeypatch):
+    from classes import brain, image_review
+    look = AsyncMock(return_value="the secret file")
+    monkeypatch.setattr(image_review, "describe_image", look)
+    brain._guard_workspace_tools()
+    blocked = asyncio.get_running_loop().create_future()
+    blocked.set_result((False, "flagged"))
+    ctx = _view_ctx(_picture_session(), brain_request="something bad", brain_guard=blocked)
+    assert await _view(ctx, path="out/chart.png") == brain.GUARD_REFUSAL
+    look.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_view_image_has_a_limit_per_run():
+    session = MagicMock()
+    ctx = _view_ctx(session, image_views=prod_sandbox_agent.MAX_IMAGE_VIEWS)
+    assert "the limit" in await _view(ctx, path="out/a.png")

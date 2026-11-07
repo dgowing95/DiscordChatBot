@@ -21,7 +21,8 @@ from classes.brain_progress import (
     parse_exec_result,
 )
 from classes.tool_embeds import (
-    BRAIN_DONE, BRAIN_STOPPED, BRAIN_WORKING, COLOR_BRAIN, COLOR_DONE, COLOR_STOPPED, work_task_text,
+    BRAIN_DONE, BRAIN_NOT_FINISHED, BRAIN_STOPPED, BRAIN_WORKING, COLOR_BRAIN, COLOR_DONE,
+    COLOR_STOPPED, work_task_text,
 )
 
 # To run this pytest file from the command line, use:
@@ -359,6 +360,16 @@ async def test_a_stopped_call_is_titled_and_coloured_as_stopped():
 
 
 @pytest.mark.asyncio
+async def test_a_helper_nothing_stopped_is_not_called_stopped():
+    channel, message = _channel_with_message()
+    hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
+    await _begin(hooks)
+    await hooks.finalize(ok=False, stopped=False)
+    _, embed = _last_flush(message)
+    assert embed.title == BRAIN_NOT_FINISHED
+
+
+@pytest.mark.asyncio
 async def test_tool_start_end_stream_command_and_output():
     channel, message = _channel_with_message()
     hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
@@ -585,57 +596,8 @@ def test_the_footer_counts_against_the_embed_budget():
     assert _embed_chars(spec) <= 6000
 
 
-@pytest.mark.asyncio
-async def test_a_command_the_gate_refused_is_shown_as_held_not_running():
-    # A refused command never ran; left as-is it would sit in the embed as
-    # "… still running" with the running colour until the run ended.
-    channel, message = _channel_with_message()
-    hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
-    await _begin(hooks)
-
-    args = _ctx(json.dumps({"cmd": "make red.png"}))
-    await hooks.on_tool_start(args, None, _tool("exec_command"))
-    await hooks.on_tool_end(args, None, _tool("exec_command"),
-                            "Not run (exec_command): thread message(s) #1 need a response first.")
-
-    _, embed = _last_flush(message)
-    assert "not run" in embed.fields[0].value
-    assert "still running" not in embed.fields[0].value
-    assert embed.color.value == COLOR_TOOL
-
-
 def _call_ctx(call_id: str, cmd: str):
     ctx = _ctx(json.dumps({"cmd": cmd}))
     ctx.tool_call_id = call_id
     return ctx
 
-
-@pytest.mark.asyncio
-async def test_a_refusal_marks_its_own_command_not_the_latest_one():
-    # One response's tool calls start concurrently: A and B both start, B
-    # runs and finishes, then A is refused. The finished B must keep its
-    # exit code and A must show as held.
-    channel, message = _channel_with_message()
-    hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
-    await _begin(hooks)
-    a, b = _call_ctx("ca", "make a"), _call_ctx("cb", "make b")
-    await hooks.on_tool_start(a, None, _tool("exec_command"))
-    await hooks.on_tool_start(b, None, _tool("exec_command"))
-    await hooks.on_tool_end(b, None, _tool("exec_command"),
-                            "Chunk ID: x\nProcess exited with code 0\nOutput:\nbuilt b")
-    await hooks.on_tool_end(a, None, _tool("exec_command"),
-                            "Not run (exec_command): thread message(s) #1 need a response first.")
-
-    _, embed = _last_flush(message)
-    field_a, field_b = embed.fields
-    assert "not run" in field_a.value and "still running" not in field_a.value
-    assert "exit 0" in field_b.value and "built b" in field_b.value
-    assert "not run" not in field_b.value
-
-
-def test_a_block_that_ran_is_never_marked_held():
-    t = SandboxTranscript("t")
-    block = t.add_command("ls")
-    t.add_output("out", exit_code=0, block=block)
-    t.mark_held(block)
-    assert block.held is False

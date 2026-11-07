@@ -26,7 +26,8 @@ DEFAULT_PLAN_APPROVAL_SECONDS = 900
 DEFAULT_PLAN_REVISIONS = 3
 DEFAULT_MAX_STEPS = 8
 DEFAULT_TIMEOUT_SECONDS = 3600
-DEFAULT_MAX_TURNS = 250
+DEFAULT_MAX_TURNS = 300
+DEFAULT_MAX_TOKENS = 0        # off
 DEFAULT_MAX_PER_GUILD = 1
 DEFAULT_SUBAGENT_MAX_TURNS = 100
 DEFAULT_SUBAGENT_MAX_CONCURRENT = 2
@@ -44,6 +45,14 @@ SCOUT_FACT_CHARS = 400        # uncut they ran about 350 live, and 240 cut 27 of
 MAX_SUBJECT_CHARS = 120
 MAX_FINDINGS_CHARS = 2700      # room for two scouts' whole findings, so nothing is cut twice
 MAX_PLAN_QUESTIONS = 3
+
+# Turns kept from the helpers for the check and the final report. A job set
+# to few turns keeps a fifth instead, so its helpers can still work.
+TURN_RESERVE = 40
+
+# What one check of the finished work may say (classes/workflow_verify.py).
+MAX_CHECKS = 12
+MAX_CHECK_NOTE_CHARS = 300
 
 
 def _env_int(name: str, default: int, env) -> int:
@@ -104,8 +113,19 @@ def timeout(env=os.environ) -> int:
 
 def max_turns(env=os.environ) -> int:
     """Model turns across every agent of one workflow (WORKFLOW_MAX_TURNS,
-    default 250)."""
+    default 300)."""
     return _env_int("WORKFLOW_MAX_TURNS", DEFAULT_MAX_TURNS, env)
+
+
+def turn_reserve(env=os.environ) -> int:
+    """The turns helpers leave for the check and the final report."""
+    return min(TURN_RESERVE, max_turns(env) // 5)
+
+
+def max_tokens(env=os.environ) -> int:
+    """Tokens, in and out, across every agent of one workflow
+    (WORKFLOW_MAX_TOKENS). 0 is off, the default."""
+    return _env_int("WORKFLOW_MAX_TOKENS", DEFAULT_MAX_TOKENS, env)
 
 
 def max_per_guild(env=os.environ) -> int:
@@ -137,6 +157,7 @@ IMPLEMENTER = "implementer"
 ROLES = (RESEARCHER, IMPLEMENTER)
 # Runs before the plan, so it is never a step's role.
 SCOUT = "scout"
+VERIFIER = "verifier"
 # Loose role names a small model writes, mapped onto ROLES.
 _ROLE_ALIASES = {
     "research": RESEARCHER, "researcher": RESEARCHER, "reader": RESEARCHER,
@@ -186,6 +207,18 @@ def clean_step_id(value) -> str:
     return re.sub(r"[^A-Za-z0-9_-]+", "-", text)[:20].strip("-")
 
 
+# The folders beside a step's that are not a step's: scouts' (d1), the end
+# checks' (v1) and the research checks' (r1). A step named so would share one.
+_OTHER_FOLDERS = re.compile(r"[dvr]\d+", re.IGNORECASE)
+
+
+def plan_step_id(value) -> str:
+    """A plan's step id: clean_step_id, and never one of _OTHER_FOLDERS
+    ("d1" becomes "sd1"). Its depends_on entries go through here too."""
+    step_id = clean_step_id(value)
+    return f"s{step_id}" if _OTHER_FOLDERS.fullmatch(step_id) else step_id
+
+
 def _list(value) -> list:
     if value is None:
         return []
@@ -215,7 +248,7 @@ def validate_plan(raw, *, max_steps: int, request: str = "") -> tuple["Plan | No
         if not isinstance(item, dict):
             problems.append(f"Step {index} is not an object.")
             continue
-        step_id = clean_step_id(item.get("id")) or f"s{index}"
+        step_id = plan_step_id(item.get("id")) or f"s{index}"
         if any(s.id == step_id for s in steps):
             problems.append(f"Two steps have the id {step_id}.")
             continue
@@ -230,8 +263,8 @@ def validate_plan(raw, *, max_steps: int, request: str = "") -> tuple["Plan | No
             continue
         depends = []
         for dep in _list(item.get("depends_on")):
-            if clean_step_id(dep):
-                depends.append(clean_step_id(dep))
+            if plan_step_id(dep):
+                depends.append(plan_step_id(dep))
             elif str(dep or "").strip():  # a blank entry is no dependency at all
                 problems.append(f"Step {step_id} depends on {str(dep)[:40]!r}, which is not a "
                                 "usable step id.")
@@ -337,6 +370,86 @@ def findings_text(findings: list[str]) -> str:
     return "\n".join(line if len(line) <= share else line[: share - 1] + "…" for line in lines)
 
 
+def clean_verdict(raw) -> dict | None:
+    """A verifier's submit_verdict arguments as {"checks": [{"deliverable",
+    "ok", "note"}], "redo_step"}. None when nothing was really checked: that
+    is "not checked", never a pass."""
+    if not isinstance(raw, dict):
+        return None
+    checks = []
+    for item in _list(raw.get("checks"))[:MAX_CHECKS]:
+        ok = str(item.get("ok")).strip().lower() if isinstance(item, dict) else ""
+        if ok in ("true", "false"):
+            checks.append({"deliverable": _text(item.get("deliverable"), MAX_DELIVERABLE_CHARS),
+                           "ok": ok == "true",
+                           "note": _text(item.get("note"), MAX_CHECK_NOTE_CHARS)})
+    if not checks:
+        return None
+    return {"checks": checks, "redo_step": clean_step_id(raw.get("redo_step"))}
+
+
+def verdict_failed(verdict: dict | None) -> bool:
+    return verdict is not None and not all(check["ok"] for check in verdict["checks"])
+
+
+def verdict_notes(verdict: dict | None) -> str:
+    """The failed checks, one per line."""
+    if verdict is None:
+        return ""
+    return "\n".join(f"- {check['deliverable']}: {check['note']}".rstrip(": ")
+                     for check in verdict["checks"] if not check["ok"])
+
+
+def redo_target(plan: Plan, results: dict, wanted: str) -> Step | None:
+    """The step to run again: the one asked for if it ran, else the last
+    implementer that ran, else the last step that ran."""
+    ran = [step for step in plan.steps if step.id in results]
+    for step in ran:
+        if step.id == wanted:
+            return step
+    built = [step for step in ran if step.role == IMPLEMENTER]
+    return (built or ran or [None])[-1]
+
+
+def redo_chain(plan: Plan, results: dict, step_id: str, waves: dict) -> list[Step]:
+    """`step_id` and every step that ran on what it made, in the order they
+    are taken up: a fixed fact has to reach the file that used it. That is
+    each step that depends on one in the chain, and every implementer that
+    ran after it: a helper reads all the earlier steps' reports, so a plan
+    that left a depends_on out still made its file from them. `waves`: the
+    wave each step first ran in (a step of the same wave never saw it)."""
+    first = waves.get(step_id, 0)
+    chain = {step_id}
+    ordered = [step for step in order_steps(plan) if step.id in results]
+    for step in ordered:
+        later = waves.get(step.id, 0) > first
+        if any(dep in chain for dep in step.depends_on) or (
+                later and step.role == IMPLEMENTER):
+            chain.add(step.id)
+    return [step for step in ordered if step.id in chain]
+
+
+def research_to_check(wave: list[Step], queue: list[Step], results: dict) -> list[Step]:
+    """The researchers of a wave that just ran whose findings are checked
+    before an implementer builds on them: those that made something, when an
+    implementer is still to come. A research-only job is left to the check at
+    the end, which looks at all of it."""
+    if not any(step.role == IMPLEMENTER for step in queue):
+        return []
+    return [step for step in wave if step.role == RESEARCHER
+            and (results.get(step.id) or {}).get("status") not in (None, "failed")]
+
+
+def research_redo(checked: list[Step], wanted: str) -> Step | None:
+    """The researcher a failed check of research sends back: the one named,
+    if it was checked, else the only one checked. Two checked and neither
+    named: none, and the check at the end looks again."""
+    for step in checked:
+        if step.id == wanted:
+            return step
+    return checked[0] if len(checked) == 1 else None
+
+
 def fallback_plan(request: str) -> Plan:
     """The plan when the manager could not write a valid one: one
     implementer with the whole request, so the workflow still runs."""
@@ -405,13 +518,14 @@ def render_plan(plan: Plan, step_states: dict | None = None) -> dict:
 PLANNING = "planning"
 AWAITING_APPROVAL = "awaiting_approval"
 RUNNING = "running"
+VERIFYING = "verifying"
 DONE = "done"
 PARTIAL = "partial"
 FAILED = "failed"
 CANCELLED = "cancelled"
 INTERRUPTED = "interrupted"
 END_STATES = (DONE, PARTIAL, FAILED, CANCELLED, INTERRUPTED)
-LIVE_STATES = (PLANNING, AWAITING_APPROVAL, RUNNING)
+LIVE_STATES = (PLANNING, AWAITING_APPROVAL, RUNNING, VERIFYING)
 
 # event -> {from state: to state}. Any end can be reached from any live
 # state by "fail", "cancel" and "interrupt"; the rest are the happy path.
@@ -419,8 +533,10 @@ _MOVES = {
     "planned": {PLANNING: AWAITING_APPROVAL},
     "revise": {AWAITING_APPROVAL: PLANNING},
     "approve": {AWAITING_APPROVAL: RUNNING},
-    "finish": {RUNNING: DONE},
-    "partial": {RUNNING: PARTIAL},
+    "verify": {RUNNING: VERIFYING},
+    "redo": {VERIFYING: RUNNING},
+    "finish": {RUNNING: DONE, VERIFYING: DONE},
+    "partial": {RUNNING: PARTIAL, VERIFYING: PARTIAL},
     "fail": {state: FAILED for state in LIVE_STATES},
     "cancel": {state: CANCELLED for state in LIVE_STATES},
     "interrupt": {state: INTERRUPTED for state in LIVE_STATES},
@@ -448,6 +564,48 @@ def budget_left(*, started: float, now: float, turns_used: int, timeout: int,
     """What a workflow has left: {"seconds", "turns"} (never below 0)."""
     return {"seconds": max(0.0, started + timeout - now),
             "turns": max(0, max_turns - turns_used)}
+
+
+# --- which steps a message is for ---------------------------------------------
+
+
+def clean_route(raw, step_ids) -> set | None:
+    """The steps named in a routing answer, or None (all of them) when it
+    is no answer. An empty list is one: the message changes no step."""
+    if not isinstance(raw, dict) or not isinstance(raw.get("steps"), list):
+        return None
+    named = {clean_step_id(step) for step in raw["steps"]}
+    if named - set(step_ids):
+        return None  # it made one up, so nothing it said can be trusted
+    return named
+
+
+# --- files ------------------------------------------------------------------
+
+
+def echo_files(files: list) -> list[tuple[int, str]]:
+    """Which of a workflow's files go to the channel, and under what name.
+    `files` holds (name, step, wave) in the order they were made; the answer
+    is (index, name) pairs, in the order each name first appeared.
+
+    A later wave's file replaces an earlier one of the same name: that is a
+    step fixing it. Two steps of one wave ran side by side, so neither is a
+    fix of the other: both go, each named after its step."""
+    first: dict[str, int] = {}
+    newest: dict[str, int] = {}
+    for index, (name, _step, wave) in enumerate(files):
+        first.setdefault(name, index)
+        newest[name] = max(newest.get(name, wave), wave)
+    latest: dict[tuple[str, str], int] = {}
+    for index, (name, step, wave) in enumerate(files):
+        if wave == newest[name]:
+            latest[(name, step)] = index
+    steps: dict[str, int] = {}
+    for name, _step in latest:
+        steps[name] = steps.get(name, 0) + 1
+    chosen = sorted(latest.items(), key=lambda item: (first[item[0][0]], item[1]))
+    return [(index, f"{step}-{name}" if steps[name] > 1 and step else name)
+            for (name, step), index in chosen]
 
 
 # --- steering ----------------------------------------------------------------

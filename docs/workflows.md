@@ -49,12 +49,28 @@ rule starts at once.
 - Each step is done by a helper. Research steps that do not depend on each other run side by side,
   two at a time. The plan shows each step's state (⏳ waiting, ▶️ running, ✅ done). Files and pictures
   a step makes are posted in the thread. A research step shows as one embed with the last thing it did.
-- Write in the thread to steer it. Your message gets 📨 and the bot answers it before the next step,
-  changing the remaining steps if you ask. Anyone in the server can write there, but only the person
-  who asked can change the steps.
+- Write in the thread to steer it. Your message gets 📨 and goes to the steps it is about: "make the
+  graph green" reaches the step making the graph, not the one writing the report. A helper already
+  working sees it the next time it thinks (in a long command, when that ends). The bot answers it
+  before the next step, changing the remaining steps if you ask. Anyone in the server can write there,
+  but only the person who asked can change the steps or reach the helpers.
 - If a helper needs to know something, it asks you in the thread, the same way as before the plan.
 - Say just **stop** in the thread, or press **Cancel** on the plan, to stop it. Files made so far
   are kept.
+
+## The check
+
+When the steps are done, a helper that did not do the work compares the result with what you asked
+for: it opens the files, counts what can be counted and tries a few links. If something is wrong, the
+step that can fix it runs once more, then every step that was built on it, and the work is checked
+again. If it is still wrong, the job ends as partly done and says what the check found.
+
+What the researchers found is also checked before a later step builds on it, so a wrong figure is
+fixed before it goes into a file. A researcher that got something wrong runs once more straight away.
+
+It looks at charts and pictures too, through the same model that checks the bot's generated images.
+With `IMAGE_REVIEW_ENABLED=0`, or a model that cannot see, it says "picture not viewed", and a pass
+then only covers the file and the data behind it.
 
 ## When it ends
 
@@ -73,7 +89,8 @@ A restart of the bot stops a running workflow; its thread says so. Ask again to 
 | `WORKFLOW_ENABLED` | on | Off removes `/task`, and the bot never starts a workflow |
 | `WORKFLOW_FROM_AUTOMATIONS` | on | Schedules, rules and follow-ups may start one |
 | `WORKFLOW_PLAN_APPROVAL_SECONDS` | 900 | How long the plan waits for an answer |
-| `WORKFLOW_TIMEOUT` / `WORKFLOW_MAX_TURNS` | 1 h / 250 | Caps one workflow (the biggest job tried took 62 min) |
+| `WORKFLOW_TIMEOUT` / `WORKFLOW_MAX_TURNS` | 1 h / 300 | Caps one workflow (the biggest job tried took 62 min) |
+| `WORKFLOW_MAX_TOKENS` | 0 (off) | Caps the tokens one workflow uses, in and out, across all its helpers |
 | `WORKFLOW_ASK_TIMEOUT` | 300 | How long a question waits for an answer, in seconds |
 | `WORKFLOW_MAX_PER_GUILD` | 1 | Workflows running at once in one server |
 | `SUBAGENT_MAX_CONCURRENT` | 2 | Research steps at once, cut to the LLM slots beside chat's |

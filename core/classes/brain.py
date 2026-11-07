@@ -170,6 +170,21 @@ WORKFLOW_INSTRUCTIONS = """- Size up the job first. A report from many sources, 
 """
 FIRST_RULE = "- Most requests need one tool."
 
+# The persona's own words for a big job (its example in tool_functions.ask_brain,
+# the same in every kind of call, since its schema is a cached prefix).
+WORKFLOW_ASK = "Start a workflow:"
+
+
+def plain_request(request: str, workflows: bool) -> str:
+    """The request, without WORKFLOW_ASK in a call that cannot start a
+    workflow (a voice turn, a reply nobody asked for, workflows off). Told to
+    start one, a model calls start_workflow whether it has it or not, and the
+    SDK fails the whole run on a tool the agent lacks. It does the job
+    itself instead, as far as one call can."""
+    if workflows or not request.lower().startswith(WORKFLOW_ASK.lower()):
+        return request
+    return request[len(WORKFLOW_ASK):].strip() or request
+
 
 def instructions(*, workflows: bool = False) -> str:
     """The brain's system prompt: BRAIN_INSTRUCTIONS, with the workflow bullet
@@ -452,11 +467,12 @@ def _configure_brain_shell(toolset) -> None:
 
 
 def _guard_workspace_tools() -> None:
-    """attach_file and save_messages_to_file are brain-only tools, so they
-    are guarded in place, once."""
+    """attach_file, save_messages_to_file and view_image are brain-only
+    tools, so they are guarded in place, once. view_image reads the
+    workspace too: a blocked request must not see its files that way."""
     from classes.message_search_tools import save_messages_to_file
-    from classes.workspace_tools import attach_file
-    for tool in (attach_file, save_messages_to_file):
+    from classes.workspace_tools import attach_file, view_image
+    for tool in (attach_file, save_messages_to_file, view_image):
         if not getattr(tool, "_brain_guarded", False):
             tool.on_invoke_tool = _guarded(tool.on_invoke_tool)
             tool._brain_guarded = True
@@ -528,6 +544,14 @@ def _loop_stop(error: BaseException) -> "LoopStopped | None":
     return None
 
 
+def response_tokens(response) -> int:
+    """A model response's tokens, in and out; 0 when a server sends none."""
+    usage = getattr(response, "usage", None)
+    return sum(tokens for tokens in (getattr(usage, "input_tokens", None),
+                                     getattr(usage, "output_tokens", None))
+               if isinstance(tokens, int))
+
+
 class BrainHooks(RunHooks):
     """The brain run's hooks, in one object (Runner.run takes one): per-tool
     metrics (ToolMetricsHooks, so the moved tools are still counted), the
@@ -542,6 +566,8 @@ class BrainHooks(RunHooks):
         self.tool_calls = 0
         # The longest prompt of the run: what a slot's context has to hold.
         self.peak_prompt_tokens = 0
+        # Called with each response's tokens, in and out (workflows count them).
+        self.on_tokens = None
 
     async def on_llm_start(self, context, agent, system_prompt, input_items) -> None:
         self.turns += 1
@@ -549,9 +575,12 @@ class BrainHooks(RunHooks):
             await part.on_llm_start(context, agent, system_prompt, input_items)
 
     async def on_llm_end(self, context, agent, response) -> None:
-        tokens = getattr(getattr(response, "usage", None), "input_tokens", None)
+        usage = getattr(response, "usage", None)
+        tokens = getattr(usage, "input_tokens", None)
         if isinstance(tokens, int):
             self.peak_prompt_tokens = max(self.peak_prompt_tokens, tokens)
+        if self.on_tokens is not None:
+            self.on_tokens(response_tokens(response))
         for part in self.parts:
             await part.on_llm_end(context, agent, response)
 
@@ -872,6 +901,10 @@ async def _run_in_workspace(ctx, lease, request, inputs, problems, hooks_box) ->
     if inputs or problems:
         preamble, given, problems = await _write_inputs(session, out_dir, inputs, problems)
 
+    tier = brain_policy.effective_tier(unprompted=bool(ctx.get("unprompted")),
+                                       automatic=bool(ctx.get("automatic")),
+                                       voice=bool(ctx.get("voice")))
+    request = plain_request(request, tier >= brain_policy.TIER_WORKFLOW)
     task = build_task(ctx, request, job_dir=job_dir, earlier_jobs=earlier,
                       inputs_preamble=preamble, datetime=await get_current_datetime(),
                       skills_index=await _skills_index(ctx.get("guild_id")))
@@ -903,9 +936,6 @@ async def _run_in_workspace(ctx, lease, request, inputs, problems, hooks_box) ->
     guard = LoopGuard(brain_policy.repeat_limit())
     hooks = BrainHooks(ToolMetricsHooks(guild_id, caller="brain"), progress, guard)
     hooks_box["hooks"] = hooks
-    tier = brain_policy.effective_tier(unprompted=bool(ctx.get("unprompted")),
-                                       automatic=bool(ctx.get("automatic")),
-                                       voice=bool(ctx.get("voice")))
     agent = build_brain_agent(automatic=bool(ctx.get("automatic")), voice=bool(ctx.get("voice")),
                               workflows=tier >= brain_policy.TIER_WORKFLOW)
     run_config = _run_config(lease, guard)

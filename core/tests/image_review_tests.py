@@ -264,3 +264,33 @@ def test_review_timeout_falls_back_on_junk(monkeypatch):
     for bad in ("", "nope", "0", "-1"):
         monkeypatch.setenv("IMAGE_REVIEW_TIMEOUT", bad)
         assert image_review.review_config().call_timeout == image_review.DEFAULT_TIMEOUT
+
+
+@pytest.mark.asyncio
+async def test_describe_image_sends_the_picture_and_the_question():
+    with patch.object(image_review._llm, "complete",
+                      AsyncMock(return_value="A bar chart, 2025")) as complete:
+        assert await image_review.describe_image(_png(), "Which year?") == "A bar chart, 2025"
+    messages = complete.await_args.args[0]
+    parts = messages[1]["content"]
+    assert parts[0]["text"].startswith("Which year? ")
+    assert image_review.VIEW_LAYOUT_QUESTION in parts[0]["text"]  # always asked
+    assert parts[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+
+@pytest.mark.asyncio
+async def test_describe_image_keeps_a_big_chart_readable():
+    with patch.object(image_review._llm, "complete", AsyncMock(return_value="ok")) as complete:
+        await image_review.describe_image(_png((2000, 1000)))
+    url = complete.await_args.args[0][1]["content"][1]["image_url"]["url"]
+    data = base64.b64decode(url.split(",", 1)[1])
+    assert Image.open(io.BytesIO(data)).size == (1280, 640)
+
+
+@pytest.mark.asyncio
+async def test_describe_image_gives_none_when_it_cannot_look(monkeypatch):
+    with patch.object(image_review._llm, "complete", AsyncMock(side_effect=RuntimeError("no"))):
+        assert await image_review.describe_image(_png()) is None
+    assert await image_review.describe_image(b"not a picture") is None
+    monkeypatch.setenv("IMAGE_REVIEW_ENABLED", "0")
+    assert await image_review.describe_image(_png()) is None

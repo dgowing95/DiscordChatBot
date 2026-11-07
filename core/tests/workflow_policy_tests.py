@@ -144,6 +144,17 @@ def test_the_fallback_is_one_implementer_with_the_whole_request():
         ("s1", wp.IMPLEMENTER, "Build a CSV to chart tool")]
 
 
+def test_a_step_never_takes_a_scouts_or_a_checks_folder():
+    plan, problems = wp.validate_plan(_plan(_step("d1"), _step("V2", depends_on=["d1"]),
+                                            _step("s3", depends_on=["r1", "V2"]),
+                                            _step("r1")), max_steps=8)
+    assert problems == []
+    assert [s.id for s in plan.steps] == ["sd1", "sV2", "s3", "sr1"]
+    assert plan.steps[1].depends_on == ["sd1"]
+    assert plan.steps[2].depends_on == ["sr1", "sV2"]
+    assert wp.plan_step_id("s1") == "s1" and wp.plan_step_id("data2") == "data2"
+
+
 def test_a_plan_round_trips_through_its_record():
     plan, _ = wp.validate_plan(_plan(_step("s1"), _step("s2", depends_on=["s1"])), max_steps=8)
     again = wp.plan_from_dict(plan.to_dict())
@@ -202,12 +213,116 @@ def test_settings_defaults_and_overrides():
     assert (wp.enabled(env), wp.from_automations(env)) == (True, True)
     assert wp.ask_timeout(env) == 300 and wp.plan_approval_seconds(env) == 900
     assert wp.plan_revisions(env) == 3 and wp.max_steps(env) == 8
-    assert wp.timeout(env) == 3600 and wp.max_turns(env) == 250
+    assert wp.timeout(env) == 3600 and wp.max_turns(env) == 300
+    assert wp.turn_reserve(env) == 40 and wp.max_tokens(env) == 0
+    assert wp.max_tokens({"WORKFLOW_MAX_TOKENS": "5000"}) == 5000
+    assert wp.turn_reserve({"WORKFLOW_MAX_TURNS": "50"}) == 10
     assert wp.max_per_guild(env) == 1 and wp.subagent_max_turns(env) == 100
     assert not wp.enabled({"WORKFLOW_ENABLED": "0"})
     assert not wp.from_automations({"WORKFLOW_FROM_AUTOMATIONS": "false"})
     assert wp.max_steps({"WORKFLOW_MAX_STEPS": "junk"}) == 8
     assert wp.timeout({"WORKFLOW_TIMEOUT": "60"}) == 60
+
+
+def test_the_check_is_a_live_state_with_its_own_moves():
+    assert wp.VERIFYING in wp.LIVE_STATES
+    assert wp.transition(wp.RUNNING, "verify") == wp.VERIFYING
+    assert wp.transition(wp.VERIFYING, "redo") == wp.RUNNING
+    assert wp.transition(wp.VERIFYING, "finish") == wp.DONE
+    assert wp.transition(wp.VERIFYING, "partial") == wp.PARTIAL
+    for event, end in (("cancel", wp.CANCELLED), ("fail", wp.FAILED),
+                       ("interrupt", wp.INTERRUPTED)):
+        assert wp.transition(wp.VERIFYING, event) == end
+
+
+def test_a_verdict_is_cleaned_and_nothing_checked_is_no_verdict():
+    raw = {"checks": [{"deliverable": "a.md", "ok": True, "note": "fine"},
+                      {"deliverable": "b.png", "ok": "false", "note": "wrong year"},
+                      {"deliverable": "c", "ok": "maybe"}, "junk"],
+           "redo_step": "../s2"}
+    verdict = wp.clean_verdict(raw)
+    assert [check["ok"] for check in verdict["checks"]] == [True, False]
+    assert verdict["redo_step"] == "s2"
+    assert wp.verdict_failed(verdict)
+    assert wp.verdict_notes(verdict) == "- b.png: wrong year"
+    for empty in (None, "junk", {}, {"checks": []}, {"checks": [{"ok": "maybe"}]}):
+        assert wp.clean_verdict(empty) is None
+    assert not wp.verdict_failed(None) and wp.verdict_notes(None) == ""
+
+
+def test_the_step_sent_back_is_one_that_ran():
+    plan = wp.Plan(goal="g", deliverables=[], notes="", steps=[
+        wp.Step(id="s1", role="researcher", brief="b"),
+        wp.Step(id="s2", role="implementer", brief="b"),
+        wp.Step(id="s3", role="researcher", brief="b"),
+        wp.Step(id="s4", role="implementer", brief="b")])
+    ran = {"s1": {}, "s2": {}, "s3": {}}
+    assert wp.redo_target(plan, ran, "s1").id == "s1"
+    assert wp.redo_target(plan, ran, "s4").id == "s2"  # it never ran: the last implementer
+    assert wp.redo_target(plan, ran, "nope").id == "s2"
+    assert wp.redo_target(plan, {"s1": {}}, "").id == "s1"  # no implementer ran
+    assert wp.redo_target(plan, {}, "s1") is None
+
+
+def _chain_plan():
+    return wp.Plan(goal="g", deliverables=[], notes="", steps=[
+        wp.Step(id="s1", role="researcher", brief="b"),
+        wp.Step(id="s2", role="researcher", brief="b"),
+        wp.Step(id="s3", role="implementer", brief="b", depends_on=["s1", "s2"]),
+        wp.Step(id="s4", role="implementer", brief="b", depends_on=["s3"]),
+        wp.Step(id="s5", role="implementer", brief="b", depends_on=["s2"])])
+
+
+def test_a_step_sent_back_brings_the_steps_built_on_it():
+    plan = _chain_plan()
+    ran = {s.id: {} for s in plan.steps}
+    waves = {"s1": 1, "s2": 1, "s3": 2, "s4": 3, "s5": 4}
+    # Every implementer after a researcher read its report.
+    assert [s.id for s in wp.redo_chain(plan, ran, "s1", waves)] == ["s1", "s3", "s4", "s5"]
+    # After an implementer: s5 ran later, so it may have read s3's report too.
+    assert [s.id for s in wp.redo_chain(plan, ran, "s3", waves)] == ["s3", "s4", "s5"]
+    assert [s.id for s in wp.redo_chain(plan, ran, "s5", waves)] == ["s5"]
+    # One that never ran is not run "again".
+    assert [s.id for s in wp.redo_chain(plan, {"s1": {}, "s3": {}}, "s1", waves)] == ["s1", "s3"]
+
+
+def test_a_send_back_reaches_a_file_the_plan_did_not_link():
+    plan = wp.Plan(goal="g", deliverables=[], notes="", steps=[
+        wp.Step(id="s1", role="researcher", brief="b"),
+        wp.Step(id="s2", role="researcher", brief="b"),
+        wp.Step(id="s3", role="implementer", brief="b")])  # no depends_on
+    ran = {"s1": {}, "s2": {}, "s3": {}}
+    waves = {"s1": 1, "s2": 1, "s3": 2}
+    # s3 still made moons.md from s1's report; s2 ran beside s1 and never saw it.
+    assert [s.id for s in wp.redo_chain(plan, ran, "s1", waves)] == ["s1", "s3"]
+
+
+def test_research_is_checked_only_when_an_implementer_is_still_to_come():
+    plan = _chain_plan()
+    s1, s2, s3 = plan.steps[:3]
+    done = {"s1": {"status": "done"}, "s2": {"status": "failed"}}
+    assert wp.research_to_check([s1, s2], [s3], done) == [s1]  # s2 made nothing
+    assert wp.research_to_check([s1, s2], [], done) == []        # the check at the end has it
+    assert wp.research_to_check([s3], [plan.steps[3]], {"s3": {"status": "done"}}) == []
+
+
+def test_the_researcher_a_research_check_sends_back():
+    s1, s2 = _chain_plan().steps[:2]
+    assert wp.research_redo([s1, s2], "s2") == s2
+    assert wp.research_redo([s1], "nope") == s1   # the only one checked
+    assert wp.research_redo([s1, s2], "s3") is None
+
+
+def test_which_files_go_to_the_channel():
+    assert wp.echo_files([]) == []
+    # a later wave fixes a file: only the newest, in the name's first place
+    assert wp.echo_files([("a", "s1", 1), ("b", "s1", 1), ("a", "s2", 2)]) == [(2, "a"), (1, "b")]
+    # one step attaching a name twice is one file
+    assert wp.echo_files([("a", "s1", 1), ("a", "s1", 1)]) == [(1, "a")]
+    # two steps side by side: both, each under its step
+    assert wp.echo_files([("a", "s1", 1), ("a", "s2", 1)]) == [(0, "s1-a"), (1, "s2-a")]
+    # ...until a later wave replaces them
+    assert wp.echo_files([("a", "s1", 1), ("a", "s2", 1), ("a", "s3", 2)]) == [(2, "a")]
 
 
 @pytest.mark.parametrize("text, stop", [

@@ -23,7 +23,11 @@ one with /task. It runs like this:
    steps found. It ends with `report`, and the files it attached are posted
    in the thread. Between waves the manager answers any thread messages
    (submit_review) and may change the remaining steps.
-4. **Finish.** The manager writes the final report, the files are echoed in
+4. **Check** (classes/workflow_verify.py). A verifier compares what was made
+   with what was asked, and a step may be sent back once, with the steps
+   built on it. What researchers found is checked too, after their wave,
+   before an implementer builds on it.
+5. **Finish.** The manager writes the final report, the files are echoed in
    the channel the request came from, and a WorkflowDone item goes on the
    bot's queue: the persona, with no tools, tells the requester there.
 
@@ -57,16 +61,20 @@ Why things are the way they are:
   (classes/thread_inbox.py), so main.on_message routes thread messages to it
   (📨). The requester saying just "stop" (or the Cancel button) cancels at
   once: a running subagent is cancelled and its files are kept. With a
-  question open (ask_requester) their next message is its answer. Everything
-  else waits for the manager's review between steps, which records an
-  outcome for each message. The thread is open to the server, so only the
-  requester can change the steps, and only their words reach later helpers.
+  question open (ask_requester) their next message is its answer. Anything
+  else they write also reaches the helpers of the steps it is about
+  (classes/workflow_steering.py), and every message waits for the manager's
+  review between steps, which answers it and records an outcome. The thread
+  is open to the server, so only the requester can change the steps, and only
+  their words reach helpers.
 - **New text passes the content guard.** The guard in the run context only
   ever saw the request, so a plan edit, a thread message or an answer is
   checked before it can reach a helper with a shell (_allowed).
-- **Limits cap the cost**: WORKFLOW_TIMEOUT (1 h) and WORKFLOW_MAX_TURNS (250) stop a
-  workflow bigger than the biggest job seen, with what exists (PARTIAL), never "retry".
-  The clock counts work: it restarts when the plan is answered.
+- **Limits cap the cost**: WORKFLOW_TIMEOUT (1 h), WORKFLOW_MAX_TURNS (300) and
+  WORKFLOW_MAX_TOKENS (off) stop a workflow bigger than the biggest job seen, with
+  what exists (PARTIAL), never "retry". Helpers leave a reserve of turns and time for
+  the check and the final report (_held_turns, _step_reserve_seconds). The clock
+  counts work: it restarts when the plan is answered.
 - **A restart interrupts**: resume is out of scope. At startup every live
   workflow becomes INTERRUPTED and its thread is told (interrupt_all).
 """
@@ -100,6 +108,8 @@ TRIGGER_AUTOMATION = "automation"
 MANAGER_SHORT_TURNS = 6
 # Time kept back for the finish when steps run long.
 FINISH_RESERVE_SECONDS = 180
+# Kept from the helpers on top of that, for the check of the finished work.
+VERIFY_RESERVE_SECONDS = 300
 # The completion reply waits this long for room on a full queue.
 DONE_RETRY_SECONDS = 30
 DONE_RETRY_FOR_SECONDS = 600
@@ -109,6 +119,12 @@ RENEW_SECONDS = 120
 ECHO_MAX_FILES = 10
 ECHO_MAX_BYTES = 25_000_000
 STEP_FACTS_CHARS = 2500
+STEER_WAIT_SECONDS = 30  # the review waits this long at most for a message's routing
+STOPPED_NOTE = "⚠️ Stopped."
+# For a thread message that came after the last review, while the final
+# report was written: 📨 said it would be seen, and nothing will see it now.
+LATE_REPLY = ("⏳ That came as this workflow was finishing, so it hasn't been applied. "
+              "@mention me in this thread to carry on with it.")
 # A helper's pictures, in its folder beside out/ (keep_image).
 IMAGES_DIR = "images"
 
@@ -132,6 +148,8 @@ which of these you are doing now.
   with sources. Researchers run side by side: give each its own part, and
   leave depends_on empty when it needs nothing first. An implementer writes
   code and files in a Linux workspace and attaches the files the user gets.
+  The finished work is checked for you, so plan no step that only reviews or
+  checks.
 - Messages from people in the thread come with ids: reply to each one with
   `submit_review`, and give new remaining steps only if they change the job.
 - For the final report, call `report` with what the user needs: what was
@@ -188,6 +206,10 @@ get the whole plan and your step: do only your step, then report.
   steps and the user need: exact numbers, names, links, file names, and
   anything that failed."""
 
+# Added for an implementer when view_image is there (a process-wide setting,
+# so the prompt stays byte-stable).
+IMPLEMENTER_VIEW_LINE = " Look at a chart or picture you made with `view_image` before you attach it."
+
 ROLE_LINES = {
     wp.RESEARCHER: ("\n\nYour role: researcher. Find the facts with web_search, fetch_url and "
                     "this server's messages, and report each with its source. Use the "
@@ -236,6 +258,9 @@ class Workflow:
     approval: asyncio.Future | None = None
     cancel_reason: str = ""
     turns: int = 0
+    tokens: int = 0           # in and out, every agent together
+    tool_calls: int = 0
+    wave: int = 0             # which wave of steps is running
     plan_message: object = None
     plan_card: object = None  # the card plan_message shows now
     plan_lead: str = ""       # the line above the plan
@@ -246,8 +271,26 @@ class Workflow:
     artifacts: list = field(default_factory=list)
     revisions: int = 0
     failed_revisions: int = 0  # cost no revision, but cannot go on for ever
-    # What was said in the thread and the manager's replies, for later helpers.
+    # What was said in the thread and the manager's replies, for later helpers,
+    # as (seq, line).
     said: list = field(default_factory=list)
+    # The requester's words for the helpers, as (seq, text, the steps it is
+    # for, None for all); it only grows, since each run keeps its own place in
+    # it (classes/workflow_steering.py). routes is those steps by seq,
+    # steer_seen what _watch has looked at, reviewed what _review has answered.
+    steering: list = field(default_factory=list)
+    steering_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    steer_tasks: dict = field(default_factory=dict)  # seq -> its steer task
+    routes: dict = field(default_factory=dict)
+    steer_seen: set = field(default_factory=set)
+    reviewed: set = field(default_factory=set)
+    # The check of the finished work (classes/workflow_verify.py).
+    verdict: dict | None = None
+    checked: bool = False     # the first check is over: half the reserves are spent
+    at_limit: set = field(default_factory=set)  # steps whose last run stopped at a limit
+    first_wave: dict = field(default_factory=dict)  # step id -> the wave it first ran in
+    finishing: bool = False   # past the last review: no thread message is read now
+    skill_reviewed: bool = False
     # The plan stage's rounds (classes/workflow_planning.py): done yet, and
     # what they learned.
     scouted: bool = False
@@ -290,6 +333,13 @@ class Workflow:
 
     def turns_left(self) -> int:
         return max(0, wp.max_turns() - self.turns)
+
+    def add_tokens(self, tokens: int) -> None:
+        self.tokens += tokens
+
+    def over_tokens(self) -> bool:
+        limit = wp.max_tokens()
+        return bool(limit) and self.tokens >= limit
 
 
 # workflow id -> its handle, while it runs in this process.
@@ -473,6 +523,7 @@ async def _run(wf: Workflow) -> None:
                                         f"{wf.record['request']} ({wf.thread_url})",
                                         run_key=f"workflow:{wf.id}")
     interrupted = False
+    late = []
     try:
         end_state, report = await _body(wf)
     except asyncio.TimeoutError:
@@ -491,7 +542,9 @@ async def _run(wf: Workflow) -> None:
         for helper in helpers:
             helper.cancel()
         if wf.ledger is not None:
-            wf.ledger.finalize()
+            # Came after the last review, and nothing will read it now.
+            late = [e for e in wf.ledger.events
+                    if wf.finishing and e.stage == thread_inbox.RECEIVED]
             thread_inbox.release_run(wf.thread.id, wf.ledger)
         if origin_id is not None:
             message_queue.unregister_task_run(origin_id, f"workflow:{wf.id}")
@@ -501,6 +554,19 @@ async def _run(wf: Workflow) -> None:
         await asyncio.gather(*helpers, return_exceptions=True)
         if not interrupted:
             await _end(wf, store, end_state, report)
+            if late:
+                await _tell_late(wf, late[-1])
+
+
+async def _tell_late(wf: Workflow, event) -> None:
+    """One reply, to the newest message no review saw. Best effort."""
+    try:
+        reference = (None if event.message_id is None else discord.MessageReference(
+            message_id=event.message_id, channel_id=wf.thread.id, fail_if_not_exists=False))
+        await asyncio.wait_for(wf.thread.send(
+            LATE_REPLY, reference=reference, allowed_mentions=discord.AllowedMentions.none()), 10)
+    except Exception as e:
+        logger.warning(f"Workflow {wf.id}: could not say a late message was not applied: {e}")
 
 
 # The line above the plan once it is over, in place of "Working on it".
@@ -513,6 +579,7 @@ async def _end(wf: Workflow, store, end_state: str, report: BrainReport) -> None
     try:
         wf.record["state"] = end_state
         wf.record["turns"] = wf.turns
+        wf.record["tokens"] = wf.tokens
         wf.record["report"] = {"status": report.status, "facts": report.facts,
                                "files": report.files_posted, "note": report.note}
         await store.save(wf.record)
@@ -526,9 +593,9 @@ async def _end(wf: Workflow, store, end_state: str, report: BrainReport) -> None
     await _post(wf.thread, embed=_closing_embed(end_state, report))
     report.files_posted = await post_workflow_copy(wf)
     metrics.observe_workflow(wf.record["trigger"], end_state, time.monotonic() - wf.started,
-                             len(wf.results), wf.turns)
+                             len(wf.results), wf.turns, wf.tokens)
     logger.info(f"Workflow {wf.id}: {end_state} in {time.monotonic() - wf.started:.0f}s, "
-                f"{len(wf.results)} step(s), {wf.turns} turn(s)")
+                f"{len(wf.results)} step(s), {wf.turns} turn(s), {wf.tokens} token(s)")
     await queue_done(wf, report)
 
 
@@ -547,25 +614,35 @@ async def _body(wf: Workflow) -> tuple[str, BrainReport]:
 
 
 async def _work(wf: Workflow) -> tuple[str, BrainReport]:
-    """The approved plan: its steps, then the finish."""
+    """The approved plan: its steps, the check, then the finish."""
+    from classes import workflow_verify
+
     queue = wp.order_steps(wf.plan)
     stopped = None
     while queue:
         if wf.cancel_reason:
             break
-        if wf.seconds_left() < FINISH_RESERVE_SECONDS:
+        if wf.seconds_left() < _step_reserve_seconds(wf):
             stopped = "It ran out of time and was stopped."
             break
-        if wf.turns_left() <= 0:
+        if wf.turns_left() <= _held_turns(wf):
             stopped = "It ran out of steps and was stopped."
+            break
+        if wf.over_tokens():
+            stopped = "It used up its tokens and was stopped."
             break
         queue = await _review(wf, queue)
         if not queue or wf.cancel_reason:
             break
         wave = wp.next_wave(queue, wf.results, _helpers_at_once())
         queue = [step for step in queue if step not in wave]
+        wf.wave += 1
         await _together(wf, [_run_step(wf, step) for step in wave])
         await _save_progress(wf)
+        # What researchers found is checked before an implementer uses it.
+        research = workflow_verify.research_due(wf, wave, queue)
+        if research:
+            await workflow_verify.check_research(wf, research)
     if wf.cancel_reason:
         for step in queue:
             wf.step_states[step.id] = "skipped"
@@ -577,19 +654,44 @@ async def _work(wf: Workflow) -> tuple[str, BrainReport]:
     await _review(wf, [])
     if wf.cancel_reason:
         return wp.CANCELLED, _report_from_steps(wf, _cancel_note(wf))
+    if stopped is None and workflow_verify.due(wf):
+        await workflow_verify.run(wf)
+        await _review(wf, [])
+        if wf.cancel_reason:
+            return wp.CANCELLED, _report_from_steps(wf, _cancel_note(wf))
+    wf.finishing = True
     report = await _finish(wf, stopped)
     if wf.cancel_reason:
         # Stopped while the final report was written: what the steps made
         # is kept and reported, but it was cancelled.
         return wp.CANCELLED, _report_from_steps(wf, _cancel_note(wf))
     all_done = all(r.get("status") == brain_result.DONE for r in wf.results.values())
-    if stopped is None and all_done and report.status == brain_result.DONE:
+    note = workflow_verify.report_note(wf)
+    if note:
+        report.note = f"{report.note} {note}".strip()
+    if (stopped is None and all_done and report.status == brain_result.DONE
+            and not workflow_verify.failed(wf)):
         await _set_state(wf, "finish")
         return wp.DONE, report
     if report.status == brain_result.DONE:
         report.status = brain_result.PARTIAL
     await _set_state(wf, "partial")
     return wp.PARTIAL, report
+
+
+def _verify_reserve_seconds() -> int:
+    """A job set to a short time keeps a fifth instead."""
+    return min(VERIFY_RESERVE_SECONDS, wp.timeout() // 5)
+
+
+def _step_reserve_seconds(wf: Workflow) -> float:
+    """The seconds helpers leave for the check and the final report."""
+    return FINISH_RESERVE_SECONDS + _verify_reserve_seconds() // (2 if wf.checked else 1)
+
+
+def _held_turns(wf: Workflow) -> int:
+    """The turns helpers leave for the check and the final report."""
+    return wp.turn_reserve() // (2 if wf.checked else 1)
 
 
 def _helpers_at_once() -> int:
@@ -625,6 +727,7 @@ async def _save_progress(wf: Workflow) -> None:
     """The record as it stands, after each wave too, so it never reads empty
     while a long job runs."""
     wf.record["turns"] = wf.turns
+    wf.record["tokens"] = wf.tokens
     try:
         await _store().save(wf.record)
     except Exception as e:
@@ -661,10 +764,12 @@ def request_cancel(wf: Workflow, reason: str) -> None:
 
 async def _watch(wf: Workflow) -> None:
     """Reads the thread's new messages as they come: the requester's "stop"
-    cancels, their message answers an open question, and while the plan waits
-    for approval it is a change to it. Everything else waits for the
-    manager's review between steps."""
-    from classes import brain_inbox
+    cancels, their message answers an open question, while the plan waits for
+    approval it is a change to it, and while the work runs it goes to the
+    helpers of the steps it is about too (classes/workflow_steering.py). Every
+    message that is not one of the first three waits for the manager's review
+    between steps, which answers it."""
+    from classes import brain_inbox, workflow_steering
 
     ledger = wf.ledger
     while True:
@@ -685,6 +790,12 @@ async def _watch(wf: Workflow) -> None:
                   and not wf.approval.done()):
                 ledger.mark_presented([event.seq], 0)
                 wf.approval.set_result(("edit", event))
+            elif (wf.state in (wp.RUNNING, wp.VERIFYING) and not wf.finishing
+                  and event.seq not in wf.steer_seen):
+                wf.steer_seen.add(event.seq)
+                task = asyncio.get_running_loop().create_task(workflow_steering.steer(wf, event))
+                wf.steer_tasks[event.seq] = task
+                _keep(task)
 
 
 # --- the agents ------------------------------------------------------------------
@@ -693,16 +804,20 @@ async def _watch(wf: Workflow) -> None:
 async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: str,
                      sandbox: bool, progress=None, caller: str = "workflow",
                      ctx: dict | None = None, seconds: float | None = None,
-                     finish_up_at: int | None = None) -> _Outcome:
+                     finish_up_at: int | None = None, finish_up: str = FINISH_UP,
+                     steer: tuple | None = None, checking: bool = False) -> _Outcome:
     """One agent run of the workflow, as a child task the cancel can stop.
     Counts its turns into the workflow's, and maps every stop to a reason
     (never raises, except when the workflow itself is being cancelled).
     `ctx` is a helper's own run context; the manager uses the workflow's.
     `seconds` is a limit of its own, under what the workflow has left.
-    From turn `finish_up_at` on it is told to report; its last input is kept
-    for _last_report."""
+    From turn `finish_up_at` on it is told `finish_up`; its last input is kept
+    for _last_report. `steer`, a place in wf.steering and a step's id: what
+    is for that step from there on reaches the run. Sandbox runs leave the
+    reserves alone, but
+    for the check (`checking`), which they are there for."""
     from agents import MaxTurnsExceeded, RunConfig, RunHooks, Runner
-    from classes import brain, brain_policy
+    from classes import brain, brain_policy, workflow_steering
     from classes.loop_guard import LoopGuard
     from classes.text_llm_handler import ToolMetricsHooks
 
@@ -715,12 +830,19 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
         run_config = RunConfig(
             call_model_input_filter=brain.input_filter(guard, brain_policy.trim_keep_recent()),
             group_id=f"workflow-{wf.id}")
+    hooks.on_tokens = wf.add_tokens
+    if steer is not None:
+        run_config = workflow_steering.steered(run_config, wf, *steer)
     seen: list = []
-    if finish_up_at is not None:
-        run_config = _finishing_up(run_config, hooks, finish_up_at, seen)
-    turns = _turn_limit(wf, max_turns)
-    # The reserve is kept back from the steps, for the manager's last runs.
-    left = max(30.0, wf.seconds_left() - (FINISH_RESERVE_SECONDS if sandbox else 0))
+    holds_back = sandbox and not checking
+    if finish_up_at is not None or (holds_back and wp.max_tokens()):
+        run_config = _finishing_up(run_config, hooks, finish_up_at, seen, finish_up,
+                                   wf.over_tokens if holds_back else None)
+    turns = _turn_limit(wf, max_turns, _held_turns(wf) if holds_back else 0)
+    # The reserves are kept back from the steps, for the check and the
+    # manager's last runs.
+    reserve = _step_reserve_seconds(wf) if holds_back else FINISH_RESERVE_SECONDS if sandbox else 0
+    left = max(30.0, wf.seconds_left() - reserve)
     seconds = left if seconds is None else min(seconds, left)
     if wf.cancel_reason:
         # request_cancel can only stop a run that exists. No await from here
@@ -766,52 +888,62 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
         wf.running.discard(child)
         wf.promised -= turns
         wf.turns += hooks.turns
+        wf.tool_calls += hooks.tool_calls
         logger.info(f"Workflow {wf.id}: {caller}: {hooks.turns} turn(s), longest prompt "
-                    f"{hooks.peak_prompt_tokens} tokens")
+                    f"{hooks.peak_prompt_tokens} tokens"
+                    + (f"; stopped: {outcome.stopped}" if outcome.stopped else ""))
     return outcome
 
 
-def _turn_limit(wf: Workflow, max_turns: int) -> int:
+def _turn_limit(wf: Workflow, max_turns: int, reserve: int = 0) -> int:
     """A run's turns. wf.turns only rises when a run ends, so a run counts
     what the others were promised, and runs starting together split the rest,
     or together they would pass WORKFLOW_MAX_TURNS. That covers a run that
-    starts late too: a step asked a question and carries on with the answer."""
-    return max(1, min(max_turns, (wf.turns_left() - wf.promised) // max(1, wf.sharing)))
+    starts late too: a step asked a question and carries on with the answer.
+    `reserve` is what this run must leave."""
+    return max(1, min(max_turns,
+                      (wf.turns_left() - wf.promised - reserve) // max(1, wf.sharing)))
 
 
-def _finishing_up(run_config, hooks, at: int, seen: list):
-    """The run's input filter, plus FINISH_UP from turn `at` on, and its last
-    input kept in `seen`. Built from what the model was sent, so no tool call
-    in it is left without its result, whatever a limit interrupts."""
+def _finishing_up(run_config, hooks, at: int | None, seen: list, finish_up: str = FINISH_UP,
+                  over=None):
+    """The run's input filter, plus `finish_up` from turn `at` on, or once
+    `over()` says so, and its last input kept in `seen`. Built from what the
+    model was sent, so no tool call in it is left without its result,
+    whatever a limit interrupts."""
     from agents.run_config import ModelInputData
     inner = run_config.call_model_input_filter
 
     def _filter(data):
         sent = inner(data)
         seen[:] = sent.input
-        if hooks.turns < at:
+        if not ((at is not None and hooks.turns >= at) or (over is not None and over())):
             return sent
-        return ModelInputData(input=[*sent.input, {"role": "user", "content": FINISH_UP}],
+        return ModelInputData(input=[*sent.input, {"role": "user", "content": finish_up}],
                               instructions=sent.instructions)
 
     return replace(run_config, call_model_input_filter=_filter)
 
 
-async def _last_report(wf: Workflow, agent, seen: list, lane: str, seconds: float) -> dict | None:
+async def _last_report(wf: Workflow, agent, seen: list, lane: str, seconds: float,
+                       tool=None, finish_up: str = FINISH_UP) -> dict | None:
     """One last call, on what a run stopped at a limit had seen, that can only
-    be `report`: its arguments, or None. Otherwise everything it found goes
-    with it. Whatever it was doing is already stopped."""
+    be `tool` (`report` unless told): its arguments, or None. Otherwise
+    everything it found goes with it. Whatever it was doing is already
+    stopped."""
     from agents import ModelSettings
     from agents.models.interface import ModelTracing
     from classes import brain
+
+    tool = tool or brain.report
 
     async def _go():
         llm_lanes.current_lane.set(lane)
         return await agent.model.get_response(
             system_instructions=agent.instructions,
-            input=[*seen, {"role": "user", "content": FINISH_UP}],
+            input=[*seen, {"role": "user", "content": finish_up}],
             model_settings=agent.model_settings.resolve(ModelSettings(tool_choice="required")),
-            tools=[brain.report], output_schema=None, handoffs=[], tracing=ModelTracing.DISABLED,
+            tools=[tool], output_schema=None, handoffs=[], tracing=ModelTracing.DISABLED,
             previous_response_id=None, conversation_id=None, prompt=None)
 
     if not seen or wf.cancel_reason:
@@ -832,8 +964,9 @@ async def _last_report(wf: Workflow, agent, seen: list, lane: str, seconds: floa
     finally:
         wf.running.discard(child)
         wf.turns += 1
+    wf.add_tokens(brain.response_tokens(response))
     for item in response.output:
-        if getattr(item, "name", None) == brain.report.name:
+        if getattr(item, "name", None) == tool.name:
             try:
                 args = json.loads(item.arguments)
             except (TypeError, ValueError):
@@ -870,25 +1003,47 @@ def _manager(mode: str, rounds=()):
 def _subagent(role: str):
     from agents.sandbox import SandboxAgent
     from agents.sandbox.capabilities import Shell
-    from classes import brain
+    from classes import brain, workflow_verify
     from classes.brain_tools import brain_tools
+    from classes.image_review import review_enabled
     from classes.llm_roles import SUBAGENT
 
     brain._guard_workspace_tools()
+    instructions = {wp.SCOUT: SCOUT_INSTRUCTIONS,
+                    wp.VERIFIER: workflow_verify.VERIFIER_INSTRUCTIONS}.get(role)
+    if instructions is None:
+        instructions = SUBAGENT_INSTRUCTIONS + ROLE_LINES[role]
+        if role == wp.IMPLEMENTER and review_enabled():
+            instructions += IMPLEMENTER_VIEW_LINE
     return SandboxAgent(
         name="Helper", model=brain.build_role_model(SUBAGENT),
-        instructions=(SCOUT_INSTRUCTIONS if role == wp.SCOUT
-                      else SUBAGENT_INSTRUCTIONS + ROLE_LINES[role]),
+        instructions=instructions,
         base_instructions="",
         capabilities=[Shell(configure_tools=brain._configure_brain_shell)],
-        tools=brain_tools(mode=role), tool_use_behavior={"stop_at_tool_names": ["report"]},
+        tools=brain_tools(mode=role),
+        tool_use_behavior={"stop_at_tool_names": ["submit_verdict" if role == wp.VERIFIER
+                                                  else "report"]},
         model_settings=_model_settings(SUBAGENT))
+
+
+def asked_in(wf: Workflow) -> str:
+    """Where the request was made. Every agent of a workflow works in its
+    thread, where "this channel" read as the thread (live, 2026-11-04)."""
+    origin = getattr(wf, "origin_channel", None)
+    channel_id = getattr(origin, "id", None)
+    if channel_id is None or channel_id == getattr(wf.thread, "id", None):
+        return ""
+    name = getattr(origin, "name", None)
+    where = f"#{name} (channel id {channel_id})" if name else f"channel id {channel_id}"
+    return f'Asked in {where}. "This channel" means that one, not this job\'s thread.'
 
 
 def _request_block(wf: Workflow) -> str:
     lines = [f"Request: {wf.record['request']}"]
     if wf.record.get("requester_name"):
         lines.append(f"Asked by: {wf.record['requester_name']}")
+    if asked_in(wf):
+        lines.append(asked_in(wf))
     if wf.record.get("reason"):
         lines.append(f"Why it is a big job: {wf.record['reason']}")
     return "\n".join(lines)
@@ -1147,14 +1302,35 @@ def step_job_id(wf: Workflow, step_id: str) -> str:
     return f"c{wf.thread.id}-w{wf.id}-{step_id}"
 
 
-async def _run_step(wf: Workflow, step: wp.Step) -> None:
+async def close_progress(progress) -> None:
+    """A step's, scout's or check's embed, closed when its run is cancelled
+    from outside (a restart, a timeout), or it would say "Starting…" for ever.
+    Capped, so a shutdown never waits on Discord; best effort."""
+    try:
+        await asyncio.wait_for(progress.finalize(ok=False, note=STOPPED_NOTE), 5)
+    except BaseException:
+        pass
+
+
+async def redo_wave(wf: Workflow, runs: list[tuple[wp.Step, str]]) -> None:
+    """Finished steps again, each in its own folder with what it must fix
+    (classes/workflow_verify.py). A wave of its own: their files replace the
+    ones they fix."""
+    wf.wave += 1
+    await _together(wf, [_run_step(wf, step, retry=retry) for step, retry in runs])
+    await _save_progress(wf)
+
+
+async def _run_step(wf: Workflow, step: wp.Step, retry: str | None = None) -> None:
     """One step: the helper's run, its files posted in the thread, its
     result recorded. A helper that needs the requester asks in the thread,
-    and the step runs once more with the answer."""
+    and the step runs once more with the answer. `retry`: what this run
+    of an earlier step must do."""
     from classes.brain_progress import BrainProgressHooks, HelperProgress
     from classes.workspace_commands import progress_enabled
 
     wf.step_states[step.id] = "running"
+    wf.first_wave.setdefault(step.id, wf.wave)
     await _update_plan_message(wf)
     quiet = step.role == wp.RESEARCHER
     if quiet:
@@ -1165,7 +1341,10 @@ async def _run_step(wf: Workflow, step: wp.Step) -> None:
         progress = BrainProgressHooks(wf.thread, f"{step.id}: {step.brief}",
                                       stream=await progress_enabled(wf.guild_id))
     try:
-        await _step_work(wf, step, progress, quiet)
+        await _step_work(wf, step, progress, quiet, retry)
+    except asyncio.CancelledError:
+        await close_progress(progress)
+        raise
     except Exception:
         # The workspace went, say. It still fails the job, but no embed or
         # plan line is left saying it is running.
@@ -1175,8 +1354,10 @@ async def _run_step(wf: Workflow, step: wp.Step) -> None:
         raise
 
 
-async def _step_work(wf: Workflow, step: wp.Step, progress, quiet: bool) -> None:
-    report, stopped = await _step_attempt(wf, step, progress, answer=None)
+async def _step_work(wf: Workflow, step: wp.Step, progress, quiet: bool,
+                     retry: str | None = None) -> None:
+    before = wf.results.get(step.id) or {}
+    report, stopped = await _step_attempt(wf, step, progress, retry)
     if (report.status == brain_result.NEEDS_INPUT and not stopped and not wf.cancel_reason):
         question = report.say_to_user or "; ".join(report.facts[:2])
         # An automatic run has nobody to ask, and no ledger means no way to
@@ -1185,25 +1366,35 @@ async def _step_work(wf: Workflow, step: wp.Step, progress, quiet: bool) -> None
         answer = await ask_requester(wf, question) if can_ask else ""
         if answer and not wf.cancel_reason:
             files = report.files_posted
-            report, stopped = await _step_attempt(wf, step, progress, answer=(question, answer))
+            report, stopped = await _step_attempt(
+                wf, step, progress,
+                f"You asked the requester: {question}\nThey answered: {answer}\n"
+                "Your files from before are still in your folder: carry on from there.")
             report.files_posted = files + [f for f in report.files_posted if f not in files]
         elif can_ask:
             report.facts.append(f"The requester was asked: {question} No answer came.")
         elif question:
             report.facts.append(f"This needed the requester, who could not be asked: {question}")
+    earlier = [name for name in before.get("files") or [] if name not in report.files_posted]
     wf.results[step.id] = {"status": report.status, "facts": report.facts,
-                           "files": report.files_posted, "note": report.note}
+                           "files": earlier + report.files_posted, "note": report.note}
+    logger.info(f"Workflow {wf.id}: {step.id} ended {report.status}"
+                + (f": {report.note}" if report.note else ""))
     wf.step_states[step.id] = ("cancelled" if wf.cancel_reason else
                                {brain_result.DONE: "done", brain_result.FAILED: "failed"}
                                .get(report.status, "partial"))
     wf.record["steps"] = dict(wf.results)
     await progress.finalize(ok=report.status == brain_result.DONE,
                             note=None if stopped is None else f"⚠️ {stopped}",
-                            **({"found": len(report.facts)} if quiet else {}))
+                            **({"found": len(report.facts)} if quiet
+                               else {"stopped": stopped is not None}))
     await _update_plan_message(wf)
 
 
-async def _step_attempt(wf: Workflow, step: wp.Step, progress, answer) -> tuple[BrainReport, str | None]:
+async def _step_attempt(wf: Workflow, step: wp.Step, progress,
+                        again: str | None) -> tuple[BrainReport, str | None]:
+    """One run of a step's helper. `again`: why it is running once more."""
+    from classes import workflow_steering
     from classes.brain import _post_files, prepare_job
     from classes.tool_functions import get_current_datetime
     from classes.workspace_tools import _deliver
@@ -1212,8 +1403,9 @@ async def _step_attempt(wf: Workflow, step: wp.Step, progress, answer) -> tuple[
     ctx = _helper_ctx(wf, job_dir=job_dir, out_dir=out_dir)
     if step.role == wp.RESEARCHER:
         ctx["channel"] = QuietChannel(wf.thread)
-    earlier = [f"../{step_job_id(wf, s)}/" for s in wf.results]
-    parts = [f"The whole job: {wf.plan.goal}", "The plan:\n" + wp.plan_text(wf.plan),
+    earlier = [f"../{step_job_id(wf, s)}/" for s in wf.results if s != step.id]
+    parts = [f"The whole job: {wf.plan.goal}", asked_in(wf),
+             "The plan:\n" + wp.plan_text(wf.plan),
              f"Your step: {step.id} [{step.role}]: {step.brief}"]
     if wf.results:
         parts.append("What the earlier steps reported:\n" + _results_text(wf))
@@ -1222,12 +1414,8 @@ async def _step_attempt(wf: Workflow, step: wp.Step, progress, answer) -> tuple[
     learned = planning_text(wf)
     if learned:
         parts.append(learned)
-    if wf.said:
-        parts.append("The requester said in the thread while the job ran (follow it where it "
-                     "applies to your step):\n" + "\n".join(f"- {line}" for line in wf.said[-10:]))
-    if answer is not None:
-        parts.append(f"You asked the requester: {answer[0]}\nThey answered: {answer[1]}\n"
-                     "Your files from before are still in your folder: carry on from there.")
+    if again is not None:
+        parts.append(again)
     folder = f"Your folder (the working directory, already open): {job_dir}/"
     if earlier:
         folder += "\nEarlier steps' folders: " + ", ".join(earlier)
@@ -1236,11 +1424,18 @@ async def _step_attempt(wf: Workflow, step: wp.Step, progress, answer) -> tuple[
                    + ", ".join(f"../{job}/" for job in wf.scout_jobs))
     parts.append(folder)
     parts.append(f"Current datetime: {await get_current_datetime()}")
-    outcome = await _agent_run(wf, _subagent(step.role), "\n\n".join(parts),
+    # No await from here to the run, so a message is either in this text or
+    # reaches the run through `steer`.
+    parts.append(workflow_steering.said_text(wf, step.id))
+    outcome = await _agent_run(wf, _subagent(step.role), "\n\n".join(filter(None, parts)),
                                max_turns=wp.subagent_max_turns(), lane=llm_lanes.SUBAGENT,
                                sandbox=True, progress=progress, caller="workflow_subagent",
-                               ctx=ctx)
+                               ctx=ctx, steer=(len(wf.steering), step.id))
     _keep_shared(wf, ctx)
+    if outcome.at_limit:
+        wf.at_limit.add(step.id)
+    else:
+        wf.at_limit.discard(step.id)
     args = ctx.get("brain_report_args")
     if args is not None:
         report = brain_result.parse_report_args(args)
@@ -1260,7 +1455,8 @@ async def _step_attempt(wf: Workflow, step: wp.Step, progress, answer) -> tuple[
         logger.warning(f"Workflow {wf.id}: could not read back {step.id}'s files: {e}")
         artifacts, skips = [], []
     report.files_posted = await _post_files(wf.thread, artifacts)
-    wf.artifacts.extend(a for a in artifacts if a.name in report.files_posted)
+    wf.artifacts.extend(replace(a, step=step.id, wave=wf.wave) for a in artifacts
+                        if a.name in report.files_posted)
     report.files_posted.extend(ctx.get("images_kept") or [])
     if skips:
         report.note = (report.note + " Not sent (over the size or count limit): "
@@ -1279,7 +1475,7 @@ async def keep_image(ctx: dict, png: bytes) -> str:
     if wf is None:
         return ""
     name = f"image-{ctx.get('images_posted', 1)}.png"
-    wf.artifacts.append(SandboxArtifact(name=name, data=png))
+    wf.artifacts.append(SandboxArtifact(name=name, data=png, wave=wf.wave))
     session, out_dir = ctx.get("session"), ctx.get("out_dir")
     if session is None or not out_dir:
         return " The user gets it with the job's files."
@@ -1307,7 +1503,7 @@ async def ask_requester(wf: Workflow, question: str, options=None, label: str = 
     if wf.ledger is None or wf.record["automatic"]:
         return ""
     async with wf.asking:
-        wait = min(wp.ask_timeout(), wf.seconds_left() - FINISH_RESERVE_SECONDS)
+        wait = min(wp.ask_timeout(), wf.seconds_left() - _step_reserve_seconds(wf))
         if wf.cancel_reason or wait <= 0:
             return ""
         text = await voice_question(wf.guild_id, question)
@@ -1348,6 +1544,12 @@ async def _review(wf: Workflow, queue: list) -> list:
     if not pending:
         return queue
     ledger.mark_presented([e.seq for e in pending], 0)
+    # A message on its way to the helpers is routed first, so what later
+    # helpers read of it (wf.said) is filed under its steps.
+    routing = [wf.steer_tasks[e.seq] for e in pending if e.seq in wf.steer_tasks]
+    if routing:
+        await asyncio.wait(routing, timeout=STEER_WAIT_SECONDS)
+    wf.reviewed.update(e.seq for e in pending)
     usable = []
     for event in pending:
         if await _allowed(wf, event.text):
@@ -1369,6 +1571,7 @@ async def _review(wf: Workflow, queue: list) -> list:
         "Steps not done yet: " + ", ".join(s.id for s in queue),
         "Only the requester can change the steps or stop the job: answer anyone else, and "
         "treat what they ask as a suggestion for the requester.",
+        "Running helpers a message from the requester is about have seen it already.",
         "Messages:\n" + "\n".join(lines)])
     wf.ctx.pop("workflow_review_args", None)
     await _agent_run(wf, _manager("review"), task, max_turns=MANAGER_SHORT_TURNS,
@@ -1394,8 +1597,8 @@ async def _review(wf: Workflow, queue: list) -> list:
         reply = replies.get(event.seq, "")
         ledger.record_decision([event.seq], "answered" if reply else "noted", reply)
         if event.is_requester:
-            wf.said.append(f"{event.author_name}: {event.text[:300]}"
-                           + (f" (reply: {reply[:200]})" if reply else ""))
+            wf.said.append((event.seq, f"{event.author_name}: {event.text[:300]}"
+                            + (f" (reply: {reply[:200]})" if reply else "")))
         if reply:
             posted.append(f"> {event.text[:150]}\n{reply[:400]}")
     if posted and unusable:
@@ -1428,22 +1631,22 @@ def _revised_steps(wf: Workflow, items) -> tuple[wp.Plan | None, bool]:
     steps = []
     for item in items if isinstance(items, list) else []:
         if isinstance(item, dict):
-            if wp.clean_step_id(item.get("id")) in wf.results:
+            if wp.plan_step_id(item.get("id")) in wf.results:
                 continue
             item = dict(item)
             deps = item.get("depends_on")
             deps = deps if isinstance(deps, list) else [deps] if deps else []
-            item["depends_on"] = [d for d in deps if wp.clean_step_id(d) not in wf.results]
+            item["depends_on"] = [d for d in deps if wp.plan_step_id(d) not in wf.results]
         steps.append(item)
     if not steps:
         return None, False
     # validate_plan names a step with no id by its place in this list, which
     # could be a done step's id: it would rerun in that step's folder.
-    taken = set(wf.results) | {wp.clean_step_id(s.get("id")) for s in steps
+    taken = set(wf.results) | {wp.plan_step_id(s.get("id")) for s in steps
                                if isinstance(s, dict)}
     number = len(wf.results)
     for item in steps:
-        if isinstance(item, dict) and not wp.clean_step_id(item.get("id")):
+        if isinstance(item, dict) and not wp.plan_step_id(item.get("id")):
             number += 1
             while f"s{number}" in taken:
                 number += 1
@@ -1467,7 +1670,10 @@ async def _finish(wf: Workflow, stopped: str | None) -> BrainReport:
         "What each step reported:\n" + (_results_text(wf) or "(nothing)"),
         f"Note: {stopped}" if stopped else "",
         ("Files already posted: " + ", ".join(a.name for a in wf.artifacts)) if wf.artifacts else "",
-        "Use status done only if the deliverables were made; else partial or failed."]))
+        ("The finished work was checked, and these are still wrong:\n" + wf.verdict["notes"])
+        if wf.verdict and wf.verdict["notes"] else "",
+        "Use status done only if the deliverables were made; else partial or failed. Say only "
+        "what the step reports and the check show."]))
     wf.ctx.pop("brain_report_args", None)
     outcome = await _agent_run(wf, _manager("finish"), task, max_turns=MANAGER_SHORT_TURNS,
                                lane=llm_lanes.BRAIN, sandbox=False, caller="workflow_manager")
@@ -1520,17 +1726,19 @@ async def post_workflow_copy(wf: Workflow) -> list[str]:
         return []
     if getattr(wf.origin_channel, "id", None) == getattr(wf.thread, "id", None):
         return []
-    # A later step that fixes a file attaches it again: send only the newest
-    # of each name, in the order they were first made.
-    latest: dict[str, object] = {}
-    for artifact in wf.artifacts:
-        latest[artifact.name] = artifact  # a dict keeps the first position
+    from classes.workspace_tools import SandboxArtifact
+
+    chosen = wp.echo_files([(a.name, getattr(a, "step", ""), getattr(a, "wave", 0))
+                            for a in wf.artifacts])
     picked, total = [], 0
-    for artifact in latest.values():
+    for index, name in chosen:
+        artifact = wf.artifacts[index]
         if len(picked) >= ECHO_MAX_FILES:
             break
         if total + len(artifact.data) > ECHO_MAX_BYTES:
             continue  # a smaller one after it may still fit
+        if name != artifact.name:
+            artifact = SandboxArtifact(name=name, data=artifact.data, caption=artifact.caption)
         picked.append(artifact)
         total += len(artifact.data)
     return await _post_files(wf.origin_channel, picked)
@@ -1543,6 +1751,7 @@ async def queue_done(wf: Workflow, report: BrainReport) -> None:
     item = WorkflowDone(wf, report)
     if _queue is None:
         await _plain_done(wf)
+        await _skill_review(wf, report)
         return
     try:
         _queue.put_nowait(item)
@@ -1560,6 +1769,7 @@ async def queue_done(wf: Workflow, report: BrainReport) -> None:
             except asyncio.QueueFull:
                 continue
         await _plain_done(wf)
+        await _skill_review(wf, report)
 
     _keep(asyncio.get_running_loop().create_task(_retry()))
 
@@ -1598,6 +1808,34 @@ async def _plain_done(wf: Workflow) -> None:
                                                              everyone=False))
 
 
+async def _skill_review(wf: Workflow, report: BrainReport) -> None:
+    """After the completion reply: is this job worth keeping as a skill? The
+    brain's review (classes/skill_reflection.py), reading the plan and what
+    the steps reported, since a workflow has no one run to read. Like a brain
+    call's, never for automatic work. Fail-soft."""
+    from classes import skill_reflection
+    from classes.skill_store import SkillStore
+    from classes.tool_embeds import trim
+    try:
+        if (wf.skill_reviewed or wf.record["automatic"] or wf.plan is None
+                or wf.record.get("state") not in (wp.DONE, wp.PARTIAL)
+                or not skill_reflection.should_reflect(status=report.status,
+                                                       tool_calls=wf.tool_calls,
+                                                       skill_saved=False)):
+            return
+        wf.skill_reviewed = True
+        existing = [skill["name"] for skill in await SkillStore().list(wf.guild_id)]
+        trail = "The plan:\n" + wp.plan_text(wf.plan) + "\n\nWhat each step reported:\n"
+        skill_reflection.start([skill_reflection.build_review(
+            request=wf.record["request"], status=report.status, facts=report.facts,
+            transcript=trim(trail + _results_text(wf), skill_reflection.TRANSCRIPT_CHARS),
+            skills_used=[], used_bodies={}, existing_names=existing,
+            channel=wf.origin_channel or wf.thread, guild_id=wf.guild_id,
+            user_id=wf.requester_id, job_id=f"c{wf.thread.id}-w{wf.id}")])
+    except Exception as e:
+        logger.warning(f"Workflow {wf.id}: could not start a skill review: {e}")
+
+
 def completion_prompt(wf: Workflow, report: BrainReport) -> str:
     """What the persona is told when a workflow ends (like a follow-up's
     prompt, automation_runner.followup_prompt): who asked, what for, the
@@ -1624,6 +1862,7 @@ async def reply_done(item: WorkflowDone, client) -> None:
     wf = item.workflow
     channel = wf.origin_channel
     if channel is None:
+        await _skill_review(wf, item.report)
         return
     try:
         handler = TextLLMHandler([{"role": "user", "content": completion_prompt(wf, item.report)}],
@@ -1642,6 +1881,7 @@ async def reply_done(item: WorkflowDone, client) -> None:
         logger.warning(f"Workflow {wf.id}: the completion reply failed ({e}); a plain note "
                        "instead")
         await _plain_done(wf)
+    await _skill_review(wf, item.report)
 
 
 # --- buttons ----------------------------------------------------------------------
