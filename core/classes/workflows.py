@@ -284,6 +284,7 @@ class Workflow:
     verdict: dict | None = None
     checked: bool = False     # the first check is over: half the reserves are spent
     at_limit: set = field(default_factory=set)  # steps whose last run stopped at a limit
+    first_wave: dict = field(default_factory=dict)  # step id -> the wave it first ran in
     skill_reviewed: bool = False
     # The plan stage's rounds (classes/workflow_planning.py): done yet, and
     # what they learned.
@@ -1305,6 +1306,7 @@ async def _run_step(wf: Workflow, step: wp.Step, retry: str | None = None) -> No
     from classes.workspace_commands import progress_enabled
 
     wf.step_states[step.id] = "running"
+    wf.first_wave.setdefault(step.id, wf.wave)
     await _update_plan_message(wf)
     quiet = step.role == wp.RESEARCHER
     if quiet:

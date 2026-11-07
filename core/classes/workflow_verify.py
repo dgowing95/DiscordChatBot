@@ -19,7 +19,8 @@ Why it works this way:
   steps' budget, not the reserves, and only with room for it and a re-run.
 - **One send-back at the end, and code does it.** The verifier names the step,
   code runs it once more in its own folder with the notes, then every step
-  that depends on it, through others too (wp.redo_chain), so a fixed fact
+  that depends on it and every implementer that ran after it (wp.redo_chain:
+  a helper reads every earlier report, depends_on or not), so a fixed fact
   reaches the file made from it (send_back). Then the work is checked again. A
   manager run would only pass the same words on. A second fail ends the job
   as partial, with the notes. The chain stops where room runs out, and the
@@ -175,7 +176,7 @@ async def check_research(wf, steps: list) -> None:
 async def send_back(wf, step, notes: str) -> None:
     """`step` again with the notes, then every step built on it, in waves
     (wp.next_wave), while there is room."""
-    chain = wp.redo_chain(wf.plan, wf.results, step.id)
+    chain = wp.redo_chain(wf.plan, wf.results, step.id, wf.first_wave)
     remaining = list(chain)
     done = set(wf.results) - {s.id for s in chain}
     while remaining and not wf.cancel_reason:

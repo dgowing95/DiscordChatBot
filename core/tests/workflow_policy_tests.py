@@ -265,11 +265,25 @@ def _chain_plan():
 def test_a_step_sent_back_brings_the_steps_built_on_it():
     plan = _chain_plan()
     ran = {s.id: {} for s in plan.steps}
-    assert [s.id for s in wp.redo_chain(plan, ran, "s1")] == ["s1", "s3", "s4"]  # s4 through s3
-    assert [s.id for s in wp.redo_chain(plan, ran, "s2")] == ["s2", "s3", "s4", "s5"]
-    assert [s.id for s in wp.redo_chain(plan, ran, "s4")] == ["s4"]
+    waves = {"s1": 1, "s2": 1, "s3": 2, "s4": 3, "s5": 4}
+    # Every implementer after a researcher read its report.
+    assert [s.id for s in wp.redo_chain(plan, ran, "s1", waves)] == ["s1", "s3", "s4", "s5"]
+    # After an implementer: s5 ran later, so it may have read s3's report too.
+    assert [s.id for s in wp.redo_chain(plan, ran, "s3", waves)] == ["s3", "s4", "s5"]
+    assert [s.id for s in wp.redo_chain(plan, ran, "s5", waves)] == ["s5"]
     # One that never ran is not run "again".
-    assert [s.id for s in wp.redo_chain(plan, {"s1": {}, "s3": {}}, "s1")] == ["s1", "s3"]
+    assert [s.id for s in wp.redo_chain(plan, {"s1": {}, "s3": {}}, "s1", waves)] == ["s1", "s3"]
+
+
+def test_a_send_back_reaches_a_file_the_plan_did_not_link():
+    plan = wp.Plan(goal="g", deliverables=[], notes="", steps=[
+        wp.Step(id="s1", role="researcher", brief="b"),
+        wp.Step(id="s2", role="researcher", brief="b"),
+        wp.Step(id="s3", role="implementer", brief="b")])  # no depends_on
+    ran = {"s1": {}, "s2": {}, "s3": {}}
+    waves = {"s1": 1, "s2": 1, "s3": 2}
+    # s3 still made moons.md from s1's report; s2 ran beside s1 and never saw it.
+    assert [s.id for s in wp.redo_chain(plan, ran, "s1", waves)] == ["s1", "s3"]
 
 
 def test_research_is_checked_only_when_an_implementer_is_still_to_come():

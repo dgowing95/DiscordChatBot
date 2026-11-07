@@ -268,6 +268,21 @@ async def test_a_step_sent_back_at_the_end_also_reruns_the_steps_built_on_it(che
 
 
 @pytest.mark.asyncio
+async def test_a_send_back_reruns_an_implementer_the_plan_did_not_link(checked):
+    checked.model = LaneModel([
+        _plan_call(("s1", "researcher", []), ("s2", "implementer", [])),
+        _report(call_id="a"), _report(call_id="b"),
+        _verdict(("moons.md", False, "Io's diameter is wrong"), redo="s1", call_id="v1"),
+        _report(facts=FIXED, call_id="c"), _report(call_id="d"),
+        _verdict(GOOD, call_id="v2"), _report(call_id="f")])
+    wf, _ = await _start(checked)
+    await _finish(wf)
+    assert wf.record["state"] == wp.DONE
+    assert "s1, which this step was built on" in json.dumps(checked.model.calls[5].input)
+    assert checked.model.remaining_steps == 0
+
+
+@pytest.mark.asyncio
 async def test_the_steps_built_on_it_wait_for_room(checked, monkeypatch):
     answers = iter([True, False])  # room for the send-back, none left after it
     monkeypatch.setattr(workflow_verify, "_room", lambda wf: next(answers))

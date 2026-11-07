@@ -399,14 +399,20 @@ def redo_target(plan: Plan, results: dict, wanted: str) -> Step | None:
     return (built or ran or [None])[-1]
 
 
-def redo_chain(plan: Plan, results: dict, step_id: str) -> list[Step]:
-    """`step_id` and every step that ran on what it made, through others too,
-    in the order they are taken up: a fixed fact has to reach the file that
-    used it."""
+def redo_chain(plan: Plan, results: dict, step_id: str, waves: dict) -> list[Step]:
+    """`step_id` and every step that ran on what it made, in the order they
+    are taken up: a fixed fact has to reach the file that used it. That is
+    each step that depends on one in the chain, and every implementer that
+    ran after it: a helper reads all the earlier steps' reports, so a plan
+    that left a depends_on out still made its file from them. `waves`: the
+    wave each step first ran in (a step of the same wave never saw it)."""
+    first = waves.get(step_id, 0)
     chain = {step_id}
     ordered = [step for step in order_steps(plan) if step.id in results]
     for step in ordered:
-        if any(dep in chain for dep in step.depends_on):
+        later = waves.get(step.id, 0) > first
+        if any(dep in chain for dep in step.depends_on) or (
+                later and step.role == IMPLEMENTER):
             chain.add(step.id)
     return [step for step in ordered if step.id in chain]
 

@@ -431,8 +431,8 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
       guard only ever saw the request).
     - **The check** (`workflow_verify.py`): every job that finished, unless a limit or a cancel stopped
       it or it made nothing. The verifier has the shell, `fetch_url` and `view_image`, and nothing that
-      posts. Code runs the step it names once more, then every step that depends on it
-      (`wp.redo_chain`), in waves, while there is room, and checks again; a second fail is PARTIAL
+      posts. Code runs the step it names once more, then every step that depends on it and every
+      implementer that ran after it (`wp.redo_chain`), in waves, while there is room, and checks again; a second fail is PARTIAL
       with the notes, and no verdict changes nothing but says so. Research is checked before it is
       built on (`check_research`, in the steps' budget, not the reserves): a wrong researcher runs
       again at once and is left to the end check after that. Verifier and

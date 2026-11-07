@@ -786,7 +786,7 @@ async def test_a_cancelled_step_closes_its_embed(monkeypatch):
     monkeypatch.setattr(workflows, "_step_work", step_work)
     monkeypatch.setattr(workflows, "_update_plan_message", AsyncMock())
     monkeypatch.setattr("classes.brain_progress.HelperProgress", lambda *a, **k: Progress())
-    wf = SimpleNamespace(step_states={}, thread=None, guild_id=1)
+    wf = SimpleNamespace(step_states={}, thread=None, guild_id=1, first_wave={}, wave=1)
     task = asyncio.create_task(workflows._run_step(
         wf, wp.Step(id="s1", role="researcher", brief="b")))
     await asyncio.wait_for(started.wait(), 5)
