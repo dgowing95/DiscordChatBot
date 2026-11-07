@@ -4,10 +4,22 @@ A Discord bot that answers messages with a **self-hosted** LLM. Nothing is sent 
 hosted model provider by default: a llama.cpp server serves a GGUF model on your own
 GPU, and Redis stores per-guild settings and per-user memories.
 
-Beyond chat it can search the web, read a URL, generate images, and hand a task to a
-**code sandbox** — an agent with its own Docker container per server (the server's
-workspace, so Docker is required) that writes and actually runs code, in a Discord
-thread you can talk to while it works.
+Beyond chat it does the work itself and answers in the channel:
+
+- **Research, files, code and charts**: it searches the web, reads links, runs code in the
+  server's own workspace (a Docker container per server, so Docker is required) and posts
+  the files it made. See [docs/brain.md](docs/brain.md).
+- **Big jobs as workflows**: a plan you approve, then steps in a thread of their own, with
+  `/task` to start one by hand ([docs/workflows.md](docs/workflows.md)).
+- **Memories**: it remembers what you tell it, and uses it.
+- **Skills**: it saves how it did a job that comes up again, and reuses it
+  ([docs/skills.md](docs/skills.md)).
+- **Images, polls, server events, schedules and rules**
+  ([docs/events.md](docs/events.md), [docs/automations.md](docs/automations.md)).
+- **Voice calls**: it joins a voice channel and talks ([docs/voice.md](docs/voice.md)).
+
+Upgrading from v2? Read [docs/upgrading-to-v3.md](docs/upgrading-to-v3.md) first: settings
+were renamed, and the old names stop the bot from starting.
 
 In Discord, `/help` lists everything it can do. After each release it posts a short
 "What's new" list of the new features once per server (turn off with
@@ -23,7 +35,7 @@ docker-compose stack for local development.
 | `core/` | the bot itself: Discord client, message queue, agent + tools, Prometheus metrics |
 | `llamacpp` | the LLM server (OpenAI-compatible API), serving the GGUF named by `model` |
 | `strata` | optional instead of `llamacpp` (`llm.engine: strata`): [Strata](https://github.com/Niko1221/Strata), for large mixture-of-experts models on consumer GPUs |
-| `redis` | per-guild settings, per-user memories, and sandbox workspace snapshots |
+| `redis` | per-guild settings, per-user memories, skills, and saved workspaces |
 | `diffusionservice/` | optional image generation (text-to-image); disable with `diffusion.enabled=false` |
 
 ## Requirements
@@ -33,7 +45,7 @@ docker-compose stack for local development.
 - An NVIDIA GPU with the [NVIDIA Container Runtime Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 - A registered Discord bot and its token.
 - A Docker daemon on the node, whose socket is mounted into the core pod: each server's
-  code-sandbox workspace is a container there, and core will not start without it.
+  workspace is a container there, and core will not start without it.
 
 ## Installing
 
@@ -44,7 +56,7 @@ docker-compose stack for local development.
 
    ```bash
    helm upgrade --install dchatbot \
-     https://github.com/dgowing95/DiscordChatBot/releases/download/v2.26/dchatbot-v2.26.tgz \
+     https://github.com/dgowing95/DiscordChatBot/releases/download/v3.0/dchatbot-v3.0.tgz \
      -f values.yaml --namespace dchatbot --create-namespace
    ```
 
@@ -72,7 +84,7 @@ code edits without a rebuild. Changing `LLM_MODEL` needs `docker compose up -d` 
 The bot can send two short, related channel messages from one generation, with a
 0.8–1.5 second pause. By default, 8% of replies offer the model this option; it can
 still choose one message. After a pair, ten successful replies in that channel
-must pass before another opportunity. Code and sandbox reports use normal delivery.
+must pass before another opportunity. Answers with files or tool results use normal delivery.
 
 Set `DOUBLE_REPLY_CHANCE` (0–1, default `0.08`; `0` disables) and
 `DOUBLE_REPLY_COOLDOWN_REPLIES` (nonnegative integer, default `10`) in `.env` for
