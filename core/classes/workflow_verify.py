@@ -294,8 +294,8 @@ async def _verdict(wf, ctx: dict, job_dir: str, progress,
         intro = [f"Check what {ids} found, before later steps build on it. Nothing is made "
                  "for the user yet: judge these steps' facts and files against the request, "
                  "and check a fact or two at its source."
-                 + (f" Later steps make {', '.join(later)}: do not check for those, they cannot exist yet."
-                    if later else ""), workflows._request_block(wf)]
+                 + (f" Later steps make {', '.join(later)}: do not check for those, they "
+                    "cannot exist yet." if later else ""), workflows._request_block(wf)]
         where = f"Their folders: {folders}"
     parts = intro + [
         "The plan:\n" + wp.plan_text(wf.plan),
