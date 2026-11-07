@@ -1537,8 +1537,9 @@ async def test_a_cancel_while_the_plan_changes_leaves_the_old_card_closed(env, m
     assert wf.record["state"] == wp.CANCELLED
     [old] = env.thread.plans()
     assert len(old.edits) == 1  # closed once, never given the unseen plan
-    assert old.edits[0]["view"].note == workflows.PLAN_CLOSED
-    assert "s2" not in old.edits[0]["view"].text
+    closed = old.edits[0]["view"]
+    assert closed.buttons == [] and workflows.PLAN_CLOSED in view_text(closed)
+    assert "do s2" not in view_text(closed)
 
 
 @pytest.mark.asyncio
@@ -1626,17 +1627,23 @@ async def test_a_step_that_crashes_leaves_nothing_saying_it_is_running(env, monk
 
 
 @pytest.mark.asyncio
-async def test_a_researchers_embed_counts_to_its_real_share_of_turns(env, monkeypatch):
+async def test_a_researchers_card_counts_to_its_real_share_of_turns(env, monkeypatch):
+    from classes import brain_progress
     monkeypatch.setenv("WORKFLOW_MAX_TURNS", "60")  # less than SUBAGENT_MAX_TURNS (100)
+    seen = []
+    real = brain_progress.HelperProgress.finalize
+
+    async def _finalize(self, *args, **kwargs):
+        seen.append((self.label, self.max_turns))
+        return await real(self, *args, **kwargs)
+
+    monkeypatch.setattr(brain_progress.HelperProgress, "finalize", _finalize)
     env.model = LaneModel([_plan_call(("s1", "researcher", [])), _report(call_id="a"),
                            _report(call_id="f")])
     wf, _ = await _start(env)
     await _finish(wf)
-    embed = next(m for m in env.thread.sent if m.kwargs.get("embed") is not None
-                 and m.kwargs["embed"].title.startswith("🔬 s1"))
-    footer = embed.edits[-1]["embed"].footer.text
-    share = int(footer.rsplit(" ", 1)[-1])
-    assert footer.startswith("Turn 1 of ") and share < 60  # not "of 100"
+    [share] = [turns for label, turns in seen if label.startswith("🔬 Research")]
+    assert share < 60  # "Turn 1 of <share>", not "of 100"
 
 
 def test_runs_side_by_side_split_the_turns_left():

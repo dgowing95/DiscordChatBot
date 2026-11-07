@@ -207,8 +207,8 @@ async def test_send_card_answers_an_interaction_then_follows_up_and_keeps_files_
 
 
 def _progress_views():
-    from classes.brain_progress import PROGRESS_HINT, SandboxTranscript
-    t = SandboxTranscript("chart the messages", files=["a.csv"], started=1000, hint=PROGRESS_HINT)
+    from classes.brain_progress import PROGRESS_HINT, WorkTranscript
+    t = WorkTranscript("chart the messages", files=["a.csv"], started=1000, hint=PROGRESS_HINT)
     for i in range(12):
         block = t.add_command(f"python step_{i}.py")
         t.add_output("OUTPUT_LINE\n" * 60, 0, block=block)
