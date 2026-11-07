@@ -144,6 +144,17 @@ def test_the_fallback_is_one_implementer_with_the_whole_request():
         ("s1", wp.IMPLEMENTER, "Build a CSV to chart tool")]
 
 
+def test_a_step_never_takes_a_scouts_or_a_checks_folder():
+    plan, problems = wp.validate_plan(_plan(_step("d1"), _step("V2", depends_on=["d1"]),
+                                            _step("s3", depends_on=["r1", "V2"]),
+                                            _step("r1")), max_steps=8)
+    assert problems == []
+    assert [s.id for s in plan.steps] == ["sd1", "sV2", "s3", "sr1"]
+    assert plan.steps[1].depends_on == ["sd1"]
+    assert plan.steps[2].depends_on == ["sr1", "sV2"]
+    assert wp.plan_step_id("s1") == "s1" and wp.plan_step_id("data2") == "data2"
+
+
 def test_a_plan_round_trips_through_its_record():
     plan, _ = wp.validate_plan(_plan(_step("s1"), _step("s2", depends_on=["s1"])), max_steps=8)
     again = wp.plan_from_dict(plan.to_dict())

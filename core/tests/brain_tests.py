@@ -650,6 +650,36 @@ def test_brain_calls_share_one_model_client(monkeypatch):
     assert brain.build_brain_model() is brain.build_brain_model()
 
 
+def test_a_call_without_start_workflow_is_never_told_to_start_one():
+    from classes.tool_functions import ask_brain
+    # The persona's example and the words taken off are one and the same.
+    assert f'request="{brain.WORKFLOW_ASK} ' in ask_brain.description
+    asked = f"{brain.WORKFLOW_ASK} a deep dive on printers"
+    assert brain.plain_request(asked, workflows=False) == "a deep dive on printers"
+    assert brain.plain_request(asked, workflows=True) == asked
+    assert brain.plain_request("Look up the weather", workflows=False) == "Look up the weather"
+    assert brain.plain_request(brain.WORKFLOW_ASK, workflows=False) == brain.WORKFLOW_ASK
+
+
+@pytest.mark.asyncio
+async def test_a_voice_turn_gets_the_request_without_the_workflow_words(monkeypatch):
+    seen = {}
+
+    def task(ctx, request, **kwargs):
+        seen["request"] = request
+        raise RuntimeError("enough")  # only the task is under test
+
+    monkeypatch.setattr(brain, "build_task", task)
+    monkeypatch.setattr(brain, "_earlier_jobs", AsyncMock(return_value=[]))
+    monkeypatch.setattr(brain, "prepare_job", AsyncMock(return_value=("jobs/j", "jobs/j/out", "m")))
+    monkeypatch.setattr(brain, "_skills_index", AsyncMock(return_value=""))
+    lease = SimpleNamespace(session=None, root="/workspace")
+    with pytest.raises(RuntimeError):
+        await brain._run_in_workspace({"voice": True, "channel": None}, lease,
+                                      f"{brain.WORKFLOW_ASK} a deep dive on printers", [], [], {})
+    assert seen["request"] == "a deep dive on printers"
+
+
 def test_the_workflow_bullet_is_there_only_when_the_tool_is(monkeypatch):
     monkeypatch.setenv("SKILLS_ENABLED", "0")
     offered = brain.instructions(workflows=True)

@@ -207,6 +207,18 @@ def clean_step_id(value) -> str:
     return re.sub(r"[^A-Za-z0-9_-]+", "-", text)[:20].strip("-")
 
 
+# The folders beside a step's that are not a step's: scouts' (d1), the end
+# checks' (v1) and the research checks' (r1). A step named so would share one.
+_OTHER_FOLDERS = re.compile(r"[dvr]\d+", re.IGNORECASE)
+
+
+def plan_step_id(value) -> str:
+    """A plan's step id: clean_step_id, and never one of _OTHER_FOLDERS
+    ("d1" becomes "sd1"). Its depends_on entries go through here too."""
+    step_id = clean_step_id(value)
+    return f"s{step_id}" if _OTHER_FOLDERS.fullmatch(step_id) else step_id
+
+
 def _list(value) -> list:
     if value is None:
         return []
@@ -236,7 +248,7 @@ def validate_plan(raw, *, max_steps: int, request: str = "") -> tuple["Plan | No
         if not isinstance(item, dict):
             problems.append(f"Step {index} is not an object.")
             continue
-        step_id = clean_step_id(item.get("id")) or f"s{index}"
+        step_id = plan_step_id(item.get("id")) or f"s{index}"
         if any(s.id == step_id for s in steps):
             problems.append(f"Two steps have the id {step_id}.")
             continue
@@ -251,8 +263,8 @@ def validate_plan(raw, *, max_steps: int, request: str = "") -> tuple["Plan | No
             continue
         depends = []
         for dep in _list(item.get("depends_on")):
-            if clean_step_id(dep):
-                depends.append(clean_step_id(dep))
+            if plan_step_id(dep):
+                depends.append(plan_step_id(dep))
             elif str(dep or "").strip():  # a blank entry is no dependency at all
                 problems.append(f"Step {step_id} depends on {str(dep)[:40]!r}, which is not a "
                                 "usable step id.")
