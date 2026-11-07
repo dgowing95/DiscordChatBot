@@ -51,7 +51,26 @@ jobs:
           major=${latest#v}
           minor=${major##*.}
           major=${major%.*}
-          next="v${major}.$((minor + 1))"
+          # .github/release-major holds the major version the next release
+          # belongs to (AGENTS.md -> Releasing). Greater than the latest tag's:
+          # the first release of a new major, v<major>.0. Equal: bump the minor
+          # as always. Smaller is a mistake: fail rather than tag backwards.
+          wanted=$major
+          if [ -f .github/release-major ]; then
+            wanted=$(tr -d '[:space:]' < .github/release-major)
+            if [[ ! "$wanted" =~ ^[0-9]+$ ]]; then
+              echo "Refusing a malformed .github/release-major: '$wanted'" >&2
+              exit 1
+            fi
+          fi
+          if (( wanted < major )); then
+            echo "Refusing: .github/release-major ($wanted) is below the latest tag's major ($major)" >&2
+            exit 1
+          elif (( wanted > major )); then
+            next="v${wanted}.0"
+          else
+            next="v${major}.$((minor + 1))"
+          fi
           if [[ ! "$next" =~ ^v[0-9]+\.[0-9]+$ ]]; then
             echo "Refusing to create malformed tag: $next" >&2
             exit 1

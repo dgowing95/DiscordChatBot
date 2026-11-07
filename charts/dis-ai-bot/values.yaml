@@ -521,7 +521,7 @@ skills:
     minSkills: 5
     retireDays: 60
 
-# The brain: the agent that does the work in the code sandbox. Its LLM is the
+# The brain: the agent that does the work in the server's workspace. Its LLM is the
 # bot's own (llm.*) unless these name another. To use a hosted
 # OpenAI-compatible API instead (e.g. OpenRouter), set all three:
 #   model: deepseek/deepseek-v4.1-flash-1017
@@ -663,7 +663,7 @@ metrics:
   # Prometheus scrape interval for the ServiceMonitor
   scrapeInterval: 30s
 
-# Safety guard on web and sandbox input (an OpenAI-compatible Moderations
+# Safety guard on web and workspace input (an OpenAI-compatible Moderations
 # endpoint, see .env.example). Fails open: no key, or no answer, allows.
 contentGuard:
   enabled: true

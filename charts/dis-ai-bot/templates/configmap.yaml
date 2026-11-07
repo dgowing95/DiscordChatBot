@@ -230,7 +230,7 @@ data:
   SKILLS_CURATOR_INTERVAL_HOURS: {{ .Values.skills.curator.intervalHours | toString | quote }}
   SKILLS_CURATOR_MIN_SKILLS: {{ .Values.skills.curator.minSkills | toString | quote }}
   SKILLS_RETIRE_DAYS: {{ .Values.skills.curator.retireDays | toString | quote }}
-  # Content guard (moderation of web and sandbox input); the key lives in
+  # Content guard (moderation of web and workspace input); the key lives in
   # secret.yaml.
   CONTENT_GUARD_ENABLED: {{ .Values.contentGuard.enabled | quote }}
   {{- if .Values.contentGuard.baseUrl }}

@@ -502,7 +502,10 @@ are the ones that actually change behaviour). The persona's *system* prompt is n
 `f"Answer as if you are {redis['dcb:{guild}:system']}"`, user-owned via `/system` and
 `change_personality`. The one exception is a voice turn, which appends
 `voice_policy.VOICE_INSTRUCTIONS`; `voice_policy` is also the one home of `GREETING_PROMPT` and
-`HOLD_ON_PROMPT`.
+`HOLD_ON_PROMPT`. Each side job has one prompt of its own: `persona_voice.PROMPT` (~130 characters, a
+question in the persona's voice), `image_prompt.SYSTEM_PROMPT` (~2050, the SDXL rewrite),
+`image_review.SYSTEM_PROMPT` / `VIEW_PROMPT` (~1080 / ~150, the picture check) and
+`research_format.SYSTEM_PROMPT` (~780, the research brief).
 
 - **One home per concept.** When adding guidance, edit its existing home rather than restating it
   nearby: a small model handed two versions of a rule follows neither reliably.
@@ -670,6 +673,11 @@ reads has a row here and a line in `.env.example`, that every row is read by som
   pushes it. That tag push starts `release.yaml` (tests -> five images -> chart -> GitHub release); its
   `workflow_dispatch` trigger is only for re-running a release against an existing tag. Dependabot's
   auto-merged PRs are releases like any other.
+- **A new major version** is set by `.github/release-major` (one number). When it is greater than the
+  latest tag's major, the next tag is `v<major>.0` (so merging `v3` released `v3.0`, not `v2.102`);
+  equal, the minor is bumped as always; smaller, Auto Tag fails rather than tag backwards. Never make a
+  major tag by hand: it races the job, which skips only a HEAD that is already tagged. To start v4, the
+  PR that releases it sets the file to `4`.
 - The chart `.tgz` is published as a GitHub release asset (`dchatbot-vX.Y.tgz`) and as an OCI artifact
   at `oci://ghcr.io/dgowing95/charts/dchatbot` (tag = the git tag), which is what ArgoCD and
   `helm install oci://...` resolve. Both carry `appVersion` = the tag, which picks the `core-<tag>` /
@@ -759,7 +767,10 @@ in the `e2e-logs` artifact.
   - Keep "Require approval for all external contributors" on (Settings → Actions). A fork edits its own
     copy of the workflow, so `runs-on:` and `if:` are not a boundary.
   - Stay on GitHub-hosted runners; the job has sudo and Docker, which is fine only because the VM is
-    thrown away. Everything the job can read, the PR's code can read. If the OpenCode key is ever
+    thrown away. Everything the job can read, the PR's code can read.
+  - **The workspace runs on the runner's own Docker** (`e2e/start_stack.sh`: the default socket,
+    `WORKSPACE_INSTANCE=e2e`), so the brain's code really runs there, inside the thrown-away VM. Never
+    point E2E at a kept machine's Docker: a PR's code would run code on it. If the OpenCode key is ever
     misused, rotate it in both secret stores and consider a key used only here.
   - Never switch to `pull_request_target` to reach secrets.
   - One run at a time across the repo (the `concurrency` group): two bots on one token would both

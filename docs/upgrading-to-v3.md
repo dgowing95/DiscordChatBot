@@ -5,8 +5,36 @@ were removed. There are **no aliases** for the old names: an old name makes the 
 (it logs each old name and its replacement), and an old values key makes `helm template` fail the same
 way. That is on purpose, so a stale `.env` or values file never runs quietly on defaults.
 
-This page grows as v3 is built. Each section lists what changed, the new default where it changed, and
-what to do.
+Start with the steps below. The sections after them list every change: what it was, the new default
+where it changed, and what to do.
+
+## Upgrade steps
+
+1. **Back up** your v2 values file and `.env`. You need them unchanged to roll back (see the end of this
+   page).
+2. **Convert them** with the tables below: [environment variables](#environment-variables),
+   [chart values](#chart-values) and, if you bring your own Secret,
+   [Secret key names](#secret-key-names). Both `helm template` and the bot's startup name any old key
+   still there, with its replacement.
+3. **Make Docker available to core**: the node's Docker socket is now required (compose already mounts
+   it; the chart mounts `brain.workspace.dockerSocketPath`). Core will not start without it.
+4. **Check Redis has room**: each active server keeps a saved workspace of up to
+   `WORKSPACE_SNAPSHOT_MAX_BYTES` (50 MB) for `WORKSPACE_SNAPSHOT_TTL_SECONDS` (7 days), plus its skills.
+5. **Deploy**, then run `/help` in a server to see the new commands.
+
+## What users will notice
+
+- **No more sandbox threads.** The bot does research, files, code and charts itself and answers in the
+  channel where it was asked (details under [The brain](#the-brain-one-tool-for-the-persona-every-other-tool-behind-it)).
+- **Big jobs run as workflows** in a thread of their own, with a plan to approve first
+  ([docs/workflows.md](workflows.md)). `/task` starts one by hand.
+- **It remembers what you told it**: saved memories are used now.
+- **It learns skills**, per server, managed with `/skills` ([docs/skills.md](skills.md)).
+- **`/workspace` replaces `/sandbox_progress_updates`** (status, reset, progress).
+- It can ask you a question with buttons when a guess would waste the work.
+- It no longer answers direct messages (it never worked there).
+
+See [docs/brain.md](brain.md) for how it all looks in a server.
 
 ## Environment variables
 
@@ -79,6 +107,16 @@ New variables, all optional:
 | `SKILLS_CURATOR_ENABLED` / `SKILLS_CURATOR_INTERVAL_HOURS` / `SKILLS_CURATOR_MIN_SKILLS` / `SKILLS_RETIRE_DAYS` | New: the daily skills tidy-up (on, every 24 hours, servers with 5+ skills, retires skills unused for 60 days) |
 | `BRAIN_MAX_CONCURRENT` / `BRAIN_QUEUE_WAIT` | Brain calls at once (3), and seconds a call waits for a free one before the bot says it is busy (120) |
 | `LLAMA_CTX_SIZE` / `LLAMA_PARALLEL` / `LLAMA_CACHE_RAM_MIB` | docker compose only: llama.cpp's total context (80000), slots (1) and prompt cache in MiB (8192). These were fixed in `docker-compose.yaml` before, at the same values |
+| `CONTENT_GUARD_MAX_RETRIES` / `CONTENT_GUARD_RETRY_BACKOFF` | Retries of the moderation call on 429/5xx (2) and its base backoff in seconds (2). The chart had these keys before; now `.env` can set them too |
+| `WORKFLOW_ENABLED` / `WORKFLOW_FROM_AUTOMATIONS` | New: workflows (`/task`, the brain's `start_workflow`; on), and whether schedules, rules and follow-ups may start one, approved at once (on) |
+| `WORKFLOW_PLAN_APPROVAL_SECONDS` / `WORKFLOW_PLAN_REVISIONS` / `WORKFLOW_MAX_STEPS` | New: seconds a plan waits for Approve before it starts anyway (900), changes a plan may get (3), steps in one plan (8) |
+| `WORKFLOW_TIMEOUT` / `WORKFLOW_MAX_TURNS` / `WORKFLOW_MAX_TOKENS` | New: caps on one workflow: seconds (3600), model turns (300) and tokens in and out (4,000,000; 0 = off), every agent together |
+| `WORKFLOW_MAX_PER_GUILD` | New: workflows running at once per server (1) |
+| `SUBAGENT_MODEL` / `SUBAGENT_LLM_HOST` / `SUBAGENT_LLM_API_KEY` | New: a workflow helper's own LLM. Empty = the brain's, then `LLM_*` |
+| `SUBAGENT_REASONING_EFFORT` / `SUBAGENT_CALL_TIMEOUT_SECONDS` | New: a helper's reasoning effort and per-call timeout. Empty = the brain's |
+| `SUBAGENT_MAX_TURNS` / `SUBAGENT_MAX_CONCURRENT` | New: turns per helper (100), researchers running at once (2, cut to the slots a self-hosted server has beside chat's) |
+| `CORE_ENV_FILE` | docker compose only: the env file handed to core (`.env`), for running a second env file |
+| `WORKFLOW_DEV_INJECT` | Local testing and E2E only: `!workflow <request>` starts a workflow from a webhook. Never set it in production |
 
 ### Keys stay with their server
 
@@ -228,6 +266,8 @@ from the chart. Also new:
 | `skills.enabled`, `skills.maxPerGuild`, `skills.maxVersions`, `skills.maxBytes`, `skills.maxBodyChars`, `skills.maxFiles`, `skills.indexMax`, `skills.reflection.enabled`, `skills.reflection.minToolCalls`, `skills.curator.enabled`, `skills.curator.intervalHours`, `skills.curator.minSkills`, `skills.curator.retireDays` | true, 100, 50, 65536, 8000, 10, 20, true, 6, true, 24, 5, 60 | The `SKILLS_*` settings above |
 | `persona.maxTurns` | **4** (was 20 as `llmMaxTurns`) | `PERSONA_MAX_TURNS` |
 | `brain.workspace.idleSeconds`, `snapshotIntervalSeconds`, `maxWarm`, `jobRetentionHours`, `cpuLimit`, `pidsLimit`, `prewarm` | 900, 1800, 4, 72, empty, 512, true | The `WORKSPACE_*` settings above. `WORKSPACE_INSTANCE` is `<namespace>-<release name>`. The core pod's `terminationGracePeriodSeconds` is `snapshotTimeout` + 30, for the shutdown save |
+| `workflows.enabled`, `fromAutomations`, `askTimeout`, `planApprovalSeconds`, `planRevisions`, `maxSteps`, `timeout`, `maxTurns`, `maxTokens`, `maxPerGuild` | true, true, 300, 900, 3, 8, 3600, 300, 4000000, 1 | The `WORKFLOW_*` settings above |
+| `subagents.model`, `llmHost`, `apiKey`, `reasoningEffort`, `callTimeout`, `maxTurns`, `maxConcurrent` | empty (= `brain.*`), 100, 2 | The `SUBAGENT_*` settings above; the key goes in the Secret as `SUBAGENT_LLM_API_KEY` |
 
 With `llm.engine: strata`, the render now fails when `persona.apiKey`, `brain.apiKey`, `research.apiKey`,
 `diffusion.promptRewrite.apiKey` or `diffusion.review.apiKey` is set without a host to go with it
@@ -273,7 +313,25 @@ unchanged.
 | `discord_bot_skill_curator_changes_total{kind}`, `discord_bot_skills_live` | New: the tidy-up's changes (`merge`, `retire`, `describe`; `refused` when a skill changed meanwhile or a check said no; `failed` passes), and live skills on every server together |
 | `discord_bot_queue_workers` | New: queue workers running, spares for brain calls included |
 | `discord_bot_llm_call_seconds{caller="brain"}` | New caller: the brain's model calls (the persona's stay `main`) |
-| `discord_bot_sandbox_thread_messages_total`, `discord_bot_sandbox_input_presentation_seconds`, `discord_bot_sandbox_input_response_seconds`, `discord_bot_sandbox_stale_actions_blocked_total`, `discord_bot_sandbox_questions_total`, `discord_bot_sandbox_unresolved_input_total`, `discord_bot_sandbox_continuations_total` | Renamed `discord_bot_workflow_*` (same labels): thread messages now go to workflows. Update dashboards |
+| `discord_bot_sandbox_thread_messages_total{outcome}` | Renamed `discord_bot_workflow_thread_messages_total` (same label): thread messages now go to workflows. Update dashboards |
+| `discord_bot_sandbox_input_presentation_seconds`, `discord_bot_sandbox_input_response_seconds`, `discord_bot_sandbox_stale_actions_blocked_total`, `discord_bot_sandbox_questions_total`, `discord_bot_sandbox_unresolved_input_total`, `discord_bot_sandbox_continuations_total` | Removed, with the sandbox thread they measured. Remove them from dashboards |
 | `discord_bot_workflows_total{trigger,end_state}`, `discord_bot_workflow_seconds{end_state}`, `discord_bot_workflow_subagents`, `discord_bot_workflow_turns` | New: each workflow (`brain`, `slash`, `automation`; `done`, `partial`, `failed`, `cancelled`), its time, steps and model turns |
 | `discord_bot_workflow_plan_approval_total{outcome}`, `discord_bot_workflows_running` | New: how plans were approved (`approved`, `edited`, `cancelled`, `timeout`, `auto`) and workflows running now |
 | `discord_bot_llm_call_seconds{caller="workflow_manager"\|"workflow_subagent"}` | New callers: a workflow's manager and helpers |
+| `discord_bot_workflow_scouts_total{outcome}`, `discord_bot_workflow_plan_questions_total{outcome}` | New: how scouts ended (`done`, `reported_at_limit`, `stopped`) and questions before the plan (`answered`, `unanswered`) |
+| `discord_bot_workflow_tokens` | New: tokens, in and out, one workflow used |
+| `discord_bot_workflow_verdicts_total{outcome}` | New: checks of finished work (`passed`, `failed`, `not_checked`, `sent_back`), and of research before it is built on (the same with `research_` in front) |
+| `discord_bot_llm_empty_retries_total{lane}` | New: model calls cut off before they said anything, and so asked once more |
+
+## Rolling back to v2
+
+1. Deploy the last v2.x release **with your v2 values file and `.env`** (the backups from step 1). A v3
+   file does not work with v2's templates.
+2. Remove the workspace containers v3 left on the node, which v2 does not know about:
+   `docker rm -f $(docker ps -aq --filter label=dcb.role=workspace)`.
+
+What carries over: memories, settings, schedules and rules, polls and the web cache use the same Redis
+keys in both. v2 ignores v3's own keys (`dcb:workspace:v1:*`, `dcb:skills:v1:*`, `dcb:workflows:v1:*`),
+and still finds its old thread workspaces if you roll back within their 7 days. v2 does not use skills,
+workflows or v3's saved workspaces; they stay in Redis for a later upgrade (saved workspaces expire
+after 7 days).
