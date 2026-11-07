@@ -848,7 +848,7 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
     if isinstance(getattr(progress, "max_turns", None), int):
         # A helper's embed counts to the turns it really has (its share, after
         # any earlier run of the same step), not the setting.
-        progress.max_turns = progress.turn + turns
+        progress.max_turns = getattr(progress, "turn", 0) + turns
     # The reserves are kept back from the steps, for the check and the
     # manager's last runs.
     reserve = _step_reserve_seconds(wf) if holds_back else FINISH_RESERVE_SECONDS if workspace else 0
