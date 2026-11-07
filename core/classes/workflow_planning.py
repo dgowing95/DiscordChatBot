@@ -39,6 +39,7 @@ Why it works this way:
 - **What the requester writes while the plan is being written** goes into the
   next round (_take_messages), rather than costing a plan edit afterwards.
 """
+import asyncio
 import logging
 
 from classes import brain_question, brain_result, llm_lanes, workflows
@@ -222,6 +223,9 @@ async def _scout(wf, number: int, subject: str) -> None:
     await progress.start()
     try:
         await _scout_work(wf, subject, ctx, job_dir, progress)
+    except asyncio.CancelledError:
+        await workflows.close_progress(progress)
+        raise
     except Exception:
         await progress.finalize(ok=False, note=f"⚠️ {workflows.HELPER_FAILED}")
         raise

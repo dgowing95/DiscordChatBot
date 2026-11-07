@@ -20,6 +20,10 @@ Why it works this way:
   (classes/workflow_verify.py) is what checking there is.
 - **New text passes the content guard first**: the guard in the run context only
   ever saw the request.
+- **One message at a time, in the order they came** (wf.steering_lock, FIFO), so
+  two sent seconds apart never reach a helper the other way round, though each
+  is routed on its own. The review waits for a message's routing (wf.steer_tasks)
+  before answering it, so what later helpers read is filed under its steps.
 """
 import dataclasses
 import json
@@ -88,12 +92,13 @@ async def route(wf, text: str) -> set | None:
 async def steer(wf, event) -> None:
     """A message from the requester, on its way to the steps it is about. One
     that is blocked here is blocked again by the review, which says so."""
-    if not await workflows._allowed(wf, event.text):
-        return
-    text = event.text[:STEERING_CHARS]
-    targets = await route(wf, text)
-    wf.routes[event.seq] = targets
-    wf.steering.append((event.seq, text, targets))
+    async with wf.steering_lock:
+        if not await workflows._allowed(wf, event.text):
+            return
+        text = event.text[:STEERING_CHARS]
+        targets = await route(wf, text)
+        wf.routes[event.seq] = targets
+        wf.steering.append((event.seq, text, targets))
     logger.info(f"Workflow {wf.id}: a message goes to "
                 f"{'every step' if targets is None else sorted(targets) or 'no step'}")
 

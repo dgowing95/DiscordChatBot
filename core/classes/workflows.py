@@ -117,6 +117,8 @@ RENEW_SECONDS = 120
 ECHO_MAX_FILES = 10
 ECHO_MAX_BYTES = 25_000_000
 STEP_FACTS_CHARS = 2500
+STEER_WAIT_SECONDS = 30  # the review waits this long at most for a message's routing
+STOPPED_NOTE = "⚠️ Stopped."
 # A helper's pictures, in its folder beside out/ (keep_image).
 IMAGES_DIR = "images"
 
@@ -271,6 +273,8 @@ class Workflow:
     # it (classes/workflow_steering.py). routes is those steps by seq,
     # steer_seen what _watch has looked at, reviewed what _review has answered.
     steering: list = field(default_factory=list)
+    steering_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    steer_tasks: dict = field(default_factory=dict)  # seq -> its steer task
     routes: dict = field(default_factory=dict)
     steer_seen: set = field(default_factory=set)
     reviewed: set = field(default_factory=set)
@@ -759,8 +763,9 @@ async def _watch(wf: Workflow) -> None:
                 wf.approval.set_result(("edit", event))
             elif wf.state in (wp.RUNNING, wp.VERIFYING) and event.seq not in wf.steer_seen:
                 wf.steer_seen.add(event.seq)
-                _keep(asyncio.get_running_loop().create_task(
-                    workflow_steering.steer(wf, event)))
+                task = asyncio.get_running_loop().create_task(workflow_steering.steer(wf, event))
+                wf.steer_tasks[event.seq] = task
+                _keep(task)
 
 
 # --- the agents ------------------------------------------------------------------
@@ -1267,6 +1272,16 @@ def step_job_id(wf: Workflow, step_id: str) -> str:
     return f"c{wf.thread.id}-w{wf.id}-{step_id}"
 
 
+async def close_progress(progress) -> None:
+    """A step's, scout's or check's embed, closed when its run is cancelled
+    from outside (a restart, a timeout), or it would say "Starting…" for ever.
+    Capped, so a shutdown never waits on Discord; best effort."""
+    try:
+        await asyncio.wait_for(progress.finalize(ok=False, note=STOPPED_NOTE), 5)
+    except BaseException:
+        pass
+
+
 async def redo_step(wf: Workflow, step: wp.Step, notes: str) -> None:
     """A finished step again, in its own folder, to fix what the check found
     (classes/workflow_verify.py). A wave of its own: its files replace the
@@ -1299,6 +1314,9 @@ async def _run_step(wf: Workflow, step: wp.Step, retry: str | None = None) -> No
                                       stream=await progress_enabled(wf.guild_id))
     try:
         await _step_work(wf, step, progress, quiet, retry)
+    except asyncio.CancelledError:
+        await close_progress(progress)
+        raise
     except Exception:
         # The workspace went, say. It still fails the job, but no embed or
         # plan line is left saying it is running.
@@ -1498,6 +1516,11 @@ async def _review(wf: Workflow, queue: list) -> list:
     if not pending:
         return queue
     ledger.mark_presented([e.seq for e in pending], 0)
+    # A message on its way to the helpers is routed first, so what later
+    # helpers read of it (wf.said) is filed under its steps.
+    routing = [wf.steer_tasks[e.seq] for e in pending if e.seq in wf.steer_tasks]
+    if routing:
+        await asyncio.wait(routing, timeout=STEER_WAIT_SECONDS)
     wf.reviewed.update(e.seq for e in pending)
     usable = []
     for event in pending:

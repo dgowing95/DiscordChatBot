@@ -713,6 +713,87 @@ def test_a_later_step_reads_only_what_is_for_it():
     assert "green" in workflow_steering.said_text(wf)  # the check reads it all
 
 
+@pytest.mark.asyncio
+async def test_two_messages_reach_the_helpers_in_the_order_they_came(monkeypatch):
+    first_routed = asyncio.Event()
+
+    async def route(wf, text):
+        if text == "first":
+            await asyncio.sleep(0.05)  # routed slower than the second
+            first_routed.set()
+        return None
+
+    monkeypatch.setattr(workflow_steering, "route", route)
+    monkeypatch.setattr(workflows, "_allowed", AsyncMock(return_value=True))
+    wf = workflows.Workflow(record={"id": "a1"}, ctx={}, thread=None, origin_channel=None)
+    events = [SimpleNamespace(seq=1, text="first"), SimpleNamespace(seq=2, text="second")]
+    await asyncio.gather(*(workflow_steering.steer(wf, e) for e in events))
+    assert [text for _seq, text, _targets in wf.steering] == ["first", "second"]
+
+
+@pytest.mark.asyncio
+async def test_the_review_waits_for_a_messages_routing(env, monkeypatch):
+    routed = asyncio.Event()
+
+    async def route(wf, text):
+        await asyncio.sleep(0.2)  # still routing when the step ends
+        routed.set()
+        return {"s1"}
+
+    monkeypatch.setattr(workflow_steering, "route", route)
+    thread_id = env.thread.id
+
+    @function_tool
+    async def look() -> str:
+        """Look."""
+        thread_inbox.deliver(thread_id, 9703, 5, "Ana", "make the graph green")
+        await asyncio.sleep(0.01)
+        return "ok"
+
+    env.subagent_tools = [look]
+    env.model = LaneModel([
+        _plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"])),
+        _look_call("l1"), _report(call_id="a"),
+        ModelStep(output=[function_call("submit_review", {"replies": []}, call_id="rv")]),
+        _report(call_id="b"), _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    assert routed.is_set()
+    assert wf.routes[1] == {"s1"}
+    # s2 started after the review, and the message was for s1 alone.
+    assert _positions(env.model.calls[4], "make the graph green") == []
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_step_closes_its_embed(monkeypatch):
+    calls = []
+
+    class Progress:
+        async def start(self):
+            pass
+
+        async def finalize(self, **kwargs):
+            calls.append(kwargs)
+
+    started = asyncio.Event()
+
+    async def step_work(*args):
+        started.set()
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(workflows, "_step_work", step_work)
+    monkeypatch.setattr(workflows, "_update_plan_message", AsyncMock())
+    monkeypatch.setattr("classes.brain_progress.HelperProgress", lambda *a, **k: Progress())
+    wf = SimpleNamespace(step_states={}, thread=None, guild_id=1)
+    task = asyncio.create_task(workflows._run_step(
+        wf, wp.Step(id="s1", role="researcher", brief="b")))
+    await asyncio.wait_for(started.wait(), 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert calls == [{"ok": False, "note": workflows.STOPPED_NOTE}]
+
+
 def test_the_routing_prompt_stays_small():
     assert len(workflow_steering.ROUTE_PROMPT) <= 500
 

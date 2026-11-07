@@ -36,6 +36,7 @@ Why it works this way:
 - **Its findings reach the final report** (wf.verdict, read by workflows._finish),
   so a report cannot claim what the check found to be untrue.
 """
+import asyncio
 import logging
 
 from classes import llm_lanes, metrics, workflow_steering, workflows
@@ -146,6 +147,9 @@ async def _check(wf, number: int) -> dict | None:
         ctx = workflows._helper_ctx(wf, job_dir=job_dir, out_dir=out_dir,
                                     channel=QuietChannel(wf.thread))
         verdict, stopped = await _verdict(wf, ctx, job_dir, progress)
+    except asyncio.CancelledError:
+        await workflows.close_progress(progress)
+        raise
     except Exception as e:
         logger.warning(f"Workflow {wf.id}: the check failed: {e!r}")
         await progress.finalize(ok=False, note=f"⚠️ {NOT_CHECKED_NOTE}")
