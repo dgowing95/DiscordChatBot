@@ -51,6 +51,7 @@ def test_the_next_tag(latest, wanted, expected, tmp_path):
     ("v2.101", ""),
     ("v2.x", "3"),       # a malformed latest tag
     ("v2.101", "2 3"),   # not one number
+    ("v22.5", "2\n3"),   # two lines, never read as 23
     ("v2.101", MISSING),  # named but missing: never fall back to a minor bump
     ("v2.101", "18446744073709551619"),  # would wrap in bash arithmetic
 ])
