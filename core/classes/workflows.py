@@ -121,6 +121,10 @@ ECHO_MAX_BYTES = 25_000_000
 STEP_FACTS_CHARS = 2500
 STEER_WAIT_SECONDS = 30  # the review waits this long at most for a message's routing
 STOPPED_NOTE = "⚠️ Stopped."
+# For a thread message that came after the last review, while the final
+# report was written: 📨 said it would be seen, and nothing will see it now.
+LATE_REPLY = ("⏳ That came as this workflow was finishing, so it hasn't been applied. "
+              "@mention me in this thread to carry on with it.")
 # A helper's pictures, in its folder beside out/ (keep_image).
 IMAGES_DIR = "images"
 
@@ -285,6 +289,7 @@ class Workflow:
     checked: bool = False     # the first check is over: half the reserves are spent
     at_limit: set = field(default_factory=set)  # steps whose last run stopped at a limit
     first_wave: dict = field(default_factory=dict)  # step id -> the wave it first ran in
+    finishing: bool = False   # past the last review: no thread message is read now
     skill_reviewed: bool = False
     # The plan stage's rounds (classes/workflow_planning.py): done yet, and
     # what they learned.
@@ -518,6 +523,7 @@ async def _run(wf: Workflow) -> None:
                                         f"{wf.record['request']} ({wf.thread_url})",
                                         run_key=f"workflow:{wf.id}")
     interrupted = False
+    late = []
     try:
         end_state, report = await _body(wf)
     except asyncio.TimeoutError:
@@ -536,6 +542,9 @@ async def _run(wf: Workflow) -> None:
         for helper in helpers:
             helper.cancel()
         if wf.ledger is not None:
+            # Came after the last review, and nothing will read it now.
+            late = [e for e in wf.ledger.events
+                    if wf.finishing and e.stage == thread_inbox.RECEIVED]
             thread_inbox.release_run(wf.thread.id, wf.ledger)
         if origin_id is not None:
             message_queue.unregister_task_run(origin_id, f"workflow:{wf.id}")
@@ -545,6 +554,19 @@ async def _run(wf: Workflow) -> None:
         await asyncio.gather(*helpers, return_exceptions=True)
         if not interrupted:
             await _end(wf, store, end_state, report)
+            if late:
+                await _tell_late(wf, late[-1])
+
+
+async def _tell_late(wf: Workflow, event) -> None:
+    """One reply, to the newest message no review saw. Best effort."""
+    try:
+        reference = (None if event.message_id is None else discord.MessageReference(
+            message_id=event.message_id, channel_id=wf.thread.id, fail_if_not_exists=False))
+        await asyncio.wait_for(wf.thread.send(
+            LATE_REPLY, reference=reference, allowed_mentions=discord.AllowedMentions.none()), 10)
+    except Exception as e:
+        logger.warning(f"Workflow {wf.id}: could not say a late message was not applied: {e}")
 
 
 # The line above the plan once it is over, in place of "Working on it".
@@ -637,6 +659,7 @@ async def _work(wf: Workflow) -> tuple[str, BrainReport]:
         await _review(wf, [])
         if wf.cancel_reason:
             return wp.CANCELLED, _report_from_steps(wf, _cancel_note(wf))
+    wf.finishing = True
     report = await _finish(wf, stopped)
     if wf.cancel_reason:
         # Stopped while the final report was written: what the steps made

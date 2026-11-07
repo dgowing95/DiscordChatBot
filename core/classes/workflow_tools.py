@@ -139,7 +139,7 @@ class CheckArg(TypedDict, total=False):
     note: str
 
 
-@function_tool
+@function_tool(failure_error_function=_keeping("workflow_verdict_args"))
 async def submit_verdict(wrapper: RunContextWrapper[dict], checks: list[CheckArg],
                          redo_step: str = "") -> str:
     """Give your verdict. E.g. `submit_verdict(checks=[{"deliverable":

@@ -767,6 +767,25 @@ async def test_the_review_waits_for_a_messages_routing(env, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_a_message_after_the_last_review_is_told_it_was_not_applied(env, monkeypatch):
+    finish = workflows._finish
+
+    async def late_finish(wf, stopped):
+        # The requester writes while the final report is being written.
+        thread_inbox.deliver(wf.thread.id, 9801, 5, "Ana", "also add a chart")
+        return await finish(wf, stopped)
+
+    monkeypatch.setattr(workflows, "_finish", late_finish)
+    env.model = LaneModel([_plan_call(("s1", "implementer", [])), _report(call_id="a"),
+                           _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    late = [m for m in env.thread.sent if m.kwargs.get("content") == workflows.LATE_REPLY]
+    assert len(late) == 1
+    assert late[0].kwargs["reference"].message_id == 9801
+
+
+@pytest.mark.asyncio
 async def test_a_cancelled_step_closes_its_embed(monkeypatch):
     calls = []
 

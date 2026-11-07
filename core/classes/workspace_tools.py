@@ -348,21 +348,29 @@ async def view_image(wrapper: RunContextWrapper[dict], path: str, question: str 
         return "That path is outside the workspace. Use one relative to your working directory."
     if ctx.get("image_views", 0) >= MAX_IMAGE_VIEWS:
         return f"You have viewed {MAX_IMAGE_VIEWS} pictures in this run, which is the limit."
-    # Size first, so a huge file is never read into core to be refused.
-    try:
-        stat = await session.exec("stat", "-c", "%s", "--", where, shell=False)
-        if not stat.ok():
-            return f"{path!r} does not exist. Check the path with `ls`."
-        if int(stat.stdout.decode("utf-8", errors="replace").strip()) > MAX_ARTIFACT_BYTES:
-            return f"{path!r} is too large to view."
-        result = await session.exec("cat", "--", where, shell=False)
-    except Exception as e:
-        logger.warning(f"Sandbox view_image: could not read {where!r}: {e}")
-        return f"Could not read {path!r}."
-    if not result.ok():
-        return f"Could not read {path!r}."
-    # Counted here: a wrong path or an unreadable file costs no vision call.
+    # Taken before the first await: the SDK runs one turn's tool calls side by
+    # side, and each would pass the check above. Given back when no picture
+    # goes to the vision model, so a wrong path costs no view.
     ctx["image_views"] = ctx.get("image_views", 0) + 1
+    sent = False
+    try:
+        # Size first, so a huge file is never read into core to be refused.
+        try:
+            stat = await session.exec("stat", "-c", "%s", "--", where, shell=False)
+            if not stat.ok():
+                return f"{path!r} does not exist. Check the path with `ls`."
+            if int(stat.stdout.decode("utf-8", errors="replace").strip()) > MAX_ARTIFACT_BYTES:
+                return f"{path!r} is too large to view."
+            result = await session.exec("cat", "--", where, shell=False)
+        except Exception as e:
+            logger.warning(f"Sandbox view_image: could not read {where!r}: {e}")
+            return f"Could not read {path!r}."
+        if not result.ok():
+            return f"Could not read {path!r}."
+        sent = True
+    finally:
+        if not sent:
+            ctx["image_views"] = ctx.get("image_views", 1) - 1
     shows = await image_review.describe_image(result.stdout, str(question or "").strip())
     if shows is None:
         return f"Could not view {path!r}: it may not be a picture, or nothing here can see."

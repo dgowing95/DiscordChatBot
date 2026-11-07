@@ -91,6 +91,19 @@ async def test_a_second_fail_ends_partial_with_the_notes_in_the_report(checked):
 
 
 @pytest.mark.asyncio
+async def test_a_verdict_of_a_slightly_wrong_shape_is_kept(checked):
+    # One check as an object, not a list: it fails the schema, and is kept.
+    loose = ModelStep(output=[function_call("submit_verdict", {
+        "checks": {"deliverable": "comparison.md", "ok": True, "note": "fine"}},
+        call_id="v")])
+    checked.model = LaneModel([_plan_call(("s1", "implementer", [])), _report(call_id="a"),
+                               loose, _report(call_id="f")])
+    wf, _ = await _start(checked)
+    await _finish(wf)
+    assert wf.verdict["state"] == workflow_verify.PASSED
+
+
+@pytest.mark.asyncio
 async def test_no_verdict_leaves_the_result_alone_and_says_so(checked):
     checked.model = LaneModel([_plan_call(("s1", "implementer", [])), _report(call_id="a"),
                                ModelStep(output=[assistant_message("It looks fine to me.")]),

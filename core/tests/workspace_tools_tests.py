@@ -908,6 +908,40 @@ async def test_a_wrong_path_costs_no_view(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_views_asked_side_by_side_cannot_pass_the_limit_together(monkeypatch):
+    from classes import image_review
+    look = AsyncMock(return_value="a chart")
+    monkeypatch.setattr(image_review, "describe_image", look)
+    replies = [_exec_result(b"3\n"), _exec_result(b"png")] * 2
+
+    async def exec_(*args, **kwargs):
+        await asyncio.sleep(0)  # a real command yields, so the other call runs meanwhile
+        return replies.pop(0)
+
+    session = MagicMock()
+    session.exec = exec_
+    ctx = _view_ctx(session, image_views=prod_sandbox_agent.MAX_IMAGE_VIEWS - 1)
+    # One turn's tool calls run at once (the SDK gathers them).
+    answers = await asyncio.gather(_view(ctx, path="out/a.png"), _view(ctx, path="out/b.png"))
+    assert look.await_count == 1
+    assert sum("the limit" in answer for answer in answers) == 1
+    assert ctx.context["image_views"] == prod_sandbox_agent.MAX_IMAGE_VIEWS
+
+
+@pytest.mark.asyncio
+async def test_a_blocked_request_cannot_read_the_workspace_through_view_image(monkeypatch):
+    from classes import brain, image_review
+    look = AsyncMock(return_value="the secret file")
+    monkeypatch.setattr(image_review, "describe_image", look)
+    brain._guard_workspace_tools()
+    blocked = asyncio.get_running_loop().create_future()
+    blocked.set_result((False, "flagged"))
+    ctx = _view_ctx(_picture_session(), brain_request="something bad", brain_guard=blocked)
+    assert await _view(ctx, path="out/chart.png") == brain.GUARD_REFUSAL
+    look.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_view_image_has_a_limit_per_run():
     session = MagicMock()
     ctx = _view_ctx(session, image_views=prod_sandbox_agent.MAX_IMAGE_VIEWS)

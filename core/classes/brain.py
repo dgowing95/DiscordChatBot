@@ -452,11 +452,12 @@ def _configure_brain_shell(toolset) -> None:
 
 
 def _guard_workspace_tools() -> None:
-    """attach_file and save_messages_to_file are brain-only tools, so they
-    are guarded in place, once."""
+    """attach_file, save_messages_to_file and view_image are brain-only
+    tools, so they are guarded in place, once. view_image reads the
+    workspace too: a blocked request must not see its files that way."""
     from classes.message_search_tools import save_messages_to_file
-    from classes.workspace_tools import attach_file
-    for tool in (attach_file, save_messages_to_file):
+    from classes.workspace_tools import attach_file, view_image
+    for tool in (attach_file, save_messages_to_file, view_image):
         if not getattr(tool, "_brain_guarded", False):
             tool.on_invoke_tool = _guarded(tool.on_invoke_tool)
             tool._brain_guarded = True
