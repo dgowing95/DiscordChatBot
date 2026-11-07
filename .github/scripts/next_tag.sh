@@ -30,8 +30,9 @@ if [ -n "$file" ]; then
     echo "Refusing: $file is missing" >&2
     exit 1
   fi
-  # Only line endings go (a Windows checkout's CR too): "2 3" is malformed.
-  wanted=$(tr -d '\r\n' < "$file")
+  # $(...) drops the trailing newline; only CR goes besides (a Windows
+  # checkout). Anything else, "2 3" or two lines, is malformed.
+  wanted=$(tr -d '\r' < "$file")
   # No leading zeros: bash would read 08 as octal and fail the comparisons.
   if [[ ! "$wanted" =~ ^(0|[1-9][0-9]{0,5})$ ]]; then
     echo "Refusing a malformed $file: '$wanted'" >&2
