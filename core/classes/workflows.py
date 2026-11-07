@@ -780,16 +780,16 @@ async def _watch(wf: Workflow) -> None:
             if not event.is_requester:
                 continue
             if wp.is_stop_word(event.text):
-                ledger.mark_presented([event.seq], 0)
+                ledger.mark_presented([event.seq])
                 ledger.record_decision([event.seq], "done", "Stopping.")
                 request_cancel(wf, "the requester asked to stop")
             elif wf.question_id is not None and event.seq > wf.question_after:
-                ledger.mark_presented([event.seq], 0)
+                ledger.mark_presented([event.seq])
                 ledger.record_decision([event.seq], "answered", "")
                 brain_inbox.deliver(wf.question_id, wf.requester_id, event.text)
             elif (wf.state == wp.AWAITING_APPROVAL and wf.approval is not None
                   and not wf.approval.done()):
-                ledger.mark_presented([event.seq], 0)
+                ledger.mark_presented([event.seq])
                 wf.approval.set_result(("edit", event))
             elif (wf.state in (wp.RUNNING, wp.VERIFYING) and not wf.finishing
                   and event.seq not in wf.steer_seen):
@@ -1136,7 +1136,7 @@ async def _approve(wf: Workflow) -> bool:
         # rewritten) is an edit now: _watch only takes them once this waits.
         early = None if wf.approval.done() else _waiting_edit(wf)
         if early is not None:
-            wf.ledger.mark_presented([early.seq], 0)
+            wf.ledger.mark_presented([early.seq])
             wf.approval.set_result(("edit", early))
         try:
             action, event = await asyncio.wait_for(asyncio.shield(wf.approval),
@@ -1549,7 +1549,7 @@ async def _review(wf: Workflow, queue: list) -> list:
     pending = ledger.unaddressed() if ledger is not None else []
     if not pending:
         return queue
-    ledger.mark_presented([e.seq for e in pending], 0)
+    ledger.mark_presented([e.seq for e in pending])
     # A message on its way to the helpers is routed first, so what later
     # helpers read of it (wf.said) is filed under its steps.
     routing = [wf.steer_tasks[e.seq] for e in pending if e.seq in wf.steer_tasks]

@@ -164,7 +164,7 @@ async def _take_messages(wf) -> None:
     for event in wf.ledger.unpresented():
         if not event.is_requester or wp.is_stop_word(event.text):
             continue
-        wf.ledger.mark_presented([event.seq], 0)
+        wf.ledger.mark_presented([event.seq])
         if await workflows._allowed(wf, event.text):
             wf.ledger.record_decision([event.seq], "noted", "Taken into the plan.")
             wf.said.append((event.seq, f"{event.author_name}: {event.text[:300]}"))
