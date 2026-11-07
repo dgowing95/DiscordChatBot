@@ -1228,7 +1228,7 @@ def _plan_spec(wf: Workflow, buttons: str | None = None, note: str = "", *,
     if label is None:
         done, total = wp.steps_done(wf.step_states), len(wf.plan.steps)
         label = (PLAN_TO_APPROVE if buttons == "approval"
-                 else f"🧵 Big job · {done} of {total} step{'s' if total != 1 else ''} done")
+                 else f"🧵 Plan · {done} of {total} step{'s' if total != 1 else ''} done")
     body = ([K.Text(wf.plan_lead)] if wf.plan_lead else []) + wp.plan_blocks(wf.plan, wf.step_states)
     rows = _plan_buttons(wf, buttons)
     if rows:
@@ -1248,7 +1248,7 @@ async def _post_plan(wf: Workflow, buttons: str | None, note: str = "") -> None:
 
 
 PLAN_TITLE = "The plan"
-PLAN_TO_APPROVE = "🧵 Big job · plan to approve"
+PLAN_TO_APPROVE = "🧵 Plan · to approve"
 PLAN_CLOSED = "This plan is closed."
 
 
@@ -1262,8 +1262,11 @@ async def _remove_buttons(wf: Workflow) -> None:
         logger.info(f"Workflow {wf.id}: could not take the buttons off")
 
 
+# The plan card says "Plan", the closing card "Big job": the same label on
+# both read as the end posted twice.
 _END_LABELS = {wp.DONE: "🧵 Big job · finished", wp.PARTIAL: "🧵 Big job · partly done",
                wp.FAILED: "🧵 Big job · failed", wp.CANCELLED: "🧵 Big job · cancelled"}
+_PLAN_END_LABELS = {state: label.replace("Big job", "Plan") for state, label in _END_LABELS.items()}
 _END_COLOURS = {wp.DONE: K.OK, wp.PARTIAL: K.WARN, wp.FAILED: K.FAIL, wp.CANCELLED: K.CLOSED}
 
 
@@ -1276,7 +1279,7 @@ async def _update_plan_message(wf: Workflow, final: bool = False, content: str |
     if content is not None:
         wf.plan_lead = content
     if final:
-        wf.plan_card = _plan_spec(wf, label=_END_LABELS.get(end_state, "🧵 Big job · over"),
+        wf.plan_card = _plan_spec(wf, label=_PLAN_END_LABELS.get(end_state, "🧵 Plan · over"),
                                   colour=_END_COLOURS.get(end_state, K.CLOSED))
     else:
         wf.plan_card = _plan_spec(wf, "running")

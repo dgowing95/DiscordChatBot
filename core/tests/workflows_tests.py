@@ -83,7 +83,7 @@ class FakeChannel:
     def plans(self):
         """The plan cards (the first message of each)."""
         return [m for m in self.sent if getattr(m.kwargs.get("view"), "kind", None) == K.CARD
-                and label_of(m.kwargs["view"]).startswith("🧵 Big job")]
+                and label_of(m.kwargs["view"]).startswith("🧵 Plan")]
 
     def closings(self):
         """The labels of the notice cards a workflow ends with."""

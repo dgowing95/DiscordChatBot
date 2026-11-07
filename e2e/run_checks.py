@@ -374,7 +374,7 @@ class Run:
         posted = await self.messages_after(self.last_trigger_id)
         mine = [m for m in posted if m["author"]["id"] == self.bot_id]
         labels = [card_label(m) for m in mine if card_kind(m)]
-        if not any(card_kind(m) == "card" and card_label(m).startswith("🧵 Big job") for m in mine):
+        if not any(card_kind(m) == "card" and card_label(m).startswith("🧵 Plan") for m in mine):
             raise CheckFailed(f"no plan card was posted (cards: {labels})")
         closing = [m for m in mine
                    if card_kind(m) == "notice" and card_label(m).startswith("🧵 Big job")]

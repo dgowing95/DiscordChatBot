@@ -1,7 +1,8 @@
 """PURE (stdlib only) the bot's cards: every status, tool and system message
 it posts, as one design. classes/card.py turns a CardSpec into Discord's
 layout components (a LayoutView: a Container of TextDisplays, Separators,
-Sections, galleries and button rows) and sends it.
+Sections, galleries and button rows) and sends it. How to build a new card,
+or extend the kit, with examples: docs/cards.md.
 
 How a card reads, top to bottom (only the body is required):
 

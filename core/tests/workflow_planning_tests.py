@@ -577,7 +577,7 @@ async def test_a_finished_plan_card_says_how_it_ended(env):
     await _finish(wf)
     final = env.thread.plans()[-1].edits[-1]["view"]
     text = view_text(final)
-    assert text.startswith("-# 🧵 Big job · cancelled") and "🛑 Cancelled." in text
+    assert text.startswith("-# 🧵 Plan · cancelled") and "🛑 Cancelled." in text
     assert final.buttons == [] and "Working on it" not in text
 
 

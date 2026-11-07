@@ -119,7 +119,8 @@ browserservice/          # headless Chromium for fetch_url; egress_proxy.py and
 speechservice/           # speech-to-text (faster-whisper) and text-to-speech (Kokoro), CPU only;
                          #   speech_params.py is its pure half
 voicesidecar/            # Node: Discord voice I/O (@discordjs/voice, DAVE); README has the protocol
-docs/                    # user guides (automations, events, voice) and upgrading-to-v3.md
+docs/                    # user guides (automations, events, voice) and upgrading-to-v3.md;
+                         #   cards.md is for developers: how to build and extend the bot's cards
 e2e/                     # end-to-end CI (README.md there)
 charts/dis-ai-bot/       # Helm chart: credentials in templates/secret.yaml, the rest in
                          #   configmap.yaml; llm.engine picks llamacpp.yaml (default) or strata.yaml
@@ -501,7 +502,8 @@ needs an entry there, gated with `requires` when it can be switched off;
 
 Every status, tool, panel and system message is a Discord Components V2 card (`card_kit.py`, pure;
 `card.py` sends it). Persona replies, their reasoning spoilers, the manager's quoted thread replies
-and the plan's text fallback stay plain text. Read `card_kit.py`'s docstring before adding one.
+and the plan's text fallback stay plain text. **To add or change one, follow `docs/cards.md`**
+(recipes: a notice, a live card, a reply, a panel with buttons, files, tests, extending the kit).
 
 - **One shape**: a small label line in plain words ("🔎 Searching the web"), an optional title, the
   body, then a small footer. Build it with a `CardSpec` (or `card_kit.info` / `done` / `heads_up` /
