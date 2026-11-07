@@ -349,6 +349,38 @@ async def test_a_wrong_finding_is_fixed_before_the_implementer_starts(researched
 
 
 @pytest.mark.asyncio
+async def test_with_one_helper_slot_the_research_is_checked_once_after_both(researched,
+                                                                            monkeypatch):
+    monkeypatch.setattr(workflows, "_helpers_at_once", lambda: 1)
+    researched.model = LaneModel([
+        _plan_call(("s1", "researcher", []), ("s2", "researcher", []),
+                   ("s3", "implementer", ["s1", "s2"])),
+        _report(call_id="a"), _report(call_id="b"),
+        _verdict(("s1 and s2's figures", True, "match"), call_id="r"),
+        _report(call_id="c"), _report(call_id="f")])
+    wf, _ = await _start(researched)
+    await _finish(wf)
+    assert "Check what s1, s2 found" in json.dumps(researched.model.calls[3].input)
+    assert [c["steps"] for c in wf.record["research_checks"]] == [["s1", "s2"]]
+    assert researched.model.remaining_steps == 0
+
+
+@pytest.mark.asyncio
+async def test_a_research_check_failing_only_the_final_file_sends_nothing_back(researched):
+    researched.model = LaneModel([
+        _plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"])),
+        _report(call_id="a"),
+        _verdict(("comparison.md", False, "Not produced yet"), redo="s1", call_id="r"),
+        _report(call_id="b"), _report(call_id="f")])
+    wf, _ = await _start(researched)
+    await _finish(wf)
+    task = json.dumps(researched.model.calls[2].input)
+    assert "Later steps make comparison.md" in task
+    assert wf.record["research_checks"][0]["state"] == workflow_verify.NOT_CHECKED
+    assert researched.model.remaining_steps == 0  # s1 was not run again
+
+
+@pytest.mark.asyncio
 async def test_no_research_check_without_an_implementer_or_room(researched, monkeypatch):
     researched.model = LaneModel([_plan_call(("s1", "researcher", [])), _report(call_id="a"),
                                   _report(call_id="f")])
@@ -361,18 +393,18 @@ async def test_no_research_check_without_an_implementer_or_room(researched, monk
         wp.Step(id="s1", role="researcher", brief="b"),
         wp.Step(id="s2", role="implementer", brief="b")])
     short = SimpleNamespace(cancel_reason=None, over_tokens=lambda: False, checked=False,
-                            at_limit=set(),
+                            at_limit=set(), plan=plan, research_checked=set(),
                             results={"s1": {"status": "done"}}, id="a1",
                             turns_left=lambda: 55, seconds_left=lambda: 3600)
     monkeypatch.delenv("WORKFLOW_MAX_TURNS", raising=False)
     monkeypatch.delenv("WORKFLOW_TIMEOUT", raising=False)
     # 40 held back leaves 15: fewer than a check (8) and a re-run (10) need.
-    assert workflow_verify.research_due(short, plan.steps[:1], plan.steps[1:]) == []
+    assert workflow_verify.research_due(short, plan.steps[1:]) == []
     short.turns_left = lambda: 100
-    assert workflow_verify.research_due(short, plan.steps[:1], plan.steps[1:]) == plan.steps[:1]
+    assert workflow_verify.research_due(short, plan.steps[1:]) == plan.steps[:1]
     # One that stopped at a limit would never be sent back: no check for it.
     short.at_limit = {"s1"}
-    assert workflow_verify.research_due(short, plan.steps[:1], plan.steps[1:]) == []
+    assert workflow_verify.research_due(short, plan.steps[1:]) == []
 
 
 @pytest.mark.asyncio

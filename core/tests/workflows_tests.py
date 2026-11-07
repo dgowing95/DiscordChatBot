@@ -148,7 +148,7 @@ def env(monkeypatch):
     # The checks have their own tests (workflow_verify_tests.py), and every
     # script here would need more steps.
     monkeypatch.setattr(workflow_verify, "due", lambda wf: False)
-    monkeypatch.setattr(workflow_verify, "research_due", lambda wf, wave, queue: [])
+    monkeypatch.setattr(workflow_verify, "research_due", lambda wf, queue: [])
     monkeypatch.setattr(workflow_steering, "route", AsyncMock(return_value=None))
     monkeypatch.setattr("classes.persona_voice.voice_question",
                         AsyncMock(side_effect=lambda guild, text: f"(voiced) {text}"))

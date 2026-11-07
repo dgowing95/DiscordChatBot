@@ -429,15 +429,57 @@ def redo_chain(plan: Plan, results: dict, step_id: str, waves: dict) -> list[Ste
     return [step for step in ordered if step.id in chain]
 
 
-def research_to_check(wave: list[Step], queue: list[Step], results: dict) -> list[Step]:
-    """The researchers of a wave that just ran whose findings are checked
-    before an implementer builds on them: those that made something, when an
-    implementer is still to come. A research-only job is left to the check at
-    the end, which looks at all of it."""
-    if not any(step.role == IMPLEMENTER for step in queue):
+def research_to_check(ran: list[Step], queue: list[Step], results: dict, checked,
+                      limit: int) -> list[Step]:
+    """The researchers checked now, before an implementer builds on them:
+    once the next wave is an implementer, every one that ran (`ran`, in plan
+    order), made something and is not in `checked`. Not after each wave of
+    researchers: on a server with one helper slot each researcher is a wave of
+    its own, and the first was checked while the second had not run (Strata,
+    2026-11-07). A research-only job is left to the check at the end."""
+    upcoming = next_wave(queue, set(results), limit) if queue else []
+    if not upcoming or upcoming[0].role != IMPLEMENTER:
         return []
-    return [step for step in wave if step.role == RESEARCHER
+    return [step for step in ran if step.role == RESEARCHER and step.id not in checked
             and (results.get(step.id) or {}).get("status") not in (None, "failed")]
+
+
+_FILE_NAME = re.compile(r"[\w-]{2,}\.[A-Za-z][A-Za-z0-9]{0,7}")
+
+
+def made_later(deliverables: list[str]) -> list[str]:
+    """The files the user gets, by name ("cities.md"), from a plan's
+    deliverables: what a research check must not judge, since later steps
+    make them. A deliverable is free text, so every file name in it counts
+    ("cities.md (with a table)"); a description ("a short table", "v1.0")
+    names none. A path counts by its last part."""
+    names = []
+    for deliverable in deliverables:
+        for word in deliverable.split():
+            name = word.strip("()[]{},;:'\"`.").rsplit("/", 1)[-1]
+            if _FILE_NAME.fullmatch(name) and name not in names:
+                names.append(name)
+    return names
+
+
+def _names_file(text: str, name: str) -> bool:
+    """`name` appears in `text` as a whole file name: "chart.png" is in
+    "out/chart.png." but not in "flowchart.png" or "chart.png5"."""
+    pattern = r"(?<![\w.-])" + re.escape(name.lower()) + r"(?![\w-]|\.\w)"
+    return re.search(pattern, text.lower()) is not None
+
+
+def research_verdict(verdict: dict | None, later: list[str]) -> dict | None:
+    """A research check's verdict without its checks of `later` files: one
+    once failed the research because cities.md did not exist yet, and sent a
+    sound researcher back. None when nothing else was checked ("not
+    checked", never a pass). A check is dropped only when it names one of
+    those files whole, so a real fail is never dropped by a similar name."""
+    if verdict is None:
+        return None
+    checks = [check for check in verdict["checks"]
+              if not any(_names_file(check["deliverable"], name) for name in later)]
+    return dict(verdict, checks=checks) if checks else None
 
 
 def research_redo(checked: list[Step], wanted: str) -> Step | None:
