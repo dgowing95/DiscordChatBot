@@ -184,6 +184,32 @@ def test_the_cut_point_moves_in_batches():
     assert cut_count(11) == 4 and cut_count(13) == 4 and cut_count(14) == 8
 
 
+def test_a_run_with_no_known_limit_is_never_squeezed():
+    watch = context_trim.ContextWatch(None)  # a remote API: no /props
+    watch.seen(900_000)
+    assert watch.keep_recent(6) == 6 and watch.note() is None
+
+
+def test_nearing_the_slot_squeezes_then_finishes_and_stays_so():
+    watch = context_trim.ContextWatch(64_000)
+    watch.seen(40_000)
+    assert watch.keep_recent(6) == 6 and watch.note() is None
+    watch.seen(49_000)  # past 75%: old outputs cut harder
+    assert watch.keep_recent(6) == context_trim.SQUEEZE_KEEP and watch.note() is None
+    watch.seen(58_000)  # past 90%: told to finish
+    assert watch.note() == context_trim.FINISH_NOTE
+    watch.seen(20_000)  # the squeeze worked: still on, or the cut outputs come back
+    assert watch.keep_recent(6) == context_trim.SQUEEZE_KEEP
+    assert watch.note() == context_trim.FINISH_NOTE
+    assert "`" not in context_trim.FINISH_NOTE  # names no tool: each run finishes its own way
+
+
+def test_the_limit_is_the_servers_own_not_a_fixed_size():
+    big = context_trim.ContextWatch(1_000_000)
+    big.seen(60_000)  # 60k is nothing to a 1M-token model
+    assert big.keep_recent(6) == 6 and big.note() is None
+
+
 def test_a_short_output_is_left_as_it_is():
     assert context_trim.cut("short") == "short"
 

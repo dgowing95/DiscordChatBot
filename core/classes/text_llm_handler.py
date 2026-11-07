@@ -528,7 +528,7 @@ class TextLLMHandler:
             lanes = llm_lanes.lanes_for(config.host_key)
             if lanes is None or lanes.slots != slots:
                 logger.info(f"LLM server {config.host}: {slots} slot(s) ({source}), lanes on")
-            llm_lanes.configure_host(config.host_key, slots, llm_lanes.chat_reserved())
+            llm_lanes.configure_host(config.host_key, slots, llm_lanes.chat_reserved(), per_slot)
             set_llm_slots(config.host_key, slots, source)
             set_context_window(config.host_key, per_slot * slots if per_slot else None)
         if value is None:

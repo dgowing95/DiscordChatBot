@@ -131,8 +131,8 @@ def env(monkeypatch):
                      tools=[*ns.subagent_tools, attach_file, brain.report],
                      tool_use_behavior={"stop_at_tool_names": ["report"]})
 
-    def _config(lease, guard):
-        return RunConfig(call_model_input_filter=brain.input_filter(guard, 6),
+    def _config(lease, guard, watch=None):
+        return RunConfig(call_model_input_filter=brain.input_filter(guard, 6, watch),
                          tracing_disabled=True)
 
     async def _open_thread(ctx, request, message):
@@ -789,6 +789,24 @@ async def test_a_message_after_the_last_review_is_told_it_was_not_applied(env, m
 
 
 @pytest.mark.asyncio
+async def test_each_run_watches_the_context_of_its_own_server(env, monkeypatch):
+    roles = []
+    real = brain.context_watch
+
+    def watch(role):
+        roles.append(role)
+        return real(role)
+
+    monkeypatch.setattr(brain, "context_watch", watch)
+    env.model = LaneModel([_plan_call(("s1", "implementer", [])), _report(call_id="a"),
+                           _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    # The manager on the brain's server, the helper on the subagent role's.
+    assert roles == ["brain", "subagent", "brain"]
+
+
+@pytest.mark.asyncio
 async def test_a_cancelled_step_closes_its_embed(monkeypatch):
     calls = []
 
@@ -1140,7 +1158,7 @@ async def test_the_brains_start_workflow_ends_its_run_with_the_thread_link(monke
 
     monkeypatch.setattr(brain, "_acquire_workspace", _acquire)
     monkeypatch.setattr(brain, "build_brain_agent", _agent)
-    monkeypatch.setattr(brain, "_run_config", lambda lease, guard: RunConfig(
+    monkeypatch.setattr(brain, "_run_config", lambda lease, guard, watch=None: RunConfig(
         tracing_disabled=True))
     monkeypatch.setattr(brain, "_skills_index", AsyncMock(return_value=""))
     monkeypatch.setattr("classes.workspace_commands.progress_enabled",
