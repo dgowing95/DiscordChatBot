@@ -361,6 +361,7 @@ async def test_no_research_check_without_an_implementer_or_room(researched, monk
         wp.Step(id="s1", role="researcher", brief="b"),
         wp.Step(id="s2", role="implementer", brief="b")])
     short = SimpleNamespace(cancel_reason=None, over_tokens=lambda: False, checked=False,
+                            at_limit=set(),
                             results={"s1": {"status": "done"}}, id="a1",
                             turns_left=lambda: 55, seconds_left=lambda: 3600)
     monkeypatch.delenv("WORKFLOW_MAX_TURNS", raising=False)
@@ -369,6 +370,9 @@ async def test_no_research_check_without_an_implementer_or_room(researched, monk
     assert workflow_verify.research_due(short, plan.steps[:1], plan.steps[1:]) == []
     short.turns_left = lambda: 100
     assert workflow_verify.research_due(short, plan.steps[:1], plan.steps[1:]) == plan.steps[:1]
+    # One that stopped at a limit would never be sent back: no check for it.
+    short.at_limit = {"s1"}
+    assert workflow_verify.research_due(short, plan.steps[:1], plan.steps[1:]) == []
 
 
 @pytest.mark.asyncio

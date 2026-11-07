@@ -140,7 +140,9 @@ def research_due(wf, wave: list, queue: list) -> list:
     """The researchers of the wave that just ran to check now, if any."""
     if wf.cancel_reason or wf.over_tokens():
         return []
-    steps = wp.research_to_check(wave, queue, wf.results)
+    # One stopped at a limit is never sent back, so a check of it changes nothing.
+    steps = [step for step in wp.research_to_check(wave, queue, wf.results)
+             if step.id not in wf.at_limit]
     if steps and not _room(wf, CHECK_TURNS, CHECK_SECONDS):
         logger.info(f"Workflow {wf.id}: the research is not checked: too little is left")
         return []

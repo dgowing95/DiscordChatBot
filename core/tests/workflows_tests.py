@@ -773,6 +773,7 @@ async def test_a_message_after_the_last_review_is_told_it_was_not_applied(env, m
     async def late_finish(wf, stopped):
         # The requester writes while the final report is being written.
         thread_inbox.deliver(wf.thread.id, 9801, 5, "Ana", "also add a chart")
+        await asyncio.sleep(0.05)  # _watch reads it
         return await finish(wf, stopped)
 
     monkeypatch.setattr(workflows, "_finish", late_finish)
@@ -783,6 +784,8 @@ async def test_a_message_after_the_last_review_is_told_it_was_not_applied(env, m
     late = [m for m in env.thread.sent if m.kwargs.get("content") == workflows.LATE_REPLY]
     assert len(late) == 1
     assert late[0].kwargs["reference"].message_id == 9801
+    # Nothing reads steering now, so it was not routed (a guard and a model call).
+    assert wf.steering == [] and wf.steer_tasks == {}
 
 
 @pytest.mark.asyncio

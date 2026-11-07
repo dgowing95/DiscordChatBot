@@ -790,7 +790,8 @@ async def _watch(wf: Workflow) -> None:
                   and not wf.approval.done()):
                 ledger.mark_presented([event.seq], 0)
                 wf.approval.set_result(("edit", event))
-            elif wf.state in (wp.RUNNING, wp.VERIFYING) and event.seq not in wf.steer_seen:
+            elif (wf.state in (wp.RUNNING, wp.VERIFYING) and not wf.finishing
+                  and event.seq not in wf.steer_seen):
                 wf.steer_seen.add(event.seq)
                 task = asyncio.get_running_loop().create_task(workflow_steering.steer(wf, event))
                 wf.steer_tasks[event.seq] = task
