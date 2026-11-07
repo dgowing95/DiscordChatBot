@@ -44,7 +44,7 @@ import time
 import uuid
 
 import discord
-# httpx2, not httpx: openai>=3 speaks HTTPX2 (see the old sandbox code's note).
+# httpx2, not httpx: openai>=3 speaks HTTPX2 (see v2's code-tool note).
 import httpx2
 from agents import (
     AsyncOpenAI,
@@ -105,7 +105,7 @@ _BRAIN_KEYS = ("session", "out_dir", "job_dir", "workspace_root", "deliverables"
 # Positive examples over prohibitions: a list of don'ts was once copied
 # straight into a run. Sized and pinned by a test (brain_tests.py).
 #
-# It MUST rule out apply_patch by name: the SDK's default sandbox prompt
+# It MUST rule out apply_patch by name: the SDK's default SandboxAgent prompt
 # (suppressed, see build_brain_agent) tells the model to use an apply_patch
 # tool we do not expose, and a call to it aborts the whole run.
 #
@@ -358,60 +358,37 @@ async def ask_user(wrapper: RunContextWrapper[dict], question: str,
         options: Up to 4 short choices, shown as buttons, when the answer is
             one of a few. They can always answer in their own words instead.
     """
-    from classes import brain_inbox, brain_question, metrics, persona_voice
+    from classes import brain_question, metrics
 
     ctx = _ctx(wrapper)
-    wait = _ask_wait(ctx)
     asked = ctx.get("brain_questions", 0)
-    if _no_one_to_ask(ctx) or wait is None or asked >= MAX_QUESTIONS:
+    if _no_one_to_ask(ctx) or _ask_wait(ctx) is None or asked >= MAX_QUESTIONS:
         metrics.inc_brain_question("skipped")
         return NO_ONE_TO_ASK
     # Counted before any await: the SDK runs one turn's tool calls at once,
     # so two questions in one turn must not both pass the cap.
     ctx["brain_questions"] = asked + 1
-    text = await persona_voice.voice_question(ctx.get("guild_id"), question)
-    message, view = await brain_question.post(ctx, text, options, wait)
-    if message is None:
+
+    async def _speak(text):
+        await _speak_question(ctx, text)
+
+    result = await brain_question.ask(ctx, question, options, lambda: _ask_wait(ctx),
+                                      before_wait=_speak if ctx.get("voice") else None)
+    if result.state == brain_question.SKIPPED:
         metrics.inc_brain_question("skipped")
         return NO_ONE_TO_ASK
-    # The reword and the post took time too: what is left of the call may now
-    # be too little to wait for, or less than the wait worked out above.
-    wait = _ask_wait(ctx)
-    if wait is None:
+    if result.state == brain_question.TIMEOUT:
         metrics.inc_brain_question("timeout")
-        await brain_question.close(message, view, brain_question.TIMED_OUT)
-        return NO_ONE_TO_ASK
-    voice = bool(ctx.get("voice"))
-    # Registered after the post (the waiter is keyed by the question's
-    # message), and before anything else awaits.
-    future = brain_inbox.ask(message.id, ctx["channel"].id, ctx["user_id"], voice=voice)
-    logger.info(f"Brain: asked the requester, waiting up to {wait:.0f}s")
-    line = brain_question.CLOSED
-    try:
-        # Inside the try: a run stopped while the question is being spoken
-        # must still take its waiter off.
-        if voice:
-            await _speak_question(ctx, text)
-        answer = await asyncio.wait_for(future, wait)
-    except asyncio.TimeoutError:
-        metrics.inc_brain_question("timeout")
-        line = brain_question.TIMED_OUT
-        return (f"No answer within {wait:.0f} seconds. Carry on with your best assumption "
-                "and say what you assumed in a fact.")
-    finally:
-        # Also on a cancel (the call's own timeout): a waiter left behind
-        # would take an answer nobody is waiting for.
-        brain_inbox.cancel(message.id, future)
-        if future.done() and not future.cancelled() and future.result():
-            said = future.result()
-            said = brain_question.YOU_DECIDE if said == brain_question.YOU_DECIDE_ANSWER else said
-            line = brain_question.ANSWERED.format(answer=said[:200])
-        await brain_question.close(message, view, line)
-    if answer is brain_inbox.REPLACED:
+        if not result.wait:  # the reword and the post used up what was left
+            return NO_ONE_TO_ASK
+        return (f"No answer within {result.wait:.0f} seconds. Carry on with your best "
+                "assumption and say what you assumed in a fact.")
+    if result.state == brain_question.REPLACED:
         metrics.inc_brain_question("skipped")
         return ("A newer question took this one's place, so it will not be answered. "
                 "Carry on with your best assumption and say what you assumed in a fact.")
     metrics.inc_brain_question("answered")
+    answer = result.answer
     if answer == brain_question.YOU_DECIDE_ANSWER:
         return ("They said you should decide. Carry on with your best judgement and say "
                 "what you chose in a fact.")
@@ -427,17 +404,20 @@ GUARD_REFUSAL = ("The safety guard blocked this request, so the workspace cannot
 async def _workspace_allowed(context: dict) -> bool:
     """Whether this call's request passed the content guard. Checked once
     per call, at its first workspace action (a command, a file), like the
-    old sandbox's check on its task. A search, a poll or a memory save never
+    v2 code tool's check on its task. A search, a poll or a memory save never
     pays for the moderation call; web_search and fetch_url check their own
-    input. Concurrent first actions share the one check."""
+    input. Concurrent first actions share the one check. A workflow helper's
+    context is a copy, so its check is kept on the workflow's
+    (`brain_guard_home`), where every helper finds it."""
     request = context.get("brain_request")
     if not request:
         return True
-    task = context.get("brain_guard")
+    home = context.get("brain_guard_home") or context
+    task = home.get("brain_guard")
     if task is None:
         from classes.content_guard import check_web_request
         task = asyncio.ensure_future(check_web_request(request))
-        context["brain_guard"] = task
+        home["brain_guard"] = task
     # Shielded: others share this task, and awaiting one directly would cancel
     # it with the caller. Cancelled, it then fails the next helper to read it.
     allowed, reason = await asyncio.shield(task)
@@ -713,11 +693,11 @@ async def prepare_job(lease, job_id: str) -> tuple[str, str | None, str | None]:
     """Makes a job folder ready: out/, the shared/ and skills/ links, and
     the run marker. Returns (job_dir, out_dir, marker); out_dir and marker
     are None when the workspace could not say where it is."""
-    from classes.workspace_tools import _mark_run_start, _sandbox_output_dir
+    from classes.workspace_tools import _mark_run_start, _output_dir
     session = lease.session
     job_dir = lease.job_dir(job_id)
     job_path = lease.job_path(job_id)
-    out_dir = await _sandbox_output_dir(session, job_dir)
+    out_dir = await _output_dir(session, job_dir)
     if out_dir is not None:
         await session.exec("mkdir", "-p", out_dir, shell=False)
         # shared/ in the job folder is the server's kept files, so "save it
@@ -1070,7 +1050,7 @@ async def _run_and_deliver(ctx, lease, agent, task, run_config, hooks, progress,
     if out.status == brain_result.DONE:
         await _record_skill_successes(ctx)
     if stopped is None:
-        await _queue_skill_review(ctx, out, hooks, task, result)
+        await _queue_skill_review(ctx, out, hooks, result)
     await progress.finalize(ok=out.status in (brain_result.DONE, brain_result.STARTED_WORKFLOW),
                             note=None if stopped is None else f"⚠️ {stopped}")
     return out
@@ -1093,7 +1073,7 @@ async def _skills_index(guild_id, header: str | None = None) -> str:
         return ""
 
 
-async def _queue_skill_review(ctx: dict, out, hooks, request_task: str, result) -> None:
+async def _queue_skill_review(ctx: dict, out, hooks, result) -> None:
     """After a long job, leaves a skill review on the persona's run context;
     the message handler starts it once the reply is out
     (classes/skill_reflection.py). Fail-soft."""

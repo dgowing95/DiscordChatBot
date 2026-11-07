@@ -37,7 +37,7 @@ class _Result:
 
 
 class _Session:
-    """The bits of a sandbox session brain.py and workspace_tools use."""
+    """The bits of a workspace session brain.py and workspace_tools use."""
 
     def __init__(self, files=None, jobs=b""):
         self.files = dict(files or {})

@@ -70,7 +70,6 @@ DECISIONS = {
     "superseded": RESOLVED,
     "deferred": RESOLVED,
 }
-UNACKNOWLEDGED = "unacknowledged"
 
 # deliver() results. main.py maps each to a reaction/reply, and metrics.py
 # counts them, so these are also bounded metric label values.
@@ -113,26 +112,7 @@ class ThreadEvent:
     outcome: str | None = None
     # The reply it got.
     reply: str = ""
-    anchor: int | None = None
-    presented_at: float | None = None
     addressed_at: float | None = None
-    # The open question this may be answering (see OpenQuestion). A candidate
-    # only: the model decides whether it is an answer, a correction or new.
-    question_id: int | None = None
-
-
-@dataclass
-class OpenQuestion:
-    qid: int
-    text: str
-    blocking: bool
-    default: str
-    # Events with a higher seq arrived after the question was asked.
-    after_seq: int
-    asked_at: float
-    message_id: int | None = None
-    waiting: bool = False
-    timed_out: bool = False
 
 
 @dataclass
@@ -142,11 +122,9 @@ class RunLedger:
     owner: object | None = None
     state: str = SETUP
     events: list[ThreadEvent] = field(default_factory=list)
-    question: OpenQuestion | None = None
     # seq of the newest accepted event (0 = none yet). Monotonic.
     revision: int = 0
     compacted: int = 0
-    _next_qid: int = 1
     _changed: asyncio.Event | None = None
 
     # -- signalling ---------------------------------------------------------
@@ -207,10 +185,6 @@ class RunLedger:
                 return FULL
         self.revision += 1
         event.seq = self.revision
-        q = self.question
-        if q is not None and (event.is_requester or
-                              (q.message_id and event.reply_to == q.message_id)):
-            event.question_id = q.qid
         self.events.append(event)
         self._compact()
         self.changed.set()
@@ -238,26 +212,18 @@ class RunLedger:
         return [e for e in self.events if e.stage == RECEIVED]
 
     def unaddressed(self) -> list[ThreadEvent]:
-        """Received or presented, and not given up on: what still needs the
-        model's attention before it may do more work."""
-        return [e for e in self.events
-                if e.stage in (RECEIVED, PRESENTED) and e.outcome != UNACKNOWLEDGED]
-
-    def unresolved(self) -> list[ThreadEvent]:
-        return [e for e in self.events if e.stage != RESOLVED]
+        """Received or presented: what still waits for an answer."""
+        return [e for e in self.events if e.stage in (RECEIVED, PRESENTED)]
 
     # -- transitions ----------------------------------------------------------
 
-    def mark_presented(self, seqs, anchor: int) -> list[ThreadEvent]:
-        now = time.monotonic()
+    def mark_presented(self, seqs) -> list[ThreadEvent]:
         shown = []
         for seq in seqs:
             e = self.get(seq)
             if e is None or e.stage != RECEIVED:
                 continue
             e.stage = PRESENTED
-            e.anchor = anchor
-            e.presented_at = now
             shown.append(e)
         return shown
 
@@ -280,32 +246,8 @@ class RunLedger:
             if e.addressed_at is None:
                 e.addressed_at = now
             updated.append(e)
-        q = self.question
-        if q is not None and any(e.question_id == q.qid for e in updated):
-            # The model has now looked at a candidate answer and said what it
-            # makes of it; if it still needs to know, it can ask again.
-            self.question = None
         return updated, unknown
 
-    def give_up_on(self, event: ThreadEvent) -> None:
-        """Stops gating on an event the model keeps ignoring. It stays
-        unresolved — reported as never acknowledged — but no longer blocks."""
-        event.outcome = UNACKNOWLEDGED
-
-    def open_question(self, text: str, blocking: bool, default: str = "") -> OpenQuestion:
-        q = OpenQuestion(qid=self._next_qid, text=text, blocking=bool(blocking),
-                         default=default or "", after_seq=self.revision,
-                         asked_at=time.monotonic())
-        self._next_qid += 1
-        self.question = q
-        return q
-
-    def close_question(self, qid: int) -> None:
-        if self.question is not None and self.question.qid == qid:
-            self.question = None
-
-    def has_input_after(self, seq: int) -> bool:
-        return any(e.seq > seq for e in self.events)
 
 # thread id -> the ledger of the run claimed in it. A thread is "active" iff
 # it has an entry here. claim_run/release_run own the key's lifetime.
@@ -359,7 +301,7 @@ def get_run(thread_id: int) -> RunLedger | None:
 
 
 def is_run_active(thread_id: int) -> bool:
-    """Whether a sandbox run is currently claimed in this thread."""
+    """Whether a workflow is currently claimed in this thread."""
     return get_run(thread_id) is not None
 
 

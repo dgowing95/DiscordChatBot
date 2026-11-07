@@ -155,12 +155,6 @@ def test_a_step_never_takes_a_scouts_or_a_checks_folder():
     assert wp.plan_step_id("s1") == "s1" and wp.plan_step_id("data2") == "data2"
 
 
-def test_a_plan_round_trips_through_its_record():
-    plan, _ = wp.validate_plan(_plan(_step("s1"), _step("s2", depends_on=["s1"])), max_steps=8)
-    again = wp.plan_from_dict(plan.to_dict())
-    assert again == plan
-
-
 def test_the_plan_reads_as_text_and_as_an_embed_with_step_states():
     plan, _ = wp.validate_plan(_plan(_step("s1"), _step("s2", "implementer", "Write", ["s1"]),
                                      deliverables=["a.md"]), max_steps=8)
@@ -201,12 +195,6 @@ def test_illegal_moves_raise(state, event):
 
 # --------------------------- budgets, settings, steering ---------------------------
 
-def test_the_budget_never_goes_below_zero():
-    assert wp.budget_left(started=0, now=100, turns_used=10, timeout=300, max_turns=50) == {
-        "seconds": 200, "turns": 40}
-    assert wp.budget_left(started=0, now=900, turns_used=90, timeout=300, max_turns=50) == {
-        "seconds": 0, "turns": 0}
-
 
 def test_settings_defaults_and_overrides():
     env = {}
@@ -214,8 +202,9 @@ def test_settings_defaults_and_overrides():
     assert wp.ask_timeout(env) == 300 and wp.plan_approval_seconds(env) == 900
     assert wp.plan_revisions(env) == 3 and wp.max_steps(env) == 8
     assert wp.timeout(env) == 3600 and wp.max_turns(env) == 300
-    assert wp.turn_reserve(env) == 40 and wp.max_tokens(env) == 0
+    assert wp.turn_reserve(env) == 40 and wp.max_tokens(env) == 4_000_000
     assert wp.max_tokens({"WORKFLOW_MAX_TOKENS": "5000"}) == 5000
+    assert wp.max_tokens({"WORKFLOW_MAX_TOKENS": "0"}) == 0  # off
     assert wp.turn_reserve({"WORKFLOW_MAX_TURNS": "50"}) == 10
     assert wp.max_per_guild(env) == 1 and wp.subagent_max_turns(env) == 100
     assert not wp.enabled({"WORKFLOW_ENABLED": "0"})

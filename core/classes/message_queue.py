@@ -10,7 +10,7 @@ Concurrency model (see process_messages() / on_message() in main.py and
 MessageHandler.handle_message() in message_handler.py):
   - N worker tasks (queue_workers(), QUEUE_WORKERS env, default 2) share one
     bounded asyncio.Queue (queue_max_size(), QUEUE_MAX_SIZE env, default 10).
-    A message stuck in a slow tool (sandbox / image generation) therefore
+    A message stuck in a slow tool (the brain / image generation) therefore
     pins only ONE worker; the others keep handling other channels.
   - one asyncio.Lock per channel id (get_channel_lock) guards only the two
     FAST phases of a handle: prompt building (build_messages) and the
@@ -18,7 +18,7 @@ MessageHandler.handle_message() in message_handler.py):
     keeps every channel.history() snapshot free of half-sent replies, while
     the slow middle phase (LLM run + tool calls) runs UNLOCKED — so a free
     worker can answer a second message in the same channel while the first
-    is stuck in a 10-minute sandbox. The lock is never held across an LLM
+    is stuck in a 10-minute brain call. The lock is never held across an LLM
     or tool await, so no deadlock is possible.
   - the in-flight task registry (register_task_run / in_flight_hint) lets a
     newer message's prompt know that an older one is still being processed:
@@ -53,12 +53,12 @@ TOOL_DISPLAY = {
 # those would only be noise, so a run shows as running once it is this old.
 HINT_AFTER_SECONDS = 10.0
 
-# Source text (the tool's argument: sandbox task / image prompt) kept per
+# Source text (the tool's argument: brain request / image prompt) kept per
 # in-flight run and shown in the hint, truncated.
 MAX_SOURCE_CHARS = 120
 
 # Only RUNNING calls are listed, never finished ones. Finished entries
-# (kept 5 minutes until v3) date from sandbox runs that posted into a
+# (kept 5 minutes until v3) date from v2's code runs that posted into a
 # thread, outside the channel history. Since v3 the brain's files and the
 # persona's reply land in the channel within seconds, so the history shows
 # what finished; and a finished entry, which cannot say whether the call
@@ -83,7 +83,7 @@ def queue_workers() -> int:
     """Queue worker tasks to run (QUEUE_WORKERS, default 2, min 1).
 
     Each worker handles one message at a time, so a message stuck in a slow
-    tool (sandbox / image generation) no longer blocks messages from other
+    tool (the brain / image generation) no longer blocks messages from other
     channels. Same-channel chunk sends stay ordered via get_channel_lock().
     """
     return _env_positive_int("QUEUE_WORKERS", DEFAULT_QUEUE_WORKERS)
@@ -283,7 +283,7 @@ def register_task_run(
 ) -> bool:
     """Record one long tool run as in-flight in `channel_id`.
 
-    `source` is the tool's argument (sandbox task text / image prompt),
+    `source` is the tool's argument (brain request text / image prompt),
     truncated to MAX_SOURCE_CHARS for prompt use. `run_key` (the SDK's
     tool_call_id) distinguishes concurrent runs of the same tool; without
     one, the truncated source is the key, so a duplicate register of the

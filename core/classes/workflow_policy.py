@@ -27,7 +27,8 @@ DEFAULT_PLAN_REVISIONS = 3
 DEFAULT_MAX_STEPS = 8
 DEFAULT_TIMEOUT_SECONDS = 3600
 DEFAULT_MAX_TURNS = 300
-DEFAULT_MAX_TOKENS = 0        # off
+# Live jobs used 0.5-2.6M tokens; a runaway one 5.1M (maintainer, 2026-11-07).
+DEFAULT_MAX_TOKENS = 4_000_000
 DEFAULT_MAX_PER_GUILD = 1
 DEFAULT_SUBAGENT_MAX_TURNS = 100
 DEFAULT_SUBAGENT_MAX_CONCURRENT = 2
@@ -61,6 +62,15 @@ def _env_int(name: str, default: int, env) -> int:
     try:
         value = int(str(env.get(name)).strip())
         return value if value > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_count(name: str, default: int, env) -> int:
+    """Like _env_int, but 0 is kept: it means off."""
+    try:
+        value = int(str(env.get(name)).strip())
+        return value if value >= 0 else default
     except (TypeError, ValueError):
         return default
 
@@ -124,8 +134,8 @@ def turn_reserve(env=os.environ) -> int:
 
 def max_tokens(env=os.environ) -> int:
     """Tokens, in and out, across every agent of one workflow
-    (WORKFLOW_MAX_TOKENS). 0 is off, the default."""
-    return _env_int("WORKFLOW_MAX_TOKENS", DEFAULT_MAX_TOKENS, env)
+    (WORKFLOW_MAX_TOKENS) [4,000,000]. 0 is off."""
+    return _env_count("WORKFLOW_MAX_TOKENS", DEFAULT_MAX_TOKENS, env)
 
 
 def max_per_guild(env=os.environ) -> int:
@@ -501,15 +511,6 @@ def fallback_plan(request: str) -> Plan:
                 notes="The manager's plan could not be used, so this is one step.")
 
 
-def plan_from_dict(raw: dict) -> Plan:
-    """A stored plan (Plan.to_dict) back as a Plan."""
-    return Plan(goal=raw.get("goal", ""), notes=raw.get("notes", ""),
-                deliverables=list(raw.get("deliverables") or []),
-                steps=[Step(id=s["id"], role=s["role"], brief=s["brief"],
-                            depends_on=list(s.get("depends_on") or []))
-                       for s in raw.get("steps") or []])
-
-
 def plan_text(plan: Plan) -> str:
     """The plan as plain text, for the agents' tasks."""
     lines = [f"Goal: {plan.goal}"]
@@ -596,16 +597,6 @@ def transition(state: str, event: str) -> str:
     if moves is None or state not in moves:
         raise IllegalMove(f"{event!r} cannot happen in state {state!r}")
     return moves[state]
-
-
-# --- budgets -----------------------------------------------------------------
-
-
-def budget_left(*, started: float, now: float, turns_used: int, timeout: int,
-                max_turns: int) -> dict:
-    """What a workflow has left: {"seconds", "turns"} (never below 0)."""
-    return {"seconds": max(0.0, started + timeout - now),
-            "turns": max(0, max_turns - turns_used)}
 
 
 # --- which steps a message is for ---------------------------------------------

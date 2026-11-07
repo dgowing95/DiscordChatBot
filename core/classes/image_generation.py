@@ -36,7 +36,7 @@ GENERATION_TIMEOUT = int(os.environ.get("IMAGE_GEN_TIMEOUT", 300))
 CAPABILITIES_TTL_SECONDS = 300
 HEALTH_TIMEOUT_SECONDS = 10
 # What every generated image is posted as, and so how an image the bot made
-# can be told apart from the other images it posts (sandbox artifacts, charts),
+# can be told apart from the other images it posts (workspace files, charts),
 # which are not offered for editing.
 GENERATED_IMAGE_FILENAME = "generated-image.png"
 # How many of the channel's newest messages to look through for the picture to
@@ -274,7 +274,7 @@ def pick_edit_source(replied_to, recent, bot_id):
 
     Only images the bot generated qualify. Never an uploaded photo -- that
     would make "make him fatter" work on a photo of a real person -- and never
-    the bot's other images (sandbox output, charts)."""
+    the bot's other images (workspace files, charts)."""
     found = generated_attachment(replied_to, bot_id)
     if found is not None:
         return found

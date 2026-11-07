@@ -2,7 +2,7 @@
 
 Since v3 the persona has a single tool, ask_brain, and every other tool
 belongs to the brain (classes/brain.py). This replaces both the persona's old
-list (text_llm_handler.agent_tools) and the sandbox's allowlist of "shared"
+list (text_llm_handler.agent_tools) and the brain's allowlist of "shared"
 tools with its gated copies: every tool is ONE object, used by the brain
 only.
 

@@ -140,7 +140,7 @@ async def start(client, voice_channel, text_channel, requested_by) -> "VoiceSess
 
 async def _session_channel(text_channel, voice_channel):
     """Where the call's text goes: a thread off the channel the join was
-    asked from, so pictures and sandbox runs (which need a thread for their
+    asked from, so pictures and brain calls (which need a thread for their
     workspace and steering) land together. Falls back to the voice channel's
     own chat, which cannot hold threads, when no thread can be made."""
     if isinstance(text_channel, discord.Thread):
@@ -148,7 +148,7 @@ async def _session_channel(text_channel, voice_channel):
     if isinstance(text_channel, discord.TextChannel):
         name = f"🎙️ Voice: {voice_channel.name}"[:100]
         # The bot's own still-active thread for this voice channel is reused,
-        # so calls do not leave a trail of threads, and a sandbox workspace
+        # so calls do not leave a trail of threads, and a server's workspace
         # (keyed by thread) carries over to the next call.
         for thread in text_channel.threads:
             if thread.name == name and thread.owner_id == text_channel.guild.me.id and not thread.locked:
@@ -297,7 +297,7 @@ class VoiceSession:
     async def end(self, note: str | None = None) -> None:
         """Leave the call. Safe to call more than once and from anywhere.
 
-        A turn already running is not cancelled -- a sandbox run or an image
+        A turn already running is not cancelled -- a brain call or an image
         in progress finishes and still posts in the thread -- it just stops
         being spoken. Queued turns are dropped."""
         if self.ending:
@@ -440,7 +440,7 @@ class VoiceSession:
                     event.set()
 
     async def stop_speaking(self) -> None:
-        """Stop talking (the turn's work, a sandbox run say, carries on)."""
+        """Stop talking (the turn's work, a brain call say, carries on)."""
         if self._current_turn is not None:
             self._muted_turns.add(self._current_turn)
         await self.bridge.send({"type": "stop", "guild_id": self.guild_key})

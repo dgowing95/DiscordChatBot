@@ -71,7 +71,7 @@ Why things are the way they are:
   ever saw the request, so a plan edit, a thread message or an answer is
   checked before it can reach a helper with a shell (_allowed).
 - **Limits cap the cost**: WORKFLOW_TIMEOUT (1 h), WORKFLOW_MAX_TURNS (300) and
-  WORKFLOW_MAX_TOKENS (off) stop a workflow bigger than the biggest job seen, with
+  WORKFLOW_MAX_TOKENS (4M) stop a workflow bigger than the biggest job seen, with
   what exists (PARTIAL), never "retry". Helpers leave a reserve of turns and time for
   the check and the final report (_held_turns, _step_reserve_seconds). The clock
   counts work: it restarts when the plan is answered.
@@ -780,16 +780,16 @@ async def _watch(wf: Workflow) -> None:
             if not event.is_requester:
                 continue
             if wp.is_stop_word(event.text):
-                ledger.mark_presented([event.seq], 0)
+                ledger.mark_presented([event.seq])
                 ledger.record_decision([event.seq], "done", "Stopping.")
                 request_cancel(wf, "the requester asked to stop")
             elif wf.question_id is not None and event.seq > wf.question_after:
-                ledger.mark_presented([event.seq], 0)
+                ledger.mark_presented([event.seq])
                 ledger.record_decision([event.seq], "answered", "")
                 brain_inbox.deliver(wf.question_id, wf.requester_id, event.text)
             elif (wf.state == wp.AWAITING_APPROVAL and wf.approval is not None
                   and not wf.approval.done()):
-                ledger.mark_presented([event.seq], 0)
+                ledger.mark_presented([event.seq])
                 wf.approval.set_result(("edit", event))
             elif (wf.state in (wp.RUNNING, wp.VERIFYING) and not wf.finishing
                   and event.seq not in wf.steer_seen):
@@ -803,7 +803,7 @@ async def _watch(wf: Workflow) -> None:
 
 
 async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: str,
-                     sandbox: bool, progress=None, caller: str = "workflow",
+                     workspace: bool, progress=None, caller: str = "workflow",
                      ctx: dict | None = None, seconds: float | None = None,
                      finish_up_at: int | None = None, finish_up: str = FINISH_UP,
                      steer: tuple | None = None, checking: bool = False) -> _Outcome:
@@ -814,7 +814,7 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
     `seconds` is a limit of its own, under what the workflow has left.
     From turn `finish_up_at` on it is told `finish_up`; its last input is kept
     for _last_report. `steer`, a place in wf.steering and a step's id: what
-    is for that step from there on reaches the run. Sandbox runs leave the
+    is for that step from there on reaches the run. Workspace runs leave the
     reserves alone, but
     for the check (`checking`), which they are there for."""
     from agents import MaxTurnsExceeded, RunConfig, RunHooks, Runner
@@ -829,7 +829,7 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
     from classes import llm_roles
     hooks.context_watch = brain.context_watch(
         llm_roles.SUBAGENT if lane == llm_lanes.SUBAGENT else llm_roles.BRAIN)
-    if sandbox:
+    if workspace:
         run_config = brain._run_config(wf.lease, guard, hooks.context_watch)
     else:
         run_config = RunConfig(
@@ -840,14 +840,18 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
     if steer is not None:
         run_config = workflow_steering.steered(run_config, wf, *steer)
     seen: list = []
-    holds_back = sandbox and not checking
+    holds_back = workspace and not checking
     if finish_up_at is not None or (holds_back and wp.max_tokens()):
         run_config = _finishing_up(run_config, hooks, finish_up_at, seen, finish_up,
                                    wf.over_tokens if holds_back else None)
     turns = _turn_limit(wf, max_turns, _held_turns(wf) if holds_back else 0)
+    if isinstance(getattr(progress, "max_turns", None), int):
+        # A helper's embed counts to the turns it really has (its share, after
+        # any earlier run of the same step), not the setting.
+        progress.max_turns = getattr(progress, "turn", 0) + turns
     # The reserves are kept back from the steps, for the check and the
     # manager's last runs.
-    reserve = _step_reserve_seconds(wf) if holds_back else FINISH_RESERVE_SECONDS if sandbox else 0
+    reserve = _step_reserve_seconds(wf) if holds_back else FINISH_RESERVE_SECONDS if workspace else 0
     left = max(30.0, wf.seconds_left() - reserve)
     seconds = left if seconds is None else min(seconds, left)
     if wf.cancel_reason:
@@ -1113,7 +1117,6 @@ async def _approve(wf: Workflow) -> bool:
     line = await voice_question(wf.guild_id, "Shall I go ahead with the plan below?")
     while True:
         if until is None:
-            await _remove_buttons(wf)
             wf.plan_lead = f"<@{wf.requester_id}> {line}"
             await _post_plan(wf, workflow_views.approval_buttons(wf.id),
                              note=f"Approve, Edit or Cancel. With no answer in {_minutes(seconds)} "
@@ -1136,7 +1139,7 @@ async def _approve(wf: Workflow) -> bool:
         # rewritten) is an edit now: _watch only takes them once this waits.
         early = None if wf.approval.done() else _waiting_edit(wf)
         if early is not None:
-            wf.ledger.mark_presented([early.seq], 0)
+            wf.ledger.mark_presented([early.seq])
             wf.approval.set_result(("edit", early))
         try:
             action, event = await asyncio.wait_for(asyncio.shield(wf.approval),
@@ -1176,6 +1179,10 @@ async def _approve(wf: Workflow) -> bool:
         wf.revisions += 1
         await _set_state(wf, "revise")
         await _remove_buttons(wf)
+        # The old card is closed for good: the plan, changed or not, is posted
+        # again. A cancel before that must not put a plan the requester never
+        # saw on the old card (_end updates wf.plan_message).
+        wf.plan_message = wf.plan_card = None
         await _post(wf.thread, content="📝 Changing the plan…")
         before = wf.plan
         wf.plan = await workflow_planning.write_plan(wf, change=event.text)
@@ -1285,14 +1292,11 @@ _SHARED_KEYS = ("image_calls", "images_posted")
 def _helper_ctx(wf: Workflow, **keys) -> dict:
     """A helper's own run context: its folder, files and report are its own,
     and two helpers run at once (see the module docstring). The content guard's
-    check of the request is started here, on the workflow, so they share it:
-    the moderation endpoint rate-limits hard."""
-    from classes.content_guard import check_web_request
-    request = wf.ctx.get("brain_request")
-    if request and wf.ctx.get("brain_guard") is None:
-        wf.ctx["brain_guard"] = asyncio.ensure_future(check_web_request(request))
+    check of the request is kept on the workflow (`brain_guard_home`), so they
+    share it, and it starts at the first workspace action like a brain call's
+    (brain._workspace_allowed): the moderation endpoint rate-limits hard."""
     return {**wf.ctx, "brain_report_args": None, "deliverables": [], "delivery_chosen": False,
-            "skills_used": [], "skill_saved": False, **keys}
+            "skills_used": [], "skill_saved": False, "brain_guard_home": wf.ctx, **keys}
 
 
 def _keep_shared(wf: Workflow, ctx: dict) -> None:
@@ -1435,7 +1439,7 @@ async def _step_attempt(wf: Workflow, step: wp.Step, progress,
     parts.append(workflow_steering.said_text(wf, step.id))
     outcome = await _agent_run(wf, _subagent(step.role), "\n\n".join(filter(None, parts)),
                                max_turns=wp.subagent_max_turns(), lane=llm_lanes.SUBAGENT,
-                               sandbox=True, progress=progress, caller="workflow_subagent",
+                               workspace=True, progress=progress, caller="workflow_subagent",
                                ctx=ctx, steer=(len(wf.steering), step.id))
     _keep_shared(wf, ctx)
     if outcome.at_limit:
@@ -1475,13 +1479,13 @@ async def keep_image(ctx: dict, png: bytes) -> str:
     too, so the channel gets it with the job's other files and later steps
     can use it. Not in out/: _deliver would post it a second time. Returns
     what to add to the tool's result. Fail-soft."""
-    from classes.workspace_tools import SandboxArtifact
+    from classes.workspace_tools import WorkspaceFile
 
     wf = get(ctx.get("workflow_id"))
     if wf is None:
         return ""
     name = f"image-{ctx.get('images_posted', 1)}.png"
-    wf.artifacts.append(SandboxArtifact(name=name, data=png, wave=wf.wave))
+    wf.artifacts.append(WorkspaceFile(name=name, data=png, wave=wf.wave))
     session, out_dir = ctx.get("session"), ctx.get("out_dir")
     if session is None or not out_dir:
         return " The user gets it with the job's files."
@@ -1503,37 +1507,30 @@ async def ask_requester(wf: Workflow, question: str, options=None, label: str = 
     button, or their next message there, answers it (_watch). One at a time,
     since two helpers may need them at once. '' when no usable answer came
     within WORKFLOW_ASK_TIMEOUT."""
-    from classes import brain_inbox, brain_question
-    from classes.persona_voice import voice_question
+    from classes import brain_question
 
     if wf.ledger is None or wf.record["automatic"]:
         return ""
-    async with wf.asking:
-        wait = min(wp.ask_timeout(), wf.seconds_left() - _step_reserve_seconds(wf))
-        if wf.cancel_reason or wait <= 0:
-            return ""
-        text = await voice_question(wf.guild_id, question)
-        message, view = await brain_question.post(wf.ctx, text, options, wait,
-                                                  label or brain_question.HEADING_STEP)
-        if message is None:
-            return ""
+
+    def _wait_left():
+        if wf.cancel_reason:
+            return None
+        return min(wp.ask_timeout(), wf.seconds_left() - _step_reserve_seconds(wf))
+
+    def _asked(message, future):
+        # From here _watch takes the requester's next thread message as the answer.
         wf.question_after = wf.ledger.revision
         wf.question_id = message.id
-        wf.question = brain_inbox.ask(message.id, wf.thread.id, wf.requester_id)
-        line = brain_question.CLOSED
+        wf.question = future
+
+    async with wf.asking:
         try:
-            answer = await asyncio.wait_for(asyncio.shield(wf.question), wait)
-            if answer:
-                shown = (brain_question.YOU_DECIDE if answer == brain_question.YOU_DECIDE_ANSWER
-                         else answer)
-                line = brain_question.ANSWERED.format(answer=shown[:200])
-        except asyncio.TimeoutError:
-            line = brain_question.TIMED_OUT
-            return ""
+            result = await brain_question.ask(wf.ctx, question, options, _wait_left,
+                                              label or brain_question.HEADING_STEP,
+                                              on_asked=_asked)
         finally:
-            brain_inbox.cancel(message.id, wf.question)
             wf.question_id = wf.question = None
-            await brain_question.close(message, view, line)
+    answer = result.answer if result.state == brain_question.ANSWERED_STATE else ""
     if answer == brain_question.YOU_DECIDE_ANSWER:
         return brain_question.YOU_DECIDE
     if answer and not await _allowed(wf, answer):
@@ -1549,7 +1546,7 @@ async def _review(wf: Workflow, queue: list) -> list:
     pending = ledger.unaddressed() if ledger is not None else []
     if not pending:
         return queue
-    ledger.mark_presented([e.seq for e in pending], 0)
+    ledger.mark_presented([e.seq for e in pending])
     # A message on its way to the helpers is routed first, so what later
     # helpers read of it (wf.said) is filed under its steps.
     routing = [wf.steer_tasks[e.seq] for e in pending if e.seq in wf.steer_tasks]
@@ -1581,7 +1578,7 @@ async def _review(wf: Workflow, queue: list) -> list:
         "Messages:\n" + "\n".join(lines)])
     wf.ctx.pop("workflow_review_args", None)
     await _agent_run(wf, _manager("review"), task, max_turns=MANAGER_SHORT_TURNS,
-                     lane=llm_lanes.BRAIN, sandbox=False, caller="workflow_manager")
+                     lane=llm_lanes.BRAIN, workspace=False, caller="workflow_manager")
     args = wf.ctx.get("workflow_review_args") or {}
     replies = {}
     for item in args.get("replies") or []:
@@ -1682,7 +1679,7 @@ async def _finish(wf: Workflow, stopped: str | None) -> BrainReport:
         "what the step reports and the check show."]))
     wf.ctx.pop("brain_report_args", None)
     outcome = await _agent_run(wf, _manager("finish"), task, max_turns=MANAGER_SHORT_TURNS,
-                               lane=llm_lanes.BRAIN, sandbox=False, caller="workflow_manager")
+                               lane=llm_lanes.BRAIN, workspace=False, caller="workflow_manager")
     args = wf.ctx.get("brain_report_args")
     if args is None:
         return _report_from_steps(wf, stopped or outcome.stopped or "")
@@ -1732,7 +1729,7 @@ async def post_workflow_copy(wf: Workflow) -> list[str]:
         return []
     if getattr(wf.origin_channel, "id", None) == getattr(wf.thread, "id", None):
         return []
-    from classes.workspace_tools import SandboxArtifact
+    from classes.workspace_tools import WorkspaceFile
 
     chosen = wp.echo_files([(a.name, getattr(a, "step", ""), getattr(a, "wave", 0))
                             for a in wf.artifacts])
@@ -1744,7 +1741,7 @@ async def post_workflow_copy(wf: Workflow) -> list[str]:
         if total + len(artifact.data) > ECHO_MAX_BYTES:
             continue  # a smaller one after it may still fit
         if name != artifact.name:
-            artifact = SandboxArtifact(name=name, data=artifact.data, caption=artifact.caption)
+            artifact = WorkspaceFile(name=name, data=artifact.data, caption=artifact.caption)
         picked.append(artifact)
         total += len(artifact.data)
     return await _post_files(wf.origin_channel, picked)

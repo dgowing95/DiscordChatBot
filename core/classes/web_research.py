@@ -16,7 +16,7 @@ from classes.side_llm import SideLLM
 
 logger = logging.getLogger(__name__)
 
-# The caller's lane: chat inside a reply, brain inside a sandbox run.
+# The caller's lane: chat inside a reply, brain inside a brain call.
 _llm = SideLLM("web_research", rf.research_config)
 
 

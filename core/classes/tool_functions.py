@@ -23,7 +23,7 @@ async def add_emoji_to_message(message: discord.Message, emoji: str) -> None:
 async def _tool_notice(wrapper: RunContextWrapper[dict], title: str, text: str,
                        color: int = tool_embeds.COLOR_WEB) -> None:
     """The embed a lookup posts where it was asked. Skipped when the run has
-    no channel: a sandbox run may have no thread (its tests, and any caller
+    no channel: a brain call may have no thread (its tests, and any caller
     that passes none), and a lookup must still work there rather than fail
     on None.send."""
     channel = wrapper.context.get("channel")

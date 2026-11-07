@@ -973,9 +973,14 @@ async def test_tokens_are_counted_from_each_response():
     assert seen == [120, 0]
 
 
-def test_no_token_limit_by_default(monkeypatch):
+def test_the_token_limit_is_4m_by_default_and_0_turns_it_off(monkeypatch):
     monkeypatch.delenv("WORKFLOW_MAX_TOKENS", raising=False)
     wf = workflows.Workflow(record={}, ctx={}, thread=None, origin_channel=None)
+    wf.add_tokens(3_999_999)
+    assert not wf.over_tokens()
+    wf.add_tokens(1)
+    assert wf.over_tokens()
+    monkeypatch.setenv("WORKFLOW_MAX_TOKENS", "0")
     wf.add_tokens(10**9)
     assert not wf.over_tokens()
 
@@ -1048,7 +1053,7 @@ def test_this_channel_means_where_it_was_asked():
 
 @pytest.mark.asyncio
 async def test_two_steps_of_a_wave_keep_their_same_named_files(monkeypatch):
-    from classes.workspace_tools import SandboxArtifact
+    from classes.workspace_tools import WorkspaceFile
     sent = []
 
     async def _post_files(channel, artifacts):
@@ -1056,8 +1061,8 @@ async def test_two_steps_of_a_wave_keep_their_same_named_files(monkeypatch):
         return [a.name for a in artifacts]
 
     monkeypatch.setattr(brain, "_post_files", _post_files)
-    files = [SandboxArtifact("data.csv", b"one", step="s1", wave=1),
-             SandboxArtifact("data.csv", b"two", step="s2", wave=1)]
+    files = [WorkspaceFile("data.csv", b"one", step="s1", wave=1),
+             WorkspaceFile("data.csv", b"two", step="s2", wave=1)]
     wf = SimpleNamespace(origin_channel=FakeChannel(77), thread=FakeChannel(500), artifacts=files)
     assert await workflows.post_workflow_copy(wf) == ["s1-data.csv", "s2-data.csv"]
     assert [a.data for a in sent] == [b"one", b"two"]
@@ -1495,6 +1500,36 @@ async def test_a_revised_plan_leaves_the_old_one_as_it_was_with_no_buttons(env, 
 
 
 @pytest.mark.asyncio
+async def test_a_cancel_while_the_plan_changes_leaves_the_old_card_closed(env, monkeypatch):
+    from classes import workflow_planning
+    real_write = workflow_planning.write_plan
+
+    async def _index(guild_id, header=None):
+        if not thread_inbox.get_run(env.thread.id).events:
+            thread_inbox.deliver(env.thread.id, 9403, 5, "Ana", "add a second step")
+        return ""
+
+    async def _write(wf, change=None):
+        plan = await real_write(wf, change=change)
+        if change:
+            workflows.request_cancel(wf, "stop")
+        return plan
+
+    monkeypatch.setattr(brain, "_skills_index", _index)
+    monkeypatch.setattr(workflow_planning, "write_plan", _write)
+    env.model = LaneModel([
+        _plan_call(("s1", "researcher", [])),
+        _plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"]), call_id="p2")])
+    wf, _ = await _start(env, automatic=False)
+    await asyncio.wait_for(_finish(wf), 5)
+    assert wf.record["state"] == wp.CANCELLED
+    [old] = env.thread.plans()
+    assert len(old.edits) == 1  # closed once, never given the unseen plan
+    assert old.edits[0]["view"].note == workflows.PLAN_CLOSED
+    assert "s2" not in old.edits[0]["view"].text
+
+
+@pytest.mark.asyncio
 async def test_a_stop_before_the_plan_is_up_is_not_lost(env, monkeypatch):
     async def _stopped_meanwhile(guild_id, text):
         workflows.request_cancel(workflows.get(next(iter(workflows._RUNNING))), "stop")
@@ -1577,6 +1612,20 @@ async def test_a_step_that_crashes_leaves_nothing_saying_it_is_running(env, monk
     assert workflows.HELPER_FAILED in embed.edits[-1]["embed"].description
 
 
+@pytest.mark.asyncio
+async def test_a_researchers_embed_counts_to_its_real_share_of_turns(env, monkeypatch):
+    monkeypatch.setenv("WORKFLOW_MAX_TURNS", "60")  # less than SUBAGENT_MAX_TURNS (100)
+    env.model = LaneModel([_plan_call(("s1", "researcher", [])), _report(call_id="a"),
+                           _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    embed = next(m for m in env.thread.sent if m.kwargs.get("embed") is not None
+                 and m.kwargs["embed"].title.startswith("🔬 s1"))
+    footer = embed.edits[-1]["embed"].footer.text
+    share = int(footer.rsplit(" ", 1)[-1])
+    assert footer.startswith("Turn 1 of ") and share < 60  # not "of 100"
+
+
 def test_runs_side_by_side_split_the_turns_left():
     wf = SimpleNamespace(turns_left=lambda: 110, sharing=2, promised=0)
     assert workflows._turn_limit(wf, 100) == 55
@@ -1634,8 +1683,11 @@ async def test_helpers_share_one_content_check(monkeypatch):
     monkeypatch.setattr("classes.content_guard.check_web_request", _check)
     wf = SimpleNamespace(ctx={"brain_request": "the job", "brain_guard": None})
     first, second = workflows._helper_ctx(wf), workflows._helper_ctx(wf)
+    assert calls == []  # not at set-up: a helper that never uses the workspace costs none
     assert await brain._workspace_allowed(first) and await brain._workspace_allowed(second)
     assert calls == ["the job"]
+    later = workflows._helper_ctx(wf)  # a later wave's helper finds it too
+    assert await brain._workspace_allowed(later) and calls == ["the job"]
 
 
 @pytest.mark.asyncio

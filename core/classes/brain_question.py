@@ -17,6 +17,7 @@ It is a card (classes/card.py), with the choices on one row and "Answer…" and
 """
 import asyncio
 import logging
+from dataclasses import dataclass
 
 import discord
 
@@ -160,6 +161,72 @@ async def post(ctx: dict, text: str, options, timeout: float, label: str = HEADI
         return None, None
     view.question_id = sent.id
     return sent, view
+
+
+# How ask() ended.
+SKIPPED = "skipped"      # not posted, or no time left to wait
+TIMEOUT = "timeout"      # posted, no answer in time
+REPLACED = "replaced"    # a newer question took its place
+ANSWERED_STATE = "answered"
+
+
+@dataclass
+class Asked:
+    state: str
+    answer: str = ""
+    wait: float = 0.0  # the seconds it waited for (0: it never waited)
+
+
+async def ask(ctx: dict, question: str, options, wait_left, label: str = HEADING_CHAT, *,
+              on_asked=None, before_wait=None) -> Asked:
+    """The one way a question reaches the requester: the brain's ask_user and
+    a workflow's ask_requester. Reworded in the persona's voice, posted,
+    registered (brain_inbox), waited on, and closed with how it ended.
+    `wait_left()` is how long it may still wait (None or <= 0: not at all).
+    It is read before the post and again after it: the reword and the post
+    take time too. `on_asked(message, future)` runs once the answer can
+    come, `before_wait(text)` (say, speaking it) before the wait, both inside
+    the waiter's lifetime, so a run stopped meanwhile still takes it off."""
+    from classes.persona_voice import voice_question
+
+    wait = wait_left()
+    if wait is None or wait <= 0:
+        return Asked(SKIPPED)
+    text = await voice_question(ctx.get("guild_id"), question)
+    message, view = await post(ctx, text, options, wait, label)
+    if message is None:
+        return Asked(SKIPPED)
+    wait = wait_left()
+    if wait is None or wait <= 0:
+        await close(message, view, TIMED_OUT)
+        return Asked(TIMEOUT)
+    # Registered after the post (the waiter is keyed by the question's
+    # message), and before anything else awaits.
+    future = brain_inbox.ask(message.id, ctx["channel"].id, ctx["user_id"],
+                             voice=bool(ctx.get("voice")))
+    logger.info(f"Asked the requester, waiting up to {wait:.0f}s")
+    line = CLOSED
+    try:
+        if on_asked is not None:
+            on_asked(message, future)
+        if before_wait is not None:
+            await before_wait(text)
+        answer = await asyncio.wait_for(future, wait)
+    except asyncio.TimeoutError:
+        line = TIMED_OUT
+        return Asked(TIMEOUT, wait=wait)
+    finally:
+        # Also on a cancel: a waiter left behind would take an answer nobody
+        # is waiting for.
+        brain_inbox.cancel(message.id, future)
+        if future.done() and not future.cancelled() and future.result():
+            said = future.result()
+            said = YOU_DECIDE if said == YOU_DECIDE_ANSWER else said
+            line = ANSWERED.format(answer=said[:200])
+        await close(message, view, line)
+    if answer is brain_inbox.REPLACED:
+        return Asked(REPLACED, wait=wait)
+    return Asked(ANSWERED_STATE, answer or "", wait)
 
 
 async def close(message, view: QuestionView, line: str) -> None:

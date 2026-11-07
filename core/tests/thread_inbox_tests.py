@@ -140,7 +140,7 @@ def test_the_cap_counts_only_unhandled_input():
     for i in range(inbox.MAX_PENDING_MESSAGES):
         ledger.deliver(i + 1, 1, "ana", f"m{i}")
     seqs = [e.seq for e in ledger.events]
-    ledger.mark_presented(seqs, anchor=1)
+    ledger.mark_presented(seqs)
     ledger.record_decision(seqs, "noted")
     assert ledger.deliver(999, 1, "ana", "room again") == inbox.ACCEPTED
 
@@ -177,14 +177,13 @@ def test_events_move_through_the_stages():
     ledger.deliver(1, 1, "ana", "make it blue")
     [e] = ledger.events
     assert e.stage == inbox.RECEIVED and ledger.unpresented() == [e]
-    ledger.mark_presented([1], anchor=3)
-    assert (e.stage, e.anchor) == (inbox.PRESENTED, 3)
+    ledger.mark_presented([1])
+    assert e.stage == inbox.PRESENTED
     assert ledger.unaddressed() == [e]
     ledger.record_decision([1], "will_apply", "switching to blue")
     assert e.stage == inbox.ADDRESSED and ledger.unaddressed() == []
-    assert ledger.unresolved() == [e]  # accepted is not done
     ledger.record_decision([1], "done")
-    assert e.stage == inbox.RESOLVED and ledger.unresolved() == []
+    assert e.stage == inbox.RESOLVED
     assert e.reply == "switching to blue"  # a later empty reply keeps the first
 
 
@@ -200,7 +199,7 @@ def test_only_resolved_history_is_compacted():
     ledger = _ledger()
     for i in range(inbox.MAX_RETAINED_EVENTS):
         ledger.deliver(i + 1, 1, "ana", f"m{i}")
-        ledger.mark_presented([i + 1], anchor=1)
+        ledger.mark_presented([i + 1])
         ledger.record_decision([i + 1], "noted" if i < 5 else "will_apply")
     ledger.deliver(1000, 1, "ana", "newest")
     assert len(ledger.events) == inbox.MAX_RETAINED_EVENTS
@@ -208,44 +207,6 @@ def test_only_resolved_history_is_compacted():
     # the oldest RESOLVED one went; no accepted-but-unfinished one did
     assert ledger.events[0].text == "m1"
     assert all(e.stage != inbox.RESOLVED or e.text != "m0" for e in ledger.events)
-
-
-# ---------------------- questions ----------------------
-
-def test_a_requester_message_while_a_question_is_open_is_a_candidate_answer():
-    ledger = _ledger(requester_id=1)
-    q = ledger.open_question("png or jpg?", blocking=True)
-    ledger.deliver(1, 1, "ana", "png")
-    ledger.deliver(2, 2, "bo", "jpg!")
-    assert ledger.events[0].question_id == q.qid
-    # another participant's reply stays an attributed suggestion
-    assert ledger.events[1].question_id is None
-
-
-def test_an_explicit_reply_to_the_question_is_a_candidate_from_anyone():
-    ledger = _ledger(requester_id=1)
-    q = ledger.open_question("png or jpg?", blocking=False)
-    q.message_id = 555
-    ledger.deliver(1, 2, "bo", "png", reply_to=555)
-    assert ledger.events[0].question_id == q.qid
-
-
-def test_responding_to_a_candidate_answer_closes_the_question():
-    ledger = _ledger(requester_id=1)
-    ledger.open_question("png or jpg?", blocking=True)
-    ledger.deliver(1, 1, "ana", "png")
-    ledger.mark_presented([1], anchor=1)
-    ledger.record_decision([1], "noted")
-    assert ledger.question is None
-
-
-def test_has_input_after_counts_only_newer_messages():
-    ledger = _ledger()
-    ledger.deliver(1, 1, "ana", "a")
-    q = ledger.open_question("q", blocking=True)
-    assert ledger.has_input_after(q.after_seq) is False
-    ledger.deliver(2, 1, "ana", "b")
-    assert ledger.has_input_after(q.after_seq) is True
 
 
 # ---------------------- closing ----------------------
@@ -256,21 +217,13 @@ def test_a_closed_run_accepts_nothing():
     assert ledger.deliver(1, 1, "ana", "x") == inbox.NO_RUN
 
 
-def test_given_up_events_stop_blocking_but_stay_unresolved():
-    ledger = _ledger()
-    ledger.deliver(1, 1, "ana", "x")
-    ledger.mark_presented([1], anchor=1)
-    ledger.give_up_on(ledger.events[0])
-    assert ledger.unaddressed() == []
-
-
 def test_a_record_full_of_unresolved_guidance_rejects_new_input():
     # Accepted-but-never-done events cannot be compacted, and every one is
     # re-sent on each model call, so the record must stop growing instead.
     ledger = _ledger()
     for i in range(inbox.MAX_RETAINED_EVENTS):
         ledger.deliver(i + 1, 1, "ana", f"m{i}")
-        ledger.mark_presented([i + 1], anchor=1)
+        ledger.mark_presented([i + 1])
         ledger.record_decision([i + 1], "will_apply")
     assert ledger.deliver(1000, 1, "ana", "one more") == inbox.FULL
     assert len(ledger.events) == inbox.MAX_RETAINED_EVENTS

@@ -60,7 +60,7 @@ def persona_max_turns() -> int:
 # Sent after the last allowed turn, when a reply runs out of turns. Before
 # this the run raised MaxTurnsExceeded and the user got a bare ❌, even though
 # the tools had already posted their results; a long chain (search, read,
-# draw, sandbox) is exactly the reply that runs out.
+# draw, the brain) is exactly the reply that runs out.
 WRAP_UP_INSTRUCTION = (
     "(You have used every step you get for this reply, so no more tools can "
     "run. Write your reply to the user now from what you already have: what "

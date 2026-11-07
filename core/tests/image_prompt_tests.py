@@ -305,7 +305,7 @@ def test_rewrite_settings_fall_back_to_the_bots_own(monkeypatch):
 
 def test_rewrite_settings_override_the_bots_own(monkeypatch):
     """So the rewrite can run on OpenRouter while chat stays local, exactly as
-    BRAIN_MODEL/BRAIN_LLM_HOST already allow for the sandbox agent."""
+    BRAIN_MODEL/BRAIN_LLM_HOST already allow for the brain."""
     _clear_roles(monkeypatch)
     monkeypatch.setenv("LLM_MODEL", "qwen3:27b")
     monkeypatch.setenv("LLM_HOST", "http://llamacpp:8080")

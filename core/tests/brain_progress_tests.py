@@ -17,7 +17,7 @@ from classes.brain_progress import (
     FIELD_VALUE_CHARS,
     MAX_FIELDS,
     BrainProgressHooks,
-    SandboxTranscript,
+    WorkTranscript,
     parse_exec_result,
 )
 from classes.tool_embeds import (
@@ -97,7 +97,7 @@ def test_parse_exec_result_non_string():
 
 
 
-# ---------------------- SandboxTranscript ----------------------
+# ---------------------- WorkTranscript ----------------------
 
 def _render(t):
     return t.render_message()
@@ -112,7 +112,7 @@ def _embed_chars(spec) -> int:
 def test_transcript_initial_embed_mirrors_tool_embed():
     # no commands yet: just what the static run embed shows, nothing in the
     # message body
-    body, spec = _render(SandboxTranscript("compute 6*7"))
+    body, spec = _render(WorkTranscript("compute 6*7"))
     assert body == ""
     assert spec.title == BRAIN_WORKING
     assert spec.description == "compute 6*7"
@@ -122,7 +122,7 @@ def test_transcript_initial_embed_mirrors_tool_embed():
 
 
 def test_transcript_one_field_per_command():
-    t = SandboxTranscript("t")
+    t = WorkTranscript("t")
     t.add_command("pip install matplotlib")
     t.add_output("Successfully installed", exit_code=0)
     t.add_command("python goat.py")
@@ -138,7 +138,7 @@ def test_transcript_one_field_per_command():
 
 
 def test_transcript_heredoc_field():
-    t = SandboxTranscript("t")
+    t = WorkTranscript("t")
     t.add_command("cat > x.py << 'EOF'\nprint(1)\nEOF")
     t.add_output("1", exit_code=0)
     _, spec = _render(t)
@@ -152,7 +152,7 @@ def test_transcript_heredoc_field():
 
 
 def test_transcript_state_colors():
-    t = SandboxTranscript("t")
+    t = WorkTranscript("t")
     t.add_command("sleep 30")
     _, spec = _render(t)
     assert spec.color == COLOR_RUNNING
@@ -174,7 +174,7 @@ def test_transcript_state_colors():
 
 
 def test_transcript_field_value_capped():
-    t = SandboxTranscript("t")
+    t = WorkTranscript("t")
     t.add_command("echo hi")
     t.add_output("x\n" * 5000, exit_code=0)
     _, spec = _render(t)
@@ -185,7 +185,7 @@ def test_transcript_field_value_capped():
 
 
 def test_transcript_huge_heredoc_capped():
-    t = SandboxTranscript("t")
+    t = WorkTranscript("t")
     t.add_command("cat > big.py << 'EOF'\n" + "line\n" * 3000 + "EOF")
     _, spec = _render(t)
     f = spec.fields[0]
@@ -194,7 +194,7 @@ def test_transcript_huge_heredoc_capped():
 
 
 def test_transcript_stdin_shown_in_field():
-    t = SandboxTranscript("t")
+    t = WorkTranscript("t")
     t.add_command("read x")
     t.add_input("y\n")
     t.add_output("got it", exit_code=0)
@@ -207,7 +207,7 @@ def test_transcript_stdin_shown_in_field():
 
 
 def test_transcript_stdin_without_command():
-    t = SandboxTranscript("t")
+    t = WorkTranscript("t")
     t.add_input("y\n")
     t.add_output("ok", exit_code=0)
     _, spec = _render(t)
@@ -216,7 +216,7 @@ def test_transcript_stdin_without_command():
 
 
 def test_transcript_note_and_thinking_in_body():
-    t = SandboxTranscript("t")
+    t = WorkTranscript("t")
     t.add_note("starting container…")
     t.set_thinking(True)
     body, _ = _render(t)
@@ -228,14 +228,14 @@ def test_transcript_note_and_thinking_in_body():
 
 
 def test_transcript_skips_empty_output():
-    t = SandboxTranscript("t")
+    t = WorkTranscript("t")
     t.add_output("")
     _, spec = _render(t)
     assert spec.fields == []
 
 
 def test_transcript_fields_fit_embed_budget():
-    t = SandboxTranscript("t")
+    t = WorkTranscript("t")
     for i in range(50):
         t.add_command(f"echo {i}")
         t.add_output("o" * 3000, exit_code=0)
@@ -249,7 +249,7 @@ def test_transcript_fields_fit_embed_budget():
 
 
 def test_transcript_fields_chronological():
-    t = SandboxTranscript("t")
+    t = WorkTranscript("t")
     t.add_command("first")
     t.add_output("one", exit_code=0)
     t.add_command("second")
@@ -261,7 +261,7 @@ def test_transcript_fields_chronological():
 
 
 def test_transcript_long_task_truncated_in_description():
-    _, spec = _render(SandboxTranscript("word " * 1000))
+    _, spec = _render(WorkTranscript("word " * 1000))
     assert len(spec.description) <= DESCRIPTION_CHARS
     # the start of the task is kept, cut at a word; the ellipsis marks the cut
     assert spec.description.startswith("word word")
@@ -565,7 +565,7 @@ async def test_message_stays_under_discord_limits():
 # ---------------------- title, files and reply hint ----------------------
 
 def test_transcript_shows_the_title_files_and_footer_it_is_given():
-    _, spec = _render(SandboxTranscript("do a thing", title=BRAIN_WORKING,
+    _, spec = _render(WorkTranscript("do a thing", title=BRAIN_WORKING,
                                         files=["a.csv", "b.png"], footer="reply here"))
     assert spec.title == BRAIN_WORKING
     assert spec.description == "do a thing\n📎 a.csv, b.png"
@@ -573,7 +573,7 @@ def test_transcript_shows_the_title_files_and_footer_it_is_given():
 
 
 def test_transcript_matches_the_static_embed_text():
-    _, spec = _render(SandboxTranscript("do a thing", files=["a.csv"]))
+    _, spec = _render(WorkTranscript("do a thing", files=["a.csv"]))
     assert spec.description == work_task_text("do a thing", ["a.csv"], DESCRIPTION_CHARS)
 
 
@@ -588,7 +588,7 @@ def test_hooks_pass_the_files_into_the_embed():
 
 def test_the_footer_counts_against_the_embed_budget():
     big_footer = "f" * 2000
-    t = SandboxTranscript("t", footer=big_footer)
+    t = WorkTranscript("t", footer=big_footer)
     for i in range(20):
         t.add_command(f"cmd{i}")
         t.add_output("x" * 900, exit_code=0)

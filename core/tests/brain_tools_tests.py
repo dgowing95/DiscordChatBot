@@ -66,7 +66,7 @@ def test_the_brain_ends_with_report(all_on):
 
 
 def test_create_event_keeps_its_poll_then_follow_up_advice(all_on):
-    # The old sandbox copy cut it (the sandbox had neither tool); the brain has both.
+    # v2's code-tool copy cut it (that tool had neither); the brain has both.
     (tool,) = [t for t in brain_tools() if t.name == "create_event"]
     assert "To find a time" in tool.description
 

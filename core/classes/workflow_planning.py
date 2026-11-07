@@ -79,7 +79,7 @@ async def write_plan(wf, change: str = "") -> wp.Plan:
             wf.ctx.pop(key, None)
         outcome = await workflows._agent_run(
             wf, workflows._manager("manager", rounds), await _task(wf, change, problems, rounds),
-            max_turns=PLAN_TURNS, lane=llm_lanes.BRAIN, sandbox=False, caller="workflow_manager")
+            max_turns=PLAN_TURNS, lane=llm_lanes.BRAIN, workspace=False, caller="workflow_manager")
         if wf.cancel_reason:
             break
         raw = wf.ctx.get("workflow_plan_args")
@@ -164,7 +164,7 @@ async def _take_messages(wf) -> None:
     for event in wf.ledger.unpresented():
         if not event.is_requester or wp.is_stop_word(event.text):
             continue
-        wf.ledger.mark_presented([event.seq], 0)
+        wf.ledger.mark_presented([event.seq])
         if await workflows._allowed(wf, event.text):
             wf.ledger.record_decision([event.seq], "noted", "Taken into the plan.")
             wf.said.append((event.seq, f"{event.author_name}: {event.text[:300]}"))
@@ -246,7 +246,7 @@ async def _scout_work(wf, subject: str, ctx: dict, job_dir: str, progress) -> No
     agent = workflows._subagent(wp.SCOUT)
     outcome = await workflows._agent_run(
         wf, agent, "\n\n".join(parts), max_turns=wp.SCOUT_MAX_TURNS,
-        lane=llm_lanes.SUBAGENT, sandbox=True, progress=progress, caller="workflow_scout",
+        lane=llm_lanes.SUBAGENT, workspace=True, progress=progress, caller="workflow_scout",
         ctx=ctx, seconds=wp.SCOUT_SECONDS,
         finish_up_at=wp.SCOUT_MAX_TURNS - wp.SCOUT_FINISH_UP_TURNS)
     workflows._keep_shared(wf, ctx)

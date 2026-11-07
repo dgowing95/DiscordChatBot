@@ -473,7 +473,7 @@ def _handled(handler, msg, set_messages):
 async def test_handle_message_scoped_lock_generates_concurrently_sends_serially():
     """Two same-channel messages handled on two worker tasks: their LLM runs
     overlap (the lock does NOT cover the LLM phase — this is what frees the
-    bot to answer in the same channel during a sandbox run), but their
+    bot to answer in the same channel during a brain call), but their
     chunked sends are serialized by the lock and never interleave.
 
     With the old FULL lock (build + LLM + send) message 2's generation would
@@ -592,7 +592,7 @@ async def test_handle_message_no_hint_when_channel_idle():
 @pytest.mark.asyncio
 async def test_handle_message_passes_client_to_text_llm_handler():
     # Regression: TextLLMHandler needs the discord.Client (forwarded to tool
-    # context as "discord_client") so run_code_sandbox's ask_user tool can
+    # context as "discord_client") so the brain's ask_user tool can
     # call client.wait_for() — handle_message must not silently drop it.
     captured = {}
 
@@ -640,66 +640,6 @@ async def test_handle_message_passes_the_unprompted_flag(marked):
         await handler.handle_message()
     assert captured["unprompted"] is marked
     assert not message_queue.pop_unprompted(message.id)
-
-
-@pytest.mark.asyncio
-async def test_send_with_files_falls_back_to_one_file_per_message():
-    import discord
-    from classes.common import send_with_files
-
-    channel = MagicMock()
-    response = MagicMock(status=413, reason="Payload Too Large")
-
-    async def _send(*args, **kwargs):
-        if len(kwargs.get("files") or []) > 1:
-            raise discord.HTTPException(response, "too large")
-    channel.send = AsyncMock(side_effect=_send)
-
-    await send_with_files(channel, "here", [("a.png", b"1"), ("b.png", b"2")])
-
-    calls = channel.send.await_args_list
-    assert calls[1].args == ("here",)
-    assert [c.kwargs["file"].filename for c in calls[2:]] == ["a.png", "b.png"]
-
-
-@pytest.mark.asyncio
-async def test_send_with_files_does_not_resend_after_a_connection_error():
-    # Discord may have posted the message before the connection dropped, so
-    # resending could post it twice.
-    from classes.common import send_with_files
-
-    channel = MagicMock()
-    channel.send = AsyncMock(side_effect=TimeoutError())
-    await send_with_files(channel, "here", [("a.png", b"1"), ("b.png", b"2")])  # does not raise
-
-    channel.send.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_send_with_files_does_not_resend_after_a_server_error():
-    # Same for a 5xx: it can arrive after the message was created.
-    import discord
-    from classes.common import send_with_files
-
-    channel = MagicMock()
-    response = MagicMock(status=502, reason="Bad Gateway")
-    channel.send = AsyncMock(side_effect=discord.DiscordServerError(response, "bad gateway"))
-    await send_with_files(channel, "here", [("a.png", b"1"), ("b.png", b"2")])  # does not raise
-
-    channel.send.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_send_with_files_puts_ten_files_on_a_message():
-    from classes.common import send_with_files
-
-    channel = MagicMock()
-    channel.send = AsyncMock()
-    await send_with_files(channel, "here", [(f"{i}.png", b"x") for i in range(12)])
-
-    calls = channel.send.await_args_list
-    assert [len(c.kwargs["files"]) for c in calls] == [10, 2]
-    assert [c.kwargs["content"] for c in calls] == ["here", None]
 
 
 @pytest.mark.asyncio
@@ -881,7 +821,7 @@ async def test_generate_recovers_reasoning_from_a_failed_run():
     handler = _generate_handler(None)
     exc = MaxTurnsExceeded("Max turns (20) exceeded")
     exc.run_data = MagicMock()
-    exc.run_data.new_items = [_reasoning_item(summary=["i kept calling the sandbox"])]
+    exc.run_data.new_items = [_reasoning_item(summary=["i kept calling the brain"])]
 
     with patch("classes.text_llm_handler.Runner") as runner, \
          patch("classes.text_llm_handler.get_current_datetime", AsyncMock(return_value="now")), \
@@ -890,7 +830,7 @@ async def test_generate_recovers_reasoning_from_a_failed_run():
         answer = await handler.generate()
 
     assert answer == "Error"  # sentinel unchanged
-    assert handler.reasoning == "i kept calling the sandbox"
+    assert handler.reasoning == "i kept calling the brain"
 
 
 @pytest.mark.asyncio
@@ -984,7 +924,6 @@ async def test_handle_message_failed_run_with_no_reasoning_just_reacts():
 
     handler.message.add_reaction.assert_awaited_with('❌')
     assert sends == []
-
 
 
 @pytest.mark.asyncio

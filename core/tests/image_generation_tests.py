@@ -374,7 +374,7 @@ def test_edit_source_falls_back_to_the_newest_generated_image():
 
 
 def test_edit_source_ignores_other_images():
-    """Uploaded photos (real people) and the bot's sandbox output are never edited."""
+    """Uploaded photos (real people) and the bot's workspace files are never edited."""
     upload = _message(7, "generated-image.png")
     chart = _message(BOT, "chart.png")
     assert image_generation.pick_edit_source(upload, [upload, chart], BOT) is None

@@ -239,7 +239,7 @@ async def test_discord_errors():
 
 @pytest.mark.asyncio
 async def test_searches_per_reply_are_not_capped():
-    # A sandbox task that tallies a bot's posts needs many searches; the
+    # A brain call that tallies a bot's posts needs many searches; the
     # agent's turn limit is what bounds a loop.
     context, http = _env()
     for _ in range(10):
@@ -443,7 +443,7 @@ async def test_reads_are_not_capped_and_need_a_server():
                                                    message=_link(20)))
 
 
-# --- saving messages to a file (sandbox runs) -----------------------------
+# --- saving messages to a file (brain calls) -------------------------------
 
 TRACKER_EMBED = {"author": {"name": "Team Ana"}, "title": "Shared Chest",
                  "description": "Team Ana withdrew:\n- 20 x Iron bar (4K)",
