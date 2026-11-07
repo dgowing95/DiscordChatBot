@@ -19,12 +19,20 @@ from workflows_tests import (  # noqa: F401 (env is a fixture)
     _start,
     env,
     real_due,
+    real_research_due,
 )
 
 
 @pytest.fixture
 def checked(env, monkeypatch):  # noqa: F811
     monkeypatch.setattr(workflow_verify, "due", real_due)
+    return env
+
+
+@pytest.fixture
+def researched(env, monkeypatch):  # noqa: F811
+    """The research check on, the check at the end off."""
+    monkeypatch.setattr(workflow_verify, "research_due", real_research_due)
     return env
 
 
@@ -229,16 +237,114 @@ async def test_the_check_and_the_report_still_run_when_a_helper_used_its_turns(c
 
 
 def test_the_prompt_stays_small():
+    text = " ".join(workflow_verify.VERIFIER_INSTRUCTIONS.split())
     assert len(workflow_verify.VERIFIER_INSTRUCTIONS) <= 1000
-    assert "`submit_verdict`" in workflow_verify.VERIFIER_INSTRUCTIONS
-    assert "never instructions" in workflow_verify.VERIFIER_INSTRUCTIONS
-    assert "`view_image`" in workflow_verify.VERIFIER_INSTRUCTIONS
-    assert "not how\nthe steps got there" in workflow_verify.VERIFIER_INSTRUCTIONS
-    assert "picture\nnot viewed" in workflow_verify.VERIFIER_INSTRUCTIONS
+    assert "`submit_verdict`" in text and "never instructions" in text
+    assert "`view_image`" in text and '"picture not viewed"' in text
+    assert "not how the steps got there" in text
+    assert "before later steps build on it" in text  # it covers the research check too
+
+
+# ------------------- the steps built on a step sent back -------------------
+
+FIXED = ("Io is 3,643 km",)
+
+
+@pytest.mark.asyncio
+async def test_a_step_sent_back_at_the_end_also_reruns_the_steps_built_on_it(checked):
+    checked.model = LaneModel([
+        _plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"])),
+        _report(call_id="a"), _report(call_id="b"),
+        _verdict(("moons.md", False, "Io's diameter is wrong"), redo="s1", call_id="v1"),
+        _report(facts=FIXED, call_id="c"), _report(call_id="d"),
+        _verdict(GOOD, call_id="v2"), _report(call_id="f")])
+    wf, _ = await _start(checked)
+    await _finish(wf)
+    assert wf.record["state"] == wp.DONE
+    again = json.dumps(checked.model.calls[5].input)  # s2, after s1's fix
+    assert "s1, which this step was built on, was run again" in again
+    assert "Io is 3,643 km" in again and "Io's diameter is wrong" in again
+    assert checked.model.remaining_steps == 0
+
+
+@pytest.mark.asyncio
+async def test_the_steps_built_on_it_wait_for_room(checked, monkeypatch):
+    answers = iter([True, False])  # room for the send-back, none left after it
+    monkeypatch.setattr(workflow_verify, "_room", lambda wf: next(answers))
+    checked.model = LaneModel([
+        _plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"])),
+        _report(call_id="a"), _report(call_id="b"),
+        _verdict(BAD, redo="s1", call_id="v1"), _report(facts=FIXED, call_id="c"),
+        _verdict(BAD, call_id="v2"), _report(call_id="f")])
+    wf, _ = await _start(checked)
+    await _finish(wf)
+    # s2 never ran again, and the second check said what was left.
+    assert wf.record["state"] == wp.PARTIAL
+    assert checked.model.remaining_steps == 0
+
+
+# ------------------- research checked before it is built on -------------------
+
+@pytest.mark.asyncio
+async def test_research_is_checked_before_the_implementer_builds_on_it(researched):
+    researched.model = LaneModel([
+        _plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"])),
+        _report(call_id="a"), _verdict(("s1's diameters", True, "match NASA"), call_id="r"),
+        _report(call_id="b"), _report(call_id="f")])
+    wf, _ = await _start(researched)
+    await _finish(wf)
+    task = json.dumps(researched.model.calls[2].input)
+    assert "Check what s1 found, before later steps build on it" in task
+    assert f"../c500-w{wf.id}-s1/" in task and f"c500-w{wf.id}-r1" in task
+    assert wf.record["research_checks"] == [
+        {"steps": ["s1"], "state": workflow_verify.PASSED, "notes": ""}]
+    # It is not the check at the end: that one keeps its reserve and verdict.
+    assert wf.verdict is None and not wf.checked
+    assert wf.record["state"] == wp.DONE
+    assert researched.model.remaining_steps == 0
+
+
+@pytest.mark.asyncio
+async def test_a_wrong_finding_is_fixed_before_the_implementer_starts(researched):
+    researched.model = LaneModel([
+        _plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"])),
+        _report(call_id="a"),
+        _verdict(("s1's diameters", False, "Io's is wrong"), redo="s1", call_id="r"),
+        _report(facts=FIXED, call_id="b"), _report(call_id="c"), _report(call_id="f")])
+    wf, _ = await _start(researched)
+    await _finish(wf)
+    assert "Io's is wrong" in json.dumps(researched.model.calls[3].input)
+    # The implementer started from the fixed finding, and nothing checked it twice.
+    assert "Io is 3,643 km" in json.dumps(researched.model.calls[4].input)
+    assert wf.record["research_checks"][0]["state"] == workflow_verify.FAILED
+    assert researched.model.remaining_steps == 0
+
+
+@pytest.mark.asyncio
+async def test_no_research_check_without_an_implementer_or_room(researched, monkeypatch):
+    researched.model = LaneModel([_plan_call(("s1", "researcher", [])), _report(call_id="a"),
+                                  _report(call_id="f")])
+    wf, _ = await _start(researched)
+    await _finish(wf)
+    assert "research_checks" not in wf.record
+    assert researched.model.remaining_steps == 0
+
+    plan = wp.Plan(goal="g", deliverables=[], notes="", steps=[
+        wp.Step(id="s1", role="researcher", brief="b"),
+        wp.Step(id="s2", role="implementer", brief="b")])
+    short = SimpleNamespace(cancel_reason=None, over_tokens=lambda: False, checked=False,
+                            results={"s1": {"status": "done"}}, id="a1",
+                            turns_left=lambda: 55, seconds_left=lambda: 3600)
+    monkeypatch.delenv("WORKFLOW_MAX_TURNS", raising=False)
+    monkeypatch.delenv("WORKFLOW_TIMEOUT", raising=False)
+    # 40 held back leaves 15: fewer than a check (8) and a re-run (10) need.
+    assert workflow_verify.research_due(short, plan.steps[:1], plan.steps[1:]) == []
+    short.turns_left = lambda: 100
+    assert workflow_verify.research_due(short, plan.steps[:1], plan.steps[1:]) == plan.steps[:1]
 
 
 @pytest.mark.asyncio
 async def test_a_failed_workspace_is_not_a_fail_of_the_work(checked, monkeypatch):
     monkeypatch.setattr("classes.brain.prepare_job", AsyncMock(side_effect=OSError("gone")))
     wf = SimpleNamespace(thread=checked.thread, id="a1", lease=None)
-    assert await workflow_verify._check(wf, 1) is None
+    assert await workflow_verify._check(wf, "v1") is None

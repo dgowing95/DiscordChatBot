@@ -253,6 +253,41 @@ def test_the_step_sent_back_is_one_that_ran():
     assert wp.redo_target(plan, {}, "s1") is None
 
 
+def _chain_plan():
+    return wp.Plan(goal="g", deliverables=[], notes="", steps=[
+        wp.Step(id="s1", role="researcher", brief="b"),
+        wp.Step(id="s2", role="researcher", brief="b"),
+        wp.Step(id="s3", role="implementer", brief="b", depends_on=["s1", "s2"]),
+        wp.Step(id="s4", role="implementer", brief="b", depends_on=["s3"]),
+        wp.Step(id="s5", role="implementer", brief="b", depends_on=["s2"])])
+
+
+def test_a_step_sent_back_brings_the_steps_built_on_it():
+    plan = _chain_plan()
+    ran = {s.id: {} for s in plan.steps}
+    assert [s.id for s in wp.redo_chain(plan, ran, "s1")] == ["s1", "s3", "s4"]  # s4 through s3
+    assert [s.id for s in wp.redo_chain(plan, ran, "s2")] == ["s2", "s3", "s4", "s5"]
+    assert [s.id for s in wp.redo_chain(plan, ran, "s4")] == ["s4"]
+    # One that never ran is not run "again".
+    assert [s.id for s in wp.redo_chain(plan, {"s1": {}, "s3": {}}, "s1")] == ["s1", "s3"]
+
+
+def test_research_is_checked_only_when_an_implementer_is_still_to_come():
+    plan = _chain_plan()
+    s1, s2, s3 = plan.steps[:3]
+    done = {"s1": {"status": "done"}, "s2": {"status": "failed"}}
+    assert wp.research_to_check([s1, s2], [s3], done) == [s1]  # s2 made nothing
+    assert wp.research_to_check([s1, s2], [], done) == []        # the check at the end has it
+    assert wp.research_to_check([s3], [plan.steps[3]], {"s3": {"status": "done"}}) == []
+
+
+def test_the_researcher_a_research_check_sends_back():
+    s1, s2 = _chain_plan().steps[:2]
+    assert wp.research_redo([s1, s2], "s2") == s2
+    assert wp.research_redo([s1], "nope") == s1   # the only one checked
+    assert wp.research_redo([s1, s2], "s3") is None
+
+
 def test_which_files_go_to_the_channel():
     assert wp.echo_files([]) == []
     # a later wave fixes a file: only the newest, in the name's first place

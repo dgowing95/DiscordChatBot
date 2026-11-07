@@ -399,6 +399,39 @@ def redo_target(plan: Plan, results: dict, wanted: str) -> Step | None:
     return (built or ran or [None])[-1]
 
 
+def redo_chain(plan: Plan, results: dict, step_id: str) -> list[Step]:
+    """`step_id` and every step that ran on what it made, through others too,
+    in the order they are taken up: a fixed fact has to reach the file that
+    used it."""
+    chain = {step_id}
+    ordered = [step for step in order_steps(plan) if step.id in results]
+    for step in ordered:
+        if any(dep in chain for dep in step.depends_on):
+            chain.add(step.id)
+    return [step for step in ordered if step.id in chain]
+
+
+def research_to_check(wave: list[Step], queue: list[Step], results: dict) -> list[Step]:
+    """The researchers of a wave that just ran whose findings are checked
+    before an implementer builds on them: those that made something, when an
+    implementer is still to come. A research-only job is left to the check at
+    the end, which looks at all of it."""
+    if not any(step.role == IMPLEMENTER for step in queue):
+        return []
+    return [step for step in wave if step.role == RESEARCHER
+            and (results.get(step.id) or {}).get("status") not in (None, "failed")]
+
+
+def research_redo(checked: list[Step], wanted: str) -> Step | None:
+    """The researcher a failed check of research sends back: the one named,
+    if it was checked, else the only one checked. Two checked and neither
+    named: none, and the check at the end looks again."""
+    for step in checked:
+        if step.id == wanted:
+            return step
+    return checked[0] if len(checked) == 1 else None
+
+
 def fallback_plan(request: str) -> Plan:
     """The plan when the manager could not write a valid one: one
     implementer with the whole request, so the workflow still runs."""

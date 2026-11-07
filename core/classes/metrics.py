@@ -149,7 +149,8 @@ Metrics (scraped by Prometheus from the /metrics HTTP endpoint):
            Tokens, in and out, one workflow used.
   Counter  discord_bot_workflow_verdicts_total{outcome}
            Checks of finished work (passed / failed / not_checked), and
-           steps run again because of one (sent_back).
+           send-backs from one (sent_back); the research checks as
+           research_passed / _failed / _not_checked / _sent_back.
   Gauge    discord_bot_workflows_running
            Workflows running in this process.
 

@@ -28,6 +28,7 @@ from classes import workflow_policy as wp
 from classes.workflow_store import WorkflowStore
 
 real_due = workflow_verify.due
+real_research_due = workflow_verify.research_due
 
 
 # --------------------------- fakes ---------------------------
@@ -144,9 +145,10 @@ def env(monkeypatch):
     monkeypatch.setattr(workflows, "_subagent", _subagent)
     monkeypatch.setattr(workflows, "_open_thread", _open_thread)
     monkeypatch.setattr(workflows, "_store", lambda: store)
-    # The check has its own tests (workflow_verify_tests.py), and every script
-    # here would need two more steps.
+    # The checks have their own tests (workflow_verify_tests.py), and every
+    # script here would need more steps.
     monkeypatch.setattr(workflow_verify, "due", lambda wf: False)
+    monkeypatch.setattr(workflow_verify, "research_due", lambda wf, wave, queue: [])
     monkeypatch.setattr(workflow_steering, "route", AsyncMock(return_value=None))
     monkeypatch.setattr("classes.persona_voice.voice_question",
                         AsyncMock(side_effect=lambda guild, text: f"(voiced) {text}"))

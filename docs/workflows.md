@@ -62,8 +62,11 @@ rule starts at once.
 
 When the steps are done, a helper that did not do the work compares the result with what you asked
 for: it opens the files, counts what can be counted and tries a few links. If something is wrong, the
-step that can fix it runs once more and the work is checked again. If it is still wrong, the job ends
-as partly done and says what the check found.
+step that can fix it runs once more, then every step that was built on it, and the work is checked
+again. If it is still wrong, the job ends as partly done and says what the check found.
+
+What the researchers found is also checked before a later step builds on it, so a wrong figure is
+fixed before it goes into a file. A researcher that got something wrong runs once more straight away.
 
 It looks at charts and pictures too, through the same model that checks the bot's generated images.
 With `IMAGE_REVIEW_ENABLED=0`, or a model that cannot see, it says "picture not viewed", and a pass

@@ -74,7 +74,7 @@ core/                    # the bot (what runs in production)
     # Tier 3 workflows (runtime item 13)
     workflows.py           # start, approval, steps, questions, finish, the completion reply
     workflow_planning.py   # the plan stage: scouts, questions before the plan, submit_plan
-    workflow_verify.py     # the check of the finished work, one send-back
+    workflow_verify.py     # the checks: research before it is built on, the finished work
     workflow_steering.py   # the requester's messages reaching the steps they are about
     workflow_policy.py     # P plans, waves, states, WORKFLOW_* / SUBAGENT_* settings
     workflow_store.py      # records and each server's running slot, in Redis
@@ -386,7 +386,8 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
     | Approval | the plan card with Approve / Edit / Cancel (`workflow_views.py`), requester only | - | a button, a thread message (a change), or `WORKFLOW_PLAN_APPROVAL_SECONDS` |
     | Steps, in waves (`next_wave`): researchers side by side, an implementer alone | a helper per step (a SandboxAgent, `SUBAGENT_INSTRUCTIONS`, mode researcher / implementer) | subagent | `report` |
     | Between steps | the manager answers waiting thread messages, may change the remaining steps | brain | `submit_review` |
-    | Check | a verifier (`workflow_verify.py`, mode verifier) compares the work with the request; one failed step runs again, then one more check | subagent | `submit_verdict` |
+    | After a wave of researchers, while an implementer is to come | a verifier checks what they found; a wrong one runs again at once | subagent | `submit_verdict` |
+    | Check | a verifier (`workflow_verify.py`, mode verifier) compares the work with the request; one failed step and the steps built on it run again, then one more check | subagent | `submit_verdict` |
     | Finish | the manager's final report; files echoed in the origin channel | brain | `report` |
     | Reply | `WorkflowDone` on the queue; the persona with NO tools, in the origin channel | chat | - |
 
@@ -430,8 +431,11 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
       guard only ever saw the request).
     - **The check** (`workflow_verify.py`): every job that finished, unless a limit or a cancel stopped
       it or it made nothing. The verifier has the shell, `fetch_url` and `view_image`, and nothing that
-      posts. Code runs the step it names once more, in a wave of its own, and checks again; a second
-      fail is PARTIAL with the notes, and no verdict changes nothing but says so. Verifier and
+      posts. Code runs the step it names once more, then every step that depends on it
+      (`wp.redo_chain`), in waves, while there is room, and checks again; a second fail is PARTIAL
+      with the notes, and no verdict changes nothing but says so. Research is checked before it is
+      built on (`check_research`, in the steps' budget, not the reserves): a wrong researcher runs
+      again at once and is left to the end check after that. Verifier and
       implementers see pictures through `view_image`: one vision call on `IMAGE_REVIEW_*`, so their
       own model needs no vision.
     - **One way to ask** (`workflows.ask_requester`): the buttons of the brain's `ask_user`, or the
@@ -507,7 +511,7 @@ are the ones that actually change behaviour). The persona's *system* prompt is n
   tidy-up's). Workflows' are pinned by `workflows_tests.py`: `MANAGER_INSTRUCTIONS` ~1350 (ceiling
   1400; every manager run: plan, review, finish; `MANAGER_IMAGE_LINE` ~100 is added when the bot can
   draw) and `SUBAGENT_INSTRUCTIONS` ~1170 (ceiling 1400, plus one `ROLE_LINES` line per helper), by
-  `workflow_verify_tests.py`: `VERIFIER_INSTRUCTIONS` ~760 (ceiling 1000), `ROUTE_PROMPT` ~360
+  `workflow_verify_tests.py`: `VERIFIER_INSTRUCTIONS` ~850 (ceiling 1000), `ROUTE_PROMPT` ~360
   (ceiling 500, `workflow_steering.py`), and
   by `workflow_planning_tests.py`: `SCOUT_INSTRUCTIONS` ~890 (ceiling 900) and `discover`'s docstring
   (ceiling 650), the home of "the shape, not the answers". The other workflow tools' docstrings

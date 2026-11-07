@@ -24,7 +24,9 @@ one with /task. It runs like this:
    in the thread. Between waves the manager answers any thread messages
    (submit_review) and may change the remaining steps.
 4. **Check** (classes/workflow_verify.py). A verifier compares what was made
-   with what was asked, and a step may be sent back once.
+   with what was asked, and a step may be sent back once, with the steps
+   built on it. What researchers found is checked too, after their wave,
+   before an implementer builds on it.
 5. **Finish.** The manager writes the final report, the files are echoed in
    the channel the request came from, and a WorkflowDone item goes on the
    bot's queue: the persona, with no tools, tells the requester there.
@@ -614,6 +616,10 @@ async def _work(wf: Workflow) -> tuple[str, BrainReport]:
         wf.wave += 1
         await _together(wf, [_run_step(wf, step) for step in wave])
         await _save_progress(wf)
+        # What researchers found is checked before an implementer uses it.
+        research = workflow_verify.research_due(wf, wave, queue)
+        if research:
+            await workflow_verify.check_research(wf, research)
     if wf.cancel_reason:
         for step in queue:
             wf.step_states[step.id] = "skipped"
@@ -1281,15 +1287,12 @@ async def close_progress(progress) -> None:
         pass
 
 
-async def redo_step(wf: Workflow, step: wp.Step, notes: str) -> None:
-    """A finished step again, in its own folder, to fix what the check found
-    (classes/workflow_verify.py). A wave of its own: its files replace the
-    ones it fixes."""
+async def redo_wave(wf: Workflow, runs: list[tuple[wp.Step, str]]) -> None:
+    """Finished steps again, each in its own folder with what it must fix
+    (classes/workflow_verify.py). A wave of its own: their files replace the
+    ones they fix."""
     wf.wave += 1
-    await _together(wf, [_run_step(wf, step, retry=(
-        f"The finished work was checked, and this step must fix it:\n{notes}\n"
-        "Your files from before are still in your folder: fix them, attach the fixed files "
-        "again, then report."))])
+    await _together(wf, [_run_step(wf, step, retry=retry) for step, retry in runs])
     await _save_progress(wf)
 
 
