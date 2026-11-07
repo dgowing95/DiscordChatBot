@@ -148,7 +148,7 @@ data:
   WORKFLOW_MAX_STEPS: {{ .Values.workflows.maxSteps | toString | quote }}
   WORKFLOW_TIMEOUT: {{ .Values.workflows.timeout | toString | quote }}
   WORKFLOW_MAX_TURNS: {{ .Values.workflows.maxTurns | toString | quote }}
-  WORKFLOW_MAX_TOKENS: {{ .Values.workflows.maxTokens | toString | quote }}
+  WORKFLOW_MAX_TOKENS: {{ .Values.workflows.maxTokens | int64 | toString | quote }}
   WORKFLOW_MAX_PER_GUILD: {{ .Values.workflows.maxPerGuild | toString | quote }}
   {{- if .Values.subagents.model }}
   SUBAGENT_MODEL: {{ .Values.subagents.model | quote }}

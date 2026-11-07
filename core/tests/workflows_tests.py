@@ -973,9 +973,14 @@ async def test_tokens_are_counted_from_each_response():
     assert seen == [120, 0]
 
 
-def test_no_token_limit_by_default(monkeypatch):
+def test_the_token_limit_is_4m_by_default_and_0_turns_it_off(monkeypatch):
     monkeypatch.delenv("WORKFLOW_MAX_TOKENS", raising=False)
     wf = workflows.Workflow(record={}, ctx={}, thread=None, origin_channel=None)
+    wf.add_tokens(3_999_999)
+    assert not wf.over_tokens()
+    wf.add_tokens(1)
+    assert wf.over_tokens()
+    monkeypatch.setenv("WORKFLOW_MAX_TOKENS", "0")
     wf.add_tokens(10**9)
     assert not wf.over_tokens()
 

@@ -27,7 +27,8 @@ DEFAULT_PLAN_REVISIONS = 3
 DEFAULT_MAX_STEPS = 8
 DEFAULT_TIMEOUT_SECONDS = 3600
 DEFAULT_MAX_TURNS = 300
-DEFAULT_MAX_TOKENS = 0        # off
+# Live jobs used 0.5-2.6M tokens; a runaway one 5.1M (maintainer, 2026-11-07).
+DEFAULT_MAX_TOKENS = 4_000_000
 DEFAULT_MAX_PER_GUILD = 1
 DEFAULT_SUBAGENT_MAX_TURNS = 100
 DEFAULT_SUBAGENT_MAX_CONCURRENT = 2
@@ -61,6 +62,15 @@ def _env_int(name: str, default: int, env) -> int:
     try:
         value = int(str(env.get(name)).strip())
         return value if value > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_count(name: str, default: int, env) -> int:
+    """Like _env_int, but 0 is kept: it means off."""
+    try:
+        value = int(str(env.get(name)).strip())
+        return value if value >= 0 else default
     except (TypeError, ValueError):
         return default
 
@@ -124,8 +134,8 @@ def turn_reserve(env=os.environ) -> int:
 
 def max_tokens(env=os.environ) -> int:
     """Tokens, in and out, across every agent of one workflow
-    (WORKFLOW_MAX_TOKENS). 0 is off, the default."""
-    return _env_int("WORKFLOW_MAX_TOKENS", DEFAULT_MAX_TOKENS, env)
+    (WORKFLOW_MAX_TOKENS) [4,000,000]. 0 is off."""
+    return _env_count("WORKFLOW_MAX_TOKENS", DEFAULT_MAX_TOKENS, env)
 
 
 def max_per_guild(env=os.environ) -> int:

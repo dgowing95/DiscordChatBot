@@ -90,7 +90,7 @@ A restart of the bot stops a running workflow; its thread says so. Ask again to 
 | `WORKFLOW_FROM_AUTOMATIONS` | on | Schedules, rules and follow-ups may start one |
 | `WORKFLOW_PLAN_APPROVAL_SECONDS` | 900 | How long the plan waits for an answer |
 | `WORKFLOW_TIMEOUT` / `WORKFLOW_MAX_TURNS` | 1 h / 300 | Caps one workflow (the biggest job tried took 62 min) |
-| `WORKFLOW_MAX_TOKENS` | 0 (off) | Caps the tokens one workflow uses, in and out, across all its helpers |
+| `WORKFLOW_MAX_TOKENS` | 4000000 (0 = off) | Caps the tokens one workflow uses, in and out, across all its helpers |
 | `WORKFLOW_ASK_TIMEOUT` | 300 | How long a question waits for an answer, in seconds |
 | `WORKFLOW_MAX_PER_GUILD` | 1 | Workflows running at once in one server |
 | `SUBAGENT_MAX_CONCURRENT` | 2 | Research steps at once, cut to the LLM slots beside chat's |

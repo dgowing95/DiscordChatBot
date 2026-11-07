@@ -71,7 +71,7 @@ Why things are the way they are:
   ever saw the request, so a plan edit, a thread message or an answer is
   checked before it can reach a helper with a shell (_allowed).
 - **Limits cap the cost**: WORKFLOW_TIMEOUT (1 h), WORKFLOW_MAX_TURNS (300) and
-  WORKFLOW_MAX_TOKENS (off) stop a workflow bigger than the biggest job seen, with
+  WORKFLOW_MAX_TOKENS (4M) stop a workflow bigger than the biggest job seen, with
   what exists (PARTIAL), never "retry". Helpers leave a reserve of turns and time for
   the check and the final report (_held_turns, _step_reserve_seconds). The clock
   counts work: it restarts when the plan is answered.

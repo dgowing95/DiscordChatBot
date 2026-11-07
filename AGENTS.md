@@ -453,7 +453,7 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
     - **Folders** `jobs/c<thread id>-w<id>-<step>/`: each helper is told the earlier steps' folders, and
       a later brain call in the thread finds them as that channel's earlier jobs.
     - **Limits cap the cost**: `WORKFLOW_TIMEOUT` (1 h), `WORKFLOW_MAX_TURNS` (300) and
-      `WORKFLOW_MAX_TOKENS` (off; every agent together) stop it with what exists (PARTIAL);
+      `WORKFLOW_MAX_TOKENS` (4M; every agent together) stop it with what exists (PARTIAL);
       `SUBAGENT_MAX_TURNS` per helper. Helpers leave 40 turns (`wp.turn_reserve`) and 300 seconds more
       than the final report's for the check. The clock restarts when the plan is answered, so waiting
       on a person is not work time.
@@ -636,7 +636,7 @@ reads has a row here and a line in `.env.example`, that every row is read by som
 | `WORKFLOW_PLAN_APPROVAL_SECONDS` | seconds a plan waits for Approve before it starts anyway [900]. Chart: `workflows.planApprovalSeconds` |
 | `WORKFLOW_PLAN_REVISIONS` | changes a plan may get before it must be approved or cancelled [3]. Chart: `workflows.planRevisions` |
 | `WORKFLOW_MAX_STEPS` | steps in one plan [8]. Chart: `workflows.maxSteps` |
-| `WORKFLOW_TIMEOUT` / `WORKFLOW_MAX_TURNS` / `WORKFLOW_MAX_TOKENS` | backstops on one workflow: wall-clock seconds [3600], model turns [300] and tokens in and out [0 = off] across all its agents; out of any stops it with what exists. Chart: `workflows.timeout` / `maxTurns` / `maxTokens` |
+| `WORKFLOW_TIMEOUT` / `WORKFLOW_MAX_TURNS` / `WORKFLOW_MAX_TOKENS` | backstops on one workflow: wall-clock seconds [3600], model turns [300] and tokens in and out [4000000; 0 = off] across all its agents; out of any stops it with what exists. Chart: `workflows.timeout` / `maxTurns` / `maxTokens` |
 | `WORKFLOW_MAX_PER_GUILD` | workflows running at once per server [1]. Chart: `workflows.maxPerGuild` |
 | `WORKFLOW_DEV_INJECT` | local testing and E2E only, never in the chart: `!workflow <request>` starts a workflow directly, since a webhook cannot use `/task` |
 | `SUBAGENT_MODEL` / `SUBAGENT_LLM_HOST` / `SUBAGENT_LLM_API_KEY` | a workflow helper's connection; empty = the brain's, then `LLM_*` (the key only for the same host). Chart: `subagents.model` / `llmHost` / `apiKey` |
