@@ -210,7 +210,6 @@ class MessageHandler:
         self.message = message
         self.client = client
         self.text_response = ""
-        self.discord_message_object = None
         # How the handle ended, for the reply-latency metric (main.py):
         # "replied", or "llm_error" when the run failed and got the ❌.
         self.outcome = "replied"

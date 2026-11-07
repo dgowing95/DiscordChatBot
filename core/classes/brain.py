@@ -1050,7 +1050,7 @@ async def _run_and_deliver(ctx, lease, agent, task, run_config, hooks, progress,
     if out.status == brain_result.DONE:
         await _record_skill_successes(ctx)
     if stopped is None:
-        await _queue_skill_review(ctx, out, hooks, task, result)
+        await _queue_skill_review(ctx, out, hooks, result)
     await progress.finalize(ok=out.status in (brain_result.DONE, brain_result.STARTED_WORKFLOW),
                             note=None if stopped is None else f"⚠️ {stopped}")
     return out
@@ -1073,7 +1073,7 @@ async def _skills_index(guild_id, header: str | None = None) -> str:
         return ""
 
 
-async def _queue_skill_review(ctx: dict, out, hooks, request_task: str, result) -> None:
+async def _queue_skill_review(ctx: dict, out, hooks, result) -> None:
     """After a long job, leaves a skill review on the persona's run context;
     the message handler starts it once the reply is out
     (classes/skill_reflection.py). Fail-soft."""

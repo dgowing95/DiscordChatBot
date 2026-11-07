@@ -208,9 +208,6 @@ class WorkTranscript:
 
     # -- events -----------------------------------------------------------
 
-    def clear_footer(self) -> None:
-        self._footer = None
-
     def add_note(self, text: str) -> None:
         note = " ".join((text or "").split())
         if not note:

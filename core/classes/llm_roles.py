@@ -109,14 +109,6 @@ def _get(env, name: str) -> str:
     return str(env.get(name, "") or "").strip()
 
 
-def _first(env, *names: str) -> str:
-    for name in names:
-        value = _get(env, name)
-        if value:
-            return value
-    return ""
-
-
 def _timeout(env, name: str, default: float) -> float:
     try:
         value = float(_get(env, name))

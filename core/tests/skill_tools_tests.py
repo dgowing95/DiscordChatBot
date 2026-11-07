@@ -340,10 +340,10 @@ async def test_a_queued_review_is_left_on_the_context_only_for_long_jobs(store, 
             "job_dir": "jobs/x", "skills_used": []}
     with patch("classes.skill_store.SkillStore", lambda: store):
         short, long_ = dict(base), dict(base)
-        await brain._queue_skill_review(short, out, SimpleNamespace(tool_calls=2), "t", result)
-        await brain._queue_skill_review(long_, out, SimpleNamespace(tool_calls=9), "t", result)
+        await brain._queue_skill_review(short, out, SimpleNamespace(tool_calls=2), result)
+        await brain._queue_skill_review(long_, out, SimpleNamespace(tool_calls=9), result)
         saved = dict(base, skill_saved=True)
-        await brain._queue_skill_review(saved, out, SimpleNamespace(tool_calls=9), "t", result)
+        await brain._queue_skill_review(saved, out, SimpleNamespace(tool_calls=9), result)
     assert "skill_reviews" not in short and "skill_reviews" not in saved
     assert long_["skill_reviews"][0]["request"] == "r"
 

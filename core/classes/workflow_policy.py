@@ -511,15 +511,6 @@ def fallback_plan(request: str) -> Plan:
                 notes="The manager's plan could not be used, so this is one step.")
 
 
-def plan_from_dict(raw: dict) -> Plan:
-    """A stored plan (Plan.to_dict) back as a Plan."""
-    return Plan(goal=raw.get("goal", ""), notes=raw.get("notes", ""),
-                deliverables=list(raw.get("deliverables") or []),
-                steps=[Step(id=s["id"], role=s["role"], brief=s["brief"],
-                            depends_on=list(s.get("depends_on") or []))
-                       for s in raw.get("steps") or []])
-
-
 def plan_text(plan: Plan) -> str:
     """The plan as plain text, for the agents' tasks."""
     lines = [f"Goal: {plan.goal}"]
@@ -606,16 +597,6 @@ def transition(state: str, event: str) -> str:
     if moves is None or state not in moves:
         raise IllegalMove(f"{event!r} cannot happen in state {state!r}")
     return moves[state]
-
-
-# --- budgets -----------------------------------------------------------------
-
-
-def budget_left(*, started: float, now: float, turns_used: int, timeout: int,
-                max_turns: int) -> dict:
-    """What a workflow has left: {"seconds", "turns"} (never below 0)."""
-    return {"seconds": max(0.0, started + timeout - now),
-            "turns": max(0, max_turns - turns_used)}
 
 
 # --- which steps a message is for ---------------------------------------------

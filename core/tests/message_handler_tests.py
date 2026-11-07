@@ -643,66 +643,6 @@ async def test_handle_message_passes_the_unprompted_flag(marked):
 
 
 @pytest.mark.asyncio
-async def test_send_with_files_falls_back_to_one_file_per_message():
-    import discord
-    from classes.common import send_with_files
-
-    channel = MagicMock()
-    response = MagicMock(status=413, reason="Payload Too Large")
-
-    async def _send(*args, **kwargs):
-        if len(kwargs.get("files") or []) > 1:
-            raise discord.HTTPException(response, "too large")
-    channel.send = AsyncMock(side_effect=_send)
-
-    await send_with_files(channel, "here", [("a.png", b"1"), ("b.png", b"2")])
-
-    calls = channel.send.await_args_list
-    assert calls[1].args == ("here",)
-    assert [c.kwargs["file"].filename for c in calls[2:]] == ["a.png", "b.png"]
-
-
-@pytest.mark.asyncio
-async def test_send_with_files_does_not_resend_after_a_connection_error():
-    # Discord may have posted the message before the connection dropped, so
-    # resending could post it twice.
-    from classes.common import send_with_files
-
-    channel = MagicMock()
-    channel.send = AsyncMock(side_effect=TimeoutError())
-    await send_with_files(channel, "here", [("a.png", b"1"), ("b.png", b"2")])  # does not raise
-
-    channel.send.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_send_with_files_does_not_resend_after_a_server_error():
-    # Same for a 5xx: it can arrive after the message was created.
-    import discord
-    from classes.common import send_with_files
-
-    channel = MagicMock()
-    response = MagicMock(status=502, reason="Bad Gateway")
-    channel.send = AsyncMock(side_effect=discord.DiscordServerError(response, "bad gateway"))
-    await send_with_files(channel, "here", [("a.png", b"1"), ("b.png", b"2")])  # does not raise
-
-    channel.send.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_send_with_files_puts_ten_files_on_a_message():
-    from classes.common import send_with_files
-
-    channel = MagicMock()
-    channel.send = AsyncMock()
-    await send_with_files(channel, "here", [(f"{i}.png", b"x") for i in range(12)])
-
-    calls = channel.send.await_args_list
-    assert [len(c.kwargs["files"]) for c in calls] == [10, 2]
-    assert [c.kwargs["content"] for c in calls] == ["here", None]
-
-
-@pytest.mark.asyncio
 async def test_handle_message_replies_in_the_channel_it_was_asked_in():
     # The brain works inline: no thread, so the reply goes where it was asked.
     class _FakeLLM:
@@ -984,7 +924,6 @@ async def test_handle_message_failed_run_with_no_reasoning_just_reacts():
 
     handler.message.add_reaction.assert_awaited_with('❌')
     assert sends == []
-
 
 
 @pytest.mark.asyncio

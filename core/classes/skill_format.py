@@ -23,7 +23,6 @@ import re
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,46}[a-z0-9]$")
 DESCRIPTION_CHARS = 200
 NOTE_CHARS = 200
-SKILL_FILE = "SKILL.md"
 FILE_DIRS = ("scripts", "references", "assets")
 
 DEFAULT_MAX_PER_GUILD = 100
