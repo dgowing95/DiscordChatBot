@@ -618,8 +618,11 @@ def input_filter(guard: LoopGuard, keep_recent: int, watch=None):
         from agents.run_config import ModelInputData
         items = list(data.model_data.input)
         try:
-            keep = keep_recent if watch is None else watch.keep_recent(keep_recent)
-            items = context_trim.trim_items(items, keep)
+            if watch is None:
+                items = context_trim.trim_items(items, keep_recent)
+            else:
+                items = context_trim.trim_items(items, watch.keep_recent(keep_recent),
+                                                watch.batch())
             for note in (guard.note(), None if watch is None else watch.note()):
                 if note:
                     items.append({"role": "user", "content": note})

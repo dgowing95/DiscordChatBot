@@ -204,6 +204,16 @@ def test_nearing_the_slot_squeezes_then_finishes_and_stays_so():
     assert "`" not in context_trim.FINISH_NOTE  # names no tool: each run finishes its own way
 
 
+def test_a_squeeze_cuts_a_few_big_outputs_at_once():
+    # Three big outputs can fill a slot: no waiting for a batch once squeezed.
+    items = [_output("x" * 20_000, i) for i in range(3)]
+    watch = context_trim.ContextWatch(64_000)
+    assert context_trim.trim_items(items, watch.keep_recent(6), watch.batch()) == items
+    watch.seen(49_000)
+    out = context_trim.trim_items(items, watch.keep_recent(6), watch.batch())
+    assert ["characters cut" in o["output"] for o in out] == [True, True, False]
+
+
 def test_the_limit_is_the_servers_own_not_a_fixed_size():
     big = context_trim.ContextWatch(1_000_000)
     big.seen(60_000)  # 60k is nothing to a 1M-token model
