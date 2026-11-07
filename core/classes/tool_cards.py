@@ -174,7 +174,7 @@ def page_card(url: str, part: int = 1, title: str = "") -> CardSpec:
     target = link_target(url)
     if not can_link(target):
         return CardSpec(body=[Text("\n".join(texts))])
-    return CardSpec(body=[Section(texts, Link("Open", target, "↗️"))])
+    return CardSpec(body=[Section(texts, Link("Open", target))])
 
 
 def memory_card(fact: str, who: str = "") -> CardSpec:

@@ -12,6 +12,7 @@ from discord.components import _component_factory
 from classes import brain_question, card_kit as K, workflow_views
 from classes.card import Card, KitView, button, kind_of, text_of, views
 from classes.message_handler import MessageHandler
+from card_checks import view_text
 
 
 def _button(label="Go"):
@@ -253,3 +254,28 @@ async def test_a_card_that_gets_shorter_takes_down_the_messages_it_no_longer_nee
     live._shown.append(None)
     await live._drop(1, K.OK)
     assert sent[0].edit.await_args.kwargs["view"].colour == K.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_two_updates_at_once_post_the_card_once():
+    # Seen live: two hooks updated a new status card together, both found no
+    # message yet, and the card was posted twice.
+    import asyncio
+    from classes.card import LiveCard
+    sent = []
+
+    async def send(**kwargs):
+        await asyncio.sleep(0.01)  # the post takes a while
+        message = MagicMock()
+        message.edit = AsyncMock()
+        sent.append(message)
+        return message
+
+    channel = MagicMock()
+    channel.send = AsyncMock(side_effect=send)
+    live = LiveCard(channel)
+    first = K.CardSpec(label="🧠 Working", body=[K.Text("one")])
+    second = K.CardSpec(label="🧠 Working", body=[K.Text("two")])
+    assert await asyncio.gather(live.show(first), live.show(second)) == [True, True]
+    assert len(sent) == 1 and live.messages == sent
+    assert "two" in view_text(sent[0].edit.await_args.kwargs["view"])

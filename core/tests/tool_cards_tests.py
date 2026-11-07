@@ -104,7 +104,7 @@ def test_the_web_search_card_then_says_what_it_read():
 def test_the_page_card_has_an_open_button_and_later_the_pages_title():
     [section] = te.page_card("https://example.com/a(b)", 2).body
     assert isinstance(section, K.Section) and section.texts[0] == "-# 🌐 Reading a page · part 2"
-    assert section.accessory == K.Link("Open", "https://example.com/a%28b%29", "↗️")
+    assert section.accessory == K.Link("Open", "https://example.com/a%28b%29")  # Discord adds the arrow
     [section] = te.page_card("https://example.com/a", title="A page").body
     assert section.texts[1] == "**A page**\n-# [example.com › a](https://example.com/a)"
 

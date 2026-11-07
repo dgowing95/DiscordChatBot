@@ -195,6 +195,10 @@ class LiveCard:
         self.mention_author = mention_author
         self.messages: list = []
         self._shown: list = []
+        # One show() at a time. Two at once (hooks of tools running side by
+        # side, a background show_soon) both saw "no message yet" and each
+        # sent one: the card was posted twice, its spill above its head.
+        self._lock = asyncio.Lock()
 
     @property
     def message(self):
@@ -206,7 +210,13 @@ class LiveCard:
         could not be sent or edited (the next call tries again; a message
         deleted meanwhile is sent anew). `edit_last_only`: leave the earlier
         messages as they are (a live card's full, finished part), to keep
-        under Discord's edit rate."""
+        under Discord's edit rate. Calls run one after another, so a call
+        made while one is sending edits what that one sent."""
+        async with self._lock:
+            return await self._show(spec, timeout, files, edit_last_only)
+
+    async def _show(self, spec: CardSpec, timeout: float | None, files: dict | None,
+                    edit_last_only: bool) -> bool:
         files = dict(files or {})
         ok = True
         built = views(spec, timeout)
