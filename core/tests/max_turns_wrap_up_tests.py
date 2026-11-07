@@ -1,7 +1,7 @@
 """A reply that runs out of turns is answered with a wrap-up, not a ❌.
 
 Run against the REAL SDK Runner with agents.testing.ScriptedModel, like
-workflow_conversation_tests.py: the point is to catch an SDK upgrade that
+workflows_tests.py: the point is to catch an SDK upgrade that
 changes how the max_turns handler is called or what it is given.
 
 Run: pytest core/tests/max_turns_wrap_up_tests.py

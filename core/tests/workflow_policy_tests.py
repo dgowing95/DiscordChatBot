@@ -202,12 +202,67 @@ def test_settings_defaults_and_overrides():
     assert (wp.enabled(env), wp.from_automations(env)) == (True, True)
     assert wp.ask_timeout(env) == 300 and wp.plan_approval_seconds(env) == 900
     assert wp.plan_revisions(env) == 3 and wp.max_steps(env) == 8
-    assert wp.timeout(env) == 3600 and wp.max_turns(env) == 250
+    assert wp.timeout(env) == 3600 and wp.max_turns(env) == 300
+    assert wp.turn_reserve(env) == 40 and wp.max_tokens(env) == 0
+    assert wp.max_tokens({"WORKFLOW_MAX_TOKENS": "5000"}) == 5000
+    assert wp.turn_reserve({"WORKFLOW_MAX_TURNS": "50"}) == 10
     assert wp.max_per_guild(env) == 1 and wp.subagent_max_turns(env) == 100
     assert not wp.enabled({"WORKFLOW_ENABLED": "0"})
     assert not wp.from_automations({"WORKFLOW_FROM_AUTOMATIONS": "false"})
     assert wp.max_steps({"WORKFLOW_MAX_STEPS": "junk"}) == 8
     assert wp.timeout({"WORKFLOW_TIMEOUT": "60"}) == 60
+
+
+def test_the_check_is_a_live_state_with_its_own_moves():
+    assert wp.VERIFYING in wp.LIVE_STATES
+    assert wp.transition(wp.RUNNING, "verify") == wp.VERIFYING
+    assert wp.transition(wp.VERIFYING, "redo") == wp.RUNNING
+    assert wp.transition(wp.VERIFYING, "finish") == wp.DONE
+    assert wp.transition(wp.VERIFYING, "partial") == wp.PARTIAL
+    for event, end in (("cancel", wp.CANCELLED), ("fail", wp.FAILED),
+                       ("interrupt", wp.INTERRUPTED)):
+        assert wp.transition(wp.VERIFYING, event) == end
+
+
+def test_a_verdict_is_cleaned_and_nothing_checked_is_no_verdict():
+    raw = {"checks": [{"deliverable": "a.md", "ok": True, "note": "fine"},
+                      {"deliverable": "b.png", "ok": "false", "note": "wrong year"},
+                      {"deliverable": "c", "ok": "maybe"}, "junk"],
+           "redo_step": "../s2"}
+    verdict = wp.clean_verdict(raw)
+    assert [check["ok"] for check in verdict["checks"]] == [True, False]
+    assert verdict["redo_step"] == "s2"
+    assert wp.verdict_failed(verdict)
+    assert wp.verdict_notes(verdict) == "- b.png: wrong year"
+    for empty in (None, "junk", {}, {"checks": []}, {"checks": [{"ok": "maybe"}]}):
+        assert wp.clean_verdict(empty) is None
+    assert not wp.verdict_failed(None) and wp.verdict_notes(None) == ""
+
+
+def test_the_step_sent_back_is_one_that_ran():
+    plan = wp.Plan(goal="g", deliverables=[], notes="", steps=[
+        wp.Step(id="s1", role="researcher", brief="b"),
+        wp.Step(id="s2", role="implementer", brief="b"),
+        wp.Step(id="s3", role="researcher", brief="b"),
+        wp.Step(id="s4", role="implementer", brief="b")])
+    ran = {"s1": {}, "s2": {}, "s3": {}}
+    assert wp.redo_target(plan, ran, "s1").id == "s1"
+    assert wp.redo_target(plan, ran, "s4").id == "s2"  # it never ran: the last implementer
+    assert wp.redo_target(plan, ran, "nope").id == "s2"
+    assert wp.redo_target(plan, {"s1": {}}, "").id == "s1"  # no implementer ran
+    assert wp.redo_target(plan, {}, "s1") is None
+
+
+def test_which_files_go_to_the_channel():
+    assert wp.echo_files([]) == []
+    # a later wave fixes a file: only the newest, in the name's first place
+    assert wp.echo_files([("a", "s1", 1), ("b", "s1", 1), ("a", "s2", 2)]) == [(2, "a"), (1, "b")]
+    # one step attaching a name twice is one file
+    assert wp.echo_files([("a", "s1", 1), ("a", "s1", 1)]) == [(1, "a")]
+    # two steps side by side: both, each under its step
+    assert wp.echo_files([("a", "s1", 1), ("a", "s2", 1)]) == [(0, "s1-a"), (1, "s2-a")]
+    # ...until a later wave replaces them
+    assert wp.echo_files([("a", "s1", 1), ("a", "s2", 1), ("a", "s3", 2)]) == [(2, "a")]
 
 
 @pytest.mark.parametrize("text, stop", [

@@ -98,8 +98,12 @@ def test_a_workflows_agents_get_their_own_short_lists(all_on, monkeypatch):
     assert _names(mode="researcher") == ["web_search", "fetch_url", "search_messages",
                                          "read_messages_around", "attach_file",
                                          "save_messages_to_file", "report"]
+    assert _names(mode="verifier") == ["fetch_url", "view_image", "submit_verdict"]
+    monkeypatch.setenv("IMAGE_REVIEW_ENABLED", "0")
+    assert "view_image" not in _names(mode="verifier") + _names(mode="implementer")
+    monkeypatch.delenv("IMAGE_REVIEW_ENABLED")
     assert _names(mode="implementer") == ["fetch_url", "generate_image", "attach_file",
-                                          "save_messages_to_file", "report"]
+                                          "save_messages_to_file", "view_image", "report"]
     # Nothing that belongs to a conversation, and no way to start another.
     for mode in ("manager", "scout", "review", "finish", "researcher", "implementer"):
         names = set(_names(mode=mode))

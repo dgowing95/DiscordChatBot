@@ -56,9 +56,9 @@ from dataclasses import dataclass, field
 import discord
 from agents import RunHooks
 
-from classes.workflow_conversation import GATE_REFUSAL_PREFIX
 from classes.tool_embeds import (
-    BRAIN_DONE, BRAIN_STOPPED, BRAIN_WORKING, COLOR_BRAIN, COLOR_DONE, COLOR_STOPPED,
+    BRAIN_DONE, BRAIN_NOT_FINISHED, BRAIN_STOPPED, BRAIN_WORKING, COLOR_BRAIN, COLOR_DONE,
+    COLOR_STOPPED,
     HELPER_TITLE_CHARS, helper_ending, helper_line, trim, work_task_text,
 )
 
@@ -163,7 +163,6 @@ class _Block:
     process_id: int | None = None
     # Refused by the conversation gate: it never ran, so it must not sit in
     # the embed looking like a command still running.
-    held: bool = False
 
 
 def _fence(text: str, lang: str = "") -> str:
@@ -250,7 +249,6 @@ class SandboxTranscript:
         if not out and exit_code is None and process_id is None:
             return
         block = block if block is not None else self._current_block()
-        block.held = False
         if out:
             block.output = f"{block.output}\n{out}".strip("\n")
             # the per-field value budget is enforced at render time; keep
@@ -259,16 +257,6 @@ class SandboxTranscript:
                 block.output = _tail(block.output, FIELD_VALUE_CHARS * 2)
         block.exit_code = exit_code
         block.process_id = process_id
-
-    def mark_held(self, block: _Block | None = None) -> None:
-        """A command was refused by the conversation gate (thread input to
-        answer first) and never ran. block is that command's own block; the
-        SDK starts one response's tool calls concurrently, so "the latest
-        block" may belong to a different command. A block that already has
-        output or an exit code evidently ran, and is never marked."""
-        target = block if block is not None else self._current_block()
-        if not target.output and target.exit_code is None:
-            target.held = True
 
     def set_thinking(self, thinking: bool) -> None:
         self._thinking = bool(thinking)
@@ -298,8 +286,6 @@ class SandboxTranscript:
             return self._final_color
         if self._blocks:
             last = self._blocks[-1]
-            if last.held:
-                return COLOR_TOOL
             if last.exit_code is None:
                 return COLOR_RUNNING
             if last.exit_code != 0:
@@ -307,8 +293,6 @@ class SandboxTranscript:
         return COLOR_TOOL
 
     def _status_line(self, block: _Block) -> str:
-        if block.held:
-            return "⏸ not run — answering thread messages first"
         if block.exit_code is not None:
             if block.exit_code == 0:
                 return "exit 0"
@@ -478,17 +462,19 @@ class BrainProgressHooks(RunHooks):
         self._started = True
         await self._flush(force=True)
 
-    async def finalize(self, ok: bool = True, note: str | None = None) -> None:
+    async def finalize(self, ok: bool = True, note: str | None = None,
+                       stopped: bool = True) -> None:
         """Flush the final state once the call is over. Nothing when the
-        embed never went out."""
+        embed never went out. `stopped` False: nothing stopped it, it only
+        reported that it did not finish."""
         if self._finalized:
             return
         self._finalized = True
         if not self._started:
             return
         self.transcript.set_thinking(False)
-        self.transcript.set_final(BRAIN_DONE if ok else BRAIN_STOPPED,
-                                  COLOR_DONE if ok else COLOR_STOPPED)
+        title = BRAIN_DONE if ok else BRAIN_STOPPED if stopped else BRAIN_NOT_FINISHED
+        self.transcript.set_final(title, COLOR_DONE if ok else COLOR_STOPPED)
         if note:
             self.transcript.add_note(note)
         await self._flush(force=True)
@@ -536,10 +522,6 @@ class BrainProgressHooks(RunHooks):
             call_id = getattr(context, "tool_call_id", None)
             if isinstance(call_id, str):
                 block = self._call_blocks.pop(call_id, None)
-        if name == "exec_command" and str(result).startswith(GATE_REFUSAL_PREFIX):
-            self._note(self.transcript.mark_held, block)
-            await self._maybe_flush()
-            return
         parsed = parse_exec_result(result)
         if block is not None:
             parsed["block"] = block

@@ -163,8 +163,8 @@ persona to put in its own words. What users notice:
   is laid out and ask what changes the plan. The steps run in turn, research side by side, and files
   arrive in the thread and in the channel, and the bot replies in the channel when it ends. Saying just
   "stop" in the thread, or Cancel, stops it. One runs per server at a time; a restart stops it
-  (the thread says so). Thread state is kept under `dcb:workflows:v1:*` and
-  `dcb:workflow_conversation:*` (the old `dcb:sandbox_conversation:*` keys simply expire).
+  (the thread says so). Thread state is kept under `dcb:workflows:v1:*` (the old
+  `dcb:sandbox_conversation:*` keys simply expire).
 - A brain call runs in the server's workspace, so **every tool request now needs Docker**, not just
   code tasks. With Docker down the bot still chats but cannot search, remember or draw.
 

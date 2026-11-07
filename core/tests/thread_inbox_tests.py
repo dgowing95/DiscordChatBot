@@ -100,7 +100,7 @@ def test_deliver_deduplicates_by_message_id():
 
 
 def test_a_missing_message_id_never_takes_part_in_deduplication():
-    # run_code_sandbox's forward path can lack an id; two such requests are
+    # a forwarded message can lack an id; two such requests are
     # two requests.
     ledger = _ledger()
     assert ledger.deliver(None, 1, "ana", "a") == inbox.ACCEPTED
@@ -196,17 +196,6 @@ def test_a_decision_for_an_unseen_message_is_refused():
     assert ledger.events[0].stage == inbox.RECEIVED
 
 
-def test_accepting_or_finishing_a_change_bumps_the_change_revision():
-    ledger = _ledger()
-    ledger.deliver(1, 1, "ana", "x")
-    ledger.deliver(2, 1, "ana", "y")
-    ledger.mark_presented([1, 2], anchor=1)
-    ledger.record_decision([1], "noted")
-    assert ledger.change_revision == 0
-    ledger.record_decision([2], "will_apply")
-    assert ledger.change_revision == 1
-
-
 def test_only_resolved_history_is_compacted():
     ledger = _ledger()
     for i in range(inbox.MAX_RETAINED_EVENTS):
@@ -259,53 +248,12 @@ def test_has_input_after_counts_only_newer_messages():
     assert ledger.has_input_after(q.after_seq) is True
 
 
-# ---------------------- finalization and outcomes ----------------------
-
-def test_after_the_boundary_messages_become_follow_ups():
-    ledger = _ledger()
-    ledger.finalize()
-    assert ledger.deliver(1, 1, "ana", "make it green too") == inbox.FINISHING
-    assert ledger.events == []
-    assert [e.text for e in ledger.follow_ups] == ["make it green too"]
-
-
-def test_follow_ups_are_bounded():
-    ledger = _ledger()
-    ledger.finalize()
-    for i in range(inbox.MAX_FOLLOW_UPS):
-        assert ledger.deliver(i + 1, 1, "ana", f"f{i}") == inbox.FINISHING
-    assert ledger.deliver(999, 1, "ana", "one more") == inbox.FULL
-
+# ---------------------- closing ----------------------
 
 def test_a_closed_run_accepts_nothing():
     ledger = inbox.claim_run(7)
     inbox.release_run(7, ledger)
     assert ledger.deliver(1, 1, "ana", "x") == inbox.NO_RUN
-
-
-def test_finalize_does_not_reopen_a_closed_run():
-    ledger = _ledger(state=inbox.CLOSED)
-    ledger.finalize()
-    assert ledger.state == inbox.CLOSED
-
-
-def test_outcomes_distinguish_accepted_from_done_and_unseen_from_ignored():
-    ledger = _ledger()
-    for i, text in enumerate(["done one", "accepted one", "ignored one", "unseen one"], 1):
-        ledger.deliver(i, 1, "ana", text)
-    ledger.mark_presented([1, 2, 3], anchor=1)
-    ledger.record_decision([1], "done", "did it")
-    ledger.record_decision([2], "will_apply")
-    ledger.finalize()
-    ledger.deliver(9, 1, "ana", "too late")
-    statuses = {row["text"]: row["status"] for row in ledger.outcomes()}
-    assert statuses == {
-        "done one": "done",
-        "accepted one": "accepted",
-        "ignored one": "unacknowledged",
-        "unseen one": "unseen",
-        "too late": "late",
-    }
 
 
 def test_given_up_events_stop_blocking_but_stay_unresolved():
@@ -314,7 +262,6 @@ def test_given_up_events_stop_blocking_but_stay_unresolved():
     ledger.mark_presented([1], anchor=1)
     ledger.give_up_on(ledger.events[0])
     assert ledger.unaddressed() == []
-    assert ledger.outcomes()[0]["status"] == "unacknowledged"
 
 
 def test_a_record_full_of_unresolved_guidance_rejects_new_input():

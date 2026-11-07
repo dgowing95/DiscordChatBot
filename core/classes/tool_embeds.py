@@ -57,6 +57,7 @@ SKILL_FOOTER_CURATOR = "tidy-up"
 BRAIN_WORKING = "🧠 Working on it"
 BRAIN_DONE = "🧠 Done"
 BRAIN_STOPPED = "🧠 Stopped"
+BRAIN_NOT_FINISHED = "🧠 Not finished"
 
 LINK_LABEL_CHARS = 80
 HELPER_LINE_CHARS = 80

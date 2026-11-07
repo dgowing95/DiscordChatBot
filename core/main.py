@@ -449,14 +449,10 @@ async def answer_brain_question(message) -> None:
 # will NOT act on the message, so nobody mistakes 🚫 for "seen".
 _WORKFLOW_REACTIONS = {
     thread_inbox.ACCEPTED: "📨",
-    thread_inbox.FINISHING: "⏳",
 }
 _WORKFLOW_REPLIES = {
     thread_inbox.EMPTY: (
         "🚫 The running workflow can only read text — send that as a text message."),
-    thread_inbox.FINISHING: (
-        "⏳ This workflow is finishing, so that hasn't been applied. Once it "
-        "closes, @mention me in this thread to carry on with it."),
     thread_inbox.ATTACHMENT_ONLY: (
         "🚫 The running workflow can't open attachments — paste the relevant part "
         "as text instead."),
@@ -467,9 +463,6 @@ _WORKFLOW_REPLIES = {
         "🚫 The workflow has too many unanswered messages right now — give it a "
         "moment to catch up, then send that again."),
 }
-# How often "received, I'll review it before my next step" may be posted
-# while a command runs: rapid messages get one notice, not one each.
-WORKFLOW_RECEIPT_NOTICE_SECONDS = 30
 
 
 async def route_to_workflow(message) -> None:
@@ -478,7 +471,6 @@ async def route_to_workflow(message) -> None:
     nothing about whether it has been applied — the workflow's manager
     answers it between steps."""
     from classes.workflow_policy import is_stop_word
-    ledger = thread_inbox.get_run(message.channel.id)
     reference = getattr(message, "reference", None)
     outcome = thread_inbox.deliver(
         message.channel.id, message.id,
@@ -495,11 +487,6 @@ async def route_to_workflow(message) -> None:
     except Exception as e:
         logger.warning(f"Workflow inbox: could not acknowledge {message.id}: {e}")
     reply = _WORKFLOW_REPLIES.get(outcome)
-    if (reply is None and outcome == thread_inbox.ACCEPTED and ledger is not None
-            and ledger.busy_since is not None
-            and time.monotonic() - ledger.last_receipt_notice > WORKFLOW_RECEIPT_NOTICE_SECONDS):
-        ledger.last_receipt_notice = time.monotonic()
-        reply = "📨 Received — I'll look at this before the next step."
     if reply is None:
         return
     try:

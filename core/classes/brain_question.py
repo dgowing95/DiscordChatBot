@@ -38,7 +38,6 @@ YOU_DECIDE = "You decide"
 # What the "You decide" button hands the brain (classes/brain.py maps it).
 YOU_DECIDE_ANSWER = "(you decide)"
 
-MENTIONS = discord.AllowedMentions(users=True, roles=False, everyone=False)
 
 ANSWERED = "✅ {answer}"
 TIMED_OUT = "⌛ No answer in time, so I went with my best guess."
@@ -142,16 +141,19 @@ async def post(ctx: dict, text: str, options, timeout: float, label: str = HEADI
     message = ctx.get("original_message")
     view = QuestionView(ctx["user_id"], options, timeout, text=str(text)[:MAX_QUESTION_CHARS],
                         note="" if message is not None else f"<@{ctx['user_id']}>", label=label)
+    # The model writes the question, so a name in it must not ping anyone else.
+    mentions = discord.AllowedMentions(users=[discord.Object(ctx["user_id"])], roles=False,
+                                       everyone=False)
     try:
         if message is not None:
             # A request deleted meanwhile still gets its question, just
             # without the reply link (Discord refuses a reply to a missing
             # message by default).
             sent = await ctx["channel"].send(
-                view=view, mention_author=True, allowed_mentions=MENTIONS,
+                view=view, mention_author=True, allowed_mentions=mentions,
                 reference=message.to_reference(fail_if_not_exists=False))
         else:
-            sent = await ctx["channel"].send(view=view, allowed_mentions=MENTIONS)
+            sent = await ctx["channel"].send(view=view, allowed_mentions=mentions)
     except Exception as e:
         logger.warning(f"Brain: could not post its question: {e}")
         view.stop()
