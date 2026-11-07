@@ -30,8 +30,8 @@ pass is skipped without a model call; the signature includes the stale set,
 so a skill going stale with time makes a pass due again. The signature is
 taken AFTER the pass's own changes, so they never make the next pass due.
 
-Each change posts its embed (footer "tidy-up") in the channel where the skill
-was last used, or saved; when that channel is gone the embed is skipped.
+Each change posts its card (labelled "daily tidy-up") in the channel where the skill
+was last used, or saved; when that channel is gone the card is skipped.
 """
 import asyncio
 import hashlib
@@ -224,7 +224,7 @@ _RELEASE = "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL
 
 class Curator:
     """One server's pass (`curate`) and the loop over every server
-    (`run_forever`). `channel_of(id)` finds a channel for the embeds (the
+    (`run_forever`). `channel_of(id)` finds a channel for the cards (the
     Discord client's get_channel); `actor_id` is the bot's own user id, so
     /skills history shows the bot made the change."""
 
@@ -381,7 +381,7 @@ class Curator:
         channel_id = skill.get("last_channel_id")
         channel = self.channel_of(channel_id) if channel_id else None
         if channel is None:
-            logger.info(f"Skills: no channel for the tidy-up embed of {skill['name']}")
+            logger.info(f"Skills: no channel for the tidy-up card of {skill['name']}")
             return
         await announce(channel, title, skill["name"], detail, tool_cards.SKILL_FOOTER_CURATOR,
                        version=version)

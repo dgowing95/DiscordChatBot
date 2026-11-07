@@ -679,7 +679,7 @@ class TextLLMHandler:
          logger.warning('Failed to get response from LLM: ' + str(e))
          # A run that died part-way (MaxTurnsExceeded after a few chained
          # tool calls is the common one) still reasoned before it broke, and
-         # its tools have already posted their embeds/files to the channel.
+         # its tools have already posted their cards and files to the channel.
          # The SDK hangs the completed turns off the exception as
          # RunErrorDetails, so recover the reasoning from there rather than
          # leaving the user with a bare ❌ and no idea what happened.

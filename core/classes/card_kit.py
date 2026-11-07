@@ -41,7 +41,8 @@ CLOSED = 0x80848E   # grey: over, answered, retired
 ASK = 0xEB459E      # pink: waiting on a person
 
 # --- Discord's limits (one message) -------------------------------------------
-MAX_TEXT = 4000        # characters across every TextDisplay
+MAX_TEXT = 4000        # characters across every TextDisplay (Discord counts UTF-16 units)
+TEXT_BUDGET = 3800     # what split() fills a message to: room to spare under MAX_TEXT
 MAX_COMPONENTS = 40    # every component, nested ones included
 MAX_ROW_BUTTONS = 5
 MAX_BUTTON_LABEL = 80
@@ -215,11 +216,16 @@ def small(text: str) -> str:
 
 # --- size of a block ----------------------------------------------------------
 
+def units(text: str) -> int:
+    """Text's length as Discord counts it: UTF-16 units (an emoji is two)."""
+    return len(text.encode("utf-16-le")) // 2
+
+
 def _chars(block) -> int:
     if isinstance(block, Text):
-        return len(block.content)
+        return units(block.content)
     if isinstance(block, Section):
-        return sum(len(t) for t in block.texts)
+        return sum(units(t) for t in block.texts)
     return 0
 
 
@@ -246,11 +252,23 @@ def _fences_open(text: str) -> str | None:
 
 
 def split_text(text: str, limit: int) -> tuple[str, str]:
-    """`text` cut so the first part is at most `limit` characters: at a blank
-    line, else a line, else a space, else anywhere. A code block open at the
-    cut is closed there and opened again in the second part."""
-    if len(text) <= limit:
+    """`text` cut so the first part is at most `limit` units (as Discord
+    counts: units()): at a blank line, else a line, else a space, else
+    anywhere. A code block open at the cut is closed there and opened again
+    in the second part."""
+    if units(text) <= limit:
         return text, ""
+    room = limit
+    while True:
+        head, tail = _cut(text, room)
+        over = units(head) - limit
+        if over <= 0 or room <= 1:
+            return head, tail
+        room = max(1, room - over)
+
+
+def _cut(text: str, limit: int) -> tuple[str, str]:
+    """split_text's cut, in Python characters."""
     room = max(limit - 12, 1)  # for closing and reopening a code block
     window = text[:room]
     cut = -1
@@ -285,7 +303,7 @@ def _trim_spacers(blocks: list) -> list:
     return blocks
 
 
-def split(spec: CardSpec, max_text: int = MAX_TEXT, max_components: int = MAX_COMPONENTS) -> list[list]:
+def split(spec: CardSpec, max_text: int = TEXT_BUDGET, max_components: int = MAX_COMPONENTS) -> list[list]:
     """The card as one block list per message. Each fits Discord's limits
     (with its container); the header goes on the first, the footer on the
     last, and no text is dropped."""
@@ -316,7 +334,7 @@ def split(spec: CardSpec, max_text: int = MAX_TEXT, max_components: int = MAX_CO
                 head, tail = split_text(block.content, max_text - chars)
                 if head:
                     current.append(Text(head))
-                    chars += len(head)
+                    chars += units(head)
                     comps += 1
                 flush()
                 block = Text(tail)

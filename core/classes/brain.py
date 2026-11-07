@@ -7,8 +7,8 @@ fixes its old habit of trying jobs it could not do itself. Every other tool
 voice, the server's workspace) belongs to the brain (classes/brain_tools.py).
 
 A brain call is Tier 2: it works INLINE in the channel. There is no thread
-and no steering; the tools post their own embeds as before, and a status
-embed ("🧠 Working on it") appears only once it uses the workspace
+and no steering; the tools post their own cards as before, and a status
+card ("🧠 Working on it") appears only once it uses the workspace
 (classes/brain_progress.py). It finishes by calling `report` with short
 facts, which the persona puts in its own voice
 (classes/brain_result.tool_result_for_persona). When a guess would waste
@@ -535,7 +535,7 @@ def response_tokens(response) -> int:
 class BrainHooks(RunHooks):
     """The brain run's hooks, in one object (Runner.run takes one): per-tool
     metrics (ToolMetricsHooks, so the moved tools are still counted), the
-    status embed (BrainProgressHooks) and the loop guard. Each part is
+    status card (BrainProgressHooks) and the loop guard. Each part is
     exception-safe on its own, except the loop guard's stop, which is the
     point."""
 

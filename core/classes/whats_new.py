@@ -12,16 +12,16 @@ bot stores only the LATEST version each guild has seen, so a guild that slept
 through vX.Y is never shown vX.Y's notes under vX.Y+1.
 
 File format: one `## Feature name` heading per feature, its body (what it
-does, and a "How to use:" line) below it. Each feature becomes one embed
-field. Text before the first heading and HTML comments are ignored, so an
+does, and a "How to use:" line) below it. Each feature becomes one section of
+the card. Text before the first heading and HTML comments are ignored, so an
 empty file, or one holding only the template comment, means "no features".
 """
 import os
 import re
 from pathlib import Path
 
-# Discord's embed limits. Exceeding any of them makes channel.send() raise,
-# so the shipped file is checked against them in core/tests/whats_new_tests.py.
+# Limits on the notes, from when they were an embed: a card would split a longer
+# one over messages, but they keep an announcement short (core/tests/whats_new_tests.py).
 MAX_FIELDS = 25
 MAX_FIELD_NAME = 256
 MAX_FIELD_VALUE = 1024

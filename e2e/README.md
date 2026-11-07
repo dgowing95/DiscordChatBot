@@ -25,7 +25,7 @@ Structure, never wording:
 | image | The reply has a `generated-image.png` PNG attachment |
 | poll | The bot posts a real Discord poll with at least two answers |
 | workspace task | Asked to make a CSV, the bot asked the brain (`discord_bot_brain_calls_total` went up), which posted a `.csv` attachment in the channel |
-| workflow | `!workflow <a big research job>` (`WORKFLOW_DEV_INJECT`: a webhook cannot use `/task`, and the brain's own hand-off is the model's choice) starts one within a minute: a `🧵 Plan` embed, a `🧵 Workflow …` closing embed and a reply after it are posted, and `discord_bot_workflows_total` goes up. Nobody presses Approve (a webhook cannot), so it starts after `WORKFLOW_PLAN_APPROVAL_SECONDS` (10 s here); it may end done or partly done |
+| workflow | `!workflow <a big research job>` (`WORKFLOW_DEV_INJECT`: a webhook cannot use `/task`, and the brain's own hand-off is the model's choice) starts one within a minute: a plan card and a `🧵 Big job · …` closing card (told apart by their container ids, `core/classes/card_kit.py`) and a reply after it are posted, and `discord_bot_workflows_total` goes up. Nobody presses Approve (a webhook cannot), so it starts after `WORKFLOW_PLAN_APPROVAL_SECONDS` (10 s here); it may end done or partly done |
 | voice call | `!voice_join` joins the voice channel (Discord shows it), the greeting is spoken, a spoken question is answered aloud, and "leave" ends the call |
 | no tracebacks | core's log has no Python traceback |
 

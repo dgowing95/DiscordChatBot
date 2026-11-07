@@ -48,7 +48,7 @@ rule starts at once.
 
 - Each step is done by a helper. Research steps that do not depend on each other run side by side,
   two at a time. The plan shows each step's state (⏳ waiting, ▶️ running, ✅ done). Files and pictures
-  a step makes are posted in the thread. A research step shows as one embed with the last thing it did.
+  a step makes are posted in the thread. A research step shows as one card with the last thing it did.
 - Write in the thread to steer it. Your message gets 📨 and goes to the steps it is about: "make the
   graph green" reaches the step making the graph, not the one writing the report. A helper already
   working sees it the next time it thinks (in a long command, when that ends). The bot answers it

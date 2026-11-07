@@ -41,6 +41,16 @@ def test_a_long_card_splits_with_the_header_once_and_the_footer_last_and_nothing
     assert all(p.strip() in joined for p in paragraphs)
 
 
+def test_emoji_count_twice_as_discord_counts_them_and_a_card_keeps_room_to_spare():
+    # Discord counts UTF-16 units: an emoji is two. A card filled to 4000 by
+    # Python's count was refused ("exceeds maximum size of 4000"), checked live.
+    spec = K.CardSpec(label="🧠 Working", body=K.listing("✅ 🔎 🌐 " * 40 for _ in range(30)))
+    cards = K.split(spec)
+    for c in cards:
+        assert sum(K.units(t) for t in _texts(c)) <= K.TEXT_BUDGET < K.MAX_TEXT
+    assert K.units("🧠") == 2 and K.units("a") == 1
+
+
 def test_a_cut_never_leaves_a_code_block_open():
     code = "```sh\n" + "\n".join(f"echo line {i}" for i in range(600)) + "\n```"
     cards = K.split(K.CardSpec(body=[K.Text(code)]))

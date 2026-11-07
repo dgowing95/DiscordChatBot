@@ -13,7 +13,7 @@ from discord import app_commands
 from classes import card, card_kit as K, skill_format, tool_cards
 from classes.content_guard import check_web_request
 from classes.skill_store import SkillError, SkillStore
-from classes.skill_tools import announce, saved_embed
+from classes.skill_tools import announce, saved_card
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +122,7 @@ class EditModal(discord.ui.Modal, title="Edit skill"):
             await card.reply(ctx, K.info("📘 Nothing changed", f"**{name}** is already saved like this."))
             return
         skill = await store.get(ctx.guild_id, name)
-        label, detail, version = saved_embed(result, name, skill["version"], skill["description"],
+        label, detail, version = saved_card(result, name, skill["version"], skill["description"],
                                              str(self.note.value or ""))
         await announce(ctx.channel, label, name, detail, version=version)
         await card.reply(ctx, K.done("✅ Saved", f"**{name}** is now v{skill['version']}."))

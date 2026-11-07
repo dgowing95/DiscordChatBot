@@ -92,7 +92,7 @@ async def announce(channel, label: str, name: str, detail: str = "", footer: str
     await card.notice(channel, spec)
 
 
-def saved_embed(result: str, name: str, version: int, description: str, note: str):
+def saved_card(result: str, name: str, version: int, description: str, note: str):
     """(label, detail, version) for a save's card: a new skill shows its
     description, an update its version and note."""
     if result == CREATED:
@@ -271,7 +271,7 @@ async def save_skill(wrapper: RunContextWrapper[dict], name: str, description: s
     if result == UNCHANGED:
         return f"{clean} is already saved exactly like this."
     skill = await store.get(guild, clean)
-    label, detail, version = saved_embed(result, clean, skill["version"], skill["description"],
+    label, detail, version = saved_card(result, clean, skill["version"], skill["description"],
                                          skill_format.one_line(note, skill_format.NOTE_CHARS))
     await announce(ctx.get("channel"), label, clean, detail, version=version)
     return f"Skill {clean} {result} (v{skill['version']})."
