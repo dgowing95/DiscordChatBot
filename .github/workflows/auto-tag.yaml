@@ -44,11 +44,8 @@ jobs:
           echo "Latest tag: ${latest:-none}"
           # The rule (minor bump, or v<major>.0 from .github/release-major)
           # lives in a script so a test can run it (release_tag_tests.py).
+          # It validates everything and prints nothing but the tag.
           next=$(bash .github/scripts/next_tag.sh "$latest" .github/release-major)
-          if [[ ! "$next" =~ ^v[0-9]+\.[0-9]+$ ]]; then
-            echo "Refusing to create malformed tag: $next" >&2
-            exit 1
-          fi
           echo "Next tag: $next"
           echo "tag=$next" >> "$GITHUB_OUTPUT"
 
