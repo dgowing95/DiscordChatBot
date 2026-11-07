@@ -15,12 +15,11 @@ import discord
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from classes import workspace_tools as sandbox_agent
-import classes.workspace_tools as prod_sandbox_agent
+import classes.workspace_tools as workspace_tools
 import classes.tool_functions as prod_tool_functions
 
 
-# ---------------------- sandbox LLM (model / host / api key) ----------------------
+# ---------------------- brain LLM (model / host / api key) -----------------------
 
 def _clear_llm_env(monkeypatch):
     for var in ("BRAIN_MODEL", "BRAIN_LLM_HOST", "BRAIN_LLM_API_KEY",
@@ -29,14 +28,14 @@ def _clear_llm_env(monkeypatch):
 
 
 # ---------------------- tolerant shell tool wrapping ----------------------
-# Regression (found live in production): the sandbox LLM is often a small
+# Regression (found live in production): the brain's model is often a small
 # local model, and both shell tools are built with strict_json_schema=False
 # (no grammar enforcement over ChatCompletions), so a tool call missing a
 # required argument (e.g. exec_command with no `cmd`) reaches
 # args_model.model_validate_json unguarded and raises a bare pydantic
 # ValidationError. Uncaught, that propagates out of Runner.run as UserError
 # ("Error running tool exec_command: 1 validation error for
-# ExecCommandArgs\ncmd\n  Field required") and aborts the whole sandbox
+# ExecCommandArgs\ncmd\n  Field required") and aborts the whole brain
 # task. _tolerant_tool_invoke must turn that into a string tool result
 # instead, per FunctionTool.on_invoke_tool's own documented contract.
 
@@ -56,7 +55,7 @@ def _validation_error():
 @pytest.mark.asyncio
 async def test_tolerant_invoke_passes_through_on_success():
     original = AsyncMock(return_value="ok")
-    wrapped = sandbox_agent._tolerant_tool_invoke(original)
+    wrapped = workspace_tools._tolerant_tool_invoke(original)
     result = await wrapped("ctx", '{"cmd": "ls"}')
     assert result == "ok"
     original.assert_awaited_once_with("ctx", '{"cmd": "ls"}')
@@ -67,7 +66,7 @@ async def test_tolerant_invoke_turns_missing_arg_into_tool_result():
     async def raiser(ctx, raw_input):
         raise _validation_error()
 
-    wrapped = sandbox_agent._tolerant_tool_invoke(raiser)
+    wrapped = workspace_tools._tolerant_tool_invoke(raiser)
     result = await wrapped("ctx", "{}")
     assert isinstance(result, str)
     assert "cmd" in result
@@ -81,7 +80,7 @@ async def test_tolerant_invoke_reraises_non_validation_errors():
     async def raiser(ctx, raw_input):
         raise RuntimeError("session wedged")
 
-    wrapped = sandbox_agent._tolerant_tool_invoke(raiser)
+    wrapped = workspace_tools._tolerant_tool_invoke(raiser)
     with pytest.raises(RuntimeError):
         await wrapped("ctx", "{}")
 
@@ -93,7 +92,7 @@ def test_configure_shell_tools_wraps_both_tools():
     write_tool.on_invoke_tool = AsyncMock(return_value="write ok")
     toolset = MagicMock(exec_command=exec_tool, write_stdin=write_tool)
 
-    sandbox_agent._configure_shell_tools(toolset)
+    workspace_tools._configure_shell_tools(toolset)
 
     assert exec_tool.on_invoke_tool is not exec_tool  # sanity: reassigned
     assert write_tool.on_invoke_tool is not write_tool
@@ -104,7 +103,7 @@ def test_configure_shell_tools_handles_no_write_stdin():
     exec_tool.on_invoke_tool = AsyncMock(return_value="exec ok")
     toolset = MagicMock(exec_command=exec_tool, write_stdin=None)
 
-    sandbox_agent._configure_shell_tools(toolset)  # must not raise
+    workspace_tools._configure_shell_tools(toolset)  # must not raise
     assert toolset.write_stdin is None
 
 
@@ -112,7 +111,7 @@ def test_configure_shell_tools_handles_no_write_stdin():
 
 def test_parse_find_output_parses_size_and_path():
     raw = "1234 /workspace/out/plot.png\n56 /workspace/out/data.csv\n"
-    assert sandbox_agent._parse_find_output(raw) == [
+    assert workspace_tools._parse_find_output(raw) == [
         ("/workspace/out/plot.png", 1234),
         ("/workspace/out/data.csv", 56),
     ]
@@ -120,31 +119,31 @@ def test_parse_find_output_parses_size_and_path():
 
 def test_parse_find_output_ignores_blank_and_malformed_lines():
     raw = "1234 /workspace/out/plot.png\n\n   \nnotanumber /workspace/out/bad\n"
-    assert sandbox_agent._parse_find_output(raw) == [("/workspace/out/plot.png", 1234)]
+    assert workspace_tools._parse_find_output(raw) == [("/workspace/out/plot.png", 1234)]
 
 
 def test_relative_artifact_name_strips_out_dir_and_flattens_subdirs():
-    assert sandbox_agent._relative_artifact_name("/out/plot.png", "/out") == "plot.png"
-    assert sandbox_agent._relative_artifact_name(
+    assert workspace_tools._relative_artifact_name("/out/plot.png", "/out") == "plot.png"
+    assert workspace_tools._relative_artifact_name(
         "/out/nested/data.csv", "/out"
     ) == "nested_data.csv"
 
 
 def test_relative_artifact_name_falls_back_when_empty():
-    assert sandbox_agent._relative_artifact_name("/out", "/out") == "artifact"
+    assert workspace_tools._relative_artifact_name("/out", "/out") == "artifact"
 
 
 def test_attachment_name_uses_the_basename():
     # The agent named this file itself, so it should arrive under that name
     # rather than the sweep's flattened form (_relative_artifact_name).
-    assert sandbox_agent._attachment_name("out/plot.png") == "plot.png"
-    assert sandbox_agent._attachment_name("out/sub/plot.png") == "plot.png"
-    assert sandbox_agent._attachment_name("plot.png") == "plot.png"
+    assert workspace_tools._attachment_name("out/plot.png") == "plot.png"
+    assert workspace_tools._attachment_name("out/sub/plot.png") == "plot.png"
+    assert workspace_tools._attachment_name("plot.png") == "plot.png"
 
 
 def test_attachment_name_falls_back_when_there_is_no_basename():
-    assert sandbox_agent._attachment_name("out/") == "out"
-    assert sandbox_agent._attachment_name("/") == "artifact"
+    assert workspace_tools._attachment_name("out/") == "out"
+    assert workspace_tools._attachment_name("/") == "artifact"
 
 
 def _entry(path, size, caption=""):
@@ -152,7 +151,7 @@ def _entry(path, size, caption=""):
 
 
 def test_select_deliverables_keeps_attached_files_under_the_caps():
-    kept, skipped = sandbox_agent._select_deliverables(
+    kept, skipped = workspace_tools._select_deliverables(
         [_entry("out/a.png", 10), _entry("out/b.png", 20)], max_files=10, max_bytes=1000)
     assert [e["path"] for e in kept] == ["out/a.png", "out/b.png"]
     assert skipped == []
@@ -161,14 +160,14 @@ def test_select_deliverables_keeps_attached_files_under_the_caps():
 def test_select_deliverables_names_skips_for_the_user():
     # Unlike _select_artifacts, whose caller re-maps container paths, these
     # notes already read as the user will see the file named.
-    kept, skipped = sandbox_agent._select_deliverables(
+    kept, skipped = workspace_tools._select_deliverables(
         [_entry("out/big.png", 5000)], max_files=10, max_bytes=1000)
     assert kept == []
     assert len(skipped) == 1 and skipped[0].startswith("big.png (skipped:")
 
 
 def test_select_deliverables_enforces_the_running_total():
-    kept, skipped = sandbox_agent._select_deliverables(
+    kept, skipped = workspace_tools._select_deliverables(
         [_entry("out/a.png", 600), _entry("out/b.png", 600)], max_files=10, max_bytes=1000)
     assert [e["path"] for e in kept] == ["out/a.png"]
     assert "would exceed" in skipped[0]
@@ -176,35 +175,35 @@ def test_select_deliverables_enforces_the_running_total():
 
 def test_select_deliverables_enforces_the_file_count_cap():
     entries = [_entry(f"out/{i}.png", 1) for i in range(3)]
-    kept, skipped = sandbox_agent._select_deliverables(entries, max_files=2, max_bytes=1000)
+    kept, skipped = workspace_tools._select_deliverables(entries, max_files=2, max_bytes=1000)
     assert len(kept) == 2
     assert skipped == ["2.png (skipped: more than 2 attached files)"]
 
 
 def test_select_artifacts_accepts_files_under_the_caps():
     listed = [("/workspace/out/a.png", 100), ("/workspace/out/b.png", 200)]
-    to_fetch, skipped = sandbox_agent._select_artifacts(listed, max_files=10, max_bytes=1000)
+    to_fetch, skipped = workspace_tools._select_artifacts(listed, max_files=10, max_bytes=1000)
     assert to_fetch == ["/workspace/out/a.png", "/workspace/out/b.png"]
     assert skipped == []
 
 
 def test_select_artifacts_rejects_oversized_file():
     listed = [("/workspace/out/huge.bin", 5000)]
-    to_fetch, skipped = sandbox_agent._select_artifacts(listed, max_files=10, max_bytes=1000)
+    to_fetch, skipped = workspace_tools._select_artifacts(listed, max_files=10, max_bytes=1000)
     assert to_fetch == []
     assert len(skipped) == 1 and "huge.bin" in skipped[0]
 
 
 def test_select_artifacts_enforces_running_total_cap():
     listed = [("/workspace/out/a.bin", 600), ("/workspace/out/b.bin", 600)]
-    to_fetch, skipped = sandbox_agent._select_artifacts(listed, max_files=10, max_bytes=1000)
+    to_fetch, skipped = workspace_tools._select_artifacts(listed, max_files=10, max_bytes=1000)
     assert to_fetch == ["/workspace/out/a.bin"]
     assert len(skipped) == 1 and "b.bin" in skipped[0]
 
 
 def test_select_artifacts_enforces_file_count_cap():
     listed = [(f"/workspace/out/{i}.txt", 1) for i in range(5)]
-    to_fetch, skipped = sandbox_agent._select_artifacts(listed, max_files=2, max_bytes=1000)
+    to_fetch, skipped = workspace_tools._select_artifacts(listed, max_files=2, max_bytes=1000)
     assert to_fetch == ["/workspace/out/0.txt", "/workspace/out/1.txt"]
     assert len(skipped) == 3
 
@@ -219,18 +218,18 @@ def _exec_result(stdout: bytes, ok: bool = True):
 
 
 @pytest.mark.asyncio
-async def test_sandbox_output_dir_joins_live_cwd():
+async def test_output_dir_joins_live_cwd():
     session = MagicMock()
     session.exec = AsyncMock(return_value=_exec_result(b"/root\n"))
-    assert await prod_sandbox_agent._sandbox_output_dir(session) == "/root/out"
+    assert await workspace_tools._output_dir(session) == "/root/out"
     session.exec.assert_awaited_once_with("pwd", shell=False)
 
 
 @pytest.mark.asyncio
-async def test_sandbox_output_dir_none_when_pwd_fails():
+async def test_output_dir_none_when_pwd_fails():
     session = MagicMock()
     session.exec = AsyncMock(return_value=_exec_result(b"", ok=False))
-    assert await prod_sandbox_agent._sandbox_output_dir(session) is None
+    assert await workspace_tools._output_dir(session) is None
 
 
 @pytest.mark.asyncio
@@ -240,7 +239,7 @@ async def test_collect_artifacts_returns_empty_when_out_dir_unresolved():
     session = MagicMock()
     session.exec = AsyncMock()
 
-    artifacts, skipped = await prod_sandbox_agent._collect_artifacts(session, None)
+    artifacts, skipped = await workspace_tools._collect_artifacts(session, None)
     assert artifacts == []
     assert skipped == []
     session.exec.assert_not_awaited()
@@ -251,7 +250,7 @@ async def test_collect_artifacts_returns_empty_when_find_fails():
     session = MagicMock()
     session.exec = AsyncMock(return_value=_exec_result(b"", ok=False))
 
-    artifacts, skipped = await prod_sandbox_agent._collect_artifacts(session, "/out")
+    artifacts, skipped = await workspace_tools._collect_artifacts(session, "/out")
     assert artifacts == []
     assert skipped == []
 
@@ -269,7 +268,7 @@ async def test_collect_artifacts_reads_listed_files():
         _exec_result(b"hi!"),
     ])
 
-    artifacts, skipped = await prod_sandbox_agent._collect_artifacts(session, "/out")
+    artifacts, skipped = await workspace_tools._collect_artifacts(session, "/out")
     assert len(artifacts) == 1
     assert artifacts[0].name == "a.txt"
     assert artifacts[0].data == b"hi!"
@@ -285,7 +284,7 @@ async def test_collect_artifacts_skips_file_that_fails_to_read():
         _exec_result(b"", ok=False),  # cat fails
     ])
 
-    artifacts, skipped = await prod_sandbox_agent._collect_artifacts(session, "/out")
+    artifacts, skipped = await workspace_tools._collect_artifacts(session, "/out")
     assert artifacts == []
     assert skipped == []
 
@@ -294,16 +293,16 @@ async def test_collect_artifacts_skips_file_that_fails_to_read():
 async def test_collect_artifacts_returns_relative_skip_notes_for_oversized_file():
     # Regression: skip notes used to be built from the raw find path
     # (e.g. "/root/out/huge.bin (skipped: ...)"). The model must never see
-    # the sandbox's absolute filesystem paths (see _relative_artifact_name
+    # the workspace's absolute filesystem paths (see _relative_artifact_name
     # usage elsewhere) — the skip note now names the file the same way a
     # successfully-fetched artifact would be named.
     session = MagicMock()
-    huge = b"x" * (sandbox_agent.MAX_ARTIFACT_BYTES + 1)
+    huge = b"x" * (workspace_tools.MAX_ARTIFACT_BYTES + 1)
     session.exec = AsyncMock(return_value=_exec_result(
         f"{len(huge)} /root/out/huge.bin\n".encode()
     ))
 
-    artifacts, skipped = await prod_sandbox_agent._collect_artifacts(session, "/root/out")
+    artifacts, skipped = await workspace_tools._collect_artifacts(session, "/root/out")
     assert artifacts == []
     assert len(skipped) == 1
     assert skipped[0].startswith("huge.bin ")
@@ -317,12 +316,12 @@ async def test_collect_artifacts_skip_notes_handle_filenames_with_spaces():
     # path as-is, spaces included) — must split on the " (skipped: "
     # marker instead.
     session = MagicMock()
-    huge = sandbox_agent.MAX_ARTIFACT_BYTES + 1
+    huge = workspace_tools.MAX_ARTIFACT_BYTES + 1
     session.exec = AsyncMock(return_value=_exec_result(
         f"{huge} /root/out/my plot.png\n".encode()
     ))
 
-    artifacts, skipped = await prod_sandbox_agent._collect_artifacts(session, "/root/out")
+    artifacts, skipped = await workspace_tools._collect_artifacts(session, "/root/out")
     assert artifacts == []
     assert len(skipped) == 1
     assert skipped[0].startswith("my plot.png (skipped: ")
@@ -343,7 +342,7 @@ async def test_collect_artifacts_filters_by_the_run_marker():
     # than the marker touched at the start of this run.
     session = MagicMock()
     session.exec = AsyncMock(return_value=_exec_result(b""))
-    await prod_sandbox_agent._collect_artifacts(session, "/root/out", "/root/.dcb_run_start")
+    await workspace_tools._collect_artifacts(session, "/root/out", "/root/.dcb_run_start")
     assert session.exec.await_args.args == (
         "find", "/root/out", "-maxdepth", "3", "-type", "f",
         "-newer", "/root/.dcb_run_start", "-printf", "%s %p\n",
@@ -356,7 +355,7 @@ async def test_collect_artifacts_omits_the_filter_without_a_marker():
     # back to the old unfiltered sweep, never to sweeping nothing.
     session = MagicMock()
     session.exec = AsyncMock(return_value=_exec_result(b""))
-    await prod_sandbox_agent._collect_artifacts(session, "/root/out", None)
+    await workspace_tools._collect_artifacts(session, "/root/out", None)
     assert "-newer" not in session.exec.await_args.args
 
 
@@ -366,7 +365,7 @@ async def test_mark_run_start_touches_beside_the_output_dir():
     # deliver it to the user as an empty file.
     session = MagicMock()
     session.exec = AsyncMock(return_value=_exec_result(b""))
-    marker = await prod_sandbox_agent._mark_run_start(session, "/root/out")
+    marker = await workspace_tools._mark_run_start(session, "/root/out")
     assert marker == "/root/.dcb_run_start"
     session.exec.assert_awaited_once_with("touch", "--", "/root/.dcb_run_start", shell=False)
 
@@ -375,8 +374,8 @@ async def test_mark_run_start_touches_beside_the_output_dir():
 async def test_mark_run_start_is_best_effort():
     session = MagicMock()
     session.exec = AsyncMock(side_effect=Exception("no touch"))
-    assert await prod_sandbox_agent._mark_run_start(session, "/root/out") is None
-    assert await prod_sandbox_agent._mark_run_start(MagicMock(), None) is None
+    assert await workspace_tools._mark_run_start(session, "/root/out") is None
+    assert await workspace_tools._mark_run_start(MagicMock(), None) is None
 
 
 @pytest.mark.asyncio
@@ -385,7 +384,7 @@ async def test_collect_deliverables_reads_only_what_was_attached():
     session.exec = AsyncMock(return_value=_exec_result(b"PNGDATA"))
     entries = [{"path": "out/final.png", "size": 7, "caption": "here you go"}]
 
-    artifacts, skipped = await prod_sandbox_agent._collect_deliverables(session, entries)
+    artifacts, skipped = await workspace_tools._collect_deliverables(session, entries)
 
     assert skipped == []
     assert [(a.name, a.data, a.caption) for a in artifacts] == [
@@ -404,8 +403,8 @@ async def test_deliver_prefers_what_the_agent_attached():
     session.exec = AsyncMock(return_value=_exec_result(b"PNGDATA"))
     sweep = AsyncMock(return_value=([], []))
 
-    with patch.object(prod_sandbox_agent, "_collect_artifacts", sweep):
-        artifacts, _ = await prod_sandbox_agent._deliver(
+    with patch.object(workspace_tools, "_collect_artifacts", sweep):
+        artifacts, _ = await workspace_tools._deliver(
             session, [{"path": "out/v3.png", "size": 7, "caption": ""}], "/root/out", None)
 
     assert [a.name for a in artifacts] == ["v3.png"]
@@ -416,11 +415,11 @@ async def test_deliver_prefers_what_the_agent_attached():
 async def test_deliver_falls_back_to_the_sweep_when_nothing_was_attached():
     # The safety net for a run cut off before it could attach anything, and
     # for a model that finished without ever calling attach_file.
-    recovered = [sandbox_agent.SandboxArtifact(name="plot.png", data=b"x")]
+    recovered = [workspace_tools.WorkspaceFile(name="plot.png", data=b"x")]
     sweep = AsyncMock(return_value=(recovered, []))
 
-    with patch.object(prod_sandbox_agent, "_collect_artifacts", sweep):
-        artifacts, _ = await prod_sandbox_agent._deliver(
+    with patch.object(workspace_tools, "_collect_artifacts", sweep):
+        artifacts, _ = await workspace_tools._deliver(
             MagicMock(), [], "/root/out", "/root/.dcb_run_start")
 
     assert artifacts == recovered
@@ -429,7 +428,7 @@ async def test_deliver_falls_back_to_the_sweep_when_nothing_was_attached():
 
 
 # ============================================================
-# Threads, HITL (ask_user/send_preview_to_thread), multi-sandbox resume,
+# Threads, HITL (ask_user/send_preview_to_thread), multi-workspace resume,
 # persistent memory
 # ============================================================
 
@@ -445,7 +444,7 @@ def _thread_mock(thread_id=555):
 async def test_ensure_work_thread_reuses_existing_thread():
     message = MagicMock()
     message.channel = _thread_mock()
-    channel, created = await prod_sandbox_agent.ensure_work_thread(message, "do a thing")
+    channel, created = await workspace_tools.ensure_work_thread(message, "do a thing")
     assert channel is message.channel
     assert created is False
     message.create_thread.assert_not_called()
@@ -457,7 +456,7 @@ async def test_ensure_work_thread_creates_one_off_a_normal_channel():
     message.channel = MagicMock()  # not a discord.Thread
     new_thread = _thread_mock()
     message.create_thread = AsyncMock(return_value=new_thread)
-    channel, created = await prod_sandbox_agent.ensure_work_thread(message, "do a thing")
+    channel, created = await workspace_tools.ensure_work_thread(message, "do a thing")
     assert channel is new_thread
     assert created is True
     message.create_thread.assert_awaited_once()
@@ -471,18 +470,18 @@ async def test_ensure_work_thread_falls_back_when_creation_fails():
     message = MagicMock()
     message.channel = MagicMock()
     message.create_thread = AsyncMock(side_effect=RuntimeError("can't thread here"))
-    channel, created = await prod_sandbox_agent.ensure_work_thread(message, "do a thing")
+    channel, created = await workspace_tools.ensure_work_thread(message, "do a thing")
     assert channel is message.channel
     assert created is False
 
 
 def test_thread_name_truncates_to_discord_limit():
-    name = prod_sandbox_agent._thread_name("x" * 200)
+    name = workspace_tools._thread_name("x" * 200)
     assert len(name) <= 100
 
 
 def test_thread_name_falls_back_when_task_empty():
-    assert prod_sandbox_agent._thread_name("") == "🧵 Workflow"
+    assert workspace_tools._thread_name("") == "🧵 Workflow"
 
 
 def _attach_ctx(**overrides):
@@ -498,7 +497,7 @@ def _attach_ctx(**overrides):
 
 
 async def _attach(ctx, **args):
-    return await prod_sandbox_agent.attach_file.on_invoke_tool(ctx, json.dumps(args))
+    return await workspace_tools.attach_file.on_invoke_tool(ctx, json.dumps(args))
 
 
 @pytest.mark.asyncio
@@ -560,7 +559,7 @@ async def test_attach_file_rejects_an_absolute_path():
 @pytest.mark.asyncio
 async def test_attach_file_rejects_an_oversized_file():
     session = MagicMock()
-    size = str(sandbox_agent.MAX_ARTIFACT_BYTES + 1).encode()
+    size = str(workspace_tools.MAX_ARTIFACT_BYTES + 1).encode()
     session.exec = AsyncMock(return_value=_exec_result(size))
     ctx = _attach_ctx(session=session)
 
@@ -575,35 +574,35 @@ async def test_attach_file_refuses_past_the_file_cap():
     session = MagicMock()
     session.exec = AsyncMock(return_value=_exec_result(b"1\n"))
     full = [{"path": f"out/{i}.png", "size": 1, "caption": ""}
-            for i in range(sandbox_agent.MAX_ARTIFACT_FILES)]
+            for i in range(workspace_tools.MAX_ARTIFACT_FILES)]
     ctx = _attach_ctx(session=session, deliverables=full)
 
     result = await _attach(ctx, path="out/extra.png")
 
-    assert len(ctx.context["deliverables"]) == sandbox_agent.MAX_ARTIFACT_FILES
+    assert len(ctx.context["deliverables"]) == workspace_tools.MAX_ARTIFACT_FILES
     assert "limit" in result
 
 
 @pytest.mark.asyncio
 async def test_a_file_that_grew_after_it_was_attached_is_not_read_or_sent():
     session = MagicMock()
-    big = str(sandbox_agent.MAX_ARTIFACT_BYTES + 1).encode()
+    big = str(workspace_tools.MAX_ARTIFACT_BYTES + 1).encode()
     session.exec = AsyncMock(return_value=_exec_result(big))  # stat says it is too big now
     entries = [{"path": "/workspace/jobs/t1/out/plot.png", "size": 10, "caption": ""}]
-    artifacts, notes = await prod_sandbox_agent._collect_deliverables(session, entries)
+    artifacts, notes = await workspace_tools._collect_deliverables(session, entries)
     assert artifacts == [] and "limit" in notes[0]
     assert [c.args[0] for c in session.exec.await_args_list] == ["stat"]  # never read
 
 
 @pytest.mark.asyncio
 async def test_files_that_grew_are_held_to_the_total_too():
-    half = sandbox_agent.MAX_ARTIFACT_BYTES // 2 + 1  # each fits alone, not both
+    half = workspace_tools.MAX_ARTIFACT_BYTES // 2 + 1  # each fits alone, not both
     async def exec_(cmd, *args, shell=False):
         return _exec_result(str(half).encode() if cmd == "stat" else b"x" * half)
     session = MagicMock()
     session.exec = AsyncMock(side_effect=exec_)
     entries = [{"path": f"/w/out/{n}.png", "size": 10, "caption": ""} for n in ("a", "b")]
-    artifacts, notes = await prod_sandbox_agent._collect_deliverables(session, entries)
+    artifacts, notes = await workspace_tools._collect_deliverables(session, entries)
     assert [a.name for a in artifacts] == ["a.png"]
     assert "b.png" in notes[0] and "total limit" in notes[0]
 
@@ -617,10 +616,10 @@ async def test_removing_every_attachment_sends_nothing_rather_than_sweeping():
     await _attach(ctx, path="out/plot.png", remove=True)
     assert ctx.context["delivery_chosen"] is True
     sweep = AsyncMock(return_value=(["swept"], []))
-    with patch.object(prod_sandbox_agent, "_collect_artifacts", sweep):
-        assert await prod_sandbox_agent._deliver(session, [], "/w/out", None, chosen=True) == ([], [])
+    with patch.object(workspace_tools, "_collect_artifacts", sweep):
+        assert await workspace_tools._deliver(session, [], "/w/out", None, chosen=True) == ([], [])
         sweep.assert_not_awaited()
-        assert (await prod_sandbox_agent._deliver(session, [], "/w/out", None))[0] == ["swept"]
+        assert (await workspace_tools._deliver(session, [], "/w/out", None))[0] == ["swept"]
 
 
 # ---------------------- the brain's call timeout ----------------------
@@ -660,7 +659,7 @@ def _warm(warm, calls=None):
 
 # ---------------------- retrying a stopped run stays in the thread ----------------------
 #
-# Observed failure this covers: a sandbox run timed out after 600s, the outer
+# Observed failure this covers: a brain call timed out after 600s, the outer
 # model retried in the same turn, ensure_work_thread asked Discord for a
 # second thread off the same message and was refused with 160004 ("a thread
 # has already been created for this message"), so the retry ran in the PARENT
@@ -676,7 +675,7 @@ async def test_ensure_work_thread_reuses_a_thread_already_started_off_the_messag
     message.channel = MagicMock()  # not a discord.Thread
     message.thread = _thread_mock(thread_id=777)
     message.create_thread = AsyncMock()
-    channel, created = await prod_sandbox_agent.ensure_work_thread(message, "do a thing")
+    channel, created = await workspace_tools.ensure_work_thread(message, "do a thing")
     assert channel is message.thread
     assert created is False
     message.create_thread.assert_not_awaited()
@@ -696,8 +695,8 @@ async def test_ensure_work_thread_reuses_a_thread_already_started_off_the_messag
 # messages and for the same reason.
 
 
-# ------------- the main agent's shared tools, in the sandbox -------------
-# The sandbox agent gets the main agent's lookup and event tools as the same
+# ------------- the main agent's shared tools, in the brain ---------------
+# The brain gets the main agent's lookup and event tools as the same
 # objects (tool_functions.shared_tools), not as copies of their code. The
 # poll tools are left out. The two that change something (create_event,
 # update_event) are gated like attach_file, through a copy, so the main
@@ -710,19 +709,19 @@ async def test_resolve_requester_prefers_the_cache_and_fails_soft():
     thread = MagicMock()
     thread.guild.get_member.return_value = cached
     thread.guild.fetch_member = AsyncMock()
-    assert await prod_sandbox_agent._resolve_requester(thread, 7) is cached
+    assert await workspace_tools._resolve_requester(thread, 7) is cached
     thread.guild.fetch_member.assert_not_awaited()
 
     thread.guild.get_member.return_value = None
     thread.guild.fetch_member = AsyncMock(side_effect=discord.NotFound(MagicMock(status=404), "gone"))
-    assert await prod_sandbox_agent._resolve_requester(thread, 7) is None
-    assert await prod_sandbox_agent._resolve_requester(None, 7) is None
-    assert await prod_sandbox_agent._resolve_requester(thread, None) is None
+    assert await workspace_tools._resolve_requester(thread, 7) is None
+    assert await workspace_tools._resolve_requester(None, 7) is None
+    assert await workspace_tools._resolve_requester(thread, None) is None
 
 
 @pytest.mark.asyncio
 async def test_the_web_tools_work_in_a_run_with_no_thread():
-    # A sandbox run may have no thread (its "channel" is None); the lookup
+    # A brain call may have no thread (its "channel" is None); the lookup
     # skips its notice instead of failing on None.send.
     from classes import web_research
     with patch.object(prod_tool_functions, "check_web_request",
@@ -740,19 +739,19 @@ async def test_the_web_tools_work_in_a_run_with_no_thread():
     ("../../shared", "shared"), ("../../shared/data", "shared/data"),
 ])
 def test_job_relative_takes_paths_from_the_job_folder(workdir, expected):
-    assert prod_sandbox_agent._job_relative({"job_dir": "jobs/t1"}, workdir) == expected
+    assert workspace_tools._job_relative({"job_dir": "jobs/t1"}, workdir) == expected
 
 
 def test_job_relative_refuses_to_leave_the_workspace():
-    assert prod_sandbox_agent._job_relative({"job_dir": "jobs/t1"}, "../../..") is None
-    assert prod_sandbox_agent._job_relative({"job_dir": "jobs/t1"}, "../../../etc") is None
+    assert workspace_tools._job_relative({"job_dir": "jobs/t1"}, "../../..") is None
+    assert workspace_tools._job_relative({"job_dir": "jobs/t1"}, "../../../etc") is None
 
 
 def test_job_paths_pass_through_without_a_job_folder():
-    assert prod_sandbox_agent._job_relative({}, "out/a.png") == "out/a.png"
-    assert prod_sandbox_agent._job_path({}, "out/a.png") == "out/a.png"
+    assert workspace_tools._job_relative({}, "out/a.png") == "out/a.png"
+    assert workspace_tools._job_path({}, "out/a.png") == "out/a.png"
     ctx = {"job_dir": "jobs/t1", "workspace_root": "/workspace"}
-    assert prod_sandbox_agent._job_path(ctx, "out/a.png") == "/workspace/jobs/t1/out/a.png"
+    assert workspace_tools._job_path(ctx, "out/a.png") == "/workspace/jobs/t1/out/a.png"
 
 
 def _shell_ctx(context):
@@ -766,7 +765,7 @@ async def test_commands_run_in_the_job_folder():
     async def _exec(ctx, raw):
         seen.append(json.loads(raw))
         return "ok"
-    invoke = prod_sandbox_agent._in_job_dir(_exec)
+    invoke = workspace_tools._in_job_dir(_exec)
     ctx = _shell_ctx({"job_dir": "jobs/t1"})
     await invoke(ctx, json.dumps({"cmd": "ls"}))
     await invoke(ctx, json.dumps({"cmd": "ls", "workdir": "out"}))
@@ -777,7 +776,7 @@ async def test_commands_run_in_the_job_folder():
 
 @pytest.mark.asyncio
 async def test_a_workdir_outside_the_workspace_is_refused_as_a_tool_result():
-    invoke = prod_sandbox_agent._in_job_dir(AsyncMock(return_value="ran"))
+    invoke = workspace_tools._in_job_dir(AsyncMock(return_value="ran"))
     out = await invoke(_shell_ctx({"job_dir": "jobs/t1"}),
                        json.dumps({"cmd": "ls", "workdir": "../../../etc"}))
     assert "outside the workspace" in out
@@ -786,7 +785,7 @@ async def test_a_workdir_outside_the_workspace_is_refused_as_a_tool_result():
 @pytest.mark.asyncio
 async def test_the_job_folder_wrapper_passes_through_without_one_or_on_odd_input():
     inner = AsyncMock(return_value="ran")
-    invoke = prod_sandbox_agent._in_job_dir(inner)
+    invoke = workspace_tools._in_job_dir(inner)
     await invoke(_shell_ctx({}), '{"cmd": "ls"}')
     await invoke(_shell_ctx({"job_dir": "jobs/t1"}), "not json")
     assert [c.args[1] for c in inner.await_args_list] == ['{"cmd": "ls"}', "not json"]
@@ -796,7 +795,7 @@ async def test_the_job_folder_wrapper_passes_through_without_one_or_on_odd_input
 async def test_an_absolute_workdir_is_refused_as_a_result_not_an_error():
     # The SDK raises InvalidManifestPathError for it, which would end the run.
     inner = AsyncMock(return_value="ran")
-    invoke = prod_sandbox_agent._in_job_dir(inner)
+    invoke = workspace_tools._in_job_dir(inner)
     out = await invoke(_shell_ctx({"job_dir": "jobs/t1"}), '{"cmd": "ls", "workdir": "/workspace"}')
     assert "relative" in out and not inner.await_count
 
@@ -810,7 +809,7 @@ async def test_attach_file_reads_from_the_job_folder():
     assert session.exec.await_args.args[-1] == "/workspace/jobs/t1/out/plot.png"
     assert ctx.context["deliverables"][0]["path"] == "/workspace/jobs/t1/out/plot.png"
     # the name the user sees is still the file's own
-    assert prod_sandbox_agent._attachment_name(ctx.context["deliverables"][0]["path"]) == "plot.png"
+    assert workspace_tools._attachment_name(ctx.context["deliverables"][0]["path"]) == "plot.png"
 
 
 @pytest.mark.asyncio
@@ -830,14 +829,14 @@ def _lease_runner():
 @pytest.mark.asyncio
 async def test_attach_file_messages_never_show_the_absolute_path():
     """A model handed an absolute path reused it as exec_command's workdir,
-    which the SDK refuses (see SANDBOX_OUTPUT_DIRNAME)."""
+    which the SDK refuses (see OUTPUT_DIRNAME)."""
     session = MagicMock()
     session.exec = AsyncMock(return_value=_exec_result(b"", ok=False))
     ctx = _attach_ctx(session=session, job_dir="jobs/t1", workspace_root="/workspace")
     out = await _attach(ctx, path="out/nope.png")
     assert "'out/nope.png' does not exist" in out and "/workspace" not in out
     session.exec = AsyncMock(return_value=_exec_result(
-        str(sandbox_agent.MAX_ARTIFACT_BYTES + 1).encode()))
+        str(workspace_tools.MAX_ARTIFACT_BYTES + 1).encode()))
     out = await _attach(ctx, path="out/huge.bin")
     assert "too large" in out and "/workspace" not in out
 
@@ -853,7 +852,7 @@ def _view_ctx(session, **overrides):
 
 
 async def _view(ctx, **args):
-    return await prod_sandbox_agent.view_image.on_invoke_tool(ctx, json.dumps(args))
+    return await workspace_tools.view_image.on_invoke_tool(ctx, json.dumps(args))
 
 
 def _picture_session(size=b"3\n"):
@@ -920,12 +919,12 @@ async def test_views_asked_side_by_side_cannot_pass_the_limit_together(monkeypat
 
     session = MagicMock()
     session.exec = exec_
-    ctx = _view_ctx(session, image_views=prod_sandbox_agent.MAX_IMAGE_VIEWS - 1)
+    ctx = _view_ctx(session, image_views=workspace_tools.MAX_IMAGE_VIEWS - 1)
     # One turn's tool calls run at once (the SDK gathers them).
     answers = await asyncio.gather(_view(ctx, path="out/a.png"), _view(ctx, path="out/b.png"))
     assert look.await_count == 1
     assert sum("the limit" in answer for answer in answers) == 1
-    assert ctx.context["image_views"] == prod_sandbox_agent.MAX_IMAGE_VIEWS
+    assert ctx.context["image_views"] == workspace_tools.MAX_IMAGE_VIEWS
 
 
 @pytest.mark.asyncio
@@ -944,5 +943,5 @@ async def test_a_blocked_request_cannot_read_the_workspace_through_view_image(mo
 @pytest.mark.asyncio
 async def test_view_image_has_a_limit_per_run():
     session = MagicMock()
-    ctx = _view_ctx(session, image_views=prod_sandbox_agent.MAX_IMAGE_VIEWS)
+    ctx = _view_ctx(session, image_views=workspace_tools.MAX_IMAGE_VIEWS)
     assert "the limit" in await _view(ctx, path="out/a.png")

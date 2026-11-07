@@ -803,7 +803,7 @@ async def _watch(wf: Workflow) -> None:
 
 
 async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: str,
-                     sandbox: bool, progress=None, caller: str = "workflow",
+                     workspace: bool, progress=None, caller: str = "workflow",
                      ctx: dict | None = None, seconds: float | None = None,
                      finish_up_at: int | None = None, finish_up: str = FINISH_UP,
                      steer: tuple | None = None, checking: bool = False) -> _Outcome:
@@ -814,7 +814,7 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
     `seconds` is a limit of its own, under what the workflow has left.
     From turn `finish_up_at` on it is told `finish_up`; its last input is kept
     for _last_report. `steer`, a place in wf.steering and a step's id: what
-    is for that step from there on reaches the run. Sandbox runs leave the
+    is for that step from there on reaches the run. Workspace runs leave the
     reserves alone, but
     for the check (`checking`), which they are there for."""
     from agents import MaxTurnsExceeded, RunConfig, RunHooks, Runner
@@ -829,7 +829,7 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
     from classes import llm_roles
     hooks.context_watch = brain.context_watch(
         llm_roles.SUBAGENT if lane == llm_lanes.SUBAGENT else llm_roles.BRAIN)
-    if sandbox:
+    if workspace:
         run_config = brain._run_config(wf.lease, guard, hooks.context_watch)
     else:
         run_config = RunConfig(
@@ -840,7 +840,7 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
     if steer is not None:
         run_config = workflow_steering.steered(run_config, wf, *steer)
     seen: list = []
-    holds_back = sandbox and not checking
+    holds_back = workspace and not checking
     if finish_up_at is not None or (holds_back and wp.max_tokens()):
         run_config = _finishing_up(run_config, hooks, finish_up_at, seen, finish_up,
                                    wf.over_tokens if holds_back else None)
@@ -851,7 +851,7 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
         progress.max_turns = progress.turn + turns
     # The reserves are kept back from the steps, for the check and the
     # manager's last runs.
-    reserve = _step_reserve_seconds(wf) if holds_back else FINISH_RESERVE_SECONDS if sandbox else 0
+    reserve = _step_reserve_seconds(wf) if holds_back else FINISH_RESERVE_SECONDS if workspace else 0
     left = max(30.0, wf.seconds_left() - reserve)
     seconds = left if seconds is None else min(seconds, left)
     if wf.cancel_reason:
@@ -1439,7 +1439,7 @@ async def _step_attempt(wf: Workflow, step: wp.Step, progress,
     parts.append(workflow_steering.said_text(wf, step.id))
     outcome = await _agent_run(wf, _subagent(step.role), "\n\n".join(filter(None, parts)),
                                max_turns=wp.subagent_max_turns(), lane=llm_lanes.SUBAGENT,
-                               sandbox=True, progress=progress, caller="workflow_subagent",
+                               workspace=True, progress=progress, caller="workflow_subagent",
                                ctx=ctx, steer=(len(wf.steering), step.id))
     _keep_shared(wf, ctx)
     if outcome.at_limit:
@@ -1479,13 +1479,13 @@ async def keep_image(ctx: dict, png: bytes) -> str:
     too, so the channel gets it with the job's other files and later steps
     can use it. Not in out/: _deliver would post it a second time. Returns
     what to add to the tool's result. Fail-soft."""
-    from classes.workspace_tools import SandboxArtifact
+    from classes.workspace_tools import WorkspaceFile
 
     wf = get(ctx.get("workflow_id"))
     if wf is None:
         return ""
     name = f"image-{ctx.get('images_posted', 1)}.png"
-    wf.artifacts.append(SandboxArtifact(name=name, data=png, wave=wf.wave))
+    wf.artifacts.append(WorkspaceFile(name=name, data=png, wave=wf.wave))
     session, out_dir = ctx.get("session"), ctx.get("out_dir")
     if session is None or not out_dir:
         return " The user gets it with the job's files."
@@ -1578,7 +1578,7 @@ async def _review(wf: Workflow, queue: list) -> list:
         "Messages:\n" + "\n".join(lines)])
     wf.ctx.pop("workflow_review_args", None)
     await _agent_run(wf, _manager("review"), task, max_turns=MANAGER_SHORT_TURNS,
-                     lane=llm_lanes.BRAIN, sandbox=False, caller="workflow_manager")
+                     lane=llm_lanes.BRAIN, workspace=False, caller="workflow_manager")
     args = wf.ctx.get("workflow_review_args") or {}
     replies = {}
     for item in args.get("replies") or []:
@@ -1679,7 +1679,7 @@ async def _finish(wf: Workflow, stopped: str | None) -> BrainReport:
         "what the step reports and the check show."]))
     wf.ctx.pop("brain_report_args", None)
     outcome = await _agent_run(wf, _manager("finish"), task, max_turns=MANAGER_SHORT_TURNS,
-                               lane=llm_lanes.BRAIN, sandbox=False, caller="workflow_manager")
+                               lane=llm_lanes.BRAIN, workspace=False, caller="workflow_manager")
     args = wf.ctx.get("brain_report_args")
     if args is None:
         return _report_from_steps(wf, stopped or outcome.stopped or "")
@@ -1729,7 +1729,7 @@ async def post_workflow_copy(wf: Workflow) -> list[str]:
         return []
     if getattr(wf.origin_channel, "id", None) == getattr(wf.thread, "id", None):
         return []
-    from classes.workspace_tools import SandboxArtifact
+    from classes.workspace_tools import WorkspaceFile
 
     chosen = wp.echo_files([(a.name, getattr(a, "step", ""), getattr(a, "wave", 0))
                             for a in wf.artifacts])
@@ -1741,7 +1741,7 @@ async def post_workflow_copy(wf: Workflow) -> list[str]:
         if total + len(artifact.data) > ECHO_MAX_BYTES:
             continue  # a smaller one after it may still fit
         if name != artifact.name:
-            artifact = SandboxArtifact(name=name, data=artifact.data, caption=artifact.caption)
+            artifact = WorkspaceFile(name=name, data=artifact.data, caption=artifact.caption)
         picked.append(artifact)
         total += len(artifact.data)
     return await _post_files(wf.origin_channel, picked)

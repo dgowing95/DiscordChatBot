@@ -52,7 +52,7 @@ logger = logging.getLogger(__name__)
 # outright. We track the absolute form ourselves for our own raw
 # session.exec() calls, which bypass that check (see _collect_artifacts), and
 # _in_job_dir makes every workdir the model gives relative to its job folder.
-SANDBOX_OUTPUT_DIRNAME = "out"
+OUTPUT_DIRNAME = "out"
 MAX_ARTIFACT_FILES = 10
 # Marker file touched at the start of every run, next to (never inside) the
 # output dir, so the fallback sweep can tell this run's files from ones a
@@ -72,7 +72,7 @@ def _tolerant_tool_invoke(original_invoke):
 
     Needed because both shell tools are built with strict_json_schema=False
     (see brain.build_brain_agent's docstring: the grammar-enforced strict mode
-    isn't available over ChatCompletions), so nothing stops the sandbox LLM
+    isn't available over ChatCompletions), so nothing stops the brain's model
     — often a small local model — from emitting a tool call with required
     arguments missing entirely (e.g. exec_command with no `cmd`). The
     underlying *Tool._invoke does `args_model.model_validate_json(raw_input)`
@@ -81,12 +81,12 @@ def _tolerant_tool_invoke(original_invoke):
     that raising fails the whole run while returning a string is fed back to
     the model as a normal tool result — confirmed in production, where an
     empty exec_command call propagated all the way out of Runner.run as
-    UserError and aborted an otherwise-working sandbox task. We opt into the
+    UserError and aborted an otherwise-working brain call. We opt into the
     string-result half of that contract here so the model can just retry.
 
     Deliberately narrow to ValidationError: transport/session failures
     (ExecTransportError, a dead container, ...) must still raise, or a
-    genuinely broken sandbox would spend every remaining turn being told
+    genuinely broken workspace would spend every remaining turn being told
     to "try again" instead of failing fast.
     """
     from pydantic import ValidationError
@@ -193,11 +193,11 @@ def _thread_name(task: str) -> str:
 
 
 async def ensure_work_thread(original_message, task: str):
-    """Resolves the Discord channel a sandbox run should post to.
+    """Resolves the Discord channel a brain call should post to.
 
     Returns (channel, thread_created). If original_message is already inside
     a thread, that thread is reused as-is (thread_created=False) — this
-    covers both a sandbox-created thread and any other thread the user is
+    covers both a thread the bot made and any other thread the user is
     @mentioning the bot in; either way it's safe, since a thread that never
     ran a task simply gets a new, empty job folder.
     A thread previously started off this very message is likewise reused.
@@ -224,7 +224,7 @@ async def ensure_work_thread(original_message, task: str):
     try:
         thread = await original_message.create_thread(name=_thread_name(task))
     except Exception as e:
-        logger.warning(f"Sandbox: could not create a thread, falling back to the channel: {e}")
+        logger.warning(f"Workspace: could not create a thread, falling back to the channel: {e}")
         return channel, False
     return thread, True
 
@@ -251,7 +251,7 @@ async def attach_file(
     ctx = _tool_context(wrapper)
     session = ctx.get("session")
     if session is None:
-        return "No sandbox session is available, so nothing can be attached."
+        return "No workspace session is available, so nothing can be attached."
     path = (path or "").strip()
     if not path:
         return "No path given — nothing was attached."
@@ -260,7 +260,7 @@ async def attach_file(
     # Kept absolute from here on: _collect_deliverables reads it with our own
     # session.exec, whose working directory is the workspace root. The
     # messages below use the model's own relative name: it must never be
-    # handed an absolute path (see SANDBOX_OUTPUT_DIRNAME).
+    # handed an absolute path (see OUTPUT_DIRNAME).
     relative = path
     path = _job_path(ctx, path)
     if path is None:
@@ -287,7 +287,7 @@ async def attach_file(
     try:
         result = await session.exec("stat", "-c", "%s", "--", path, shell=False)
     except Exception as e:
-        logger.warning(f"Sandbox attach_file: stat failed for {path!r}: {e}")
+        logger.warning(f"attach_file: stat failed for {path!r}: {e}")
         return f"Could not check {relative!r}. Verify it exists with `ls`, then attach it again."
     if not result.ok():
         return (
@@ -363,7 +363,7 @@ async def view_image(wrapper: RunContextWrapper[dict], path: str, question: str 
                 return f"{path!r} is too large to view."
             result = await session.exec("cat", "--", where, shell=False)
         except Exception as e:
-            logger.warning(f"Sandbox view_image: could not read {where!r}: {e}")
+            logger.warning(f"view_image: could not read {where!r}: {e}")
             return f"Could not read {path!r}."
         if not result.ok():
             return f"Could not read {path!r}."
@@ -383,7 +383,7 @@ async def _resolve_requester(thread, user_id):
     The event tools need a Member, not an id, to check the requester's own
     permission. The bot runs without the members intent, so
     guild.get_member usually misses for someone who only typed a message,
-    and the sandbox context has no message author to fall back on. One
+    and the brain's context has no message author to fall back on. One
     fetch_member here, before the run, is what makes that check work. A
     failure leaves None, which the event tools treat as "not allowed"."""
     guild = getattr(thread, "guild", None)
@@ -397,14 +397,14 @@ async def _resolve_requester(thread, user_id):
     except Exception as e:
         # A warning, not info: the event tools then refuse as if the person
         # lacked the permission, and this line is the only sign of why.
-        logger.warning(f"Sandbox: could not look up the requester {user_id}: {e}")
+        logger.warning(f"Workspace: could not look up the requester {user_id}: {e}")
         return None
 
 
 @dataclass
-class SandboxArtifact:
-    """One file being delivered to the user: normally one the sandbox agent
-    chose with attach_file, otherwise one swept out of SANDBOX_OUTPUT_DIR by
+class WorkspaceFile:
+    """One file being delivered to the user: normally one the brain
+    chose with attach_file, otherwise one swept out of OUTPUT_DIRNAME by
     the fallback path. caption is whatever the agent passed to attach_file
     (empty for a swept file), sent as the message text beside it."""
     name: str
@@ -523,8 +523,8 @@ def _select_artifacts(
     return to_fetch, skipped
 
 
-async def _sandbox_output_dir(session, job_dir: str = "") -> str | None:
-    """The absolute path to SANDBOX_OUTPUT_DIRNAME in the run's job folder
+async def _output_dir(session, job_dir: str = "") -> str | None:
+    """The absolute path to OUTPUT_DIRNAME in the run's job folder
     (job_dir, relative to the workspace root). The root is asked of the live
     session (`pwd`: our own exec calls start there) rather than assumed.
     None if it can't be determined (treated as "no artifacts")."""
@@ -532,13 +532,13 @@ async def _sandbox_output_dir(session, job_dir: str = "") -> str | None:
     if not res.ok():
         return None
     cwd = res.stdout.decode("utf-8", errors="replace").strip()
-    return posixpath.join(cwd, job_dir, SANDBOX_OUTPUT_DIRNAME) if cwd else None
+    return posixpath.join(cwd, job_dir, OUTPUT_DIRNAME) if cwd else None
 
 
 async def _collect_artifacts(
     session, out_dir: str | None, newer_than: str | None = None,
-) -> tuple[list[SandboxArtifact], list[str]]:
-    """Reads back whatever the sandbox agent saved under out_dir.
+) -> tuple[list[WorkspaceFile], list[str]]:
+    """Reads back whatever the brain saved under out_dir.
 
     This is the FALLBACK delivery path, used when the agent attached nothing
     with attach_file (or was cut off before it could). It is a blind sweep, so
@@ -557,12 +557,12 @@ async def _collect_artifacts(
     MAX_ARTIFACT_FILES / MAX_ARTIFACT_BYTES — see _select_artifacts), with
     the container's absolute path replaced by the same relative, Discord-
     safe name used for artifacts (_relative_artifact_name) — the model must
-    never see the sandbox's real absolute filesystem paths (see
-    SANDBOX_OUTPUT_DIRNAME comment for why: it has previously reused one as
+    never see the workspace's real absolute filesystem paths (see
+    OUTPUT_DIRNAME comment for why: it has previously reused one as
     an exec_command `workdir` argument and failed outright).
 
     out_dir is resolved once by the caller (brain.run_brain, via
-    _sandbox_output_dir) up front — before Runner.run starts — rather than
+    _output_dir) up front — before Runner.run starts — rather than
     re-queried here, so the same path used to tell the model where to save
     files is also the one we look in afterward.
 
@@ -570,10 +570,10 @@ async def _collect_artifacts(
     the exec_command/write_stdin tool path the model's own turns go
     through. session.read() is out because it validates paths against the
     SDK's nominal manifest root ("/workspace"), which the Shell-only
-    capability we use never actually creates (see SANDBOX_OUTPUT_DIRNAME) —
+    capability we use never actually creates (see OUTPUT_DIRNAME) —
     it rejects our real, cwd-relative paths as "not relative to the
     manifest". exec_command is out because it truncates large output to a
-    token budget and would burn the (often small, local) sandbox model's
+    token budget and would burn the (often small, local) brain model's
     own context on raw file bytes for no reason. Plain exec("cat", ...) is
     the same primitive session.read() uses internally, just without the
     manifest-relative check that doesn't apply to our setup.
@@ -590,31 +590,31 @@ async def _collect_artifacts(
     to_fetch, skipped = _select_artifacts(listed)
     skip_notes: list[str] = []
     for note in skipped:
-        logger.info(f"Sandbox: {note}")
+        logger.info(f"Workspace: {note}")
         # split on the " (skipped: " marker, not plain whitespace — a path
         # under out/ can itself contain spaces (e.g. "my plot.png")
         path, _, reason = note.partition(" (skipped: ")
         skip_notes.append(f"{_relative_artifact_name(path, out_dir)} (skipped: {reason}")
 
-    artifacts: list[SandboxArtifact] = []
+    artifacts: list[WorkspaceFile] = []
     for path in to_fetch:
         try:
             read_result = await session.exec("cat", "--", path, shell=False)
         except Exception as e:
-            logger.warning(f"Sandbox: failed to read output file {path}: {e}")
+            logger.warning(f"Workspace: failed to read output file {path}: {e}")
             continue
         if not read_result.ok():
-            logger.warning(f"Sandbox: failed to read output file {path}: exit {read_result.exit_code}")
+            logger.warning(f"Workspace: failed to read output file {path}: exit {read_result.exit_code}")
             continue
         artifacts.append(
-            SandboxArtifact(name=_relative_artifact_name(path, out_dir), data=read_result.stdout)
+            WorkspaceFile(name=_relative_artifact_name(path, out_dir), data=read_result.stdout)
         )
     return artifacts, skip_notes
 
 
 async def _collect_deliverables(
     session, entries: list[dict]
-) -> tuple[list[SandboxArtifact], list[str]]:
+) -> tuple[list[WorkspaceFile], list[str]]:
     """Reads back the files the agent chose with attach_file, in the order it
     attached them.
 
@@ -632,29 +632,29 @@ async def _collect_deliverables(
     current = [dict(entry, size=await _current_size(session, entry)) for entry in entries]
     kept, skip_notes = _select_deliverables(current)
     for note in skip_notes:
-        logger.info(f"Sandbox: {note}")
+        logger.info(f"Workspace: {note}")
 
-    artifacts: list[SandboxArtifact] = []
+    artifacts: list[WorkspaceFile] = []
     total = 0
     for entry in kept:
         path = entry["path"]
         try:
             read_result = await session.exec("cat", "--", path, shell=False)
         except Exception as e:
-            logger.warning(f"Sandbox: failed to read attached file {path}: {e}")
+            logger.warning(f"Workspace: failed to read attached file {path}: {e}")
             continue
         if not read_result.ok():
-            logger.warning(f"Sandbox: failed to read attached file {path}: exit {read_result.exit_code}")
+            logger.warning(f"Workspace: failed to read attached file {path}: exit {read_result.exit_code}")
             continue
         size = len(read_result.stdout)
         if total + size > MAX_ARTIFACT_BYTES:  # total >= 0, so this covers one big file too
             name = _attachment_name(path)
             which = "" if size > MAX_ARTIFACT_BYTES else " total"
             skip_notes.append(f"{name} (skipped: grew past the {MAX_ARTIFACT_BYTES}-byte{which} limit)")
-            logger.info(f"Sandbox: {name} grew past the{which} size limit while it was being sent")
+            logger.info(f"Workspace: {name} grew past the{which} size limit while it was being sent")
             continue
         total += size
-        artifacts.append(SandboxArtifact(
+        artifacts.append(WorkspaceFile(
             name=_attachment_name(path),
             data=read_result.stdout,
             caption=entry.get("caption") or "",
@@ -670,7 +670,7 @@ async def _current_size(session, entry: dict) -> int:
         if result.ok():
             return int(result.stdout.decode("utf-8", errors="replace").strip())
     except Exception as e:
-        logger.info(f"Sandbox: could not stat attached file {entry.get('path')!r}: {e}")
+        logger.info(f"Workspace: could not stat attached file {entry.get('path')!r}: {e}")
     return int(entry.get("size") or 0)
 
 
@@ -690,7 +690,7 @@ async def _mark_run_start(session, out_dir: str | None) -> str | None:
     try:
         res = await session.exec("touch", "--", marker, shell=False)
     except Exception as e:
-        logger.warning(f"Sandbox: could not write the run marker: {e}")
+        logger.warning(f"Workspace: could not write the run marker: {e}")
         return None
     return marker if res.ok() else None
 
@@ -707,7 +707,7 @@ async def _write_inputs(session, out_dir: str | None, inputs, problems):
         if in_dir is None or not (await session.exec("mkdir", "-p", in_dir, shell=False)).ok():
             raise RuntimeError("no workspace folder for the files")
     except Exception as e:
-        logger.warning(f"Sandbox: could not make the input folder: {e}")
+        logger.warning(f"Workspace: could not make the input folder: {e}")
         in_dir = None
     for name, data in inputs:
         if in_dir is None:
@@ -719,17 +719,17 @@ async def _write_inputs(session, out_dir: str | None, inputs, problems):
             await session.write(PurePosixPath(in_dir, name), io.BytesIO(data))
             written.append((name, len(data)))
         except Exception as e:
-            logger.warning(f"Sandbox: could not write input {name}: {e}")
+            logger.warning(f"Workspace: could not write input {name}: {e}")
             problems.append(f"{name} (could not be copied in)")
     if written:
-        logger.info(f"Sandbox: gave the run {len(written)} file(s) in {in_dir}")
+        logger.info(f"Workspace: gave the run {len(written)} file(s) in {in_dir}")
     return workspace_inputs.task_preamble(written, problems), [n for n, _ in written], problems
 
 
 async def _deliver(
     session, deliverables: list[dict], out_dir: str | None, marker: str | None,
     chosen: bool = False,
-) -> tuple[list[SandboxArtifact], list[str]]:
+) -> tuple[list[WorkspaceFile], list[str]]:
     """What the user actually receives: the files the agent attached, or —
     only when it attached none — a swept fallback from out/.
 

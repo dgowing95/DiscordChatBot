@@ -240,11 +240,11 @@ async def test_process_messages_worker_pool_runs_messages_concurrently():
         "(different channels run concurrently)"
     )
 
-# ---------------------- on_message: routing into a running sandbox ----------------------
+# ---------------------- on_message: routing into a running workflow ----------------------
 
 @pytest.fixture
 def claimed_thread():
-    """A sandbox run claimed in channel 77 (the _message() default)."""
+    """A workflow claimed in channel 77 (the _message() default)."""
     from classes import thread_inbox as inbox
     inbox._RUNS.clear()
     ledger = inbox.claim_run(77, requester_id=777)

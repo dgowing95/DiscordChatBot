@@ -301,7 +301,7 @@ def get_run(thread_id: int) -> RunLedger | None:
 
 
 def is_run_active(thread_id: int) -> bool:
-    """Whether a sandbox run is currently claimed in this thread."""
+    """Whether a workflow is currently claimed in this thread."""
     return get_run(thread_id) is not None
 
 

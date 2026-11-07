@@ -473,7 +473,7 @@ def _handled(handler, msg, set_messages):
 async def test_handle_message_scoped_lock_generates_concurrently_sends_serially():
     """Two same-channel messages handled on two worker tasks: their LLM runs
     overlap (the lock does NOT cover the LLM phase — this is what frees the
-    bot to answer in the same channel during a sandbox run), but their
+    bot to answer in the same channel during a brain call), but their
     chunked sends are serialized by the lock and never interleave.
 
     With the old FULL lock (build + LLM + send) message 2's generation would
@@ -592,7 +592,7 @@ async def test_handle_message_no_hint_when_channel_idle():
 @pytest.mark.asyncio
 async def test_handle_message_passes_client_to_text_llm_handler():
     # Regression: TextLLMHandler needs the discord.Client (forwarded to tool
-    # context as "discord_client") so run_code_sandbox's ask_user tool can
+    # context as "discord_client") so the brain's ask_user tool can
     # call client.wait_for() — handle_message must not silently drop it.
     captured = {}
 
@@ -881,7 +881,7 @@ async def test_generate_recovers_reasoning_from_a_failed_run():
     handler = _generate_handler(None)
     exc = MaxTurnsExceeded("Max turns (20) exceeded")
     exc.run_data = MagicMock()
-    exc.run_data.new_items = [_reasoning_item(summary=["i kept calling the sandbox"])]
+    exc.run_data.new_items = [_reasoning_item(summary=["i kept calling the brain"])]
 
     with patch("classes.text_llm_handler.Runner") as runner, \
          patch("classes.text_llm_handler.get_current_datetime", AsyncMock(return_value="now")), \
@@ -890,7 +890,7 @@ async def test_generate_recovers_reasoning_from_a_failed_run():
         answer = await handler.generate()
 
     assert answer == "Error"  # sentinel unchanged
-    assert handler.reasoning == "i kept calling the sandbox"
+    assert handler.reasoning == "i kept calling the brain"
 
 
 @pytest.mark.asyncio

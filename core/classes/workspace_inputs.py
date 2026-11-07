@@ -1,7 +1,7 @@
 """Which chat files a workspace run is given, and how each side is told (PURE,
 stdlib only).
 
-The old sandbox received nothing but its `task` string, so anything it was
+v2's code tool received nothing but its `task` string, so anything it was
 meant to work ON had to be squeezed through text: an uploaded CSV pasted in by
 the persona (when it could see it at all -- non-image attachments never
 reached the prompt), and a picture the bot had just drawn not at all. So

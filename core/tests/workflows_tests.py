@@ -1053,7 +1053,7 @@ def test_this_channel_means_where_it_was_asked():
 
 @pytest.mark.asyncio
 async def test_two_steps_of_a_wave_keep_their_same_named_files(monkeypatch):
-    from classes.workspace_tools import SandboxArtifact
+    from classes.workspace_tools import WorkspaceFile
     sent = []
 
     async def _post_files(channel, artifacts):
@@ -1061,8 +1061,8 @@ async def test_two_steps_of_a_wave_keep_their_same_named_files(monkeypatch):
         return [a.name for a in artifacts]
 
     monkeypatch.setattr(brain, "_post_files", _post_files)
-    files = [SandboxArtifact("data.csv", b"one", step="s1", wave=1),
-             SandboxArtifact("data.csv", b"two", step="s2", wave=1)]
+    files = [WorkspaceFile("data.csv", b"one", step="s1", wave=1),
+             WorkspaceFile("data.csv", b"two", step="s2", wave=1)]
     wf = SimpleNamespace(origin_channel=FakeChannel(77), thread=FakeChannel(500), artifacts=files)
     assert await workflows.post_workflow_copy(wf) == ["s1-data.csv", "s2-data.csv"]
     assert [a.data for a in sent] == [b"one", b"two"]

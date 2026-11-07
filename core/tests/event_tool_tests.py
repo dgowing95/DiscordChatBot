@@ -185,7 +185,7 @@ async def test_works_without_a_message_as_the_user_id():
 
 @pytest.mark.asyncio
 async def test_a_sandbox_run_uses_the_requester_it_fetched():
-    """A sandbox run has no message, and without the members intent the
+    """A brain call has no message, and without the members intent the
     cache usually misses its requester: it passes the Member it fetched."""
     actor = _member(ident=777)
     guild, context = _env(message=False)

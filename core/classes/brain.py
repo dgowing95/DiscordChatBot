@@ -44,7 +44,7 @@ import time
 import uuid
 
 import discord
-# httpx2, not httpx: openai>=3 speaks HTTPX2 (see the old sandbox code's note).
+# httpx2, not httpx: openai>=3 speaks HTTPX2 (see v2's code-tool note).
 import httpx2
 from agents import (
     AsyncOpenAI,
@@ -105,7 +105,7 @@ _BRAIN_KEYS = ("session", "out_dir", "job_dir", "workspace_root", "deliverables"
 # Positive examples over prohibitions: a list of don'ts was once copied
 # straight into a run. Sized and pinned by a test (brain_tests.py).
 #
-# It MUST rule out apply_patch by name: the SDK's default sandbox prompt
+# It MUST rule out apply_patch by name: the SDK's default SandboxAgent prompt
 # (suppressed, see build_brain_agent) tells the model to use an apply_patch
 # tool we do not expose, and a call to it aborts the whole run.
 #
@@ -404,7 +404,7 @@ GUARD_REFUSAL = ("The safety guard blocked this request, so the workspace cannot
 async def _workspace_allowed(context: dict) -> bool:
     """Whether this call's request passed the content guard. Checked once
     per call, at its first workspace action (a command, a file), like the
-    old sandbox's check on its task. A search, a poll or a memory save never
+    v2 code tool's check on its task. A search, a poll or a memory save never
     pays for the moderation call; web_search and fetch_url check their own
     input. Concurrent first actions share the one check. A workflow helper's
     context is a copy, so its check is kept on the workflow's
@@ -693,11 +693,11 @@ async def prepare_job(lease, job_id: str) -> tuple[str, str | None, str | None]:
     """Makes a job folder ready: out/, the shared/ and skills/ links, and
     the run marker. Returns (job_dir, out_dir, marker); out_dir and marker
     are None when the workspace could not say where it is."""
-    from classes.workspace_tools import _mark_run_start, _sandbox_output_dir
+    from classes.workspace_tools import _mark_run_start, _output_dir
     session = lease.session
     job_dir = lease.job_dir(job_id)
     job_path = lease.job_path(job_id)
-    out_dir = await _sandbox_output_dir(session, job_dir)
+    out_dir = await _output_dir(session, job_dir)
     if out_dir is not None:
         await session.exec("mkdir", "-p", out_dir, shell=False)
         # shared/ in the job folder is the server's kept files, so "save it

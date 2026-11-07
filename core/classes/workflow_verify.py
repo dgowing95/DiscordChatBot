@@ -308,7 +308,7 @@ async def _verdict(wf, ctx: dict, job_dir: str, progress,
     # research check runs in the steps' budget.
     outcome = await workflows._agent_run(
         wf, agent, "\n\n".join(filter(None, parts)), max_turns=CHECK_TURNS,
-        lane=llm_lanes.SUBAGENT, sandbox=True, progress=progress,
+        lane=llm_lanes.SUBAGENT, workspace=True, progress=progress,
         caller="workflow_verifier", ctx=ctx, seconds=CHECK_SECONDS,
         finish_up_at=CHECK_TURNS - CHECK_FINISH_UP_TURNS, finish_up=FINISH_UP,
         checking=research is None)

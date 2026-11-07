@@ -2,7 +2,7 @@
 
 Pure module (stdlib only). One place answers "which model/host/key/effort/
 timeout does role X use", for the persona (the personality that answers in
-chat), the brain (the agent in the code sandbox) and, from Tier 3, subagents;
+chat), the brain (the agent in the server's workspace) and, from Tier 3, subagents;
 and for the side jobs (research brief, image prompt rewrite, image check).
 
 Every role falls back to the bot's own LLM server (LLM_MODEL / LLM_HOST /

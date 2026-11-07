@@ -18,7 +18,7 @@ Shapes worth knowing (Discord's docs; check them again if this breaks):
   * thread names come in `threads`: an archived thread is often not in
     discord.py's cache.
 
-Saving messages to a file (save_messages_to_file, sandbox runs only) pages
+Saving messages to a file (save_messages_to_file, brain calls only) pages
 through the same search, 25 at a time, with `offset`. Discord refuses an
 offset over 9975, so one search can reach 10000 messages at most. Every
 message is written in full, as one JSON object per line, for code to read:
@@ -138,7 +138,7 @@ def _embed(embed: dict) -> str:
     """An embed as one line: author and title, then the description and each
     field as "name: value". Bots (game trackers, feeds) put everything that
     matters in the body and fields; showing only the title once left a
-    sandbox run with 25 copies of "[embed: Group Shared Storage]" and none
+    brain call with 25 copies of "[embed: Group Shared Storage]" and none
     of the items or values it had been asked to add up. Code-block fences
     are dropped and the whole is cut at EMBED_CHARS; the footer and images
     are left out."""
@@ -341,7 +341,7 @@ def export_filename(query: str, where: str, author: str) -> str:
 
 def export_summary(path: str, saved: int, total: int, first: dict | None,
                    stopped: str = "") -> str:
-    """What the sandbox model is told: where the file is, how much is in it,
+    """What the brain is told: where the file is, how much is in it,
     its shape (one real record, cut short), and why it stopped if it did."""
     if not saved:
         return "No messages matched, so no file was written."

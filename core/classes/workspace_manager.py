@@ -1,6 +1,6 @@
 """One long-lived Docker container per server: the server's workspace.
 
-It replaces the throwaway container every code sandbox call used to get.
+It replaces the throwaway container every v2 code-tool call used to get.
 A server's workspace survives between calls and core restarts, is snapshotted
 to Redis on a timer and before it stops, stops after WORKSPACE_IDLE_SECONDS
 unused, and gives each call its own folder (jobs/<id>/). The pure rules

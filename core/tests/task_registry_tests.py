@@ -40,9 +40,9 @@ def test_slow_tool_names_match_tool_functions():
 
 def test_register_and_unregister_roundtrip():
     ch = 1
-    assert mq.register_task_run(ch, "🐳 code sandbox", "write a script", run_key="c1")
+    assert mq.register_task_run(ch, "🧠 brain", "write a script", run_key="c1")
     # same run registered twice is a no-op
-    assert not mq.register_task_run(ch, "🐳 code sandbox", "write a script", run_key="c1")
+    assert not mq.register_task_run(ch, "🧠 brain", "write a script", run_key="c1")
     assert mq.unregister_task_run(ch, run_key="c1")
     # double unregister / unknown key is a no-op, not an error
     assert not mq.unregister_task_run(ch, run_key="c1")
@@ -61,10 +61,10 @@ def test_register_without_run_key_dedupes_on_source():
 
 def test_in_flight_hint_lists_running_tool_with_elapsed_and_source():
     ch = 3
-    mq.register_task_run(ch, "🐳 code sandbox", "write a script that prints pi",
+    mq.register_task_run(ch, "🧠 brain", "write a script that prints pi",
                          run_key="c1", started=BASE - 30)
     hint = mq.in_flight_hint(ch, now=BASE + 222)  # 4m 12s since BASE - 30
-    assert "🐳 code sandbox" in hint
+    assert "🧠 brain" in hint
     assert "running for 4m 12s" in hint
     assert "write a script that prints pi" in hint
     assert hint.startswith("Note:")
@@ -75,7 +75,7 @@ def test_in_flight_hint_empty_when_idle():
 
 def test_unregister_unknown_key_is_noop():
     ch = 8
-    mq.register_task_run(ch, "🐳 code sandbox", "task one", run_key="c1", started=BASE - 30)
+    mq.register_task_run(ch, "🧠 brain", "task one", run_key="c1", started=BASE - 30)
     mq.register_task_run(ch, "🎨 image generation", "a red fox", run_key="c2", started=BASE - 30)
     # removing the wrong key must not clear the other run
     assert not mq.unregister_task_run(ch, run_key="nope")
@@ -87,7 +87,7 @@ def test_unregister_unknown_key_is_noop():
 def test_hint_source_is_truncated():
     ch = 9
     long_source = "x" * 500
-    mq.register_task_run(ch, "🐳 code sandbox", long_source, run_key="c1", started=BASE - 30)
+    mq.register_task_run(ch, "🧠 brain", long_source, run_key="c1", started=BASE - 30)
     hint = mq.in_flight_hint(ch, now=BASE + 1)
     # _truncate keeps MAX_SOURCE_CHARS-1 chars + an ellipsis
     assert "x" * (mq.MAX_SOURCE_CHARS - 1) + "…" in hint
@@ -95,7 +95,7 @@ def test_hint_source_is_truncated():
 
 def test_channels_are_isolated():
     ch_a, ch_b = 11, 12
-    mq.register_task_run(ch_a, "🐳 code sandbox", "task a", run_key="c1", started=BASE - 30)
+    mq.register_task_run(ch_a, "🧠 brain", "task a", run_key="c1", started=BASE - 30)
     assert mq.in_flight_hint(ch_b, now=BASE + 1) == ""
     assert mq.in_flight_hint(ch_a, now=BASE + 1) != ""
 

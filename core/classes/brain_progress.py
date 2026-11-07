@@ -38,7 +38,7 @@ Rendering (streamed form):
   queue outgrows Discord's embed budget (25 fields / 6000 characters) the
   OLDEST fields are dropped first.
 
-The pure parts (SandboxTranscript, parse_exec_result) are unit-tested in
+The pure parts (WorkTranscript, parse_exec_result) are unit-tested in
 core/tests/brain_progress_tests.py.
 
 A workflow's scouts and researchers have their own, smaller embed
@@ -183,7 +183,7 @@ def _head(text: str, cap: int) -> str:
     return text[: cap - 2] + "… "
 
 
-class SandboxTranscript:
+class WorkTranscript:
     """The rolling queue of command/output blocks behind the live message.
 
     Pure (no Discord/SDK interaction): append events, render the tail.
@@ -437,7 +437,7 @@ class BrainProgressHooks(RunHooks):
                  footer: str | None = None, edit_interval: float = EDIT_INTERVAL_SECONDS):
         self.channel = channel
         self.stream = stream
-        self.transcript = SandboxTranscript(task, title=BRAIN_WORKING, files=files, footer=footer)
+        self.transcript = WorkTranscript(task, title=BRAIN_WORKING, files=files, footer=footer)
         self.edit_interval = edit_interval
         self._message: discord.Message | None = None
         self._started = False
@@ -507,7 +507,7 @@ class BrainProgressHooks(RunHooks):
                     if isinstance(call_id, str) and call_id:
                         self._call_blocks[call_id] = block
                 except Exception as e:  # a progress error must never kill the run
-                    logger.warning(f"Sandbox progress: ignoring transcript error: {e}")
+                    logger.warning(f"Brain progress: ignoring transcript error: {e}")
         elif name == "write_stdin":
             chars = args.get("chars") or ""
             if chars.strip("\n"):
@@ -540,7 +540,7 @@ class BrainProgressHooks(RunHooks):
             fn(*args, **kwargs)
             self._dirty = True
         except Exception as e:  # a progress error must never kill the run
-            logger.warning(f"Sandbox progress: ignoring transcript error: {e}")
+            logger.warning(f"Brain progress: ignoring transcript error: {e}")
 
     async def _maybe_flush(self, force: bool = False) -> None:
         if self._finalized or not self._started or not self._dirty:
@@ -565,7 +565,7 @@ class BrainProgressHooks(RunHooks):
         try:
             content, spec = self.transcript.render_message()
         except Exception as e:
-            logger.warning(f"Sandbox progress: render failed: {e}")
+            logger.warning(f"Brain progress: render failed: {e}")
             return
         embed = self._build_embed(spec)
         try:
@@ -576,12 +576,12 @@ class BrainProgressHooks(RunHooks):
         except discord.NotFound:
             # The message was deleted; fall back to a fresh send.
             self._message = None
-            logger.info("Sandbox progress: message deleted, will resend")
+            logger.info("Brain progress: message deleted, will resend")
             return
         except Exception as e:
             # Usually a Discord rate limit (edits: 5/minute per channel) or
             # a network error — back off and keep the brain's run going.
-            logger.warning(f"Sandbox progress: update failed, backing off: {e}")
+            logger.warning(f"Brain progress: update failed, backing off: {e}")
             self._backoff_until = time.monotonic() + BACKOFF_SECONDS
             return
         self._last_flush = time.monotonic()

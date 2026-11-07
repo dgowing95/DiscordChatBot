@@ -69,7 +69,7 @@ class FakeSession:
         self.hydrated.append(raw)
 
 
-class FakeSandboxClient:
+class FakeDockerClient:
     """DockerSandboxClient's surface the manager uses."""
 
     def __init__(self, daemon):
@@ -192,7 +192,7 @@ class Clock:
 class Env:
     def __init__(self, **env):
         self.daemon = FakeDaemon()
-        self.client = FakeSandboxClient(self.daemon)
+        self.client = FakeDockerClient(self.daemon)
         self.store = FakeStore()
         self.redis = FakeRedis()
         self.clock = Clock()
