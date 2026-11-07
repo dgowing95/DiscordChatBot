@@ -291,34 +291,6 @@ async def test_a_redelivered_message_is_recorded_once(claimed_thread):
 
 
 @pytest.mark.asyncio
-async def test_a_message_while_a_command_runs_gets_one_receipt_notice(claimed_thread):
-    import time as _time
-    main_mod = _import_main()
-    claimed_thread.busy_since = _time.monotonic()
-    with patch.object(main_mod, "client", MagicMock()):
-        first, second = _thread_message(msg_id=1), _thread_message("and bigger", msg_id=2)
-        await main_mod.on_message(first)
-        await main_mod.on_message(second)
-
-    first.reply.assert_awaited_once()
-    assert "look at this before the next step" in first.reply.await_args.args[0]
-    second.reply.assert_not_awaited()  # coalesced
-
-
-@pytest.mark.asyncio
-async def test_a_message_as_the_run_finishes_is_told_it_was_not_applied(claimed_thread):
-    main_mod = _import_main()
-    claimed_thread.finalize()
-    with patch.object(main_mod, "client", MagicMock()):
-        msg = _thread_message("and a csv")
-        await main_mod.on_message(msg)
-
-    msg.add_reaction.assert_awaited_once_with("⏳")
-    assert "hasn't been applied" in msg.reply.await_args.args[0]
-    assert claimed_thread.follow_ups[0].text == "and a csv"
-
-
-@pytest.mark.asyncio
 async def test_an_attachment_only_message_is_not_acknowledged_as_read(claimed_thread):
     main_mod = _import_main()
     with patch.object(main_mod, "client", MagicMock()):

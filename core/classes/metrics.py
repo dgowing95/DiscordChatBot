@@ -521,10 +521,6 @@ web_fetch_failures_total = Counter(
     ["reason"],
 )
 
-# Receipt -> presentation is bounded by one model call plus any running
-# command's checkpoint; receipt -> response adds the model's own turn.
-WORKFLOW_INPUT_BUCKETS = (1, 2.5, 5, 10, 20, 30, 60, 120, 300, 600)
-
 workflow_thread_messages_total = Counter(
     "discord_bot_workflow_thread_messages_total",
     "Thread messages offered to a running workflow, by delivery result",

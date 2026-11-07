@@ -51,8 +51,6 @@ MAX_MESSAGE_CHARS = 1000
 # deliver() rejects new input (FULL) instead, so the context the coordinator
 # re-sends on every call stays bounded either way.
 MAX_RETAINED_EVENTS = 60
-# Messages that arrive after the finalization boundary (see finalize()).
-MAX_FOLLOW_UPS = 10
 MAX_AUTHOR_CHARS = 40
 
 RECEIVED = "received"
@@ -83,16 +81,11 @@ EMPTY = "empty"
 ATTACHMENT_ONLY = "attachment_only"
 TOO_LONG = "too_long"
 FULL = "full"
-FINISHING = "finishing"
 
-# Run lifecycle. SETUP covers the awaits between claim and the first model
-# call (snapshot lookup, container start); input accepted then is presented
-# at the first call. FINALIZING starts at the finalization boundary: artifact
-# collection, persistence and Discord delivery are under way and nothing new
-# can be applied. The claim is held through all of it.
+# Run lifecycle: open from the claim to release_run, then CLOSED. A workflow
+# releases its claim the moment it ends, so a later message is no longer its.
 SETUP = "setup"
 RUNNING = "running"
-FINALIZING = "finalizing"
 CLOSED = "closed"
 
 
@@ -123,8 +116,6 @@ class ThreadEvent:
     anchor: int | None = None
     presented_at: float | None = None
     addressed_at: float | None = None
-    gate_refusals: int = 0
-    last_refused_call: int | None = None
     # The open question this may be answering (see OpenQuestion). A candidate
     # only: the model decides whether it is an answer, a correction or new.
     question_id: int | None = None
@@ -151,15 +142,9 @@ class RunLedger:
     owner: object | None = None
     state: str = SETUP
     events: list[ThreadEvent] = field(default_factory=list)
-    follow_ups: list[ThreadEvent] = field(default_factory=list)
     question: OpenQuestion | None = None
     # seq of the newest accepted event (0 = none yet). Monotonic.
     revision: int = 0
-    # Bumped whenever the model accepts or completes a change (will_apply /
-    # done), so attachments chosen before it can be recognised as outdated.
-    change_revision: int = 0
-    busy_since: float | None = None
-    last_receipt_notice: float = 0.0
     compacted: int = 0
     _next_qid: int = 1
     _changed: asyncio.Event | None = None
@@ -180,8 +165,7 @@ class RunLedger:
             # 0/None are not real ids (a forwarded message can
             # lack one), so they never take part in de-duplication.
             return False
-        return any(e.message_id == message_id for e in self.events) or any(
-            e.message_id == message_id for e in self.follow_ups)
+        return any(e.message_id == message_id for e in self.events)
 
     def deliver(self, message_id, author_id, author_name, text,
                 reply_to=None, has_attachments: bool = False, stop_word: bool = False) -> str:
@@ -212,13 +196,6 @@ class RunLedger:
             reply_to=int(reply_to) if reply_to else None,
             has_attachments=bool(has_attachments),
         )
-        if self.state == FINALIZING:
-            # Past the boundary nothing can be applied any more. Kept: never
-            # silently dropped, never claimed handled.
-            if len(self.follow_ups) >= MAX_FOLLOW_UPS:
-                return FULL
-            self.follow_ups.append(event)
-            return FINISHING
         pending = self.unaddressed()
         if not (stop_word and event.is_requester):
             if len(pending) >= MAX_PENDING_MESSAGES:
@@ -303,8 +280,6 @@ class RunLedger:
             if e.addressed_at is None:
                 e.addressed_at = now
             updated.append(e)
-        if updated and decision in ("will_apply", "done"):
-            self.change_revision += 1
         q = self.question
         if q is not None and any(e.question_id == q.qid for e in updated):
             # The model has now looked at a candidate answer and said what it
@@ -331,43 +306,6 @@ class RunLedger:
 
     def has_input_after(self, seq: int) -> bool:
         return any(e.seq > seq for e in self.events)
-
-    def finalize(self) -> None:
-        """The finalization boundary. From here on deliver() files messages
-        as follow-ups for a later run instead of accepting them into this
-        one — see FINISHING. Synchronous, so the caller's "anything left?"
-        check and this commit cannot be split by an arriving message."""
-        if self.state in (SETUP, RUNNING):
-            self.state = FINALIZING
-
-    # -- reporting ------------------------------------------------------------
-
-    def outcomes(self) -> list[dict]:
-        """What happened to each message, for the outer model and the thread's
-        closing note. `status` is one of: done, answered, noted, declined,
-        superseded, deferred (the model's own outcome), accepted (will_apply,
-        completion not confirmed), unacknowledged (the model never responded),
-        unseen (never reached a completed model call) or late (arrived after
-        the finalization boundary)."""
-        rows = []
-        for e in self.events:
-            if e.outcome == UNACKNOWLEDGED:
-                status = "unacknowledged"
-            elif e.stage == RECEIVED:
-                status = "unseen"
-            elif e.stage == PRESENTED:
-                status = "unacknowledged"
-            elif e.outcome == "will_apply":
-                status = "accepted"
-            else:
-                status = e.outcome or "noted"
-            rows.append({"author": e.author_name, "text": e.text,
-                         "status": status, "reply": e.reply})
-        for e in self.follow_ups:
-            rows.append({"author": e.author_name, "text": e.text,
-                         "status": "late", "reply": ""})
-        return rows
-
 
 # thread id -> the ledger of the run claimed in it. A thread is "active" iff
 # it has an entry here. claim_run/release_run own the key's lifetime.

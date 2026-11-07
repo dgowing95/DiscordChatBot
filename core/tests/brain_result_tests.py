@@ -119,7 +119,7 @@ def test_the_same_call_three_times_in_a_row_warns_then_stops():
     assert guard.record("web_search", '{"search_request":"x"}') is None  # same, other spacing
     assert guard.record("web_search", {"search_request": "x"}) == REPEAT
     note = guard.note()
-    assert "repeating `web_search`" in note and "report" in note
+    assert "repeating `web_search`" in note and "finish now" in note
     assert guard.note() is None  # once
     assert not guard.should_stop()
     for _ in range(3):

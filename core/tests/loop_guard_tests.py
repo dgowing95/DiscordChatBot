@@ -9,7 +9,8 @@ def test_the_same_page_fetched_again_and_again_is_a_loop_however_far_apart():
              ("exec_command", {"cmd": "ls"}), ("fetch_url", page)]
     kinds = [guard.record(tool, args) for tool, args in calls]
     assert kinds == [None, None, None, None, AGAIN]
-    assert "gives the same answer" in guard.note()
+    note = guard.note()
+    assert "gives the same answer" in note and "`report`" not in note
     assert not guard.should_stop()
 
 

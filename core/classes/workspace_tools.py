@@ -348,7 +348,6 @@ async def view_image(wrapper: RunContextWrapper[dict], path: str, question: str 
         return "That path is outside the workspace. Use one relative to your working directory."
     if ctx.get("image_views", 0) >= MAX_IMAGE_VIEWS:
         return f"You have viewed {MAX_IMAGE_VIEWS} pictures in this run, which is the limit."
-    ctx["image_views"] = ctx.get("image_views", 0) + 1
     # Size first, so a huge file is never read into core to be refused.
     try:
         stat = await session.exec("stat", "-c", "%s", "--", where, shell=False)
@@ -362,6 +361,8 @@ async def view_image(wrapper: RunContextWrapper[dict], path: str, question: str 
         return f"Could not read {path!r}."
     if not result.ok():
         return f"Could not read {path!r}."
+    # Counted here: a wrong path or an unreadable file costs no vision call.
+    ctx["image_views"] = ctx.get("image_views", 0) + 1
     shows = await image_review.describe_image(result.stdout, str(question or "").strip())
     if shows is None:
         return f"Could not view {path!r}: it may not be a picture, or nothing here can see."

@@ -533,7 +533,6 @@ async def _run(wf: Workflow) -> None:
         for helper in helpers:
             helper.cancel()
         if wf.ledger is not None:
-            wf.ledger.finalize()
             thread_inbox.release_run(wf.thread.id, wf.ledger)
         if origin_id is not None:
             message_queue.unregister_task_run(origin_id, f"workflow:{wf.id}")

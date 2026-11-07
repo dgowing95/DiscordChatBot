@@ -894,6 +894,20 @@ async def test_view_image_refuses_what_it_should_not_read():
 
 
 @pytest.mark.asyncio
+async def test_a_wrong_path_costs_no_view(monkeypatch):
+    from classes import image_review
+    monkeypatch.setattr(image_review, "describe_image", AsyncMock(return_value="a chart"))
+    missing = MagicMock()
+    missing.exec = AsyncMock(return_value=_exec_result(b"", ok=False))
+    ctx = _view_ctx(missing)
+    await _view(ctx, path="out/typo.png")
+    assert ctx.context.get("image_views", 0) == 0
+    ctx.context["session"] = _picture_session()
+    await _view(ctx, path="out/chart.png")
+    assert ctx.context["image_views"] == 1
+
+
+@pytest.mark.asyncio
 async def test_view_image_has_a_limit_per_run():
     session = MagicMock()
     ctx = _view_ctx(session, image_views=prod_sandbox_agent.MAX_IMAGE_VIEWS)

@@ -95,7 +95,7 @@ class LoopGuard:
                 STALE: "(Your last few tool calls repeat ones you already made.",
                 AGAIN: f"(You have made this `{tool}` call before, and it gives the same answer "
                        "every time.",
-            }[kind] + (" Change your approach, or call `report` now with what you have"
+            }[kind] + (" Change your approach, or finish now with what you have"
                        " and what is still missing.)")
         return kind
 
