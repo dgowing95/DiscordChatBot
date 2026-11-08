@@ -145,3 +145,12 @@ def test_a_long_text_of_a_notice_is_cut_in_the_history_not_on_the_card():
     request = "word " * 600  # 3000 characters, pasted by someone
     text = K.notice_for_history("bot", ["-# 🧠 Working on it", K.quote(request), "short note"])
     assert len(text) < K.HISTORY_TEXT_CHARS + 200 and "…" in text and "short note" in text
+
+
+def test_text_of_emoji_fills_its_messages():
+    # An emoji is 1 character and 2 units: the cut once took the units over
+    # off the characters, and 4000 emoji went over 24 messages, not 3.
+    cards = K.split(K.CardSpec(body=[K.Text(chr(0x1F600) * 4000)]))
+    assert len(cards) == 3
+    assert all(sum(K.units(b.content) for b in c) <= K.TEXT_BUDGET for c in cards)
+    assert "".join(b.content for c in cards for b in c).count(chr(0x1F600)) == 4000

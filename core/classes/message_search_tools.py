@@ -25,7 +25,7 @@ import discord
 from agents import RunContextWrapper, function_tool
 from discord.http import Route
 
-from classes import card
+from classes import card, card_kit as K
 from classes.tool_cards import (
     READING_MESSAGES,
     SAVING_MESSAGES,
@@ -108,10 +108,12 @@ async def search_messages(wrapper: RunContextWrapper[dict], query: str, channel:
     context["message_search_calls"] = context.get("message_search_calls", 0) + 1
     logger.info(f"Searching {scope.where} for {scope.query!r} (author {scope.author_id}, call "
                 f"{context['message_search_calls']})")
-    await card.notice(scope.current, message_search_card(
-        SEARCHING_MESSAGES, message_search_line(scope.query, scope.where, scope.author)))
+    spec = message_search_card(
+        SEARCHING_MESSAGES, message_search_line(scope.query, scope.where, scope.author))
+    live = await card.notice(scope.current, spec)
     body = await _search_page(scope, limit)
     if isinstance(body, str):
+        _failed(live, spec)
         return body
     text = format_results(body, scope.guild.id, _channel_names(scope.guild), scope.query,
                           scope.where)
@@ -210,9 +212,10 @@ async def save_messages_to_file(wrapper: RunContextWrapper[dict], query: str = "
     wanted = clamp_export(max_messages)
     logger.info(f"Saving up to {wanted} messages from {scope.where} for {scope.query!r} "
                 f"(author {scope.author_id})")
-    await card.notice(scope.current, message_search_card(
+    spec = message_search_card(
         SAVING_MESSAGES, message_search_line(scope.query, scope.where, scope.author),
-        "For code to count or chart them"))
+        "For code to count or chart them")
+    live = await card.notice(scope.current, spec)
     names = _channel_names(scope.guild)
     records, seen, total, size, stopped = [], set(), 0, 0, ""
     offset = 0
@@ -220,6 +223,7 @@ async def save_messages_to_file(wrapper: RunContextWrapper[dict], query: str = "
         body = await _search_page(scope, MAX_LIMIT, offset, newest_first=True)
         if isinstance(body, str):
             if not records:
+                _failed(live, spec)
                 return body
             stopped = (f"Stopped early: Discord stopped answering after {len(records)} "
                        f"messages, so the file holds only those.")
@@ -258,9 +262,18 @@ async def save_messages_to_file(wrapper: RunContextWrapper[dict], query: str = "
                             io.BytesIO(("\n".join(records) + "\n").encode("utf-8")))
     except Exception as e:
         logger.warning(f"could not write the message file: {e}")
+        _failed(live, spec)
         return "The messages were found but could not be written to your workspace."
     logger.info(f"Saved {len(records)} of {total} messages to in/{name}")
     return export_summary(f"in/{name}", len(records), total, json.loads(records[0]), stopped)
+
+
+def _failed(live, spec) -> None:
+    """The card of a search or read that did not work says so: a notice
+    comes back in later prompts, where "Searching..." would read as still
+    going."""
+    if live is not None:
+        live.show_soon(K.finished(spec, "It didn't work"))
 
 
 async def _input_dir(context: dict, session) -> str:
@@ -343,8 +356,8 @@ async def read_messages_around(wrapper: RunContextWrapper[dict], message: str,
     before, after = clamp_side(before), clamp_side(after)
     logger.info(f"Reading {before}/{after} messages around {message_id} in {place.id} (call "
                 f"{context['message_context_calls']})")
-    await card.notice(current, message_search_card(
-        READING_MESSAGES, f"Around a message in #{place.name}"))
+    spec = message_search_card(READING_MESSAGES, f"Around a message in #{place.name}")
+    live = await card.notice(current, spec)
     try:
         anchor = await client.http.get_message(place.id, message_id)
         older, newer = await asyncio.gather(
@@ -353,12 +366,15 @@ async def read_messages_around(wrapper: RunContextWrapper[dict], message: str,
             client.http.logs_from(place.id, after, after=message_id) if after
             else asyncio.sleep(0, []))
     except discord.NotFound:
+        _failed(live, spec)
         return ("That message doesn't exist any more (it may have been deleted), or the link "
                 "is wrong. Tell the user.")
     except discord.Forbidden:
+        _failed(live, spec)
         return _NO_HISTORY_TEXT
     except discord.HTTPException as e:
         logger.warning(f"reading messages around {message_id} failed: {e}")
+        _failed(live, spec)
         return "Discord didn't return the messages. Tell the user to try again later."
     return format_context(anchor, older, newer, guild.id, place.id, place.name, before, after)
 

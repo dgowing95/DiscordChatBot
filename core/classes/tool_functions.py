@@ -261,11 +261,12 @@ async def generate_image(wrapper: RunContextWrapper[dict], prompt: str,
     # The prompt the image model is given, not the requested one, is what the
     # card shows: it is the thing worth seeing when the result does not match
     # what was asked for.
-    live = None
+    live = drawing = None
 
     async def announce(first_prompt):
-        nonlocal live
-        live = await card.notice(channel, tool_cards.drawing_card(first_prompt, editing))
+        nonlocal live, drawing
+        drawing = tool_cards.drawing_card(first_prompt, editing)
+        live = await card.notice(channel, drawing)
 
     # What was asked, for the check of the finished picture: the message, or
     # in a voice call (no message) what the speaker said.
@@ -275,6 +276,8 @@ async def generate_image(wrapper: RunContextWrapper[dict], prompt: str,
         result = await create_image(prompt, user_request, reference=source, on_first_prompt=announce)
     except Exception as e:
         logger.warning(f"Image generation failed: {e}")
+        if live is not None:  # not left saying it is drawing
+            live.show_soon(K.finished(drawing, "It didn't work", colour=K.FAIL))
         return ("Image generation failed. Tell the user the image service is "
                 "unavailable right now and do not retry.")
     # The picture goes into its own card, with the prompt it was drawn from

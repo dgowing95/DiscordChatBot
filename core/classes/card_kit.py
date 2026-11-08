@@ -264,13 +264,16 @@ def split_text(text: str, limit: int) -> tuple[str, str]:
     in the second part."""
     if units(text) <= limit:
         return text, ""
-    room = limit
+    room = limit  # in Python characters, which _cut slices by
     while True:
         head, tail = _cut(text, room)
-        over = units(head) - limit
-        if over <= 0 or room <= 1:
+        size = units(head)
+        if size <= limit or room <= 1:
             return head, tail
-        room = max(1, room - over)
+        # Shrunk by how far over it went, as a ratio: characters and units
+        # differ (an emoji is 1 and 2), so taking the units over off the
+        # characters cut text of emoji into dozens of small messages.
+        room = max(1, room * limit // size)
 
 
 def _cut(text: str, limit: int) -> tuple[str, str]:

@@ -172,7 +172,9 @@ async def test_the_panels_buttons_toggle_progress_and_ask_before_a_reset():
         press = _interaction()
         await _button(panel, "Live progress").callback(press)
         assert config.data["workspace_progress"] == "True"
-        updated = press.response.edit_message.await_args.kwargs["view"]
+        # Answered before the slow status read, then the card is redrawn.
+        press.response.defer.assert_awaited_once()
+        updated = press.edit_original_response.await_args.kwargs["view"]
         assert _button(updated, "Live progress").label == "Live progress: on"
         reset = _interaction(manage=False)
         await _button(panel, "Reset").callback(reset)

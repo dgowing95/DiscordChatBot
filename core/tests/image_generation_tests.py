@@ -758,3 +758,20 @@ async def test_a_long_prompt_goes_on_in_a_follow_up_with_no_pings(monkeypatch):
     assert first["attachments"][0].filename == "generated-image.png" and "files" not in rest
     assert "THE END" in view_text(rest["view"]) and "Reply to this" in view_text(rest["view"])
     assert first["allowed_mentions"].everyone is False and rest["allowed_mentions"].everyone is False
+
+
+@pytest.mark.asyncio
+async def test_a_failed_picture_does_not_leave_its_card_drawing():
+    import asyncio
+    channel, context = _tool_env()
+
+    async def fails(description, user_request="", reference=None, on_first_prompt=None):
+        await on_first_prompt(description)
+        raise RuntimeError("service down")
+    with patch.object(image_generation, "create_image", AsyncMock(side_effect=fails)):
+        result, channel, message = await _invoke(context, prompt="a red fox")
+    assert "failed" in result
+    await asyncio.sleep(0)  # the card's edit runs in the background
+    await asyncio.sleep(0)
+    closed = message.edit.await_args.kwargs["view"]
+    assert "It didn't work" in view_text(closed) and "10" not in view_text(closed)

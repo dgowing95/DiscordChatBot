@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import pytest
 
-from classes import message_search_format as msf
+from classes import card_kit as K, message_search_format as msf
 
 GUILD_ID = 100000000000000001
 GENERAL_ID = 200000000000000002
@@ -155,8 +155,11 @@ async def _search(context, **arguments):
 
 @pytest.fixture(autouse=True)
 def no_cards(monkeypatch):
+    """The notice a tool posts: its card, whose show_soon a failure calls."""
     from classes import card
-    monkeypatch.setattr(card, "notice", AsyncMock())
+    live = MagicMock()
+    monkeypatch.setattr(card, "notice", AsyncMock(return_value=live))
+    return live
 
 
 @pytest.mark.asyncio
@@ -222,9 +225,12 @@ async def test_nsfw_follows_the_channel_asked_in():
 
 
 @pytest.mark.asyncio
-async def test_not_indexed_yet():
+async def test_not_indexed_yet(no_cards):
     context, _ = _env(body={"message": "Index not yet available. Try again later", "code": 110000})
     assert (await _search(context, query="x")) == msf.NOT_INDEXED_TEXT
+    # Its card does not keep saying it is searching.
+    closed = no_cards.show_soon.call_args.args[0]
+    assert closed.footer == "It didn't work" and closed.colour == K.CLOSED
 
 
 @pytest.mark.asyncio

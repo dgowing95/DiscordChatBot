@@ -195,3 +195,12 @@ async def test_a_file_that_cannot_be_written_is_named_as_not_provided(out_dir, s
     # What the outer model is told comes from these, so a failed write is
     # never reported as given.
     assert given == [] and problems == ["a.csv (could not be copied in)"]
+
+
+def test_a_file_is_found_by_the_name_it_had_before_it_was_posted():
+    # The brain made "Sales Chart (Q1).png"; it was uploaded as
+    # "Sales_Chart_Q1.png" (card.safe_filename), and the persona knows the first.
+    posted = si.Candidate("Sales_Chart_Q1.png", 10, None)
+    chosen, missing, _ = si.select([], [posted], ["Sales Chart (Q1).png"], 1000)
+    assert chosen == [posted] and missing == []
+    assert si.select([], [posted], ["Sales Chart (Q2).png"], 1000)[1] == ["Sales Chart (Q2).png"]

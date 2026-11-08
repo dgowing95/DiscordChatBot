@@ -1142,7 +1142,9 @@ def file_card(name: str, caption: str = ""):
 
 async def _post_files(channel, artifacts) -> list[str]:
     """Sends each file to the channel (its caption beside it) and returns
-    the names actually sent. Under the channel's lock, like a reply's
+    the names of those sent, as the brain named them: it is uploaded under
+    card.safe_filename's, and a later lookup matches either
+    (workspace_inputs.name_key). Under the channel's lock, like a reply's
     chunks: since v3 they land in the asking channel, not a thread, so
     without it a file could land between another reply's chunks. Safe to
     take here: no holder of that lock waits on a model run."""

@@ -164,8 +164,11 @@ async def _status_panel(guild_id, user_id: int) -> K.CardSpec:
     on = await progress_enabled(guild_id)
 
     async def toggle(ctx: discord.Interaction):
+        # Answered first: the status read below (a docker exec) can take
+        # longer than Discord's 3 seconds, as /workspace status defers too.
+        await ctx.response.defer()
         await configManager().update_setting(SETTING, str(not on), ctx.guild_id)
-        await ctx.response.edit_message(view=card.views(
+        await ctx.edit_original_response(view=card.views(
             await _status_panel(ctx.guild_id, user_id), timeout=PANEL_SECONDS)[0])
 
     async def reset(ctx: discord.Interaction):

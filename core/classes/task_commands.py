@@ -33,8 +33,8 @@ def register_task_commands(tree, client) -> None:
         if voice_gate.active(ctx.guild_id):
             await card.reply(ctx, K.heads_up(VOICE_BUSY_LABEL, VOICE_BUSY_REPLY))
             return
-        message = (await card.reply(ctx, workflows.starter_card(request, PLAN_COMING),
-                                    ephemeral=False))[0]
+        sent = await card.reply(ctx, workflows.starter_card(request, PLAN_COMING), ephemeral=False)
+        message = sent[0]
         run_ctx = {"guild_id": ctx.guild_id, "user_id": ctx.user.id,
                    "requester_name": getattr(ctx.user, "display_name", None) or ctx.user.name,
                    "channel": ctx.channel, "discord_client": client}
@@ -42,11 +42,18 @@ def register_task_commands(tree, client) -> None:
                                                 message=message)
         if not result.ok:
             try:
-                # The request is clipped, not the reason: it carries the link
-                # to the workflow already running.
-                spec = workflows.starter_card(request, f"❌ Not started. {_plain(result.text)}")
-                spec.colour = K.FAIL
-                await message.edit(view=card.views(spec)[0], allowed_mentions=card.NO_MENTIONS)
+                # The reason first (it carries the link to the workflow
+                # already running), so it is on the first message even when
+                # a long request takes more than one.
+                spec = K.CardSpec(label="🧵 Big job · not started", colour=K.FAIL, body=[
+                    K.Text(f"❌ {_plain(result.text)}"), K.Divider(), K.Text(K.quote(request))])
+                views = card.views(spec)
+                for part, view in zip(sent, views):
+                    await part.edit(view=view, allowed_mentions=card.NO_MENTIONS)
+                for extra in sent[len(views):]:  # no "a plan will appear" left up
+                    await extra.delete()
+                for view in views[len(sent):]:  # longer now: the rest of the request
+                    await ctx.followup.send(view=view, allowed_mentions=card.NO_MENTIONS, wait=True)
             except Exception as e:
                 logger.warning(f"/task: could not say why it did not start: {e}")
 

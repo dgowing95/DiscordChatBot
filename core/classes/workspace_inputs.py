@@ -82,9 +82,18 @@ def human_size(size) -> str:
     return f"{size / 1_000_000:.1f} MB"
 
 
+def name_key(name: str) -> str:
+    """A file name as matched against another: its letters and digits,
+    lowercase. A name is rewritten on the way (Discord's upload, a card's
+    card.safe_filename, safe_name here), so "Sales Chart (Q1).png" is posted
+    as "Sales_Chart_Q1.png" while the persona was told the first."""
+    base = (name or "").replace("\\", "/").rsplit("/", 1)[-1]
+    return "".join(ch for ch in base.lower() if ch.isascii() and ch.isalnum())
+
+
 def _matches(candidate, wanted: str) -> bool:
-    want = (wanted or "").strip().lower()
-    return bool(want) and want in (candidate.name.lower(), safe_name(candidate.name).lower())
+    want = name_key((wanted or "").strip())
+    return bool(want) and want == name_key(candidate.name)
 
 
 def select(given, recent, requested, max_bytes: int):

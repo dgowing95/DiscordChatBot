@@ -2221,3 +2221,30 @@ def test_a_blank_dependency_is_ignored():
         max_steps=4)
     assert problems == []
     assert plan.steps[0].depends_on == []
+
+
+@pytest.mark.asyncio
+async def test_task_says_why_it_did_not_start_on_its_first_message(monkeypatch):
+    # A request of emoji counts double, so it can take two messages; the
+    # reason went in the footer, on the last one, which was never edited.
+    from classes import task_commands, voice_gate
+    commands = {}
+    tree = SimpleNamespace(command=lambda **kw: (lambda f: commands.setdefault(kw["name"], f)))
+    task_commands.register_task_commands(tree, client=None)
+    monkeypatch.setattr(voice_gate, "active", lambda guild_id: False)
+    first = MagicMock()
+    first.edit = AsyncMock()
+    ctx = card_interaction(guild_id=1, user=SimpleNamespace(id=5, name="ana", display_name="Ana"),
+                           channel=FakeChannel(77))
+    ctx.original_response = AsyncMock(return_value=first)
+    monkeypatch.setattr(workflows, "start_workflow", AsyncMock(return_value=SimpleNamespace(
+        ok=False, text="One is already running: https://discord.com/x. " + "It is a long one. " * 20
+        + "Tell them where it is.")))
+    await commands["task"](ctx, "🧵" * 1800)
+    shown = view_text(first.edit.await_args.kwargs["view"])
+    assert "not started" in shown and "https://discord.com/x" in shown
+    assert "Tell them" not in shown
+    # The card the request was posted as fit one message; with the reason it
+    # takes two, and the rest of the request goes on in a follow-up.
+    rest = view_text(ctx.followup.send.await_args.kwargs["view"])
+    assert rest.count("🧵") + shown.count("🧵") == 1800 + 1  # and the label's
