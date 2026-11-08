@@ -4,11 +4,22 @@ The rules, the prompt and every string the model sees are in
 research_format.py (pure, and why this replaced the old snippet-only search
 is there too); this module only does the I/O. Fails soft at each step: no
 pages read, or a brief that fails, still returns the search results.
+
+The search itself runs in a worker process (classes/search_worker.py), one
+search at a time across the bot:
+  - in a process of its own because the search library's native code once
+    crashed the whole bot (search_worker's docstring); there, a crash costs
+    one search, and the next search starts a new worker;
+  - one at a time because that crash came with four searches at once, and
+    because the search engines rate-limit parallel searches hard (six at
+    once: up to five of six refused). Workflow helpers that search side by
+    side wait a few seconds for each other instead.
 """
 import asyncio
+import json
 import logging
-
-from ddgs import DDGS
+import sys
+from pathlib import Path
 
 from classes import research_format as rf
 from classes.response_filter import strip_thinking
@@ -20,10 +31,108 @@ logger = logging.getLogger(__name__)
 _llm = SideLLM("web_research", rf.research_config)
 
 
+# One search, the worker's own wait on each engine included. Past it the
+# worker is killed (it may be stuck) and the next search starts a new one.
+SEARCH_TIMEOUT_SECONDS = 30
+# A reply is one JSON line: the results' titles, links and snippets.
+_REPLY_LIMIT = 4 * 1024 * 1024
+_CORE_DIR = Path(__file__).resolve().parents[1]
+
+
+class SearchWorker:
+    """The worker process and the lock that keeps it to one search at a
+    time. One per event loop (worker())."""
+
+    def __init__(self, command=None):
+        self.command = command or [sys.executable, "-m", "classes.search_worker"]
+        self.lock = asyncio.Lock()
+        self.proc = None
+        self.loop = asyncio.get_running_loop()
+        self._reaping: set = set()
+
+    async def _process(self):
+        if self.proc is None or self.proc.returncode is not None:
+            self.proc = await asyncio.create_subprocess_exec(
+                *self.command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                cwd=str(_CORE_DIR), limit=_REPLY_LIMIT)
+        return self.proc
+
+    def _drop(self) -> None:
+        """Kills the worker (it may be stuck, or a late reply would answer
+        the next search) and waits for its end in the background, so its
+        pipes are closed. Synchronous: it also runs while a search is being
+        cancelled."""
+        proc, self.proc = self.proc, None
+        if proc is None:
+            return
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+        task = self.loop.create_task(self._reap(proc))
+        self._reaping.add(task)
+        task.add_done_callback(self._reaping.discard)
+
+    @staticmethod
+    async def _reap(proc) -> None:
+        try:
+            await asyncio.wait_for(proc.wait(), 10)
+        except Exception as e:
+            logger.warning(f"Search worker {proc.pid} did not end when killed: {e!r}")
+
+    async def close(self) -> None:
+        """Ends the worker and waits for it (tests; the bot's exit closes
+        its stdin, which ends it too)."""
+        if self.proc is not None and self.proc.returncode is None and self.proc.stdin:
+            self.proc.stdin.close()
+        self._drop()
+        await asyncio.gather(*self._reaping, return_exceptions=True)
+
+    async def search(self, query: str, max_results: int) -> list:
+        """The engines' results. Raises RuntimeError when the search failed,
+        took too long, or the worker ended (a crash): the caller fails soft."""
+        async with self.lock:
+            proc = await self._process()
+            try:
+                request = json.dumps({"query": query, "max_results": max_results})
+                proc.stdin.write((request + "\n").encode())
+                await proc.stdin.drain()
+                line = await asyncio.wait_for(proc.stdout.readline(), SEARCH_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                self._drop()
+                raise RuntimeError(f"the search took over {SEARCH_TIMEOUT_SECONDS} seconds")
+            except asyncio.CancelledError:
+                self._drop()
+                raise
+            except (OSError, ValueError) as e:  # a pipe to a worker that ended
+                self._drop()
+                raise RuntimeError(f"the search worker stopped ({e})")
+            if not line:
+                code = proc.returncode if proc.returncode is not None else "unknown"
+                logger.warning(f"Search worker ended (exit {code}); the next search starts a new one")
+                self._drop()
+                raise RuntimeError("the search worker stopped")
+            reply = json.loads(line)
+            if not reply.get("ok"):
+                raise RuntimeError(reply.get("error") or "the search failed")
+            return reply.get("results") or []
+
+
+_worker: SearchWorker | None = None
+
+
+def worker() -> SearchWorker:
+    """This event loop's search worker (tests run several loops)."""
+    global _worker
+    if _worker is None or _worker.loop is not asyncio.get_running_loop():
+        _worker = SearchWorker()
+    return _worker
+
+
 async def search(query: str) -> list:
-    """Raises like DDGS does; the caller says so to the model."""
-    raw = await asyncio.to_thread(DDGS().text, query, max_results=rf.SEARCH_RESULTS)
-    return rf.clean_results(raw)
+    """Raises when the search fails; the caller says so to the model."""
+    return rf.clean_results(await worker().search(query, rf.SEARCH_RESULTS))
 
 
 async def _read_one(url: str):
