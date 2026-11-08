@@ -991,7 +991,9 @@ def _model_settings(role: str):
 
 def manager_instructions() -> str:
     from classes.image_generation import image_generation_enabled
-    return MANAGER_INSTRUCTIONS + (MANAGER_IMAGE_LINE if image_generation_enabled() else "")
+    from classes.brain_policy import SAFETY_RULE
+    return (MANAGER_INSTRUCTIONS + (MANAGER_IMAGE_LINE if image_generation_enabled() else "")
+            + SAFETY_RULE)
 
 
 def _manager(mode: str, rounds=()):
@@ -1022,6 +1024,8 @@ def _subagent(role: str):
         instructions = SUBAGENT_INSTRUCTIONS + ROLE_LINES[role]
         if role == wp.IMPLEMENTER and review_enabled():
             instructions += IMPLEMENTER_VIEW_LINE
+    from classes.brain_policy import SAFETY_RULE
+    instructions += SAFETY_RULE
     return SandboxAgent(
         name="Helper", model=brain.build_role_model(SUBAGENT),
         instructions=instructions,

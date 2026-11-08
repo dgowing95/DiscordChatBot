@@ -544,6 +544,10 @@ question in the persona's voice), `image_prompt.SYSTEM_PROMPT` (~2050, the SDXL 
 - **Prefer a positive example over a list of prohibitions.** A model given a list of things not to
   choose went on to choose items straight off the list. The prompts show the shape instead
   (`ask_brain`'s examples, the `report(...)` call in `BRAIN_INSTRUCTIONS`).
+- **One safety rule** (`brain_policy.SAFETY_RULE`, ~230 characters, ceiling 250, pinned by
+  `brain_tests.py`) ends the prompt of every agent that works: the brain, and a workflow's manager,
+  helpers, scouts and verifier. Each builder appends it, so the sizes below leave it out. The
+  content guard checks only search, links and pictures; this is what covers the rest.
 - Sizes are pinned by `brain_tests.py`: `BRAIN_INSTRUCTIONS` ~2240 characters (ceiling 2300; 2500 with `WORKFLOW_INSTRUCTIONS`, ~245, put first and only in calls offered `start_workflow`),
   `ask_brain` ~1750 including its JSON schema (ceiling 1760). Re-measure before adding. Skills have
   their own homes, pinned by `skill_tools_tests.py`: `SKILLS_INSTRUCTIONS` ~270 characters (ceiling

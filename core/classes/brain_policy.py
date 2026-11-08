@@ -17,6 +17,11 @@ on a queue worker gets a spare worker, so chat stays answered while the
 brain works (classes/message_queue.py); the cap bounds how many spares. A
 call that finds every slot busy for BRAIN_QUEUE_WAIT seconds is told the bot
 is busy.
+
+SAFETY_RULE is the one home of the rule every agent that does work is given
+(the brain, and a workflow's manager, helpers, scouts and verifier), since
+the content guard checks only search, links and pictures
+(classes/content_guard.py). Each builder appends it to its prompt.
 """
 import os
 
@@ -32,6 +37,12 @@ DEFAULT_UNPROMPTED_TIMEOUT_SECONDS = 180
 DEFAULT_ASK_TIMEOUT_SECONDS = 120
 DEFAULT_MAX_CONCURRENT = 3
 DEFAULT_QUEUE_WAIT_SECONDS = 120
+
+# Its size is pinned (brain_tests.py). Ends the prompt, after the agent's own
+# "Finish by calling ..." line, which "finish at once" points back to.
+SAFETY_RULE = ("\n\nTurn down any job meant to cause harm: malware, breaking into or attacking "
+               "a machine or an account, probing the network around this workspace, or spying "
+               "on someone. Do none of it, and finish at once saying you won't help with that.")
 
 
 def _env_int(name: str, default: int, env) -> int:

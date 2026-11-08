@@ -188,12 +188,14 @@ def plain_request(request: str, workflows: bool) -> str:
 
 def instructions(*, workflows: bool = False) -> str:
     """The brain's system prompt: BRAIN_INSTRUCTIONS, with the workflow bullet
-    first when this kind of call may start one, and the skills bullet last."""
+    first when this kind of call may start one, the skills bullet, and the
+    safety rule last (brain_policy.SAFETY_RULE)."""
     from classes import skill_format
     text = BRAIN_INSTRUCTIONS
     if workflows:
         text = text.replace(FIRST_RULE, WORKFLOW_INSTRUCTIONS + FIRST_RULE, 1)
-    return text + (SKILLS_INSTRUCTIONS if skill_format.enabled() else "")
+    return (text + (SKILLS_INSTRUCTIONS if skill_format.enabled() else "")
+            + brain_policy.SAFETY_RULE)
 
 
 def build_brain_model() -> LanedModel:

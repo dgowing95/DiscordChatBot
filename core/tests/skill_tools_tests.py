@@ -197,9 +197,10 @@ def test_brain_tools_include_skills_unless_switched_off(monkeypatch):
 def test_skills_instructions_are_small_and_off_when_disabled(monkeypatch):
     from classes import brain
     assert len(brain.SKILLS_INSTRUCTIONS) <= 400, len(brain.SKILLS_INSTRUCTIONS)
-    assert brain.instructions().endswith(brain.SKILLS_INSTRUCTIONS)
+    from classes.brain_policy import SAFETY_RULE
+    assert brain.instructions().endswith(brain.SKILLS_INSTRUCTIONS + SAFETY_RULE)
     monkeypatch.setenv("SKILLS_ENABLED", "0")
-    assert brain.instructions() == brain.BRAIN_INSTRUCTIONS
+    assert brain.instructions() == brain.BRAIN_INSTRUCTIONS + SAFETY_RULE
 
 
 def test_the_index_goes_in_the_task_between_the_request_and_the_folder():

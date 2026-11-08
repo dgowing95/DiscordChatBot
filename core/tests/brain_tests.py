@@ -542,6 +542,22 @@ def test_the_instructions_stay_small_and_keep_their_rules():
     assert "apply_patch" not in text
 
 
+def test_every_agent_that_works_gets_the_one_safety_rule(monkeypatch):
+    # The content guard checks only search, links and pictures; this is the
+    # rest. One home (brain_policy), appended by every builder, pinned small.
+    from classes import workflows
+    from classes import workflow_policy as wp
+    from classes.brain_policy import SAFETY_RULE
+    assert len(SAFETY_RULE) <= 250, len(SAFETY_RULE)
+    assert "finish at once" in SAFETY_RULE
+    assert brain.instructions().endswith(SAFETY_RULE)
+    assert brain.instructions(workflows=True).endswith(SAFETY_RULE)
+    assert workflows.manager_instructions().endswith(SAFETY_RULE)
+    monkeypatch.setattr(brain, "build_role_model", lambda role: None)
+    for role in (wp.SCOUT, wp.RESEARCHER, wp.IMPLEMENTER, wp.VERIFIER):
+        assert workflows._subagent(role).instructions.endswith(SAFETY_RULE), role
+
+
 def test_the_ask_brain_tool_stays_small():
     from classes.tool_functions import ask_brain
     size = len(ask_brain.description) + len(json.dumps(ask_brain.params_json_schema))
