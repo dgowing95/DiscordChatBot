@@ -927,18 +927,6 @@ async def test_views_asked_side_by_side_cannot_pass_the_limit_together(monkeypat
     assert ctx.context["image_views"] == workspace_tools.MAX_IMAGE_VIEWS
 
 
-@pytest.mark.asyncio
-async def test_a_blocked_request_cannot_read_the_workspace_through_view_image(monkeypatch):
-    from classes import brain, image_review
-    look = AsyncMock(return_value="the secret file")
-    monkeypatch.setattr(image_review, "describe_image", look)
-    brain._guard_workspace_tools()
-    blocked = asyncio.get_running_loop().create_future()
-    blocked.set_result((False, "flagged"))
-    ctx = _view_ctx(_picture_session(), brain_request="something bad", brain_guard=blocked)
-    assert await _view(ctx, path="out/chart.png") == brain.GUARD_REFUSAL
-    look.assert_not_awaited()
-
 
 @pytest.mark.asyncio
 async def test_view_image_has_a_limit_per_run():

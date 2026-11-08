@@ -33,6 +33,8 @@ where it changed, and what to do.
 - **`/workspace` replaces `/sandbox_progress_updates`** (status, reset, progress).
 - It can ask you a question with buttons when a guess would waste the work.
 - It no longer answers direct messages (it never worked there).
+- **The moderation check (`CONTENT_GUARD_*`) covers web searches, links and pictures only.** v2 also
+  checked the code sandbox's task; v3's brain is told to turn down harmful jobs itself instead.
 
 See [docs/brain.md](brain.md) for how it all looks in a server.
 

@@ -55,9 +55,12 @@ def store(monkeypatch):
 
 @pytest.fixture
 def allowed():
-    with patch.object(skill_tools, "check_web_request", AsyncMock(return_value=(True, ""))), \
-         patch.object(skill_commands, "check_web_request", AsyncMock(return_value=(True, ""))):
+    """Skills are never sent to the content guard (it checks only search,
+    links and images)."""
+    guard = AsyncMock(return_value=(True, ""))
+    with patch("classes.content_guard.check_web_request", guard):
         yield
+    guard.assert_not_awaited()
 
 
 @pytest.fixture
@@ -120,12 +123,6 @@ async def test_save_skill_tells_the_brain_what_to_fix(store, ctx, allowed):
     assert await store.list(GUILD) == []
     ctx["channel"].send.assert_not_called()
 
-
-@pytest.mark.asyncio
-async def test_save_skill_obeys_the_content_guard(store, ctx):
-    with patch.object(skill_tools, "check_web_request", AsyncMock(return_value=(False, "flagged"))):
-        out = await call(skill_tools.save_skill, ctx, name="bad-skill", description="d", steps="s")
-    assert "safety guard" in out and await store.list(GUILD) == []
 
 
 @pytest.mark.asyncio

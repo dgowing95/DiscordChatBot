@@ -14,6 +14,7 @@ from classes.llm_roles import PERSONA, role_config, role_warnings
 from classes.config_manager import configManager
 from classes.image_generation import (
     GENERATED_IMAGE_FILENAME,
+    ImageBlocked,
     create_image,
     image_generation_enabled,
 )
@@ -263,6 +264,10 @@ async def register_commands():
             # result is checked against.
             try:
                 result = await create_image(prompt, prompt)
+            except ImageBlocked:
+                await card.answer_deferred(ctx, K.error(
+                    "That prompt was blocked by the safety check.", "🚫 Couldn't make the image"))
+                return
             except Exception as e:
                 logger.warning(f"Image generation failed: {e}")
                 await card.answer_deferred(ctx, K.error(

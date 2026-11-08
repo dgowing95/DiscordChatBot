@@ -18,8 +18,6 @@ Why it works this way:
   the same. It goes after the trimming filter, which so never sees it.
 - **Nothing makes a helper follow it.** The check of the finished work
   (classes/workflow_verify.py) is what checking there is.
-- **New text passes the content guard first**: the guard in the run context only
-  ever saw the request.
 - **One message at a time, in the order they came** (wf.steering_lock, FIFO), so
   two sent seconds apart never reach a helper the other way round, though each
   is routed on its own. The review waits for a message's routing (wf.steer_tasks)
@@ -31,7 +29,7 @@ import logging
 import re
 from dataclasses import replace
 
-from classes import llm_lanes, workflows
+from classes import llm_lanes
 from classes import workflow_policy as wp
 from classes.llm_roles import BRAIN, role_config
 from classes.response_filter import strip_thinking
@@ -90,11 +88,8 @@ async def route(wf, text: str) -> set | None:
 
 
 async def steer(wf, event) -> None:
-    """A message from the requester, on its way to the steps it is about. One
-    that is blocked here is blocked again by the review, which says so."""
+    """A message from the requester, on its way to the steps it is about."""
     async with wf.steering_lock:
-        if not await workflows._allowed(wf, event.text):
-            return
         text = event.text[:STEERING_CHARS]
         targets = await route(wf, text)
         wf.routes[event.seq] = targets

@@ -67,9 +67,6 @@ Why things are the way they are:
   review between steps, which answers it and records an outcome. The thread
   is open to the server, so only the requester can change the steps, and only
   their words reach helpers.
-- **New text passes the content guard.** The guard in the run context only
-  ever saw the request, so a plan edit, a thread message or an answer is
-  checked before it can reach a helper with a shell (_allowed).
 - **Limits cap the cost**: WORKFLOW_TIMEOUT (1 h), WORKFLOW_MAX_TURNS (300) and
   WORKFLOW_MAX_TOKENS (4M) stop a workflow bigger than the biggest job seen, with
   what exists (PARTIAL), never "retry". Helpers leave a reserve of turns and time for
@@ -497,7 +494,6 @@ def _run_context(ctx: dict, record: dict, thread) -> dict:
         "followup": bool(ctx.get("followup")),
         "discord_client": ctx.get("discord_client") or _client,
         "request_text": record["request"],
-        # The content guard checks this once, at the first workspace action.
         "brain_request": record["request"],
         "image_cap": wp.MAX_IMAGES,
         "workflow_id": record["id"],
@@ -1020,7 +1016,6 @@ def _subagent(role: str):
     from classes.image_review import review_enabled
     from classes.llm_roles import SUBAGENT
 
-    brain._guard_workspace_tools()
     instructions = {wp.SCOUT: SCOUT_INSTRUCTIONS,
                     wp.VERIFIER: workflow_verify.VERIFIER_INSTRUCTIONS}.get(role)
     if instructions is None:
@@ -1176,11 +1171,6 @@ async def _approve(wf: Workflow) -> bool:
                 "📝 No more changes", "That's as many changes as I can make to the plan. "
                                      "Press Approve or Cancel."))
             continue
-        if not await _allowed(wf, event.text):
-            wf.ledger.record_decision([event.seq], "declined", "Blocked by the content guard.")
-            await _post_card(wf.thread, K.error("I can't make that change to the plan.",
-                                                "🚫 Not changed"))
-            continue
         until = None
         wf.revisions += 1
         await _set_state(wf, "revise")
@@ -1287,15 +1277,6 @@ async def _update_plan_message(wf: Workflow, final: bool = False, content: str |
         logger.info(f"Workflow {wf.id}: could not update the plan")
 
 
-async def _allowed(wf: Workflow, text: str) -> bool:
-    """Whether new text passes the content guard (fail-open like the guard)."""
-    from classes.content_guard import check_web_request
-    allowed, reason = await check_web_request(text)
-    if not allowed:
-        logger.warning(f"Workflow {wf.id}: thread text blocked by the content guard: {reason}")
-    return allowed
-
-
 def _waiting_edit(wf: Workflow):
     """The requester's oldest thread message not yet taken (stop words
     are _watch's), or None."""
@@ -1336,12 +1317,9 @@ _SHARED_KEYS = ("image_calls", "images_posted")
 
 def _helper_ctx(wf: Workflow, **keys) -> dict:
     """A helper's own run context: its folder, files and report are its own,
-    and two helpers run at once (see the module docstring). The content guard's
-    check of the request is kept on the workflow (`brain_guard_home`), so they
-    share it, and it starts at the first workspace action like a brain call's
-    (brain._workspace_allowed): the moderation endpoint rate-limits hard."""
+    and two helpers run at once (see the module docstring)."""
     return {**wf.ctx, "brain_report_args": None, "deliverables": [], "delivery_chosen": False,
-            "skills_used": [], "skill_saved": False, "brain_guard_home": wf.ctx, **keys}
+            "skills_used": [], "skill_saved": False, **keys}
 
 
 def _keep_shared(wf: Workflow, ctx: dict) -> None:
@@ -1580,10 +1558,6 @@ async def ask_requester(wf: Workflow, question: str, options=None, label: str = 
     answer = result.answer if result.state == brain_question.ANSWERED_STATE else ""
     if answer == brain_question.YOU_DECIDE_ANSWER:
         return brain_question.YOU_DECIDE
-    if answer and not await _allowed(wf, answer):
-        await _post_card(wf.thread, K.heads_up(
-            "🚫 Answer not used", "I can't use that answer, so I'll carry on without it."))
-        return ""
     return answer or ""
 
 
@@ -1601,18 +1575,6 @@ async def _review(wf: Workflow, queue: list) -> list:
     if routing:
         await asyncio.wait(routing, timeout=STEER_WAIT_SECONDS)
     wf.reviewed.update(e.seq for e in pending)
-    usable = []
-    for event in pending:
-        if await _allowed(wf, event.text):
-            usable.append(event)
-        else:
-            ledger.record_decision([event.seq], "declined", "Blocked by the content guard.")
-    if len(usable) < len(pending):
-        # 📨 said it would be seen: say what became of it.
-        await _post_card(wf.thread, K.error("I can't act on that message.", "🚫 Not passed on"))
-    pending = usable
-    if not pending:
-        return queue
     lines = [f"[{e.seq}] {e.author_name}{' (the requester)' if e.is_requester else ''}: {e.text}"
              for e in pending]
     task = "\n\n".join([

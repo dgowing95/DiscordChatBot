@@ -716,8 +716,8 @@ async def test_cancel_during_a_question_closes_it(env):
 
 
 @pytest.mark.asyncio
-async def test_an_answer_the_guard_blocks_never_reaches_the_manager(env, monkeypatch):
-    _blocks(monkeypatch, "forbidden")
+async def test_an_answer_is_never_sent_to_the_content_guard(env, monkeypatch):
+    guard = _blocks(monkeypatch, "forbidden")
     env.model = LaneModel([_ask("Which one?"), _plan_call(("s1", "researcher", [])),
                            _report(call_id="a"), _report(call_id="f")])
     wf, _ = await _start(env, automatic=False)
@@ -725,8 +725,8 @@ async def test_an_answer_the_guard_blocks_never_reaches_the_manager(env, monkeyp
     thread_inbox.deliver(env.thread.id, 9007, 5, "Ana", "something forbidden")
     await _approve(wf)
     await _finish(wf)
-    assert "something forbidden" not in json.dumps([_text_of(c) for c in env.model.calls])
-    assert any("can't use that answer" in text for text in env.thread.texts())
+    assert "something forbidden" in json.dumps([_text_of(c) for c in env.model.calls])
+    guard.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -776,27 +776,6 @@ async def test_a_message_during_discovery_reaches_the_next_plan_run_and_costs_no
     assert "only use free sources" in _text_of(env.model.calls[3])
     assert "only use free sources" in _text_of(env.model.calls[4])
 
-
-@pytest.mark.asyncio
-async def test_a_blocked_message_during_discovery_never_reaches_the_plan(env, monkeypatch):
-    _blocks(monkeypatch, "forbidden")
-    thread_id = env.thread.id
-
-    @function_tool
-    async def look() -> str:
-        """Look."""
-        thread_inbox.deliver(thread_id, 9021, 5, "Ana", "do something forbidden")
-        return "ok"
-
-    env.subagent_tools = [look]
-    env.model = LaneModel([_discover("Which table?"),
-                           ModelStep(output=[function_call("look", {}, call_id="l")]),
-                           _report(call_id="s"), _plan_call(("s1", "researcher", [])),
-                           _report(call_id="a"), _report(call_id="f")])
-    wf, _ = await _start(env)
-    await _finish(wf)
-    assert "something forbidden" not in json.dumps([_text_of(c) for c in env.model.calls])
-    assert any("can't act on that message" in text for text in env.thread.texts())
 
 
 @pytest.mark.asyncio

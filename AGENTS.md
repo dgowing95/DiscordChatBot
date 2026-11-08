@@ -31,7 +31,7 @@ core/                    # the bot (what runs in production)
     reply_policy.py        # P occasional double replies
     text_llm_handler.py    # the persona: an agents-SDK Agent with one tool, ask_brain
     response_filter.py     # P answer cleaning, reasoning extraction, Discord chunking
-    content_guard.py       # moderation check for web_search / fetch_url / the brain's workspace
+    content_guard.py       # moderation check for web_search / fetch_url / image generation
     user_memory.py         # saved memories: JSON lists in Redis per (guild, user)
     config_manager.py      # per-guild settings in Redis (system prompt, temperature, ...)
     redis_client.py        # the two shared, lazily built Redis clients (str + binary)
@@ -256,7 +256,9 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
      finish past 90%. A remote API reports no limit, so its runs are never squeezed.
    - **Every call needs the workspace**: `SandboxAgent` binds its session before the first model call,
      so a lazy start is not possible. `WORKSPACE_PREWARM` starts a cold one while the persona thinks.
-   - **The content guard runs at the first workspace action**, once per call, not on every `ask_brain`.
+   - **The content guard checks only `web_search`, `fetch_url` and image generation**
+     (`image_generation.create_image`, so `/generate_image` too). The workspace, workflows and skills
+     are not checked: the brain's own safety rule in its prompts covers them (`brain_policy.SAFETY_RULE`).
    - **One workspace per server, a folder per call** (`jobs/c<channel id>-<time>-<random>/`;
      `_in_job_dir` makes relative paths start there). The task names the channel's newest earlier
      folders, so "make the chart blue" finds the last chart. `shared/` holds what the server asked to
@@ -437,8 +439,7 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
       back where it was first shown, after the trim). Every message waits for the review between
       steps (and once more after the last step), which answers it and records an outcome. The thread
       is open to the server: only the requester can change the steps, and only their words reach
-      helpers. Plan edits, thread messages and answers pass the content guard first (the run context's
-      guard only ever saw the request).
+      helpers.
     - **The check** (`workflow_verify.py`): every job that finished, unless a limit or a cancel stopped
       it or it made nothing. The verifier has the shell, `fetch_url` and `view_image`, and nothing that
       posts. Code runs the step it names once more, then every step that depends on it and every

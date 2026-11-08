@@ -131,7 +131,6 @@ def env(monkeypatch):
     def _subagent(role):
         from classes.workflow_tools import submit_verdict
         from classes.workspace_tools import attach_file
-        brain._guard_workspace_tools()
         if role == wp.VERIFIER:
             return Agent(name="Helper", model=ns.model, instructions="verifier",
                          tools=[*ns.subagent_tools, submit_verdict],
@@ -732,7 +731,6 @@ async def test_two_messages_reach_the_helpers_in_the_order_they_came(monkeypatch
         return None
 
     monkeypatch.setattr(workflow_steering, "route", route)
-    monkeypatch.setattr(workflows, "_allowed", AsyncMock(return_value=True))
     wf = workflows.Workflow(record={"id": "a1"}, ctx={}, thread=None, origin_channel=None)
     events = [SimpleNamespace(seq=1, text="first"), SimpleNamespace(seq=2, text="second")]
     await asyncio.gather(*(workflow_steering.steer(wf, e) for e in events))
@@ -862,17 +860,17 @@ async def test_someone_elses_message_never_reaches_a_helper(env):
 
 
 @pytest.mark.asyncio
-async def test_a_blocked_message_never_reaches_a_helper(env, monkeypatch):
-    _blocks(monkeypatch, "forbidden")
+async def test_a_steered_message_is_never_sent_to_the_content_guard(env, monkeypatch):
+    guard = _blocks(monkeypatch, "forbidden")
     _says_while_looking(env, 5, "do something forbidden")
     env.model = LaneModel([
         _plan_call(("s1", "researcher", [])), _look_call("l1"), _report(call_id="a"),
+        ModelStep(output=[function_call("submit_review", {"replies": []}, call_id="rv")]),
         _report(call_id="f")])
     wf, _ = await _start(env)
     await _finish(wf)
-    assert wf.steering == []
-    assert _positions(env.model.calls[2], "forbidden") == []
-    assert wf.ledger.events[0].outcome == "declined"
+    assert [text for _seq, text, _targets in wf.steering] == ["do something forbidden"]
+    guard.assert_not_awaited()
 
 
 def test_a_message_stays_out_of_the_trim_and_a_filter_error_costs_only_the_message():
@@ -1728,41 +1726,6 @@ async def test_runs_side_by_side_are_never_promised_more_than_is_left(env, monke
     assert wf.promised == 0
 
 
-@pytest.mark.asyncio
-async def test_helpers_share_one_content_check(monkeypatch):
-    calls = []
-
-    async def _check(request):
-        calls.append(request)
-        return True, ""
-
-    monkeypatch.setattr("classes.content_guard.check_web_request", _check)
-    wf = SimpleNamespace(ctx={"brain_request": "the job", "brain_guard": None})
-    first, second = workflows._helper_ctx(wf), workflows._helper_ctx(wf)
-    assert calls == []  # not at set-up: a helper that never uses the workspace costs none
-    assert await brain._workspace_allowed(first) and await brain._workspace_allowed(second)
-    assert calls == ["the job"]
-    later = workflows._helper_ctx(wf)  # a later wave's helper finds it too
-    assert await brain._workspace_allowed(later) and calls == ["the job"]
-
-
-@pytest.mark.asyncio
-async def test_a_helper_stopped_during_the_check_leaves_it_for_the_next(monkeypatch):
-    release = asyncio.Event()
-
-    async def _slow(request):
-        await release.wait()
-        return True, ""
-
-    monkeypatch.setattr("classes.content_guard.check_web_request", _slow)
-    context = {"brain_request": "the job"}
-    waiting = asyncio.create_task(brain._workspace_allowed(context))
-    await asyncio.sleep(0)
-    waiting.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await waiting
-    release.set()
-    assert await brain._workspace_allowed(context)
 
 
 def test_the_longest_plan_goes_over_several_cards_with_nothing_cut():
@@ -1984,9 +1947,10 @@ def _other_person_during_the_step(env, text):
 
 
 def _blocks(monkeypatch, word):
-    async def _check(text):
-        return (False, "flagged") if word in text else (True, "")
-    monkeypatch.setattr("classes.content_guard.check_web_request", _check)
+    """A content guard that would refuse `word`: workflows never ask it."""
+    guard = AsyncMock(side_effect=lambda text: (False, "flagged") if word in text else (True, ""))
+    monkeypatch.setattr("classes.content_guard.check_web_request", guard)
+    return guard
 
 
 @pytest.mark.asyncio
@@ -2008,40 +1972,41 @@ async def test_someone_else_in_the_thread_cannot_change_the_steps_or_reach_a_hel
 
 
 @pytest.mark.asyncio
-async def test_a_plan_edit_the_guard_blocks_never_reaches_the_manager(env, monkeypatch):
-    _blocks(monkeypatch, "forbidden")
-    env.model = LaneModel([_plan_call(("s1", "researcher", [])), _report(call_id="a"),
-                           _report(call_id="f")])
+async def test_a_plan_edit_is_never_sent_to_the_content_guard(env, monkeypatch):
+    guard = _blocks(monkeypatch, "forbidden")
+    env.model = LaneModel([_plan_call(("s1", "researcher", [])), _plan_call(("s1", "researcher", [])),
+                           _report(call_id="a"), _report(call_id="f")])
     wf, _ = await _start(env, automatic=False)
     await _until(lambda: wf.state == wp.AWAITING_APPROVAL and wf.approval is not None)
     thread_inbox.deliver(env.thread.id, 9601, 5, "Ana", "do something forbidden")
-    await _until(lambda: any("can't make that change" in t for t in env.thread.texts()))
-    assert wf.revisions == 0 and len(env.model.calls) == 1
-    await _until(lambda: wf.approval is not None and not wf.approval.done())
+    await _until(lambda: wf.revisions == 1 and wf.approval is not None and not wf.approval.done())
+    assert "do something forbidden" in json.dumps(env.model.calls[1].input)
     _, call = _press(wf, "approve")
     await call
     await _finish(wf)
     assert wf.record["state"] == wp.DONE
+    guard.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_a_thread_message_the_guard_blocks_never_reaches_the_review(env, monkeypatch):
-    _blocks(monkeypatch, "forbidden")
+async def test_a_thread_message_reaches_the_review_without_the_content_guard(env, monkeypatch):
+    guard = _blocks(monkeypatch, "forbidden")
     _thread_message_during_the_step(env, 9602, "now do something forbidden")
     env.model = LaneModel([
         _plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"])),
         ModelStep(output=[function_call("look", {}, call_id="l")]), _report(call_id="a"),
+        ModelStep(output=[function_call("submit_review", {"replies": []}, call_id="rv")]),
         _report(call_id="b"), _report(call_id="f")])
     wf, _ = await _start(env)
     await _finish(wf)
-    assert wf.ledger.events[0].outcome == "declined"
-    assert wf.said == [] and wf.record["state"] == wp.DONE
-    assert any("I can't act on that message." in t for t in env.thread.texts())
+    assert wf.ledger.events[0].outcome == "noted"
+    assert wf.record["state"] == wp.DONE
+    guard.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_an_answer_the_guard_blocks_never_reaches_the_helper(env, monkeypatch):
-    _blocks(monkeypatch, "forbidden")
+async def test_an_answer_is_never_sent_to_the_content_guard(env, monkeypatch):
+    guard = _blocks(monkeypatch, "forbidden")
     env.model = LaneModel([
         _plan_call(("s1", "researcher", [])),
         _report(status="needs_input", facts=("Which one?",), call_id="a"),
@@ -2054,7 +2019,8 @@ async def test_an_answer_the_guard_blocks_never_reaches_the_helper(env, monkeypa
     await _until(lambda: wf.question_id is not None)
     thread_inbox.deliver(env.thread.id, 9500, 5, "Ana", "something forbidden")
     await _finish(wf)
-    assert "something forbidden" not in json.dumps([c.input for c in env.model.calls])
+    assert "something forbidden" in json.dumps([c.input for c in env.model.calls])
+    guard.assert_not_awaited()
 
 
 @pytest.mark.asyncio
