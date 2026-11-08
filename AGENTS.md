@@ -544,7 +544,7 @@ question in the persona's voice) and `REPLY_PROMPT` (~140, a workflow manager's 
 - **Prefer a positive example over a list of prohibitions.** A model given a list of things not to
   choose went on to choose items straight off the list. The prompts show the shape instead
   (`ask_brain`'s examples, the `report(...)` call in `BRAIN_INSTRUCTIONS`).
-- **One safety rule** (`brain_policy.SAFETY_RULE`, ~230 characters, ceiling 250, pinned by
+- **One safety rule** (`brain_policy.SAFETY_RULE`, ~220 characters, ceiling 250, pinned by
   `brain_tests.py`) ends the prompt of every agent that works: the brain, and a workflow's manager,
   helpers, scouts and verifier. Each builder appends it, so the sizes below leave it out. The
   content guard checks only search, links and pictures; this is what covers the rest.

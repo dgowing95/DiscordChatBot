@@ -39,10 +39,12 @@ DEFAULT_MAX_CONCURRENT = 3
 DEFAULT_QUEUE_WAIT_SECONDS = 120
 
 # Its size is pinned (brain_tests.py). Ends the prompt, after the agent's own
-# "Finish by calling ..." line, which "finish at once" points back to.
-SAFETY_RULE = ("\n\nTurn down any job meant to cause harm: malware, breaking into or attacking "
-               "a machine or an account, probing the network around this workspace, or spying "
-               "on someone. Do none of it, and finish at once saying you won't help with that.")
+# "Finish by calling ..." line, which "finish at once" points back to. One
+# sentence of intent and one example of the shape: AGENTS.md, a list of
+# prohibitions is what a small model picks from.
+SAFETY_RULE = ("\n\nTurn down any job meant to harm people or other machines. E.g. asked to "
+               "write a keylogger for a friend's PC, or to scan the network around this "
+               "workspace, do none of it and finish at once, saying you won't help with that.")
 
 
 def _env_int(name: str, default: int, env) -> int:
