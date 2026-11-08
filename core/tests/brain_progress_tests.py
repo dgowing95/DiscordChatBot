@@ -438,3 +438,110 @@ async def test_two_commands_at_once_get_their_own_output():
     await hooks.on_tool_end(first, None, _tool("exec_command"), "Process exited with code 0\nOutput:\nONE")
     text = _view_text(_last(message))
     assert text.index("echo one") < text.index("ONE") < text.index("echo two")
+
+
+# ---------------------- the status line (off form) ----------------------
+
+from unittest.mock import patch
+
+from classes import brain_status
+
+
+def _cmd(cmd: str):
+    return _ctx(json.dumps({"cmd": cmd}))
+
+
+@pytest.mark.asyncio
+async def test_the_first_post_already_says_what_it_is_doing_in_words():
+    channel, message = _channel_with_message()
+    hooks = BrainProgressHooks(channel, "make a gif", edit_interval=0)
+    await hooks.on_tool_start(_cmd("pip install pillow"), None, _tool("exec_command"))
+    text = _view_text(channel.send.await_args.kwargs["view"])
+    assert "⏳ Running pip" in text and "pip install pillow" not in text
+    await hooks.finalize(ok=True)
+
+
+@pytest.mark.asyncio
+async def test_the_status_line_is_written_in_plain_words_and_goes_at_the_end():
+    channel, message = _channel_with_message()
+    hooks = BrainProgressHooks(channel, "make a gif of a bee", edit_interval=0)
+    hooks.status_interval = 0
+    complete = AsyncMock(return_value="installing python libraries.")
+    with patch.object(brain_status._llm, "complete", complete):
+        await hooks.on_tool_start(_cmd("pip install pillow"), None, _tool("exec_command"))
+        await hooks._status_task
+    assert "⏳ Installing python libraries" in _view_text(_last(message))
+    asked = complete.await_args.args[0][1]["content"]
+    assert "make a gif of a bee" in asked and "ran: pip install pillow" in asked
+    await hooks.finalize(ok=True)
+    assert "⏳" not in _view_text(_last(message))
+
+
+@pytest.mark.asyncio
+async def test_the_line_waits_out_its_interval_and_a_finished_call_writes_no_more():
+    channel, message = _channel_with_message()
+    hooks = BrainProgressHooks(channel, "t", edit_interval=0)
+    complete = AsyncMock(return_value="Creating the script")
+    with patch.object(brain_status._llm, "complete", complete):
+        await hooks.on_tool_start(_cmd("cat > a.py << 'EOF'"), None, _tool("exec_command"))
+        await hooks._status_task  # the first line comes at once
+        await hooks.on_tool_start(_cmd("python a.py"), None, _tool("exec_command"))
+        await hooks.on_tool_start(_cmd("python a.py"), None, _tool("exec_command"))
+        await hooks.finalize(ok=True)  # within the 30 s: the next line never comes
+    assert complete.await_count == 1
+    assert hooks._status_task is None
+
+
+@pytest.mark.asyncio
+async def test_a_failed_line_keeps_the_one_there_was():
+    channel, message = _channel_with_message()
+    hooks = BrainProgressHooks(channel, "t", edit_interval=0)
+    hooks.status_interval = 0
+    await hooks.on_tool_start(_cmd("python a.py"), None, _tool("exec_command"))
+    await hooks._status_task  # the side call fails (conftest)
+    assert hooks.transcript._status == "Running a Python script"
+    await hooks.finalize(ok=True)
+
+
+@pytest.mark.asyncio
+async def test_the_streamed_form_has_no_status_line_and_makes_no_side_call():
+    channel, message = _channel_with_message()
+    hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
+    complete = AsyncMock(return_value="Creating the script")
+    with patch.object(brain_status._llm, "complete", complete):
+        await hooks.on_tool_start(_cmd("python a.py"), None, _tool("exec_command"))
+        await hooks.finalize(ok=True)
+    complete.assert_not_awaited()
+    assert "⏳ Running" not in _view_text(channel.send.await_args.kwargs["view"])
+
+
+def test_the_status_prompt_stays_small_and_shows_the_shape():
+    assert len(brain_status.PROMPT) <= 300, len(brain_status.PROMPT)
+    assert "Installing python libraries" in brain_status.PROMPT
+
+
+@pytest.mark.parametrize("raw, line", [
+    ("Creating the script", "Creating the script"),
+    ('"drawing the frames."', "Drawing the frames"),
+    ("<think>hmm</think>\n- Building the GIF\n", "Building the GIF"),
+    ("", None),
+    ("I am now going to carefully install every single library this job needs", None),
+])
+def test_only_a_short_line_is_a_status(raw, line):
+    assert brain_status.clean_status(raw) == line
+
+
+def test_steps_read_as_what_was_done_and_polls_say_nothing():
+    assert brain_status.step_text("exec_command", {"cmd": "pip install pillow"}) == \
+        "ran: pip install pillow"
+    assert brain_status.step_text("attach_file", {"path": "out/bee.gif"}) == \
+        "sent the user the file out/bee.gif"
+    assert brain_status.step_text("write_stdin", {"chars": ""}) is None
+    assert brain_status.step_text("report", {}) is None
+    assert len(brain_status.step_text("exec_command", {"cmd": "x" * 5000})) == brain_status.STEP_CHARS
+
+
+def test_the_line_is_the_brains_work_on_the_background_lane(monkeypatch):
+    monkeypatch.setenv("BRAIN_LLM_HOST", "https://brain.example")
+    assert brain_status._config().host.startswith("https://brain.example")
+    assert brain_status._llm.lane == "background"

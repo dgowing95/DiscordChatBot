@@ -8,7 +8,13 @@ until the first workspace action (BrainProgressHooks.on_tool_start).
 
 Two forms, chosen per server with /workspace progress:
   - off (the default): the card with the request (and its notes), relabelled
-    when the call ends ("🧠 Done" / "🧠 Stopped").
+    when the call ends ("🧠 Done" / "🧠 Stopped"). While it works, one line
+    says what the brain is doing in plain words ("⏳ Creating the script"),
+    so a long job never looks frozen: a side call writes it
+    (classes/brain_status.py) from the newest tool calls, at most every
+    STATUS_INTERVAL_SECONDS. Until the first one answers (or when it fails),
+    the line is the rule-written one helpers use (tool_cards.helper_line).
+    The line goes when the call ends.
   - on: the same card with every exec_command and its output streamed in,
     a gap between each, edited in place.
 
@@ -46,6 +52,7 @@ they did. Their tools post nothing (common.QuietChannel). Two can run in one
 thread, so each edits at most every HELPER_EDIT_SECONDS, which keeps the pair
 under the 5 edits a minute.
 """
+import asyncio
 import logging
 import json
 import re
@@ -72,6 +79,8 @@ NOTE_CHARS = 300              # per-note cap
 CMD_CHARS = 1500              # a command's text shown (a heredoc can be long)
 OUTPUT_CHARS = 1500           # the newest output of a command (a live log)
 PROGRESS_HINT = "live progress is on (/workspace progress)"
+STATUS_INTERVAL_SECONDS = 30.0  # between status lines: two of the 5 edits a minute
+STATUS_STEPS = 3                # newest tool calls the status line is written from
 
 _EXIT_RE = re.compile(r"Process exited with code (-?\d+)")
 _RUNNING_RE = re.compile(r"Process running with session ID (\d+)")
@@ -173,6 +182,7 @@ class WorkTranscript:
         self._blocks: list[_Block] = []
         self._notes: list[str] = []
         self._thinking = False
+        self._status = ""
 
     # -- events -----------------------------------------------------------
 
@@ -216,6 +226,10 @@ class WorkTranscript:
 
     def set_thinking(self, thinking: bool) -> None:
         self._thinking = bool(thinking)
+
+    def set_status(self, text: str | None) -> None:
+        """The one line on what the call is doing now; None clears it."""
+        self._status = " ".join((text or "").split())[:NOTE_CHARS]
 
     def set_final(self, label: str, colour: int, seconds: float | None = None) -> None:
         """The call is over: its closing label and colour."""
@@ -263,6 +277,8 @@ class WorkTranscript:
         if self._notes:
             body += [Divider(), Text(K.safe("\n".join(self._notes)))]
         footer = []
+        if self._final is None and self._status:
+            footer.append(f"⏳ {self._status}")
         if self._final is None and self._thinking:
             footer.append("💭 Thinking…")
         if self._final is None and self._hint:
@@ -374,6 +390,13 @@ class BrainProgressHooks(RunHooks):
         # One response's tool calls start concurrently, so the latest block
         # is not necessarily the one a finishing call belongs to.
         self._call_blocks: dict[str, _Block] = {}
+        # The status line (off form only): the newest tool calls, whether one
+        # came since the last line, and the task that writes it.
+        self.status_interval = STATUS_INTERVAL_SECONDS
+        self._steps: list[str] = []
+        self._status_wanted = False
+        self._status_task: asyncio.Task | None = None
+        self._last_status = 0.0
 
     @property
     def started(self) -> bool:
@@ -398,9 +421,11 @@ class BrainProgressHooks(RunHooks):
         if self._finalized:
             return
         self._finalized = True
+        await self._stop_status()
         if not self._started:
             return
         self.transcript.set_thinking(False)
+        self.transcript.set_status(None)
         label, colour = ((BRAIN_DONE, K.OK) if ok else (BRAIN_STOPPED, K.FAIL) if stopped
                          else (BRAIN_NOT_FINISHED, K.WARN))
         self.transcript.set_final(label, colour, self.clock() - self._started_at)
@@ -420,9 +445,12 @@ class BrainProgressHooks(RunHooks):
 
     async def on_tool_start(self, context, agent, tool) -> None:
         name = getattr(tool, "name", None)
+        if not self.stream:
+            self._record_step(name, context)
         if name in WORKSPACE_TOOLS:
             await self._start()
         if not self.stream:
+            self._want_status()
             return
         args = _tool_args(context)
         if name == "exec_command":
@@ -460,6 +488,73 @@ class BrainProgressHooks(RunHooks):
             return
         self._note(self.transcript.add_output, **parsed)
         await self._maybe_flush()
+
+    # -- the status line (off form) ---------------------------------------------
+
+    def _record_step(self, name, context) -> None:
+        """Keeps the newest tool calls for the status line. Before the card
+        is out, the newest one also sets the rule-written line, so the card's
+        first post already says what it is doing."""
+        try:
+            from classes.brain_status import step_text
+            from classes.tool_cards import helper_line
+            if not isinstance(name, str):
+                return
+            args = _tool_args(context)
+            step = step_text(name, args)
+            if step is None:
+                return
+            self._steps = (self._steps + [step])[-STATUS_STEPS:]
+            self._status_wanted = True
+            if not self._started or not self.transcript._status:
+                line = helper_line(name, args)
+                if line:
+                    # helper_line starts with an emoji: the card adds its own ⏳.
+                    self.transcript.set_status(line.split(" ", 1)[-1])
+        except Exception as e:  # a progress error must never kill the run
+            logger.warning(f"Brain progress: ignoring status error: {e}")
+
+    def _want_status(self) -> None:
+        """Starts the task that writes the status line, unless it runs."""
+        if (self._finalized or not self._started or not self._status_wanted
+                or (self._status_task is not None and not self._status_task.done())):
+            return
+        try:
+            self._status_task = asyncio.get_running_loop().create_task(self._status_loop())
+        except Exception as e:
+            logger.warning(f"Brain progress: could not start the status line: {e}")
+
+    async def _status_loop(self) -> None:
+        """While new tool calls come: wait out the interval, write a line
+        from the newest ones, show it. Never raises."""
+        from classes import brain_status
+        try:
+            while self._status_wanted and not self._finalized:
+                wait = self._last_status + self.status_interval - time.monotonic()
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                self._status_wanted = False
+                self._last_status = time.monotonic()
+                line = await brain_status.describe(self.transcript._task, list(self._steps))
+                if line and not self._finalized and line != self.transcript._status:
+                    self.transcript.set_status(line)
+                    self._dirty = True
+                    await self._maybe_flush()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(f"Brain progress: status line failed: {e}")
+
+    async def _stop_status(self) -> None:
+        """Ends the status task, so its edit never lands on the final card."""
+        task, self._status_task = self._status_task, None
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except BaseException:
+            pass
 
     # -- internals ------------------------------------------------------------
 
