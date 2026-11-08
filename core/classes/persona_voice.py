@@ -85,6 +85,8 @@ def reply_messages(personality: str, reply: str) -> list[dict]:
 
 
 async def _voice_reply(personality: str, reply: str) -> str:
+    if not reply:
+        return reply
     try:
         text = await _llm.complete(reply_messages(personality, reply),
                                    temperature=0.7, max_tokens=REPLY_MAX_TOKENS)
@@ -107,5 +109,4 @@ async def voice_replies(guild_id, replies: list[str]) -> list[str]:
     except Exception as e:
         logger.info(f"Persona voice: no personality ({e}); posting replies as written")
         return replies
-    return list(await asyncio.gather(*(_voice_reply(personality, r) if r else asyncio.sleep(0, r)
-                                       for r in replies)))
+    return list(await asyncio.gather(*(_voice_reply(personality, r) for r in replies)))

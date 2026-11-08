@@ -27,8 +27,7 @@ within a minute. Before writing it the bot may:
   **Answer…** box and **You decide**. Writing in the thread answers too. With no answer in 5 minutes
   it stops asking, decides for itself and says so in the plan.
 
-Anything else you write in the thread meanwhile goes into the plan. Automatic runs (schedules, rules)
-can look but never ask.
+Anything else you write in the thread meanwhile goes into the plan.
 
 ## The plan
 

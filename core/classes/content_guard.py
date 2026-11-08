@@ -3,7 +3,9 @@
 Blocks requests that are classified as unsafe *before* the bot touches the
 internet or draws anything. Only those: the brain's own work (its workspace,
 workflows, skills) is not checked here, and its prompts tell it to refuse
-harmful jobs instead (brain_policy.SAFETY_RULE). Uses the free OpenAI Moderations endpoint
+harmful jobs instead (brain_policy.SAFETY_RULE).
+
+Uses the free OpenAI Moderations endpoint
 (https://developers.openai.com/api/reference/resources/moderations); the
 response contains a ``categories`` object of detected unsafe categories and
 a URL/query is considered unsafe if *any* of them is ``true``.

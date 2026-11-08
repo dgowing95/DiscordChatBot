@@ -331,7 +331,9 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
    `schedule_forever` polls due schedules every 15 s and admits only what the queue has room for; an
    admitted rule replaces the ordinary reply. An automatic run has no source message (`automatic=True`,
    `actor_id` = the entry's last editor): no memory or automation tools, no memories, no double replies.
-   A started run is never replayed, since tools may already have posted. A lost channel, a departed
+   A started run is never replayed, since tools may already have posted. It never starts a workflow
+   (`brain_policy.effective_tier`, and `workflows.start_workflow` refuses one): nobody is there to
+   approve the plan. A lost channel, a departed
    editor or a missing permission suspends the entry. **Follow-ups** (`schedule_followup`) are one-off
    schedules with their own quota, at least `SCHEDULE_MIN_INTERVAL_HOURS` apart per person
    (`automation_policy.followup_conflict`); a follow-up cannot set another.
@@ -410,7 +412,7 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
       12 turns, 5 minutes, 3 facts, 2700 characters of findings). A scout is told to finish two turns
       before its limit (`FINISH_UP`), and one that reaches a limit gets one last call that can only be
       `report` (`_last_report`), so what it found is kept. Findings and answers go to every later run
-      by code (`planning_text`). Automatic runs may look but not ask.
+      by code (`planning_text`).
     - **One card per scout and researcher** (`brain_progress.HelperProgress`): their last tool call
       and turn, trimmed, edited at most every 30 s since two share a thread's edits. Their tools post
       nothing (`common.QuietChannel` drops notice cards), which replaced dozens of them a run. An
