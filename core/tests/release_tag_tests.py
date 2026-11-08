@@ -62,3 +62,18 @@ def test_a_mistake_is_refused_not_tagged(latest, wanted, tmp_path):
 def test_the_repo_file_names_this_major():
     marker = SCRIPT.parents[1] / "release-major"
     assert marker.read_text(encoding="utf-8").strip() == "3"
+
+
+def test_the_release_gate_tests_on_the_python_the_image_runs():
+    # release.yaml once ran its tests on 3.13 while tests.yaml and the image
+    # used 3.14, so v3.0's release failed on code every PR check had passed.
+    import re
+    root = SCRIPT.parents[2]
+
+    def versions(workflow):
+        text = (root / ".github" / "workflows" / workflow).read_text(encoding="utf-8")
+        return set(re.findall(r"python-version:\s*['\"]?([0-9.]+)", text))
+
+    image = re.search(r"^FROM python:([0-9.]+)",
+                      (root / "core" / "Dockerfile").read_text(encoding="utf-8"), re.M).group(1)
+    assert versions("release.yaml") == versions("tests.yaml") == {image}

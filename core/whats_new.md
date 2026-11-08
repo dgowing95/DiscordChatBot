@@ -25,7 +25,7 @@ Tell me something worth keeping and I save it, and now I actually use it: your p
 How to use: "remember I prefer metric units". To remove it: "forget that I prefer metric units", or "forget everything about me"
 
 ## I learn skills
-When a job takes several steps that will come up again, I save how I did it as a skill for this server and use it next time, so it's faster and more steady. Anyone can see, edit or undo them.
+When a job takes several steps that will come up again, I save how I did it as a skill for this server and use it next time, so it's faster and steadier. Anyone can see, edit or undo them.
 How to use: "save that as a skill", or /skills list
 
 ## I ask before I guess
