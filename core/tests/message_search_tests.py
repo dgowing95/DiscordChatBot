@@ -604,3 +604,13 @@ def test_the_brain_gets_the_save_tool_and_the_persona_does_not():
     assert "save_messages_to_file" not in {t.name for t in persona_tools()}
     names = {t.name for t in brain_tools()}
     assert {"save_messages_to_file", "read_messages_around", "search_messages"} <= names
+
+
+def test_a_cards_files_are_named_and_saved():
+    from card_checks import FILE_CARD
+    card = _hit(1, content="", components=FILE_CARD)
+    text = msf.format_results(_body(card), GUILD_ID, {}, "x")
+    assert "[attached: generated-image.png]" in text and "[attached: saturn_notes.md]" in text
+    assert "linked.png" not in text
+    assert msf.export_record(card, GUILD_ID, {})["attachments"] == [
+        "generated-image.png", "saturn_notes.md"]

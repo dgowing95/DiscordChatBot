@@ -275,8 +275,8 @@ async def generate_image(wrapper: RunContextWrapper[dict], prompt: str,
         return ("Image generation failed. Tell the user the image service is "
                 "unavailable right now and do not retry.")
     # The picture goes into its own card, with the prompt it was drawn from
-    # (the final one: only the final image is posted). It stays a real
-    # attachment named GENERATED_IMAGE_FILENAME, which the next edit finds.
+    # (the final one: only the final image is posted). It is uploaded as
+    # GENERATED_IMAGE_FILENAME, which the next edit finds (card.files_of).
     finished = tool_cards.image_card(result.prompt, editing, GENERATED_IMAGE_FILENAME)
     files = {GENERATED_IMAGE_FILENAME: result.png}
     posted = live is not None and not live.dropped and await live.show(finished, files=files)

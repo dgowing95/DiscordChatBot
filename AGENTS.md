@@ -518,7 +518,8 @@ and the plan's text fallback stay plain text. **To add or change one, follow `do
   status card, not as something the bot said; an `ANNOUNCE` is left out; a `CARD` (question, plan)
   reads as its text.
 - **Files a card shows** are sent with that message (`card.safe_filename` keeps the name Discord
-  stores) and stay real attachments: the image edit and chat-file code find them by name.
+  stores). Discord lists them in no `message.attachments`, only in the card: read a message's
+  files with `card.files_of` (the image edit, the brain's chat files, history images do).
 - Buttons that must work after a restart are `DynamicItem`s registered in `main.on_ready`
   (`WorkflowButton`, `RestoreButton`, `LeaveButton`); a panel's own buttons re-check permissions.
 

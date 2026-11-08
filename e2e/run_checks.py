@@ -41,6 +41,7 @@ import re
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import aiohttp
 import redis.asyncio as redis
@@ -92,6 +93,32 @@ def card_text(message: dict) -> str:
 
     walk(message.get("components") or [])
     return "\n".join(lines)
+
+
+def message_files(message: dict) -> list[dict]:
+    """A message's files as {filename, content_type, size}: its attachments,
+    and those inside a card, which Discord lists in no attachments (a File
+    component has its name and size, a gallery picture its URL and width)."""
+    found = [{"filename": a["filename"], "content_type": a.get("content_type", ""),
+              "size": a.get("size", 0)} for a in message.get("attachments", [])]
+
+    def walk(items) -> None:
+        for item in items:
+            file = item.get("file") or {}
+            if item.get("type") == 13 and file.get("attachment_id"):
+                found.append({"filename": item.get("name", ""),
+                              "content_type": file.get("content_type", ""),
+                              "size": item.get("size", 0)})
+            for entry in item.get("items") or []:
+                media = entry.get("media") or {}
+                if media.get("attachment_id"):
+                    found.append({"filename": urlsplit(media.get("url", "")).path.rsplit("/", 1)[-1],
+                                  "content_type": media.get("content_type", ""),
+                                  "size": media.get("width", 0)})  # a picture with pixels
+            walk(item.get("components") or [])
+
+    walk(message.get("components") or [])
+    return found
 
 
 class CheckFailed(Exception):
@@ -319,11 +346,10 @@ class Run:
     async def image(self):
         messages = await self.ask("Generate an image of a red apple on a wooden table.", IMAGE_TIMEOUT)
         for message in messages:
-            for attachment in message.get("attachments", []):
-                if (attachment["filename"] == "generated-image.png"
-                        and attachment.get("content_type", "").startswith("image/png")
-                        and attachment.get("size", 0) > 0):
-                    return f"{attachment['size']} bytes"
+            for file in message_files(message):
+                if (file["filename"] == "generated-image.png"
+                        and file["content_type"].startswith("image/png") and file["size"] > 0):
+                    return "generated-image.png in its card"
         raise CheckFailed("no generated-image.png attachment in the reply")
 
     async def poll(self):
@@ -347,9 +373,9 @@ class Run:
         if await calls() <= before:
             raise CheckFailed("the brain was never asked (no ask_brain call)")
         for message in messages:
-            for attachment in message.get("attachments", []):
-                if attachment["filename"].endswith(".csv") and attachment.get("size", 0) > 0:
-                    return f"{attachment['filename']}, {attachment['size']} bytes"
+            for file in message_files(message):
+                if file["filename"].endswith(".csv") and file["size"] > 0:
+                    return f"{file['filename']}, {file['size']} bytes"
         raise CheckFailed("no .csv attachment in the reply")
 
     async def workflow(self):

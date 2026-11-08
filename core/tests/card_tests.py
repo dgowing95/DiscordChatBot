@@ -279,3 +279,26 @@ async def test_two_updates_at_once_post_the_card_once():
     assert await asyncio.gather(live.show(first), live.show(second)) == [True, True]
     assert len(sent) == 1 and live.messages == sent
     assert "two" in view_text(sent[0].edit.await_args.kwargs["view"])
+
+
+@pytest.mark.asyncio
+async def test_files_of_reads_back_the_files_inside_a_card():
+    # Seen in E2E: a card's files are in no message.attachments, so the
+    # picture to edit and the chat files for the brain were not found.
+    from card_checks import posted_file_card
+    from classes.card import files_of
+    files = files_of(posted_file_card())
+    assert [(f.filename, f.size, f.content_type, f.id) for f in files] == [
+        ("generated-image.png", None, "image/png", 2),          # a linked picture is not a file
+        ("saturn_notes.md", 1962, "text/markdown", 3)]
+    assert await files[0].read() == b"PNG"
+    plain = SimpleNamespace(attachments=["a.csv"], components=[])
+    assert files_of(plain) == ["a.csv"] and files_of(SimpleNamespace()) == []
+
+
+def test_a_cards_picture_goes_into_the_prompt_like_an_attachment():
+    from card_checks import posted_file_card
+    from classes.card import files_of
+    from classes.message_handler import image_targets
+    assert image_targets(files_of(posted_file_card())) == [
+        (2, "https://media.example/attachments/1/2/generated-image.png?ex=1", "image/png")]

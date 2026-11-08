@@ -732,3 +732,11 @@ async def test_generate_image_tool_absent_when_disabled(monkeypatch):
     names = await _agent_tool_names(monkeypatch, "0")
     assert "generate_image" not in names
     assert "web_search" in names
+
+
+def test_edit_source_finds_the_picture_inside_its_card():
+    from card_checks import posted_file_card
+    card = posted_file_card(author_id=BOT)
+    found = image_generation.pick_edit_source(None, [card], BOT)
+    assert found is not None and found.filename == "generated-image.png"
+    assert image_generation.pick_edit_source(None, [posted_file_card(author_id=7)], BOT) is None

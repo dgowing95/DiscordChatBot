@@ -1130,8 +1130,8 @@ _PICTURES = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 
 def file_card(name: str, caption: str = ""):
     """A file the brain made, in its card: the caption it wrote, then the
-    file (a picture shown, anything else as a download). It stays a real
-    attachment: later calls find chat files by name."""
+    file (a picture shown, anything else as a download). Later calls find
+    it by name with card.files_of (it is in no message.attachments)."""
     from classes import card_kit as K
     shown = (K.Gallery((f"attachment://{name}",)) if name.lower().endswith(_PICTURES)
              else K.FileRef(name))
@@ -1192,10 +1192,11 @@ async def _replied_to(message, channel):
 async def chat_input_files(ctx: dict, requested) -> tuple[list, list, list]:
     """(inputs, problems, names) for a brain call: the chat files it is
     given (see classes/workspace_inputs.py for which, and why), downloaded."""
-    from classes import workspace_inputs as wi
+    from classes import card, workspace_inputs as wi
 
     def _candidates(message):
-        return [wi.Candidate(a.filename, a.size, a) for a in getattr(message, "attachments", None) or []]
+        # card.files_of: a file the bot posted is inside its card, in no attachments.
+        return [wi.Candidate(a.filename, a.size, a) for a in card.files_of(message)]
 
     channel = ctx.get("channel")
     message = ctx.get("original_message")

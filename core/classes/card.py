@@ -13,8 +13,9 @@ The layout has rules of its own, and this is where they are kept:
 - **4000 characters and 40 components per message.** A longer card goes over
   several messages (card_kit.split); LiveCard keeps them updated.
 - **Files a card shows** ("attachment://name") must be sent with the message
-  that shows them, and stay real attachments (the image-edit and chat-file
-  code find them by name).
+  that shows them. Discord then lists them in no `message.attachments`, only
+  in the card's components: files_of() reads them back (the image-edit and
+  chat-file code find them by name).
 - **Its text is not message.content.** text_of() reads it back, and kind_of()
   says what it is (its container's id), for the history.
 
@@ -397,3 +398,55 @@ def kind_of(message) -> str | None:
         if kind:
             return kind
     return None
+
+
+class CardFile:
+    """A file shown inside a card, read like a discord.Attachment (filename,
+    size, url, proxy_url, content_type, id, read()). Discord lists a
+    Components V2 message's files in no `attachments`: they are only in its
+    File and MediaGallery components."""
+
+    def __init__(self, media, filename: str, size: int | None):
+        self.media = media
+        self.id = media.attachment_id
+        self.filename = filename
+        self.size = size  # None for a picture: a gallery item has no size
+        self.url = media.url
+        self.proxy_url = media.proxy_url
+        self.content_type = media.content_type
+
+    async def read(self) -> bytes:
+        return await self.media.read()
+
+    def __repr__(self) -> str:
+        return f"CardFile({self.filename!r})"
+
+
+def _name_in_url(url: str) -> str:
+    from urllib.parse import unquote, urlsplit
+    return unquote(urlsplit(url or "").path.rsplit("/", 1)[-1])
+
+
+def _card_files(items, out: list) -> None:
+    for item in items:
+        if isinstance(item, discord.components.FileComponent):
+            if item.media.attachment_id:
+                out.append(CardFile(item.media, item.name or _name_in_url(item.media.url), item.size))
+        elif isinstance(item, discord.components.MediaGalleryComponent):
+            # Only pictures uploaded with the message, not a linked one.
+            out.extend(CardFile(g.media, _name_in_url(g.media.url), None)
+                       for g in item.items if g.media.attachment_id)
+        else:
+            _card_files(getattr(item, "children", None) or [], out)
+
+
+def files_of(message) -> list:
+    """A message's files: its attachments, and the files and pictures inside
+    its card. Use this, never message.attachments, wherever the bot's own
+    messages are read for files (the picture to edit, a chat file for the
+    brain, images in the history): a card's files are in no attachments."""
+    found = list(getattr(message, "attachments", None) or [])
+    components = getattr(message, "components", None)
+    if isinstance(components, (list, tuple)):
+        _card_files(components, found)
+    return found

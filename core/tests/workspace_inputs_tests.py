@@ -139,6 +139,19 @@ async def test_input_files_fetch_an_unresolved_reply_and_report_failed_downloads
 
 
 @pytest.mark.asyncio
+async def test_input_files_find_a_file_the_bot_posted_in_a_card():
+    # A card's files are in no message.attachments (seen in E2E).
+    from card_checks import posted_file_card
+    from classes.brain import chat_input_files
+
+    trigger = SimpleNamespace(attachments=[], reference=None)
+    wrapper = SimpleNamespace(context={"original_message": trigger,
+                                       "channel": _Channel([posted_file_card(cdn=b"S")])})
+    inputs, problems, names = await chat_input_files(wrapper.context, ["saturn_notes.md"])
+    assert inputs == [("saturn_notes.md", b"S")] and problems == []
+
+
+@pytest.mark.asyncio
 async def test_no_message_and_no_names_gives_nothing():
     from classes.brain import chat_input_files
 

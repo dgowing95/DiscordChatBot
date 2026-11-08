@@ -140,10 +140,16 @@ spec = K.CardSpec(label="📎 chart.png", body=[K.Text(caption), K.Gallery(("att
 await card.send_card(channel, spec, files={"chart.png": png_bytes})
 ```
 
-`files` is `{name: bytes}`. Each file is sent with the message that shows it, so it stays a
-real attachment. Name files with `card.safe_filename(name)`, because Discord rewrites spaces
-and other characters, which would break the `attachment://` link. Code that finds files by
-name (the image edit's `generated-image.png`, the chat files of a brain call) keeps working.
+`files` is `{name: bytes}`. Each file is sent with the message that shows it. Name files
+with `card.safe_filename(name)`, because Discord rewrites spaces and other characters, which
+would break the `attachment://` link.
+
+**A card's files are not in `message.attachments`**: Discord lists them only in the card's
+File and Gallery components. To read a message's files, the bot's own included, use
+`card.files_of(message)` (attachment-like: `filename`, `size`, `url`, `content_type`,
+`read()`; a gallery picture has no `size`). The image edit's `generated-image.png`, the
+brain's chat files and the pictures in the history all go through it. Raw API messages (the
+message search) have `message_search_format._file_names`.
 
 ### Long content
 

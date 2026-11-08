@@ -12,7 +12,7 @@ from PIL import Image
 pillow_heif.register_heif_opener()
 from classes.text_llm_handler import TextLLMHandler, slot_context_tokens
 from classes import attachment_cache, history_policy, reply_policy
-from classes.card import kind_of, text_of, texts_of
+from classes.card import files_of, kind_of, text_of, texts_of
 from classes import card_kit
 from classes.workspace_inputs import attachment_note
 from classes.history_policy import (
@@ -278,7 +278,7 @@ class MessageHandler:
         delete event reached the attachment cache in between) is left out.
         """
         history = self._history
-        wanted = [m for m in [*history, self.message] if image_targets(m.attachments)]
+        wanted = [m for m in [*history, self.message] if image_targets(files_of(m))]
         polls = [m for m in [*history, self.message] if message_poll(m)]
         started = time.monotonic()
 
@@ -305,7 +305,7 @@ class MessageHandler:
         self.messages = messages
 
     def _estimate(self, message, always=False):
-        placeholders = [_PLACEHOLDER_IMAGE] * len(image_targets(message.attachments))
+        placeholders = [_PLACEHOLDER_IMAGE] * len(image_targets(files_of(message)))
         return estimate_tokens(self._format_group(
             message, placeholders, always=always, voters=placeholder_voters(message)))
 
@@ -391,7 +391,7 @@ class MessageHandler:
         # would start writing the tag itself.
         files = ""
         if role == "user":
-            files = attachment_note([(a.filename, a.size) for a in message.attachments or []])
+            files = attachment_note([(a.filename, a.size) for a in files_of(message)])
         # The bot's own cards (classes/card_kit.py): a status card reads as one,
         # not as something it said (the model copies its earlier replies'
         # shape); its What's New announcement is left out.
@@ -439,7 +439,7 @@ class MessageHandler:
         are downloaded (at most DOWNLOAD_CONCURRENCY at once, process-wide).
         Non-image attachments and failed downloads are skipped, and a failure
         is not cached, so the next build retries it."""
-        targets = image_targets(message.attachments)
+        targets = image_targets(files_of(message))
         if not targets:
             return []
         cache = attachment_cache.cache()
