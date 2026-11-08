@@ -78,11 +78,13 @@ FILE_CARD = [{"type": 17, "id": 231407617, "accent_color": 5763719, "components"
 
 
 def posted_file_card(author_id=42, message_id=1, cdn=b"PNG"):
-    """FILE_CARD on a message, as discord.py builds it; its files read `cdn`."""
+    """FILE_CARD on a message, as discord.py builds it: its components with no
+    connection state of their own (Message._handle_components), the message
+    with one, through which its files read `cdn`."""
     from types import SimpleNamespace
     from discord.components import _component_factory
     state = MagicMock()
     state.http.get_from_cdn = AsyncMock(return_value=cdn)
     return SimpleNamespace(id=message_id, author=SimpleNamespace(id=author_id), content="",
-                           attachments=[], embeds=[], reference=None,
-                           components=[_component_factory(c, state) for c in FILE_CARD])
+                           attachments=[], embeds=[], reference=None, _state=state,
+                           components=[_component_factory(c) for c in FILE_CARD])

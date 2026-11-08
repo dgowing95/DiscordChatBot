@@ -425,7 +425,7 @@ class CardFile:
     Components V2 message's files in no `attachments`: they are only in its
     File and MediaGallery components."""
 
-    def __init__(self, media, filename: str, size: int | None):
+    def __init__(self, media, filename: str, size: int | None, state=None):
         self.media = media
         self.id = media.attachment_id
         self.filename = filename
@@ -433,8 +433,14 @@ class CardFile:
         self.url = media.url
         self.proxy_url = media.proxy_url
         self.content_type = media.content_type
+        self._state = state
 
     async def read(self) -> bytes:
+        # Through the message's connection: discord.py builds a message's
+        # components with none of their own (media.read() raises "Invalid
+        # state"; found live).
+        if self._state is not None:
+            return await self._state.http.get_from_cdn(self.url)
         return await self.media.read()
 
     def __repr__(self) -> str:
@@ -446,17 +452,18 @@ def _name_in_url(url: str) -> str:
     return unquote(urlsplit(url or "").path.rsplit("/", 1)[-1])
 
 
-def _card_files(items, out: list) -> None:
+def _card_files(items, out: list, state) -> None:
     for item in items:
         if isinstance(item, discord.components.FileComponent):
             if item.media.attachment_id:
-                out.append(CardFile(item.media, item.name or _name_in_url(item.media.url), item.size))
+                out.append(CardFile(item.media, item.name or _name_in_url(item.media.url),
+                                    item.size, state))
         elif isinstance(item, discord.components.MediaGalleryComponent):
             # Only pictures uploaded with the message, not a linked one.
-            out.extend(CardFile(g.media, _name_in_url(g.media.url), None)
+            out.extend(CardFile(g.media, _name_in_url(g.media.url), None, state)
                        for g in item.items if g.media.attachment_id)
         else:
-            _card_files(getattr(item, "children", None) or [], out)
+            _card_files(getattr(item, "children", None) or [], out, state)
 
 
 def files_of(message) -> list:
@@ -467,5 +474,5 @@ def files_of(message) -> list:
     found = list(getattr(message, "attachments", None) or [])
     components = getattr(message, "components", None)
     if isinstance(components, (list, tuple)):
-        _card_files(components, found)
+        _card_files(components, found, getattr(message, "_state", None))
     return found
