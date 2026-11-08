@@ -1,7 +1,7 @@
 1. Get the application URL by running these commands:
 
 {{ if eq (include "dcb.llmEngine" .) "strata" -}}
-2. LLM service (Strata, OpenAI-compatible API, llmEngine=strata),
+2. LLM service (Strata, OpenAI-compatible API, llm.engine=strata),
 {{- if .Values.strata.nodePort }} also on every node at port {{ .Values.strata.nodePort }} (send the API key):
    curl -H "Authorization: Bearer <strata.apiKey>" http://<node>:{{ .Values.strata.nodePort }}/v1/models
 {{- else }} in-cluster only (strata.nodePort opens a node port).
@@ -12,7 +12,7 @@
 {{ else -}}
 2. LLM service (llama.cpp, OpenAI-compatible API):
    kubectl get svc <release>-llamacpp-service
-   curl http://<node>:31434/v1/models   # the model name the bot must use (MODEL value)
+   curl http://<node>:31434/v1/models   # the model name the bot must use (llm.model value)
 {{ end }}
 3. Image generation (when diffusion.enabled=true): separate pod + service,
    called in-cluster by the bot's generate_image tool. /health returns 200
@@ -20,10 +20,10 @@
    kubectl get svc <release>-diffusion-service
    kubectl logs deploy/<release>-diffusion-deployment
 
-4. Code sandbox (when sandbox.enabled=true): the bot's run_code_sandbox tool
-   runs each task in a throwaway container on this node. The node needs a
-   Docker daemon; its socket is mounted into the core pod via hostPath
-   (sandbox.dockerSocketPath, default /var/run/docker.sock). First use pulls
-   the sandbox image (sandbox.image). If the node has no Docker daemon, set
-   sandbox.enabled=false — otherwise the core pod will not start (hostPath
-   Socket type requires the socket to exist).
+4. Server workspaces: the bot's brain (every tool request) runs in one long-lived
+   container per Discord server on this node. The node needs a Docker daemon
+   (required): its socket is mounted into the core pod via hostPath
+   (brain.workspace.dockerSocketPath, default /var/run/docker.sock), and the
+   core pod will not start without it. Core pulls the image
+   (brain.workspace.image) at startup if it is missing. List the containers:
+   docker ps --filter label=dcb.instance={{ .Release.Namespace }}-{{ .Release.Name }}

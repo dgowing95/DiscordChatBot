@@ -194,7 +194,7 @@ async def test_a_silent_tool_call_gets_a_written_line_before_the_answer(monkeypa
 @pytest.mark.asyncio
 async def test_a_failed_hold_on_line_falls_back_to_a_plain_one(monkeypatch, fake_llm):
     session, bridge = _session(monkeypatch)
-    fake_llm.script = [("model",), ("tool", "generate_image", '{"prompt": "a cat"}'), ("model",),
+    fake_llm.script = [("model",), ("tool", "ask_brain", '{"request": "draw a cat"}'), ("model",),
                        ("text", "Done, it's in the thread.")]
     fake_llm.answer = "Done, it's in the thread."
     with patch.object(voice_session._hold_on_llm, "complete", AsyncMock(side_effect=RuntimeError("down"))), \
@@ -203,7 +203,7 @@ async def test_a_failed_hold_on_line_falls_back_to_a_plain_one(monkeypatch, fake
         await session.heard(7, "Ana", "hey sparky draw a cat")
         await _settle(session)
         await asyncio.sleep(0.05)
-    assert bridge.spoken() == ["Hold on, I'm making a picture.", "Done, it's in the thread."]
+    assert bridge.spoken() == ["Hold on, I'm looking into that.", "Done, it's in the thread."]
     session._worker.cancel()
 
 
@@ -440,3 +440,71 @@ def test_main_argument():
     assert voice_session._main_argument('{"search_request": "f1 winner"}') == "f1 winner"
     assert voice_session._main_argument("not json") == ""
     assert voice_session._main_argument("[1, 2]") == ""
+
+
+# --- the brain's question to a speaker (ask_user, classes/brain_inbox.py) ----
+
+@pytest.mark.asyncio
+async def test_the_asked_speakers_next_words_are_the_answer(monkeypatch, fake_llm):
+    from classes import brain_inbox
+    brain_inbox.reset()
+    session, bridge = _session(monkeypatch)
+    session.text_channel.id = 900
+    future = brain_inbox.ask(4100, 900, 7, voice=True)
+    await session.heard(8, "Bo", "unrelated chatter")  # someone else
+    assert not future.done()
+    await session.heard(7, "Ana", "the blue one")  # no wake phrase needed
+    assert future.result() == "the blue one"
+    assert fake_llm.instances == []
+    assert "chime" in bridge.kinds()
+    brain_inbox.reset()
+
+
+@pytest.mark.asyncio
+async def test_stop_still_works_while_a_question_is_open(monkeypatch, fake_llm):
+    from classes import brain_inbox
+    brain_inbox.reset()
+    session, bridge = _session(monkeypatch)
+    session.text_channel.id = 900
+    future = brain_inbox.ask(4100, 900, 7, voice=True)
+    await session.heard(7, "Ana", "hey sparky, stop")
+    assert bridge.kinds() == ["stop"]
+    assert not future.done()
+    brain_inbox.reset()
+
+
+@pytest.mark.asyncio
+async def test_speak_line_speaks_plain_text(monkeypatch):
+    session, bridge = _session(monkeypatch)
+    await session.speak_line("**Bar** or line?")
+    assert bridge.spoken() == ["Bar or line?"]
+
+
+@pytest.mark.asyncio
+async def test_the_wake_phrase_alone_does_not_answer_a_question(monkeypatch, fake_llm):
+    from classes import brain_inbox
+    brain_inbox.reset()
+    session, bridge = _session(monkeypatch)
+    session.text_channel.id = 900
+    future = brain_inbox.ask(4100, 900, 7, voice=True)
+    await session.heard(7, "Ana", "Hey Sparky.")
+    assert not future.done()
+    assert session._followup_user == 7  # the usual wake-only follow-up window
+    await session.heard(7, "Ana", "hey sparky, the red one")
+    assert future.result() == "the red one"
+    brain_inbox.reset()
+
+
+@pytest.mark.asyncio
+async def test_a_bare_stop_while_a_question_is_open_is_a_command_not_the_answer(monkeypatch, fake_llm):
+    from classes import brain_inbox
+    brain_inbox.reset()
+    session, bridge = _session(monkeypatch)
+    session.text_channel.id = 900
+    future = brain_inbox.ask(4100, 900, 7, voice=True)
+    await session.heard(7, "Ana", "stop")  # no wake phrase
+    assert bridge.kinds() == ["stop"]
+    assert not future.done()
+    await session.heard(7, "Ana", "the blue one")
+    assert future.result() == "the blue one"
+    brain_inbox.reset()

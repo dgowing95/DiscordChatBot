@@ -135,7 +135,7 @@ async def test_review_sends_the_image_and_returns_the_verdict(monkeypatch):
     assert parts[0]["type"] == "text" and "draw a fox" in parts[0]["text"]
     assert parts[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
     # thinking off, like the rewrite: a reasoning model would spend the budget first
-    assert kwargs["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+    assert kwargs["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}, "reasoning": {"enabled": False}}
 
 
 def _sizes(parts):
@@ -231,28 +231,66 @@ def test_retries_default_to_one_and_are_clamped(monkeypatch):
         assert image_review.review_retries() == expected, raw
 
 
-def test_review_settings_fall_back_to_the_bots_own(monkeypatch):
-    for name in ("IMAGE_REVIEW_MODEL", "IMAGE_REVIEW_LLM_HOST", "IMAGE_REVIEW_LLM_API_KEY"):
+def _clear_roles(monkeypatch):
+    for name in ("IMAGE_REVIEW_MODEL", "IMAGE_REVIEW_LLM_HOST", "IMAGE_REVIEW_LLM_API_KEY",
+                 "BRAIN_MODEL", "BRAIN_LLM_HOST", "BRAIN_LLM_API_KEY"):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("MODEL", "qwen3:27b")
+
+
+def test_review_settings_fall_back_to_the_bots_own(monkeypatch):
+    _clear_roles(monkeypatch)
+    monkeypatch.setenv("LLM_MODEL", "qwen3:27b")
     monkeypatch.setenv("LLM_HOST", "http://llamacpp:8080")
-    monkeypatch.setenv("LLM_PASS", "llamacpp")
-    assert image_review.review_model() == "qwen3:27b"
-    assert image_review.review_llm_host() == "http://llamacpp:8080"
-    assert image_review.review_llm_api_key() == "llamacpp"
+    monkeypatch.setenv("LLM_API_KEY", "llamacpp")
+    config = image_review.review_config()
+    assert (config.model, config.host, config.api_key) == ("qwen3:27b", "http://llamacpp:8080", "llamacpp")
 
 
 def test_review_settings_override_the_bots_own(monkeypatch):
-    monkeypatch.setenv("MODEL", "qwen3:27b")
+    _clear_roles(monkeypatch)
+    monkeypatch.setenv("LLM_MODEL", "qwen3:27b")
+    monkeypatch.setenv("LLM_API_KEY", "local-key")
     monkeypatch.setenv("IMAGE_REVIEW_MODEL", "some/vision-model")
     monkeypatch.setenv("IMAGE_REVIEW_LLM_HOST", "https://openrouter.ai/api")
-    assert image_review.review_model() == "some/vision-model"
-    assert image_review.review_llm_host() == "https://openrouter.ai/api"
+    config = image_review.review_config()
+    assert (config.model, config.host) == ("some/vision-model", "https://openrouter.ai/api")
+    # Another server with no key of its own gets none, never the local one.
+    assert config.api_key == ""
 
 
 def test_review_timeout_falls_back_on_junk(monkeypatch):
     monkeypatch.setenv("IMAGE_REVIEW_TIMEOUT", "45")
-    assert image_review.review_timeout() == 45
+    assert image_review.review_config().call_timeout == 45
     for bad in ("", "nope", "0", "-1"):
         monkeypatch.setenv("IMAGE_REVIEW_TIMEOUT", bad)
-        assert image_review.review_timeout() == image_review.DEFAULT_TIMEOUT
+        assert image_review.review_config().call_timeout == image_review.DEFAULT_TIMEOUT
+
+
+@pytest.mark.asyncio
+async def test_describe_image_sends_the_picture_and_the_question():
+    with patch.object(image_review._llm, "complete",
+                      AsyncMock(return_value="A bar chart, 2025")) as complete:
+        assert await image_review.describe_image(_png(), "Which year?") == "A bar chart, 2025"
+    messages = complete.await_args.args[0]
+    parts = messages[1]["content"]
+    assert parts[0]["text"].startswith("Which year? ")
+    assert image_review.VIEW_LAYOUT_QUESTION in parts[0]["text"]  # always asked
+    assert parts[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+
+@pytest.mark.asyncio
+async def test_describe_image_keeps_a_big_chart_readable():
+    with patch.object(image_review._llm, "complete", AsyncMock(return_value="ok")) as complete:
+        await image_review.describe_image(_png((2000, 1000)))
+    url = complete.await_args.args[0][1]["content"][1]["image_url"]["url"]
+    data = base64.b64decode(url.split(",", 1)[1])
+    assert Image.open(io.BytesIO(data)).size == (1280, 640)
+
+
+@pytest.mark.asyncio
+async def test_describe_image_gives_none_when_it_cannot_look(monkeypatch):
+    with patch.object(image_review._llm, "complete", AsyncMock(side_effect=RuntimeError("no"))):
+        assert await image_review.describe_image(_png()) is None
+    assert await image_review.describe_image(b"not a picture") is None
+    monkeypatch.setenv("IMAGE_REVIEW_ENABLED", "0")
+    assert await image_review.describe_image(_png()) is None

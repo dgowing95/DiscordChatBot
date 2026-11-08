@@ -32,6 +32,7 @@ prefill), so a turn's prompt is already processed up to its last few tokens
 when the wake phrase is heard.
 """
 import asyncio
+import dataclasses
 import json
 import logging
 import time
@@ -39,9 +40,10 @@ import uuid
 
 import discord
 
-from classes import voice_gate, voice_policy
+from classes import brain_inbox, voice_gate, voice_policy
 from classes.config_manager import configManager
-from classes.llm_config import llm_api_key, llm_host, llm_model
+from classes import llm_lanes
+from classes.llm_roles import PERSONA, role_config
 from classes.metrics import (
     inc_voice_turn,
     inc_voice_utterance,
@@ -66,6 +68,7 @@ from classes.voice_policy import (
     utterance_message,
 )
 
+from classes import card_kit
 logger = logging.getLogger(__name__)
 
 # How long a session waits for its last sentences to finish playing before
@@ -76,8 +79,15 @@ HOLD_ON_TIMEOUT_SECONDS = 8
 # A busy notice is spoken at most this often.
 BUSY_NOTICE_SECONDS = 10
 
-_hold_on_llm = SideLLM("voice_hold_on", llm_model, llm_host, llm_api_key, lambda: HOLD_ON_TIMEOUT_SECONDS)
-_greeting_llm = SideLLM("voice_greeting", llm_model, llm_host, llm_api_key, lambda: HOLD_ON_TIMEOUT_SECONDS)
+
+def _voice_line_config():
+    """The persona's connection, with the short wait a spoken line allows."""
+    return dataclasses.replace(role_config(PERSONA), call_timeout=HOLD_ON_TIMEOUT_SECONDS)
+
+
+# The persona's own side calls: chat lane.
+_hold_on_llm = SideLLM("voice_hold_on", _voice_line_config, lane=llm_lanes.CHAT)
+_greeting_llm = SideLLM("voice_greeting", _voice_line_config, lane=llm_lanes.CHAT)
 
 
 class VoiceError(Exception):
@@ -131,7 +141,7 @@ async def start(client, voice_channel, text_channel, requested_by) -> "VoiceSess
 
 async def _session_channel(text_channel, voice_channel):
     """Where the call's text goes: a thread off the channel the join was
-    asked from, so pictures and sandbox runs (which need a thread for their
+    asked from, so pictures and brain calls (which need a thread for their
     workspace and steering) land together. Falls back to the voice channel's
     own chat, which cannot hold threads, when no thread can be made."""
     if isinstance(text_channel, discord.Thread):
@@ -139,7 +149,7 @@ async def _session_channel(text_channel, voice_channel):
     if isinstance(text_channel, discord.TextChannel):
         name = f"🎙️ Voice: {voice_channel.name}"[:100]
         # The bot's own still-active thread for this voice channel is reused,
-        # so calls do not leave a trail of threads, and a sandbox workspace
+        # so calls do not leave a trail of threads, and a server's workspace
         # (keyed by thread) carries over to the next call.
         for thread in text_channel.threads:
             if thread.name == name and thread.owner_id == text_channel.guild.me.id and not thread.locked:
@@ -242,10 +252,11 @@ class VoiceSession:
     async def begin(self) -> None:
         await self.refresh_settings()
         self._worker = asyncio.create_task(self._run_turns())
-        await self._post(
-            f"🎙️ I'm in {self.voice_channel.mention}. Say **\"{self.wake_phrase}\"** and then what "
-            f"you'd like. Pictures and code results will appear here. Say "
-            f"\"{self.wake_phrase}, leave\" or use `/voice leave` to end the call.")
+        from classes.voice_commands import call_card
+        await self._post(call_card(
+            self.voice_channel.mention, self.wake_phrase,
+            f' Pictures and code results will appear here. Say "{self.wake_phrase}, leave" or use '
+            "`/voice leave` to end the call."))
         # Not awaited: /voice join's reply should not wait on the LLM.
         self._greeting_task = asyncio.create_task(self._greet())
         self.members_changed()
@@ -288,7 +299,7 @@ class VoiceSession:
     async def end(self, note: str | None = None) -> None:
         """Leave the call. Safe to call more than once and from anywhere.
 
-        A turn already running is not cancelled -- a sandbox run or an image
+        A turn already running is not cancelled -- a brain call or an image
         in progress finishes and still posts in the thread -- it just stops
         being spoken. Queued turns are dropped."""
         if self.ending:
@@ -310,7 +321,8 @@ class VoiceSession:
             except Exception as e:
                 logger.warning(f"Voice: leaving guild {self.guild.id} was not clean: {e}")
         if note:
-            await self._post(f"👋 {note}")
+            await self._post(card_kit.CardSpec(label="🎙️ Call ended", body=[card_kit.Text(f"👋 {note}")],
+                                               colour=card_kit.CLOSED))
         logger.info(f"Voice: session in guild {self.guild.id} ended ({note or 'asked'})")
 
     def moved(self, channel) -> None:
@@ -360,6 +372,23 @@ class VoiceSession:
         logger.debug(f"Voice: heard {name}: {text}")
         now = time.monotonic()
         matched, rest = match_wake(text, self.wake_phrase)
+        # The brain asked this speaker a question (ask_user): what they say
+        # next is the answer, wake phrase or not (nobody can press Reply in
+        # a call). "leave" and "stop" still work as commands.
+        question = (brain_inbox.voice_waiting(self.text_channel.id, user_id)
+                    if self.text_channel is not None else None)
+        if question is not None:
+            spoken = rest if matched else text
+            if parse_command(spoken) in (LEAVE, STOP):
+                # "stop" and "leave" are commands even without the wake
+                # phrase while a question is open; the question stays open.
+                matched, rest = True, spoken
+            # The wake phrase alone is not an answer: deliver("") is refused
+            # and the wake-only handling below runs as usual.
+            elif brain_inbox.deliver(question, user_id, spoken) == brain_inbox.ACCEPTED:
+                inc_voice_utterance("answer")
+                await self._chime()
+                return
         if not matched and self._followup_user == user_id and now < self._followup_until:
             matched, rest = True, text
         if not matched:
@@ -414,7 +443,7 @@ class VoiceSession:
                     event.set()
 
     async def stop_speaking(self) -> None:
-        """Stop talking (the turn's work, a sandbox run say, carries on)."""
+        """Stop talking (the turn's work, a brain call say, carries on)."""
         if self._current_turn is not None:
             self._muted_turns.add(self._current_turn)
         await self.bridge.send({"type": "stop", "guild_id": self.guild_key})
@@ -542,6 +571,13 @@ class VoiceSession:
         if not self.ending:
             await self.bridge.send({"type": "chime", "guild_id": self.guild_key})
 
+    async def speak_line(self, text: str) -> None:
+        """Speak one line outside the turn's own speech (the brain's
+        question to a speaker, classes/brain.py)."""
+        text = speakable(text or "")
+        if text:
+            await self._speak_line(text)
+
     async def _speak_line(self, text: str) -> None:
         """A one-off line outside any turn (greeting, busy notice)."""
         if not self.ending:
@@ -584,11 +620,12 @@ class VoiceSession:
 
     # -- text ---------------------------------------------------------------------
 
-    async def _post(self, content: str) -> None:
+    async def _post(self, spec) -> None:
         if self.text_channel is None:
             return
         try:
-            await self.text_channel.send(content)
+            from classes import card
+            await card.send_card(self.text_channel, spec)
         except Exception as e:
             logger.warning(f"Voice: could not post to the session channel: {e}")
 

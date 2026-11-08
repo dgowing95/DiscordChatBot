@@ -13,6 +13,12 @@ spec:
       labels:
         app: {{ .Release.Name }}-core
     spec:
+      # Room for the shutdown save of the server workspaces (bounded by
+      # snapshotTimeout, read like core does: under 1 means its default 120)
+      # after SIGTERM, plus the rest of the close.
+      {{- $snapshotTimeout := .Values.brain.workspace.snapshotTimeout | int64 }}
+      {{- if lt $snapshotTimeout 1 }}{{ $snapshotTimeout = 120 }}{{ end }}
+      terminationGracePeriodSeconds: {{ add $snapshotTimeout 30 }}
       containers:
       - name: core
         image: "{{ .Values.image.repository }}:core-{{ .Values.image.tag | default .Chart.AppVersion }}"
@@ -21,15 +27,15 @@ spec:
         envFrom:
         - configMapRef:
             name: {{ .Release.Name }}-configmap
-        # Credentials (DISCORD_TOKEN, OPENAI_API_KEY, SANDBOX_LLM_API_KEY);
+        # Credentials (DISCORD_TOKEN, LLM_API_KEY, CONTENT_GUARD_API_KEY, BRAIN_LLM_API_KEY, ...);
         # the chart's own Secret unless existingSecret names one
         - secretRef:
             name: {{ .Values.existingSecret | default (printf "%s-secret" .Release.Name) }}
         {{- if eq (include "dcb.llmEngine" .) "strata" }}
-        # Strata checks the key, so core's LLM_PASS is the real one from the
+        # Strata checks the key, so core's LLM_API_KEY is the real one from the
         # Strata secret (an explicit env entry beats the configmap's).
         env:
-        - name: LLM_PASS
+        - name: LLM_API_KEY
           valueFrom:
             secretKeyRef:
               name: {{ include "dcb.strataSecretName" . }}
@@ -47,14 +53,13 @@ spec:
           requests:
             cpu: {{ .Values.coreResources.requests.cpu }}
             memory: {{ .Values.coreResources.requests.memory }}
-        {{- if .Values.sandbox.enabled }}
-        # Code sandbox: the run_code_sandbox tool drives the node's Docker
-        # daemon (agents.sandbox DockerSandboxClient) through this socket.
+        # The server workspaces are containers on the node's Docker daemon
+        # (agents.sandbox DockerSandboxClient), reached through this socket.
+        # Required: core exits at startup without it.
         # Security note: this gives the core pod control of the node's Docker.
         volumeMounts:
         - name: docker-socket
           mountPath: /var/run/docker.sock
-        {{- end }}
       {{- if .Values.voice.enabled }}
       # Discord voice I/O for core (voicesidecar/). Same pod so the bridge
       # stays on localhost: it is bound to 127.0.0.1 and has no auth of its
@@ -85,10 +90,8 @@ spec:
             cpu: {{ .Values.voiceSidecarResources.requests.cpu }}
             memory: {{ .Values.voiceSidecarResources.requests.memory }}
       {{- end }}
-      {{- if .Values.sandbox.enabled }}
       volumes:
       - name: docker-socket
         hostPath:
-          path: {{ .Values.sandbox.dockerSocketPath }}
+          path: {{ .Values.brain.workspace.dockerSocketPath }}
           type: Socket
-      {{- end }}

@@ -165,7 +165,7 @@ async def test_build_disables_thinking_on_the_first_try(monkeypatch):
         await image_prompt.build_image_prompt("draw me a fox")
 
     kwargs = client.chat.completions.create.await_args.kwargs
-    assert kwargs["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+    assert kwargs["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}, "reasoning": {"enabled": False}}
 
 
 def _rejected(status=400):
@@ -287,38 +287,43 @@ async def test_build_ignores_an_empty_request(monkeypatch):
 
 # ---------------------- connection settings ----------------------
 
-def test_rewrite_settings_fall_back_to_the_bots_own(monkeypatch):
-    for name in ("IMAGE_PROMPT_MODEL", "IMAGE_PROMPT_LLM_HOST", "IMAGE_PROMPT_LLM_API_KEY"):
+def _clear_roles(monkeypatch):
+    for name in ("IMAGE_PROMPT_MODEL", "IMAGE_PROMPT_LLM_HOST", "IMAGE_PROMPT_LLM_API_KEY",
+                 "BRAIN_MODEL", "BRAIN_LLM_HOST", "BRAIN_LLM_API_KEY"):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("MODEL", "qwen3:27b")
-    monkeypatch.setenv("LLM_HOST", "http://llamacpp:8080")
-    monkeypatch.setenv("LLM_PASS", "llamacpp")
 
-    assert image_prompt.rewrite_model() == "qwen3:27b"
-    assert image_prompt.rewrite_llm_host() == "http://llamacpp:8080"
-    assert image_prompt.rewrite_llm_api_key() == "llamacpp"
+
+def test_rewrite_settings_fall_back_to_the_bots_own(monkeypatch):
+    _clear_roles(monkeypatch)
+    monkeypatch.setenv("LLM_MODEL", "qwen3:27b")
+    monkeypatch.setenv("LLM_HOST", "http://llamacpp:8080")
+    monkeypatch.setenv("LLM_API_KEY", "llamacpp")
+
+    config = image_prompt.rewrite_config()
+    assert (config.model, config.host, config.api_key) == ("qwen3:27b", "http://llamacpp:8080", "llamacpp")
 
 
 def test_rewrite_settings_override_the_bots_own(monkeypatch):
     """So the rewrite can run on OpenRouter while chat stays local, exactly as
-    SANDBOX_MODEL/SANDBOX_LLM_HOST already allow for the sandbox agent."""
-    monkeypatch.setenv("MODEL", "qwen3:27b")
+    BRAIN_MODEL/BRAIN_LLM_HOST already allow for the brain."""
+    _clear_roles(monkeypatch)
+    monkeypatch.setenv("LLM_MODEL", "qwen3:27b")
     monkeypatch.setenv("LLM_HOST", "http://llamacpp:8080")
     monkeypatch.setenv("IMAGE_PROMPT_MODEL", "deepseek/deepseek-v4-flash-0731")
     monkeypatch.setenv("IMAGE_PROMPT_LLM_HOST", "https://openrouter.ai/api")
     monkeypatch.setenv("IMAGE_PROMPT_LLM_API_KEY", "sk-or-test")
 
-    assert image_prompt.rewrite_model() == "deepseek/deepseek-v4-flash-0731"
-    assert image_prompt.rewrite_llm_host() == "https://openrouter.ai/api"
-    assert image_prompt.rewrite_llm_api_key() == "sk-or-test"
+    config = image_prompt.rewrite_config()
+    assert (config.model, config.host, config.api_key) == (
+        "deepseek/deepseek-v4-flash-0731", "https://openrouter.ai/api", "sk-or-test")
 
 
 def test_rewrite_timeout_falls_back_on_junk(monkeypatch):
     monkeypatch.setenv("IMAGE_PROMPT_TIMEOUT", "90")
-    assert image_prompt.rewrite_timeout() == 90
+    assert image_prompt.rewrite_config().call_timeout == 90
     for bad in ("", "   ", "not-a-number", "0", "-5"):
         monkeypatch.setenv("IMAGE_PROMPT_TIMEOUT", bad)
-        assert image_prompt.rewrite_timeout() == image_prompt.DEFAULT_TIMEOUT
+        assert image_prompt.rewrite_config().call_timeout == image_prompt.DEFAULT_TIMEOUT
 
 
 def test_rewrite_enabled_env_values(monkeypatch):

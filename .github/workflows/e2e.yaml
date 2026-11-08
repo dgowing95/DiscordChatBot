@@ -6,6 +6,7 @@ on:
   pull_request:
     branches:
       - main
+      - v3
   # Warms the dependency/model caches that PR runs restore (a PR can read
   # main's caches, not another PR's) whenever the inputs to them change.
   push:

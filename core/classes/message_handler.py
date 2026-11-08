@@ -12,8 +12,9 @@ from PIL import Image
 pillow_heif.register_heif_opener()
 from classes.text_llm_handler import TextLLMHandler, slot_context_tokens
 from classes import attachment_cache, history_policy, reply_policy
-from classes.sandbox_inputs import attachment_note
-from classes.common import send_with_files
+from classes.card import files_of, kind_of, text_of, texts_of
+from classes import card_kit
+from classes.workspace_inputs import attachment_note
 from classes.history_policy import (
     ANCHORED,
     KEEP,
@@ -55,7 +56,7 @@ from classes.metrics import (
     observe_stage,
     set_attachment_cache_bytes,
 )
-from classes.message_queue import get_channel_lock, in_flight_hint
+from classes.message_queue import get_channel_lock, in_flight_hint, pop_unprompted
 
 logger = logging.getLogger(__name__)
 
@@ -197,9 +198,10 @@ def is_reset(message) -> bool:
 
 
 def is_announcement(embed, message, client) -> bool:
-    """The bot's own What's New embed (marked by its footer). Kept out of the
-    prompt: a release announcement is not part of the conversation, and it
-    would shift anchored-mode prompt prefixes."""
+    """The bot's own What's New embed from before the cards (marked by its
+    footer). Kept out of the prompt: a release announcement is not part of the
+    conversation, and it would shift anchored-mode prompt prefixes. Today's
+    is a card marked card_kit.ANNOUNCE (see _format_group)."""
     footer = getattr(getattr(embed, "footer", None), "text", None)
     return footer == ANNOUNCEMENT_FOOTER and message.author.id == client.user.id
 
@@ -210,7 +212,6 @@ class MessageHandler:
         self.message = message
         self.client = client
         self.text_response = ""
-        self.discord_message_object = None
         # How the handle ended, for the reply-latency metric (main.py):
         # "replied", or "llm_error" when the run failed and got the ❌.
         self.outcome = "replied"
@@ -277,7 +278,7 @@ class MessageHandler:
         delete event reached the attachment cache in between) is left out.
         """
         history = self._history
-        wanted = [m for m in [*history, self.message] if image_targets(m.attachments)]
+        wanted = [m for m in [*history, self.message] if image_targets(files_of(m))]
         polls = [m for m in [*history, self.message] if message_poll(m)]
         started = time.monotonic()
 
@@ -304,7 +305,7 @@ class MessageHandler:
         self.messages = messages
 
     def _estimate(self, message, always=False):
-        placeholders = [_PLACEHOLDER_IMAGE] * len(image_targets(message.attachments))
+        placeholders = [_PLACEHOLDER_IMAGE] * len(image_targets(files_of(message)))
         return estimate_tokens(self._format_group(
             message, placeholders, always=always, voters=placeholder_voters(message)))
 
@@ -385,13 +386,25 @@ class MessageHandler:
             role = "assistant" if message.author.id == self.client.user.id else "user"
         entries = []
         # Names a user's files (a CSV would otherwise not be in the prompt at
-        # all), so the model can hand them to run_code_sandbox. Not on the
+        # all), so the model can hand them to ask_brain. Not on the
         # bot's own messages: the model copies its earlier replies' shape, and
         # would start writing the tag itself.
         files = ""
         if role == "user":
-            files = attachment_note([(a.filename, a.size) for a in message.attachments or []])
-        if message.content or image_parts or always or files:
+            files = attachment_note([(a.filename, a.size) for a in files_of(message)])
+        # The bot's own cards (classes/card_kit.py): a status card reads as one,
+        # not as something it said (the model copies its earlier replies'
+        # shape); its What's New announcement is left out.
+        kind = kind_of(message) if message.author.id == self.client.user.id else None
+        if kind == card_kit.ANNOUNCE:
+            return entries
+        if kind == card_kit.NOTICE:
+            text = card_kit.notice_for_history(message.author.name, texts_of(message))
+            if text or image_parts:
+                entries.append({'role': role, 'content': [*image_parts, {"type": "text", "text": text}]
+                                if image_parts else text})
+            return entries
+        if message.content or text_of(message) or image_parts or always or files:
             text = f"Message from '{message.author.name}': {self.clean_message_content(message)}{files}"
             # With images the content becomes a list of parts (base64 images + text);
             # the agents SDK forwards them as multimodal chat-completions input.
@@ -426,7 +439,7 @@ class MessageHandler:
         are downloaded (at most DOWNLOAD_CONCURRENCY at once, process-wide).
         Non-image attachments and failed downloads are skipped, and a failure
         is not cached, so the next build retries it."""
-        targets = image_targets(message.attachments)
+        targets = image_targets(files_of(message))
         if not targets:
             return []
         cache = attachment_cache.cache()
@@ -445,7 +458,8 @@ class MessageHandler:
 
 
     def clean_message_content(self, message):
-        return (message.content or "").replace(f'<@{self.client.user.id}>', '').strip()
+        text = message.content or text_of(message)
+        return text.replace(f'<@{self.client.user.id}>', '').strip()
     
 
 
@@ -484,58 +498,12 @@ class MessageHandler:
                 await asyncio.sleep(1)
 
 
-
-
-    def _sandbox_copy_channel(self, thread):
-        """Where a sandbox run's reply and files are copied, besides the
-        thread they went to; None for nowhere.
-
-        A request made outside the thread: the channel it was made in. A
-        follow-up made inside a thread the bot started (a sandbox thread):
-        the channel that thread belongs to, so each new result shows up in
-        the channel the work began in. Not a thread people started
-        themselves, where the bot only joined in, and not a run whose thread
-        could not be made (it ran in the request's own channel)."""
-        channel = self.message.channel
-        if thread is None:
-            return None
-        if thread is not channel and getattr(thread, "id", None) != getattr(channel, "id", None):
-            return channel
-        bot_id = getattr(getattr(self.client, "user", None), "id", None)
-        if (isinstance(channel, discord.Thread) and bot_id is not None
-                and getattr(channel, "owner_id", None) == bot_id):
-            return getattr(channel, "parent", None)
-        return None
-
-    async def _post_sandbox_copy(self, ollama, text):
-        """Posts the reply and the files a sandbox run sent to its thread in
-        the channel the work was asked for in too (_sandbox_copy_channel),
-        so the result is there as well as in the thread. Sent under THAT
-        channel's lock, taken after this handle's own is released (for a
-        follow-up the two differ, and holding one while waiting for the
-        other could deadlock).
-        Exception-safe: the thread already has everything, so a failure
-        here must not cost the rest of the handle."""
-        channel = self._sandbox_copy_channel(getattr(ollama, "sandbox_thread", None))
-        if channel is None:
-            return
-        files = list(getattr(ollama, "sandbox_files", None) or [])
-        chunks = chunk_for_discord(text or "")
-        if not chunks and not files:
-            return
+    def _prewarm_workspace(self) -> None:
         try:
-            async with get_channel_lock(channel.id):
-                for chunk in chunks[:-1]:
-                    # One lost chunk must not cost the files below.
-                    try:
-                        await channel.send(chunk)
-                    except Exception as e:
-                        logger.warning(f"Could not copy part of the sandbox reply: {e!r}")
-                    await asyncio.sleep(1)
-                await send_with_files(channel, chunks[-1] if chunks else None, files)
+            from classes.workspace_manager import workspaces
+            workspaces().prewarm(self.message.guild.id)
         except Exception as e:
-            logger.warning(f"Could not post the sandbox result in the original channel: {e}")
-
+            logger.info(f"Could not pre-warm the server's workspace: {e}")
 
     async def handle_message(self):
         logger.info(f'Handling message: {self.message.content}')
@@ -557,8 +525,8 @@ class MessageHandler:
             #    read is a consistent snapshot (no half-sent replies from a
             #    concurrent same-channel handle).
             await self.select_messages()
-            # If an earlier message's slow tool is still running (or just
-            # finished) in this channel, tell the model — it can then answer
+            # If an earlier message's brain call is still running in this
+            # channel, tell the model — it can then answer
             # follow-ups honestly ("it's still running") instead of guessing
             # that the previous request went unanswered.
             hint = in_flight_hint(self.message.channel.id)
@@ -569,11 +537,17 @@ class MessageHandler:
         await self.prepare_messages()
         if hint:
             self.messages.append({"role": "user", "content": hint})
+        # The persona may hand the job to the brain, which needs this server's
+        # workspace: start it now, while the persona thinks
+        # (WORKSPACE_PREWARM, on by default). Fire-and-forget, fail-soft.
+        self._prewarm_workspace()
         # 3) LLM run + tool calls UNLOCKED (the slow phase; other messages —
         #    same channel or not — can build/generate concurrently).
         ollama = TextLLMHandler(
             self.messages, self.message.guild.id, self.message,
             client=self.client,
+            # Let in by the reply chance, not a mention (main.on_message).
+            unprompted=pop_unprompted(self.message.id),
         )
         ollama.allow_double_reply = allow_double_reply
         response = await ollama.generate()
@@ -585,11 +559,9 @@ class MessageHandler:
         # from TextLLMHandler breaks a test instead of silently killing the
         # feature again.
         thinking = ollama.reasoning if SHOW_THINKING else ""
-        # If run_code_sandbox created/reused a thread this run, the sandbox's
-        # own output already lives there — send the outer agent's reply
-        # there, next to it. The reply and the run's files are then posted
-        # in the channel the work was asked for as well (_post_sandbox_copy).
-        target_channel = getattr(ollama, "sandbox_thread", None) or self.message.channel
+        # The brain works inline (no thread): its files are already in this
+        # channel, and the reply goes here too.
+        target_channel = self.message.channel
 
         if response == "Error":
             # The run broke part-way (e.g. it ran out of turns chaining tool
@@ -603,8 +575,6 @@ class MessageHandler:
                     started = time.monotonic()
                     await self.handle_thinking_send(thinking, channel=target_channel)
                     self._observe_stage("send", started)
-            # No reply to copy, but the files a sandbox run made still exist.
-            await self._post_sandbox_copy(ollama, "")
         else:
             response = self.filter_response(response)
             # 4) Send under the lock: serializes the chunked replies of
@@ -614,7 +584,6 @@ class MessageHandler:
                 parts = reply_policy.reply_parts(
                     response,
                     allowed=(allow_double_reply
-                             and not getattr(ollama, "sandbox_thread", None)
                              and reply_policy.policy.available(target_channel.id)),
                 )
                 if len(parts) == 2:
@@ -633,7 +602,8 @@ class MessageHandler:
                 if thinking:
                     await self.handle_thinking_send(thinking, channel=target_channel)
                 self._observe_stage("send", started)
-            # parts, not response: what the thread got (pair marker resolved).
-            # After the lock: the copy takes the lock of the channel it goes to.
-            await self._post_sandbox_copy(ollama, "\n\n".join(p for p in parts if p))
+        if response != "Error":
+            # After the reply: a long brain job may be worth keeping as a skill.
+            from classes import skill_reflection
+            skill_reflection.start(getattr(ollama, "skill_reviews", None))
         observe_response_generation(self.message.guild.id, time.monotonic() - start)

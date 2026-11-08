@@ -7,6 +7,7 @@ from types import SimpleNamespace
 # and pyproject.toml puts core/ on the test path).
 
 import pytest
+from card_checks import label_of, view_text
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from classes import image_generation, image_prompt, image_review
@@ -200,6 +201,36 @@ async def test_an_unreachable_service_falls_back():
 
 # ---------------------- create_image ----------------------
 
+@pytest.fixture(autouse=True)
+def _guard_allows():
+    with patch("classes.content_guard.check_web_request", AsyncMock(return_value=(True, ""))):
+        yield
+
+
+@pytest.mark.asyncio
+async def test_a_description_the_guard_blocks_makes_nothing(monkeypatch):
+    patches, api, _, rewrite = _patched(KLEIN, [b"ONE"], [MATCH], monkeypatch)
+    guard = AsyncMock(return_value=(False, "flagged"))
+    with patch("classes.content_guard.check_web_request", guard), \
+         pytest.raises(image_generation.ImageBlocked):
+        await _run(patches, "something bad")
+    guard.assert_awaited_once_with("something bad")
+    api.assert_not_awaited()
+    rewrite.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_the_tool_says_a_blocked_picture_plainly_and_it_costs_no_picture():
+    from agents.tool_context import ToolContext
+    from classes import tool_functions
+    context = {"image_calls": 0, "channel": None}
+    with patch("classes.content_guard.check_web_request", AsyncMock(return_value=(False, "flagged"))):
+        text = await tool_functions.generate_image.on_invoke_tool(
+            ToolContext(context=context, tool_name="generate_image", tool_call_id="i",
+                        tool_arguments='{"prompt": "x"}'), '{"prompt": "x"}')
+    assert "blocked by the safety guard" in text and "do not try again" in text
+    assert context["image_calls"] == 0
+
 MISSING_ARMS = ImageReview(shows="An obese woman with ordinary arms.", missing=("very thin arms",))
 STILL_MISSING_TWO = ImageReview(shows="A woman.", missing=("very thin arms", "pizza slice"))
 MATCH = ImageReview(shows="An obese woman with stick-thin arms.", missing=())
@@ -374,7 +405,7 @@ def test_edit_source_falls_back_to_the_newest_generated_image():
 
 
 def test_edit_source_ignores_other_images():
-    """Uploaded photos (real people) and the bot's sandbox output are never edited."""
+    """Uploaded photos (real people) and the bot's workspace files are never edited."""
     upload = _message(7, "generated-image.png")
     chart = _message(BOT, "chart.png")
     assert image_generation.pick_edit_source(upload, [upload, chart], BOT) is None
@@ -465,14 +496,17 @@ def _creates(result):
     return AsyncMock(side_effect=create)
 
 
-async def _invoke(context, **arguments):
+async def _invoke(context, edit_error=None, **arguments):
+    """Runs the tool. Returns its result, the channel (its first send is the
+    drawing card) and that card's message (its edit holds the picture)."""
     from classes import tool_functions
-    with patch.object(tool_functions.Common, "send_tool_discord_embed",
-                      AsyncMock(return_value=MagicMock())) as embed, \
-         patch.object(tool_functions.Common, "edit_tool_discord_embed", AsyncMock()) as edit:
-        result = await tool_functions.generate_image.on_invoke_tool(
-            _tool_context(context), json.dumps(arguments))
-    return result, embed, edit
+    channel = context["channel"]
+    message = MagicMock()
+    message.edit = AsyncMock(side_effect=edit_error)
+    channel.send = AsyncMock(return_value=message)
+    result = await tool_functions.generate_image.on_invoke_tool(
+        _tool_context(context), json.dumps(arguments))
+    return result, channel, message
 
 
 @pytest.mark.asyncio
@@ -480,15 +514,33 @@ async def test_tool_posts_the_final_image_and_reports_what_it_shows():
     channel, context = _tool_env()
     made = ImageResult(b"TWO", "a red fox. Make sure...", MATCH, 2)
     with patch.object(image_generation, "create_image", _creates(made)) as create:
-        result, embed, edit = await _invoke(context, prompt="a red fox")
+        result, channel, message = await _invoke(context, prompt="a red fox")
 
     assert MATCH.shows in result
-    assert channel.send.await_args.kwargs["file"].filename == "generated-image.png"
     assert create.await_args.kwargs["reference"] is None
-    # the embed is brought in line with the image that was actually posted
-    edit.assert_awaited_once()
-    assert edit.await_args.args[1] == "a red fox. Make sure..."
-    assert edit.await_args.args[3] == "🎨 Drawing an image"
+    drawing = channel.send.await_args_list[0].kwargs["view"]
+    assert label_of(drawing) == "🎨 Drawing an image" and "a red fox" in view_text(drawing)
+    # the same card then holds the picture, with the prompt it was really drawn from
+    message.edit.assert_awaited_once()
+    final = message.edit.await_args.kwargs
+    assert label_of(final["view"]) == "🎨 Image"
+    assert "a red fox. Make sure..." in view_text(final["view"])
+    assert [f.filename for f in final["attachments"]] == ["generated-image.png"]
+    assert channel.send.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_picture_whose_card_cannot_be_edited_is_posted_anew():
+    channel, context = _tool_env()
+    made = ImageResult(b"PNG", "a fox", MATCH, 1)
+    with patch.object(image_generation, "create_image", _creates(made)):
+        result, channel, message = await _invoke(context, edit_error=RuntimeError("rate limited"),
+                                                 prompt="a fox")
+    assert MATCH.shows in result
+    assert channel.send.await_count == 2
+    again = channel.send.await_args.kwargs
+    assert label_of(again["view"]) == "🎨 Image"
+    assert [f.filename for f in again["files"]] == ["generated-image.png"]
 
 
 @pytest.mark.asyncio
@@ -502,7 +554,7 @@ async def test_tool_makes_at_most_a_few_pictures_per_reply():
             await _invoke(context, prompt="a fox")
         result, _, _ = await _invoke(context, prompt="a fox")
     assert create.await_count == image_generation.MAX_IMAGE_CALLS
-    assert result == image_generation.TOO_MANY_IMAGES_TEXT
+    assert result == image_generation.too_many_images_text()
 
 
 def test_a_picture_still_wrong_is_not_tried_again_in_the_reply():
@@ -521,14 +573,14 @@ async def test_tool_edits_the_previous_image():
     with patch.object(image_generation, "service_capabilities", AsyncMock(return_value=KLEIN)), \
          patch.object(image_generation, "find_edit_source", AsyncMock(return_value=b"OLD")) as find, \
          patch.object(image_generation, "create_image", _creates(made)) as create:
-        result, embed, edit = await _invoke(context, prompt="make her fatter", edit_previous=True)
+        result, channel, message = await _invoke(context, prompt="make her fatter", edit_previous=True)
 
     assert find.await_args.args[2] == BOT
     assert create.await_args.kwargs["reference"] == b"OLD"
     assert result.startswith("Edited image")
-    assert embed.await_args.args[1] == "make her fatter"
-    assert embed.await_args.args[3] == "🖌️ Editing an image"
-    edit.assert_not_awaited()  # one attempt: the announced prompt is already right
+    drawing = channel.send.await_args.kwargs["view"]
+    assert label_of(drawing) == "🖌️ Editing an image" and "make her fatter" in view_text(drawing)
+    assert label_of(message.edit.await_args.kwargs["view"]) == "🖌️ Edited image"
 
 
 @pytest.mark.asyncio
@@ -642,11 +694,11 @@ async def test_generate_image_command_defers_and_sends_image(monkeypatch):
                       new=AsyncMock(return_value=b"PNGDATA")):
         await fn(ctx, "a red fox")
 
-    # deferred first (generation is slow), then the image is uploaded
+    # deferred first (generation is slow), then the image is uploaded in its card
     ctx.response.defer.assert_awaited_once()
     ctx.edit_original_response.assert_awaited_once()
     kwargs = ctx.edit_original_response.await_args.kwargs
-    assert kwargs["content"] == "🎨"
+    assert label_of(kwargs["view"]) == "🎨 Image" and "a red fox" in view_text(kwargs["view"])
     assert kwargs["attachments"][0].filename == "generated-image.png"
     assert kwargs["attachments"][0].fp.read() == b"PNGDATA"
 
@@ -684,29 +736,17 @@ async def test_generate_image_command_reports_failure(monkeypatch):
 
     ctx.edit_original_response.assert_awaited_once()
     kwargs = ctx.edit_original_response.await_args.kwargs
-    assert "❌" in kwargs["content"]
+    assert "❌" in view_text(kwargs["view"])
     assert "attachments" not in kwargs
 
 
 # ---------------------- tool registration in the LLM agent ----------------------
 
 async def _agent_tool_names(monkeypatch, enabled_value):
-    # TextLLMHandler.__init__ needs Redis; skip it and set what get_client()
-    # reads directly.
+    # Since v3 the image tool is the brain's (the persona has only ask_brain).
     monkeypatch.setenv("IMAGE_GEN_ENABLED", enabled_value)
-    from classes.text_llm_handler import TextLLMHandler
-
-    handler = TextLLMHandler.__new__(TextLLMHandler)
-    handler.messages = []
-    handler.guild_id = 0
-    handler.original_message = MagicMock()
-    handler.config = MagicMock()
-    handler.user_memory = MagicMock()
-    handler.system = "test"
-    handler.model = "qwen3:4b"
-    handler.options = {"temperature": 1.0}
-    await handler.get_client()
-    return [getattr(tool, "name", str(tool)) for tool in handler.agent.tools]
+    from classes.brain_tools import brain_tools
+    return [tool.name for tool in brain_tools()]
 
 
 @pytest.mark.asyncio
@@ -722,3 +762,46 @@ async def test_generate_image_tool_absent_when_disabled(monkeypatch):
     names = await _agent_tool_names(monkeypatch, "0")
     assert "generate_image" not in names
     assert "web_search" in names
+
+
+def test_edit_source_finds_the_picture_inside_its_card():
+    from card_checks import posted_file_card
+    card = posted_file_card(author_id=BOT)
+    found = image_generation.pick_edit_source(None, [card], BOT)
+    assert found is not None and found.filename == "generated-image.png"
+    assert image_generation.pick_edit_source(None, [posted_file_card(author_id=7)], BOT) is None
+
+
+@pytest.mark.asyncio
+async def test_a_long_prompt_goes_on_in_a_follow_up_with_no_pings(monkeypatch):
+    main_mod, commands = await _register_and_collect(monkeypatch, "1")
+    ctx = MagicMock()
+    ctx.response.defer = AsyncMock()
+    ctx.edit_original_response = AsyncMock()
+    ctx.followup.send = AsyncMock()
+    prompt = "@everyone a fox " + "in a very detailed forest " * 200 + "THE END"
+    with patch.object(image_generation, "generate_image_from_api",
+                      new=AsyncMock(return_value=b"PNGDATA")):
+        await commands["generate_image"](ctx, prompt)
+    first = ctx.edit_original_response.await_args.kwargs
+    rest = ctx.followup.send.await_args.kwargs
+    assert first["attachments"][0].filename == "generated-image.png" and "files" not in rest
+    assert "THE END" in view_text(rest["view"]) and "Reply to this" in view_text(rest["view"])
+    assert first["allowed_mentions"].everyone is False and rest["allowed_mentions"].everyone is False
+
+
+@pytest.mark.asyncio
+async def test_a_failed_picture_does_not_leave_its_card_drawing():
+    import asyncio
+    channel, context = _tool_env()
+
+    async def fails(description, user_request="", reference=None, on_first_prompt=None):
+        await on_first_prompt(description)
+        raise RuntimeError("service down")
+    with patch.object(image_generation, "create_image", AsyncMock(side_effect=fails)):
+        result, channel, message = await _invoke(context, prompt="a red fox")
+    assert "failed" in result
+    await asyncio.sleep(0)  # the card's edit runs in the background
+    await asyncio.sleep(0)
+    closed = message.edit.await_args.kwargs["view"]
+    assert "It didn't work" in view_text(closed) and "10" not in view_text(closed)

@@ -12,26 +12,24 @@ bot stores only the LATEST version each guild has seen, so a guild that slept
 through vX.Y is never shown vX.Y's notes under vX.Y+1.
 
 File format: one `## Feature name` heading per feature, its body (what it
-does, and a "How to use:" line) below it. Each feature becomes one embed
-field. Text before the first heading and HTML comments are ignored, so an
+does, and a "How to use:" line) below it. Each feature becomes one section of
+the card. Text before the first heading and HTML comments are ignored, so an
 empty file, or one holding only the template comment, means "no features".
 """
 import os
 import re
 from pathlib import Path
 
-# Discord's embed limits. Exceeding any of them makes channel.send() raise,
-# so the shipped file is checked against them in core/tests/whats_new_tests.py.
+# Limits on the notes, from when they were an embed: a card would split a longer
+# one over messages, but they keep an announcement short (core/tests/whats_new_tests.py).
 MAX_FIELDS = 25
 MAX_FIELD_NAME = 256
 MAX_FIELD_VALUE = 1024
 MAX_EMBED_TOTAL = 6000
 
-EMBED_COLOR = 0x5865F2
-
-# The marker that keeps this embed out of prompt history
-# (MessageHandler._format_group): a release announcement is not part of the
-# conversation, and letting it in would shift anchored-mode prompt prefixes.
+# The footer of the announcement. Before the cards it was also the marker that
+# kept the embed out of prompt history; old embeds are still matched by it
+# (message_handler.is_announcement), new cards by their kind.
 ANNOUNCEMENT_FOOTER = "Use /help to see everything I can do"
 
 DEFAULT_NOTES_PATH = Path(__file__).resolve().parent.parent / "whats_new.md"
@@ -103,23 +101,30 @@ def limit_problems(notes: list[tuple[str, str]], version: str = "v99.999") -> li
             problems.append(f"heading {name[:40]!r}... is over {MAX_FIELD_NAME} chars")
         if len(value) > MAX_FIELD_VALUE:
             problems.append(f"section {name!r} is {len(value)} chars, max {MAX_FIELD_VALUE}")
-    data = notes_embed_data(version, notes)
-    total = len(data["title"]) + len(data["footer"]) + sum(
-        len(f["name"]) + len(f["value"]) for f in data["fields"])
+    total = sum(len(name) + len(value) for name, value in notes)
     if total > MAX_EMBED_TOTAL:
-        problems.append(f"embed is {total} chars in total, max {MAX_EMBED_TOTAL}")
+        problems.append(f"the notes are {total} chars in total, max {MAX_EMBED_TOTAL}")
     return problems
 
 
-def notes_embed_data(version: str, notes: list[tuple[str, str]]) -> dict:
-    """The announcement as plain data; classes.common.embed_from_data turns
-    it into a discord.Embed."""
-    return {
-        "title": f"✨ What's new in {version}" if version else "✨ What's new",
-        "color": EMBED_COLOR,
-        "fields": [{"name": name, "value": value} for name, value in notes],
-        "footer": ANNOUNCEMENT_FOOTER,
-    }
+def _section(name: str, value: str) -> str:
+    """One feature: its heading, what it does, and its "How to use:" line in
+    small type."""
+    lines = []
+    for line in value.strip().split("\n"):
+        if line.lower().startswith("how to use:"):
+            line = "-# **How to use:** " + line.split(":", 1)[1].strip()
+        lines.append(line)
+    return f"### {name}\n" + "\n".join(lines)
+
+
+def notes_card(version: str, notes: list[tuple[str, str]]):
+    """The announcement as a card (classes/card_kit.py), marked ANNOUNCE so
+    it is kept out of prompt history (MessageHandler._format_group)."""
+    from classes import card_kit as K
+    label = f"✨ What's new · {version}" if version else "✨ What's new"
+    return K.CardSpec(label=label, body=K.listing(_section(n, v) for n, v in notes),
+                      footer=ANNOUNCEMENT_FOOTER, kind=K.ANNOUNCE)
 
 
 def seen_key(guild_id) -> str:

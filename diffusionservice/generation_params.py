@@ -1,6 +1,6 @@
 """Generation-parameter policy for the diffusion service.
 
-Pure module (stdlib only), following the core/classes/llm_config.py pattern: it
+Pure module (stdlib only), following the core/classes/llm_roles.py pattern: it
 holds every decision that can be made from strings and env vars alone, so the
 rules below can be unit-tested without importing torch/diffusers. That matters
 because CI installs neither (pyproject.toml's testpaths reach this directory,

@@ -1,7 +1,7 @@
 {{- if eq (include "dcb.llmEngine" .) "strata" }}
-# Strata server (llmEngine: strata), the alternative to llamacpp.yaml. Same
+# Strata server (llm.engine: strata), the alternative to llamacpp.yaml. Same
 # OpenAI-compatible API, so core only needs the address (configmap LLM_HOST)
-# and the key (core.yaml LLM_PASS).
+# and the key (core.yaml LLM_API_KEY).
 apiVersion: apps/v1
 kind: Deployment
 metadata:

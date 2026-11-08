@@ -130,7 +130,7 @@ async def test_concurrent_generations_recheck_cooldown_and_serialize_pair():
     sends = []
 
     class LLM:
-        def __init__(self, messages, guild_id, original_message, client=None):
+        def __init__(self, messages, guild_id, original_message, client=None, unprompted=False):
             self.mid = original_message.id
             self.reasoning = ""
 
@@ -177,21 +177,6 @@ async def test_send_failure_never_replays_pair(fail_at, remaining):
             await handler.handle_message()
     assert handler.message.channel.send.await_count == fail_at
     assert rp.policy._remaining[902] == remaining
-
-
-@pytest.mark.asyncio
-async def test_sandbox_combines_pair_in_thread():
-    thread = MagicMock(id=904, send=AsyncMock())
-    base = _reasoning_llm("", "result\n<message_break>\ndetails")
-
-    class LLM(base):
-        sandbox_thread = thread
-
-    sends = []
-    await _run_with_llm(LLM, 903, sends)
-    # The original channel gets the same combined reply as the thread.
-    assert sends == ["result\n\ndetails"]
-    thread.send.assert_awaited_once_with("result\n\ndetails")
 
 
 @pytest.mark.asyncio

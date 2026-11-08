@@ -139,7 +139,7 @@ DISCORD_CHUNK_SIZE = 2000
 _TRIPLE_BACKTICK_ESCAPE = "``​`"
 # A tool-calling run reasons on every turn, so the collected thinking can be
 # far longer than the single block a plain answer produces. Cap the follow-up
-# messages so one long sandbox run cannot flood a channel; the tail is the
+# messages so one long brain call cannot flood a channel; the tail is the
 # part that explains the final answer, so keep that end and note the cut.
 MAX_THINKING_CHUNKS = 4
 _TRUNCATION_NOTE = "[... earlier reasoning truncated ...]\n"

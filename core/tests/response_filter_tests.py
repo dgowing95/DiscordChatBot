@@ -210,14 +210,14 @@ def test_extract_reasoning_items_joins_every_turn_of_a_tool_run():
     """Each turn of a tool-calling run contributes its own reasoning item;
     taking only the final turn's would lose the rest."""
     items = [
-        _reasoning_item(summary=["i should call the sandbox"]),
+        _reasoning_item(summary=["i should call the brain"]),
         _Item("tool_call_item", object()),
         _Item("tool_call_output_item", object()),
-        _reasoning_item(summary=["the sandbox returned 42, so"]),
+        _reasoning_item(summary=["the brain returned 42, so"]),
         _message_item(),
     ]
     assert extract_reasoning_items(items) == (
-        "i should call the sandbox\n\nthe sandbox returned 42, so"
+        "i should call the brain\n\nthe brain returned 42, so"
     )
 
 

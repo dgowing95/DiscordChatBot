@@ -8,9 +8,9 @@ without the discord/agents SDKs.
 
 Concurrency model (see process_messages() / on_message() in main.py and
 MessageHandler.handle_message() in message_handler.py):
-  - N worker tasks (worker_count(), WORKER_COUNT env, default 2) share one
+  - N worker tasks (queue_workers(), QUEUE_WORKERS env, default 2) share one
     bounded asyncio.Queue (queue_max_size(), QUEUE_MAX_SIZE env, default 10).
-    A message stuck in a slow tool (sandbox / image generation) therefore
+    A message stuck in a slow tool (the brain / image generation) therefore
     pins only ONE worker; the others keep handling other channels.
   - one asyncio.Lock per channel id (get_channel_lock) guards only the two
     FAST phases of a handle: prompt building (build_messages) and the
@@ -18,7 +18,7 @@ MessageHandler.handle_message() in message_handler.py):
     keeps every channel.history() snapshot free of half-sent replies, while
     the slow middle phase (LLM run + tool calls) runs UNLOCKED — so a free
     worker can answer a second message in the same channel while the first
-    is stuck in a 10-minute sandbox. The lock is never held across an LLM
+    is stuck in a 10-minute brain call. The lock is never held across an LLM
     or tool await, so no deadlock is possible.
   - the in-flight task registry (register_task_run / in_flight_hint) lets a
     newer message's prompt know that an older one is still being processed:
@@ -34,33 +34,37 @@ import asyncio
 import os
 import time
 
-DEFAULT_WORKER_COUNT = 2
+DEFAULT_QUEUE_WORKERS = 2
 DEFAULT_QUEUE_MAX_SIZE = 10
 
-# The tools that can pin a worker for a long time (sandbox up to
-# SANDBOX_TIMEOUT, image gen up to IMAGE_GEN_TIMEOUT + queue wait). Names
-# must match the FunctionTool names in tool_functions.py. The registry is
-# generic (register/unregister work for any label); this set only drives
-# which tools get tracked automatically by the metrics hooks.
-SLOW_TOOL_NAMES = frozenset({"run_code_sandbox", "generate_image"})
+# The tools that can pin a worker for a long time. Since v3 the persona has
+# one tool, ask_brain, and every slow tool (the workspace, images) runs inside
+# it, so it is the one tracked. Names must match the FunctionTool names. The
+# registry is generic (register/unregister work for any label); this set only
+# drives which tools the metrics hooks track automatically.
+SLOW_TOOL_NAMES = frozenset({"ask_brain"})
 
 # Human-facing labels for the hint (emoji + short name).
 TOOL_DISPLAY = {
-    "run_code_sandbox": "🐳 code sandbox",
-    "generate_image": "🎨 image generation",
+    "ask_brain": "🧠 brain",
 }
 
-# Source text (the tool's argument: sandbox task / image prompt) kept per
+# Most brain calls are one quick tool (a search, a memory save). A hint for
+# those would only be noise, so a run shows as running once it is this old.
+HINT_AFTER_SECONDS = 10.0
+
+# Source text (the tool's argument: brain request / image prompt) kept per
 # in-flight run and shown in the hint, truncated.
 MAX_SOURCE_CHARS = 120
 
-# Recently-finished runs stay visible to follow-up prompts this long (a
-# follow-up like "make it shorter" often lands seconds after the result was
-# posted; without this, the prompt looks like the result never happened).
-RECENT_DONE_SECONDS = 300.0
-
-# Cap on the recently-done list per channel (oldest dropped).
-MAX_RECENT_DONE = 5
+# Only RUNNING calls are listed, never finished ones. Finished entries
+# (kept 5 minutes until v3) date from v2's code runs that posted into a
+# thread, outside the channel history. Since v3 the brain's files and the
+# persona's reply land in the channel within seconds, so the history shows
+# what finished; and a finished entry, which cannot say whether the call
+# worked, made the persona claim work was done that it never asked for, or
+# that had failed ("Done! I've set a reminder" after a failed call; live on
+# the dev stack, 2026-11-03).
 
 
 def _env_positive_int(name: str, default: int) -> int:
@@ -75,14 +79,14 @@ def _env_positive_int(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
-def worker_count() -> int:
-    """Queue worker tasks to run (WORKER_COUNT, default 2, min 1).
+def queue_workers() -> int:
+    """Queue worker tasks to run (QUEUE_WORKERS, default 2, min 1).
 
     Each worker handles one message at a time, so a message stuck in a slow
-    tool (sandbox / image generation) no longer blocks messages from other
+    tool (the brain / image generation) no longer blocks messages from other
     channels. Same-channel chunk sends stay ordered via get_channel_lock().
     """
-    return _env_positive_int("WORKER_COUNT", DEFAULT_WORKER_COUNT)
+    return _env_positive_int("QUEUE_WORKERS", DEFAULT_QUEUE_WORKERS)
 
 
 def queue_max_size() -> int:
@@ -119,6 +123,99 @@ def mark_enqueued(message_id: int, now: float | None = None) -> None:
 def pop_enqueued(message_id: int) -> float | None:
     """The enqueue time of `message_id` (monotonic), or None if unknown."""
     return _enqueued_at.pop(message_id, None)
+
+
+# Replies the bot was not asked for (the random reply chance let them in,
+# no mention): MessageHandler pops the flag and the brain gets the tighter
+# unprompted limits (brain_policy.limits_for) and asks no questions.
+_unprompted: dict[int, None] = {}
+
+
+def mark_unprompted(message_id: int) -> None:
+    """Record that `message_id` was let in by the reply chance."""
+    _unprompted[message_id] = None
+    while len(_unprompted) > MAX_ENQUEUED_TRACKED:
+        del _unprompted[next(iter(_unprompted))]
+
+
+def pop_unprompted(message_id: int) -> bool:
+    """Whether `message_id` was an unprompted reply (and forget it)."""
+    if message_id in _unprompted:
+        del _unprompted[message_id]
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Elastic worker pool (D9)
+# ---------------------------------------------------------------------------
+#
+# A brain call can hold its queue worker for minutes. So that chat keeps
+# QUEUE_WORKERS free workers meanwhile, each brain call running on a queue
+# worker (chat replies and automatic runs; not voice turns, which have their
+# own task) starts a spare: target = QUEUE_WORKERS + brain calls on workers,
+# at most BRAIN_MAX_CONCURRENT of them (the brain's slots). Nothing is ever
+# cancelled: when the pool is above target, the next worker to come back for
+# an item exits instead. main.py owns the tasks; this owns the counts. No
+# function here awaits, so each check-and-update is atomic.
+_pool = {"workers": 0, "brain_calls": 0}
+_spawner = None
+
+
+def set_spawner(spawn) -> None:
+    """The callable that starts one more worker task (main.py); it calls
+    worker_started() itself."""
+    global _spawner
+    _spawner = spawn
+
+
+def pool_workers() -> int:
+    return _pool["workers"]
+
+
+def target_workers() -> int:
+    return queue_workers() + _pool["brain_calls"]
+
+
+def worker_started() -> None:
+    """Count a worker in. Called by whoever creates the task, as it is
+    created, not from inside it: two brain calls starting back to back must
+    both see the first one's spare, or both would start one."""
+    _pool["workers"] += 1
+
+
+def worker_stopped() -> None:
+    _pool["workers"] = max(0, _pool["workers"] - 1)
+
+
+def claim_exit() -> bool:
+    """Called by a worker before it takes the next item: True (and the
+    worker is counted out) when the pool is above target."""
+    if _pool["workers"] > target_workers():
+        _pool["workers"] -= 1
+        return True
+    return False
+
+
+def brain_call_started() -> bool:
+    """A brain call took a slot on a queue worker. Starts a spare when the
+    pool is short; returns whether it did."""
+    _pool["brain_calls"] += 1
+    if _spawner is not None and _pool["workers"] < target_workers():
+        _spawner()
+        return True
+    return False
+
+
+def brain_call_finished() -> None:
+    _pool["brain_calls"] = max(0, _pool["brain_calls"] - 1)
+
+
+def reset_pool() -> None:
+    """Forget the counts and the spawner (tests)."""
+    global _spawner
+    _pool.update(workers=0, brain_calls=0)
+    _spawner = None
 
 
 # One lock per channel id. Creating a lock needs no guard: the event loop is
@@ -159,8 +256,6 @@ def get_channel_lock(channel_id: int) -> asyncio.Lock:
 _in_flight: dict[int, dict[str, dict]] = {}
 # channel_id -> [run_key, ...] in registration order (stable hint order)
 _in_flight_order: dict[int, list[str]] = {}
-# channel_id -> [{"label", "ended"}, ...] recently finished (ordered)
-_recent_done: dict[int, list[dict]] = {}
 
 
 def _truncate(text: str, limit: int = MAX_SOURCE_CHARS) -> str:
@@ -188,7 +283,7 @@ def register_task_run(
 ) -> bool:
     """Record one long tool run as in-flight in `channel_id`.
 
-    `source` is the tool's argument (sandbox task text / image prompt),
+    `source` is the tool's argument (brain request text / image prompt),
     truncated to MAX_SOURCE_CHARS for prompt use. `run_key` (the SDK's
     tool_call_id) distinguishes concurrent runs of the same tool; without
     one, the truncated source is the key, so a duplicate register of the
@@ -212,61 +307,35 @@ def register_task_run(
     return True
 
 
-def unregister_task_run(
-    channel_id: int,
-    run_key: str | None = None,
-    finish: bool = True,
-    ended: float | None = None,
-) -> bool:
+def unregister_task_run(channel_id: int, run_key: str | None = None) -> bool:
     """Remove an in-flight run from `channel_id`.
 
     `run_key` must match the one used in register_task_run (the hooks pass
     the same key to both). If no key is given, or the key is unknown, this
     is a no-op rather than a guess — removing the wrong run would clear
-    someone else's hint. With `finish` (default) the run is also kept in
-    the channel's recently-done list for RECENT_DONE_SECONDS. `ended`
-    overrides the end timestamp (tests). Returns True when an entry was
-    removed.
+    someone else's hint. Returns True when an entry was removed.
     """
     runs = _in_flight.get(channel_id)
     if not runs or run_key is None or run_key not in runs:
         return False
-    entry = runs.pop(run_key)
+    runs.pop(run_key)
     order = _in_flight_order.get(channel_id, [])
     if run_key in order:
         order.remove(run_key)
     if not runs:
         del _in_flight[channel_id]
         _in_flight_order.pop(channel_id, None)
-    if finish:
-        recent = _recent_done.setdefault(channel_id, [])
-        recent.append({
-            "label": entry["label"],
-            "source": entry["source"],
-            "ended": ended if ended is not None else time.monotonic(),
-        })
-        if len(recent) > MAX_RECENT_DONE:
-            del recent[: len(recent) - MAX_RECENT_DONE]
     return True
 
 
 def in_flight_hint(channel_id: int, now: float | None = None) -> str:
     """Prompt hint for a message being built in `channel_id`, or "".
 
-    Lists tools still running (with how long they've been running and a
-    truncated source) and runs that finished within RECENT_DONE_SECONDS
-    (whose result was already sent to the channel). Called from
-    MessageHandler.build_messages(); it only READS the registry (plus
-    prunes stale recently-done entries), so it is safe to call either
-    inside or outside the per-channel lock.
-
-    The two groups get SEPARATE headers. A single header covering both
-    ("...still being processed or finished very recently") made the model
-    announce completed work as still on its way: it saw the words "still
-    being processed" in the freshest user-role turn and ignored the
-    qualifier. When nothing is actually running, the note now says so
-    outright and tells the model not to promise a result that already
-    landed.
+    Lists tools still running, with how long they've been running and
+    the request they were given (truncated). Finished runs are never listed
+    (why: the comment after MAX_SOURCE_CHARS). Called from
+    MessageHandler.build_messages(); it only READS the registry, so it is
+    safe to call either inside or outside the per-channel lock.
     """
     now = time.monotonic() if now is None else now
     running: list[str] = []
@@ -274,45 +343,22 @@ def in_flight_hint(channel_id: int, now: float | None = None) -> str:
     if runs:
         for key in _in_flight_order.get(channel_id, []):
             entry = runs.get(key)
-            if entry is None:
+            if entry is None or now - entry["started"] < HINT_AFTER_SECONDS:
                 continue
+            if not entry["source"]:
+                continue  # nothing to say WHICH request: it would read as this one
             running.append(
                 f"- {entry['label']} running for {_format_elapsed(now - entry['started'])}"
                 f" — {entry['source']}"
             )
-    done: list[str] = []
-    recent = _recent_done.get(channel_id)
-    if recent:
-        kept: list[dict] = []
-        for record in recent:
-            age = now - record["ended"]
-            if age > RECENT_DONE_SECONDS:
-                continue  # stale: drop it
-            kept.append(record)
-            done.append(
-                f"- {record['label']} finished {_format_elapsed(age)} ago — {record['source']}"
-                f" (result already sent to the channel)"
-            )
-        if len(kept) != len(recent):
-            _recent_done[channel_id] = kept
-        if not kept:
-            _recent_done.pop(channel_id, None)
-    if not running and not done:
+    if not running:
         return ""
 
     # Always opens with "Note:" — it is injected as a user-role turn (the
     # chat template rejects a late system message), so it has to announce
     # itself as a status note rather than something the user said.
     parts = ["Note: this is an automatic status note about this channel, not"
-             " a message from the user."]
-    if running:
-        parts.append("Earlier request(s) still being processed right now:")
-        parts.extend(running)
-    if done:
-        parts.append(
-            "Already FINISHED (nothing left to wait for — the result is"
-            " already in the channel above; never say this work is still"
-            " coming, on its way, or will arrive shortly):"
-        )
-        parts.extend(done)
+             " a message from the user.",
+             "Earlier request(s) still being processed right now:"]
+    parts.extend(running)
     return "\n".join(parts)

@@ -9,8 +9,9 @@ API. It is what lets a dependency bump be merged without trying it by hand.
 
 What is checked is STRUCTURE, never wording: the model may phrase a reply
 however it likes, but a reply must arrive, a remembered fact must be in
-Redis, a picture must be a PNG attachment, a poll must be a poll, the call
-must be joined and spoken in. Each case reads the bot's own Prometheus
+Redis, a picture must be a PNG attachment, a poll must be a poll, a code
+task must hand back its file from the server workspace (a container on the
+runner's own Docker), the call must be joined and spoken in. Each case reads the bot's own Prometheus
 metrics to know when the message has been fully handled, and how it ended
 (reply_latency is counted once per message, by outcome), so no case waits
 on a guess.
@@ -40,6 +41,7 @@ import re
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import aiohttp
 import redis.asyncio as redis
@@ -50,11 +52,73 @@ WAKE_PHRASE = "hey tester"
 # CPU generation (plus a vision check of it, against a real image service).
 REPLY_TIMEOUT = 300
 IMAGE_TIMEOUT = 420
+# A workspace task: the container may start cold (and its image be pulled),
+# then a brain run of a few model calls.
+WORKSPACE_TIMEOUT = 420
+# A whole Tier 3 workflow: plan (approved at once by `!workflow`), its steps and
+# the reply. start_stack.sh caps it with WORKFLOW_TIMEOUT.
+WORKFLOW_TIMEOUT = 1200
+# `!workflow` starts one at once, so anything longer means it never started.
+WORKFLOW_START_TIMEOUT = 60
 READY_TIMEOUT = 600
 
 LOG_DIR = Path(os.environ.get("E2E_LOG_DIR", Path(__file__).parent / "logs"))
 METRICS_URL = os.environ.get("E2E_METRICS_URL", "http://127.0.0.1:9464/metrics")
 SPEECH_URL = os.environ.get("E2E_SPEECH_URL", "http://127.0.0.1:8002").rstrip("/")
+
+
+# What a card is, from its container's id (core/classes/card_kit.py KIND_IDS).
+CARD_KINDS = {0x0DCB0001: "notice", 0x0DCB0002: "announce", 0x0DCB0003: "card"}
+
+
+def card_kind(message: dict) -> str:
+    return next((CARD_KINDS[c["id"]] for c in message.get("components") or []
+                 if c.get("id") in CARD_KINDS), "")
+
+
+def card_label(message: dict) -> str:
+    """A card's small first line ("🧵 Big job · finished"), without its "-# "."""
+    return next((line.removeprefix("-# ") for line in card_text(message).splitlines()
+                 if line.strip()), "")
+
+
+def card_text(message: dict) -> str:
+    """The text of a card (core/classes/card.py), which has no content or embeds."""
+    lines = []
+
+    def walk(items) -> None:
+        for item in items:
+            lines.append(item.get("content") or "")
+            walk(item.get("components") or [])
+
+    walk(message.get("components") or [])
+    return "\n".join(lines)
+
+
+def message_files(message: dict) -> list[dict]:
+    """A message's files as {filename, content_type, size}: its attachments,
+    and those inside a card, which Discord lists in no attachments (a File
+    component has its name and size, a gallery picture its URL and width)."""
+    found = [{"filename": a["filename"], "content_type": a.get("content_type", ""),
+              "size": a.get("size", 0)} for a in message.get("attachments", [])]
+
+    def walk(items) -> None:
+        for item in items:
+            file = item.get("file") or {}
+            if item.get("type") == 13 and file.get("attachment_id"):
+                found.append({"filename": item.get("name", ""),
+                              "content_type": file.get("content_type", ""),
+                              "size": item.get("size", 0)})
+            for entry in item.get("items") or []:
+                media = entry.get("media") or {}
+                if media.get("attachment_id"):
+                    found.append({"filename": urlsplit(media.get("url", "")).path.rsplit("/", 1)[-1],
+                                  "content_type": media.get("content_type", ""),
+                                  "size": media.get("width", 0)})  # a picture with pixels
+            walk(item.get("components") or [])
+
+    walk(message.get("components") or [])
+    return found
 
 
 class CheckFailed(Exception):
@@ -153,6 +217,7 @@ class Run:
         self.channel_id = ""
         self.webhook_id = ""
         self.thread_id = ""
+        self.last_trigger_id = ""
         self.redis = redis.Redis(host="127.0.0.1", decode_responses=True)
 
     async def setup(self) -> None:
@@ -203,6 +268,7 @@ class Run:
                     and have.get("guild_id") == self.guild_id}
         before = await outcomes()
         trigger = await self.post(f"<@{self.bot_id}> {content}")
+        self.last_trigger_id = trigger["id"]
 
         async def handled():
             now = await outcomes()
@@ -220,6 +286,19 @@ class Run:
         if not mine:
             raise CheckFailed("the bot handled the message but posted nothing")
         return mine
+
+    async def messages_after(self, message_id: str) -> list[dict]:
+        """Every message after an id, oldest first: a workflow can post more
+        than one page of them."""
+        found = []
+        while True:
+            page = await self.discord.request(
+                "GET", f"/channels/{self.thread_id}/messages",
+                params={"after": message_id, "limit": 100})
+            found.extend(page)
+            if len(page) < 100:
+                return sorted(found, key=lambda m: int(m["id"]))
+            message_id = max(page, key=lambda m: int(m["id"]))["id"]
 
     async def case(self, name: str, check) -> None:
         started = time.monotonic()
@@ -248,14 +327,29 @@ class Run:
             raise CheckFailed(f"no stored memory mentions teal (stored: {facts})")
         return f"stored: {facts}"
 
+    async def recall(self):
+        """The saved memory is in the persona's prompt now, so asking about it
+        needs no brain call."""
+        # Hide the "remember ... teal" message from the history first, so the
+        # answer can only come from the saved-memories block.
+        await self.post("!reset_history")
+        calls = lambda: metric(self.session, "discord_bot_brain_calls_total")
+        before = await calls()
+        messages = await self.ask("What is my favourite colour? Answer in one short sentence.")
+        text = " ".join(m["content"] for m in messages)
+        if "teal" not in text.lower():
+            raise CheckFailed(f"the reply does not mention teal: {_quote(text)}")
+        if await calls() > before:
+            raise CheckFailed("the bot asked the brain to recall a saved memory")
+        return _quote(text)
+
     async def image(self):
         messages = await self.ask("Generate an image of a red apple on a wooden table.", IMAGE_TIMEOUT)
         for message in messages:
-            for attachment in message.get("attachments", []):
-                if (attachment["filename"] == "generated-image.png"
-                        and attachment.get("content_type", "").startswith("image/png")
-                        and attachment.get("size", 0) > 0):
-                    return f"{attachment['size']} bytes"
+            for file in message_files(message):
+                if (file["filename"] == "generated-image.png"
+                        and file["content_type"].startswith("image/png") and file["size"] > 0):
+                    return "generated-image.png in its card"
         raise CheckFailed("no generated-image.png attachment in the reply")
 
     async def poll(self):
@@ -268,6 +362,58 @@ class Run:
             raise CheckFailed(f"the poll has fewer than two answers: {answers}")
         return f"{polls[0]['question'].get('text', '')!r} {answers}"
 
+    async def workspace(self):
+        """A code task through the brain, in the server workspace: the file
+        must come back in the channel."""
+        calls = lambda: metric(self.session, "discord_bot_brain_calls_total")
+        before = await calls()
+        messages = await self.ask(
+            "Write a CSV file named squares.csv with the numbers 1 to 5 and their "
+            "squares, and send me the file.", WORKSPACE_TIMEOUT)
+        if await calls() <= before:
+            raise CheckFailed("the brain was never asked (no ask_brain call)")
+        for message in messages:
+            for file in message_files(message):
+                if file["filename"].endswith(".csv") and file["size"] > 0:
+                    return f"{file['filename']}, {file['size']} bytes"
+        raise CheckFailed("no .csv attachment in the reply")
+
+    async def workflow(self):
+        """A Tier 3 workflow, by structure only: `!workflow` starts it (the
+        brain's own hand-off is the model's choice, so a check through it
+        fails at random), the plan is posted already approved (a webhook
+        cannot press Approve, and an unanswered plan is cancelled), and the
+        end and the persona's reply are posted."""
+        ended = lambda: metric(self.session, "discord_bot_workflows_total")
+        running = lambda: metric(self.session, "discord_bot_workflows_running")
+        before = await ended()
+        trigger = await self.post(
+            "!workflow Research the diameters of Jupiter's four largest moons from two sources "
+            "each, then write a moons.md report with a table.")
+        self.last_trigger_id = trigger["id"]
+
+        async def _started():
+            return await running() > 0 or await ended() > before
+        await wait_until(_started, WORKFLOW_START_TIMEOUT, "the workflow to start")
+        await wait_until(lambda: _gt(ended(), before), WORKFLOW_TIMEOUT, "the workflow to end")
+        # `after` is exclusive.
+        posted = await self.messages_after(self.last_trigger_id)
+        mine = [m for m in posted if m["author"]["id"] == self.bot_id]
+        labels = [card_label(m) for m in mine if card_kind(m)]
+        if not any(card_kind(m) == "card" and card_label(m).startswith("🧵 Plan") for m in mine):
+            raise CheckFailed(f"no plan card was posted (cards: {labels})")
+        closing = [m for m in mine
+                   if card_kind(m) == "notice" and card_label(m).startswith("🧵 Big job")]
+        if not closing:
+            raise CheckFailed(f"no closing card was posted (cards: {labels})")
+
+        async def _reply():
+            later = [m for m in await self.messages_after(closing[-1]["id"])
+                     if m["author"]["id"] == self.bot_id and m["content"]]
+            return later[-1]["content"] if later else ""
+        reply = await wait_until(_reply, REPLY_TIMEOUT, "the reply after the closing card")
+        return f"{card_label(closing[-1])}; reply: {_quote(reply, 80)}"
+
     async def slash_commands(self):
         # From this run's log, not GET /applications/.../commands: the
         # registered set outlives the process, so an earlier run's sync
@@ -275,7 +421,7 @@ class Run:
         synced = await wait_until(
             lambda: set(re.findall(r"Command '([^']+)' synced", core_log())),
             120, "the slash commands to sync")
-        expected = {"help", "whats_new", "system", "generate_image"}
+        expected = {"help", "whats_new", "system", "generate_image", "workspace", "task"}
         if self.voice_channel_id:
             expected.add("voice")
         missing = expected - synced
@@ -395,11 +541,14 @@ async def main() -> int:
             await run.case("slash commands", run.slash_commands)
             await run.case("chat reply", run.chat)
             await run.case("memory tool", run.memory)
+            await run.case("memory recall", run.recall)
             # The poll before the image: once the picture is in the thread,
             # every later reply sends it to the LLM as part of the history,
             # and the E2E LLM may be a text-only model. (Voice turns use no
             # channel history.)
             await run.case("poll", run.poll)
+            await run.case("workspace task", run.workspace)
+            await run.case("workflow", run.workflow)
             await run.case("image", run.image)
             if voice_channel_id:
                 await run.case("voice call", run.voice)

@@ -45,11 +45,29 @@ Metrics (scraped by Prometheus from the /metrics HTTP endpoint):
            observation, because each is a prompt that had to fit in the
            context window. This is the answer to "how much of the configured
            context are we actually using"; divide by the gauge below.
-  Gauge    discord_bot_llm_context_window_tokens
-           The configured context window (LLM_CONTEXT_LENGTH), exported so a
-           dashboard has the denominator without hard-coding it. This is the
-           server TOTAL: with several slots one request only gets its share,
-           so use the per-slot gauge below as a request's capacity.
+  Gauge    discord_bot_llm_context_window_tokens{host}
+           Each self-hosted LLM server's TOTAL context (per-slot n_ctx x its
+           slots, from its /props, refreshed with the per-slot gauge below),
+           so a dashboard has the denominator without hard-coding it. With
+           several slots one request only gets its share, so use the
+           per-slot gauge as a request's capacity.
+  Gauge    discord_bot_llm_slots{host,source}
+           Parallel slots core lanes each self-hosted server by: source
+           "props" (its /props total_slots), "env" (LLM_SLOTS) or "default"
+           (1). One series per host; a changed source replaces it.
+  Histogram discord_bot_llm_lane_wait_seconds{lane}
+           Seconds one model call waited for a slot on its server before it
+           was sent (classes/llm_lanes.py). Not part of
+           discord_bot_llm_call_seconds, which stays model time. A remote
+           API has no lanes and records nothing here.
+  Counter  discord_bot_llm_empty_retries_total{lane}
+           Model calls cut off before they said anything (finish_reason
+           "length", no text or tool call) and so asked for once more
+           (classes/laned_model.py). A rising count means the model spends
+           its whole output on thinking.
+  Gauge    discord_bot_llm_lane_in_use{host,lane} / discord_bot_llm_lane_waiting{host,lane}
+           Slots held, and calls waiting for one, per server and lane, read
+           at scrape time.
   Gauge    discord_bot_llm_slot_context_tokens
            Per-slot context of the running llama.cpp server, read from its
            /props (default_generation_settings.n_ctx) at startup and every few
@@ -110,27 +128,84 @@ Metrics (scraped by Prometheus from the /metrics HTTP endpoint):
            blocked / http / unsupported / rate_limited / blocked_by_site /
            unavailable / ...). Cached briefly, so each is counted once.
 
-  Sandbox conversation (classes/sandbox_conversation.py; labels are bounded
-  outcome names — never message ids, thread ids or user text):
-  Counter  discord_bot_sandbox_thread_messages_total{outcome}
-           Thread messages offered to a running sandbox, by delivery result
+  Tier 3 workflows (classes/workflows.py):
+  Counter  discord_bot_workflows_total{trigger,end_state}
+           Workflows ended, by how they started (brain / slash / dev, the
+           test command)
+           and how they ended (done / partial / failed / cancelled).
+  Histogram discord_bot_workflow_seconds{end_state}
+           A workflow's wall-clock time.
+  Histogram discord_bot_workflow_subagents
+           Steps (subagent runs) per workflow.
+  Histogram discord_bot_workflow_turns
+           Model turns per workflow, every agent together.
+  Counter  discord_bot_workflow_plan_approval_total{outcome}
+           How plans were answered (approved / edited / cancelled / timeout,
+           which now cancels, and dev for the test command).
+  Counter  discord_bot_workflow_scouts_total{outcome}
+           How scouts ended (done / reported_at_limit / stopped).
+  Counter  discord_bot_workflow_plan_questions_total{outcome}
+           Questions before the plan (answered / unanswered).
+  Histogram discord_bot_workflow_tokens
+           Tokens, in and out, one workflow used.
+  Counter  discord_bot_workflow_verdicts_total{outcome}
+           Checks of finished work (passed / failed / not_checked), and
+           send-backs from one (sent_back); the research checks as
+           research_passed / _failed / _not_checked / _sent_back.
+  Gauge    discord_bot_workflows_running
+           Workflows running in this process.
+
+  Thread messages (labels are bounded outcome names, never ids or user text):
+  Counter  discord_bot_workflow_thread_messages_total{outcome}
+           Thread messages offered to a running workflow, by delivery result
            (accepted / duplicate / too_long / full / attachment_only /
            finishing / ...).
-  Histogram discord_bot_sandbox_input_presentation_seconds
-           Receipt of a thread message to its first completed model call.
-  Histogram discord_bot_sandbox_input_response_seconds
-           Receipt of a thread message to the model's respond_to_updates.
-  Counter  discord_bot_sandbox_stale_actions_blocked_total
-           Tool calls refused because thread input was still unanswered.
-  Counter  discord_bot_sandbox_questions_total{mode,outcome}
-           ask_user questions by mode (blocking/optional) and outcome
-           (posted / replied / timeout / send_failed).
-  Counter  discord_bot_sandbox_unresolved_input_total{status}
-           Messages still unresolved when a run ended, by status
-           (accepted / unacknowledged / unseen / late).
-  Counter  discord_bot_sandbox_continuations_total
-           Extra runner passes started because a run tried to finish with
-           thread input unanswered (or outdated files attached).
+
+  Server workspace (classes/workspace_manager.py):
+  Counter  discord_bot_workspace_starts_total{kind}
+  Histogram discord_bot_workspace_start_seconds{kind}
+           Each acquisition of a server's workspace, and how long it took to
+           be ready. kind: cached (already warm here) / resumed (re-attached
+           to its running container) / snapshot (a new container filled from
+           the snapshot) / fresh (a new, empty one).
+  Gauge    discord_bot_workspaces_warm
+           Server workspaces warm in this core process (WORKSPACE_MAX_WARM caps it).
+  Histogram discord_bot_workspace_snapshot_seconds / discord_bot_workspace_snapshot_bytes
+           Each saved snapshot's time and size.
+  Counter  discord_bot_workspace_snapshot_failures_total{reason}
+           Snapshots not saved: too_large (over WORKSPACE_SNAPSHOT_MAX_BYTES;
+           the previous one is kept) / timeout / error.
+  Counter  discord_bot_workspace_reaped_total
+           Workspace containers removed because no live record names them.
+
+  The brain (classes/brain.py; labels are bounded: tier is 2 until Tier 3,
+  status is done / partial / needs_input / failed):
+  Counter  discord_bot_brain_calls_total{tier,status}
+  Histogram discord_bot_brain_call_seconds{tier,status}
+           Each ask_brain call, and how long it took end to end.
+  Histogram discord_bot_brain_turns / discord_bot_brain_tool_calls
+           Model turns and tool calls per brain call: how far real calls are
+           from the loop guard's backstops, and how many are one-tool jobs.
+  Counter  discord_bot_brain_loop_stops_total{kind}
+           Brain calls the loop guard stopped (repeat / stale).
+  Counter  discord_bot_brain_facts_dropped_total
+           Must-keep facts the persona's reply left out.
+  Counter  discord_bot_persona_escalations_total{result}
+           Persona replies that called the brain (brain) or answered alone
+           (answered).
+  Counter  discord_bot_brain_questions_total{outcome}
+  Counter  discord_bot_skills_saved_total{source,result}
+  Counter  discord_bot_skills_used_total
+  Counter  discord_bot_skill_success_total
+  Counter  discord_bot_skill_reflection_total{action}
+           The brain's ask_user: answered / timeout (no answer in time) /
+           skipped (no one to ask: automatic runs, unprompted replies, or
+           the per-call cap).
+  Histogram discord_bot_brain_slot_wait_seconds
+           Seconds a brain call waited for one of BRAIN_MAX_CONCURRENT slots.
+  Gauge    discord_bot_queue_workers
+           Queue worker tasks running: QUEUE_WORKERS plus one spare per brain
+           call holding a worker (classes/message_queue.py).
 
 Context-window note: this is the PROMPT side, which is what has to fit before
 generation starts. The server-side counterpart is llama.cpp's own
@@ -155,7 +230,10 @@ import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from prometheus_client import Counter, Gauge, Histogram, generate_latest
+from prometheus_client import REGISTRY, Counter, Gauge, Histogram, generate_latest
+from prometheus_client.core import GaugeMetricFamily
+
+from classes import llm_lanes
 
 logger = logging.getLogger(__name__)
 
@@ -331,7 +409,14 @@ llm_prompt_tokens = Histogram(
 
 llm_context_window_tokens = Gauge(
     "discord_bot_llm_context_window_tokens",
-    "Configured LLM context window in tokens (LLM_CONTEXT_LENGTH)",
+    "Total context of a self-hosted LLM server in tokens (per-slot n_ctx x slots, from its /props)",
+    ["host"],
+)
+
+llm_slots = Gauge(
+    "discord_bot_llm_slots",
+    "Parallel slots of a self-hosted LLM server, and where the number came from",
+    ["host", "source"],
 )
 
 llm_slot_context_tokens = Gauge(
@@ -344,7 +429,7 @@ llm_slot_context_available = Gauge(
     "1 when the per-slot context was read from the LLM server on the last attempt, else 0",
 )
 
-# Queue waits and full replies span a quick chat answer to a long sandbox run.
+# Queue waits and full replies span a quick chat answer to a long brain call.
 LATENCY_BUCKETS = (0.1, 0.5, 1, 2.5, 5, 10, 20, 30, 60, 120, 300, 600)
 # Fast phases (history reads, downloads, lock waits, sends).
 STAGE_BUCKETS = (0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60)
@@ -376,6 +461,19 @@ llm_call_seconds = Histogram(
     "Seconds of one model request",
     ["caller", "outcome"],
     buckets=LATENCY_BUCKETS,
+)
+
+llm_lane_wait_seconds = Histogram(
+    "discord_bot_llm_lane_wait_seconds",
+    "Seconds one model call waited for a slot on its LLM server",
+    ["lane"],
+    buckets=LATENCY_BUCKETS,
+)
+
+llm_empty_retries_total = Counter(
+    "discord_bot_llm_empty_retries_total",
+    "Model calls cut off before any output and asked for once more",
+    ["lane"],
 )
 
 llm_completion_tokens = Histogram(
@@ -425,49 +523,187 @@ web_fetch_failures_total = Counter(
     ["reason"],
 )
 
-# Receipt -> presentation is bounded by one model call plus any running
-# command's checkpoint; receipt -> response adds the model's own turn.
-SANDBOX_INPUT_BUCKETS = (1, 2.5, 5, 10, 20, 30, 60, 120, 300, 600)
-
-sandbox_thread_messages_total = Counter(
-    "discord_bot_sandbox_thread_messages_total",
-    "Thread messages offered to a running sandbox, by delivery result",
+workflow_thread_messages_total = Counter(
+    "discord_bot_workflow_thread_messages_total",
+    "Thread messages offered to a running workflow, by delivery result",
     ["outcome"],
 )
 
-sandbox_input_presentation_seconds = Histogram(
-    "discord_bot_sandbox_input_presentation_seconds",
-    "Seconds from receiving a thread message to its first completed model call",
-    buckets=SANDBOX_INPUT_BUCKETS,
+# The server workspace (classes/workspace_manager.py).
+workspace_starts_total = Counter(
+    "discord_bot_workspace_starts_total",
+    "Server workspace acquisitions, by how the workspace was made ready",
+    ["kind"],
+)
+workspace_start_seconds = Histogram(
+    "discord_bot_workspace_start_seconds",
+    "Seconds to make a server workspace ready, by kind",
+    ["kind"],
+    buckets=(0.01, 0.1, 0.5, 1, 2, 5, 10, 30, 60, 120),
+)
+workspaces_warm = Gauge(
+    "discord_bot_workspaces_warm", "Server workspaces warm in this core process",
+)
+workspace_snapshot_seconds = Histogram(
+    "discord_bot_workspace_snapshot_seconds",
+    "Seconds to save one server workspace snapshot",
+    buckets=(0.1, 0.5, 1, 2, 5, 10, 30, 60, 120),
+)
+workspace_snapshot_bytes = Histogram(
+    "discord_bot_workspace_snapshot_bytes",
+    "Size of each saved server workspace snapshot",
+    buckets=(10_000, 100_000, 1_000_000, 5_000_000, 10_000_000, 25_000_000, 50_000_000,
+             100_000_000),
+)
+workspace_snapshot_failures_total = Counter(
+    "discord_bot_workspace_snapshot_failures_total",
+    "Server workspace snapshots that were not saved, by reason",
+    ["reason"],
+)
+workspace_reaped_total = Counter(
+    "discord_bot_workspace_reaped_total",
+    "Workspace containers removed by the reaper (no live record names them)",
 )
 
-sandbox_input_response_seconds = Histogram(
-    "discord_bot_sandbox_input_response_seconds",
-    "Seconds from receiving a thread message to the sandbox model responding to it",
-    buckets=SANDBOX_INPUT_BUCKETS,
+
+# The brain (classes/brain.py).
+brain_calls_total = Counter(
+    "discord_bot_brain_calls_total", "Brain calls, by tier and how they ended",
+    ["tier", "status"],
+)
+brain_call_seconds = Histogram(
+    "discord_bot_brain_call_seconds", "Seconds one brain call took, by tier and how it ended",
+    ["tier", "status"],
+    buckets=(1, 2.5, 5, 10, 20, 30, 60, 120, 300, 600, 1200, 1800),
+)
+brain_turns = Histogram(
+    "discord_bot_brain_turns", "Model turns per brain call",
+    buckets=(1, 2, 3, 5, 8, 12, 20, 30, 50, 75, 100),
+)
+brain_tool_calls = Histogram(
+    "discord_bot_brain_tool_calls", "Tool calls per brain call",
+    buckets=(0, 1, 2, 3, 5, 8, 12, 20, 30, 50, 100),
+)
+brain_loop_stops_total = Counter(
+    "discord_bot_brain_loop_stops_total", "Brain calls stopped by the loop guard, by kind",
+    ["kind"],
+)
+brain_facts_dropped_total = Counter(
+    "discord_bot_brain_facts_dropped_total",
+    "Must-keep facts from the brain that the persona's reply left out",
+)
+persona_escalations_total = Counter(
+    "discord_bot_persona_escalations_total",
+    "Persona replies, by whether they called the brain",
+    ["result"],
+)
+brain_questions_total = Counter(
+    "discord_bot_brain_questions_total",
+    "Questions the brain asked the requester, by outcome",
+    ["outcome"],
+)
+skills_saved_total = Counter(
+    "discord_bot_skills_saved_total",
+    "Skill saves, by who made them (brain, reflection, command, curator, revert) and result",
+    ["source", "result"],
+)
+skills_used_total = Counter("discord_bot_skills_used_total", "use_skill calls that found a skill")
+skill_success_total = Counter(
+    "discord_bot_skill_success_total", "Brain calls that used a skill and ended done")
+skill_reflection_total = Counter(
+    "discord_bot_skill_reflection_total",
+    "Reviews of a finished job, by what they decided (none, create, update, failed)", ["action"])
+skill_curator_changes_total = Counter(
+    "discord_bot_skill_curator_changes_total",
+    "The daily tidy-up's changes to skills, by kind (merge, retire, describe, refused)", ["kind"])
+skills_live_gauge = Gauge("discord_bot_skills_live", "Live skills, every server together")
+brain_slot_wait_seconds = Histogram(
+    "discord_bot_brain_slot_wait_seconds",
+    "Seconds a brain call waited for a brain slot",
+    buckets=(0.1, 1, 5, 15, 30, 60, 120, 300),
+)
+queue_workers_gauge = Gauge(
+    "discord_bot_queue_workers",
+    "Queue worker tasks running (base pool plus spares for brain calls)",
 )
 
-sandbox_stale_actions_blocked_total = Counter(
-    "discord_bot_sandbox_stale_actions_blocked_total",
-    "Sandbox tool calls refused because thread input was still unanswered",
-)
 
-sandbox_questions_total = Counter(
-    "discord_bot_sandbox_questions_total",
-    "Sandbox ask_user questions by mode and outcome",
-    ["mode", "outcome"],
-)
+def observe_brain_call(tier, status: str, seconds: float, turns: int, tool_calls: int) -> None:
+    brain_calls_total.labels(tier=str(tier), status=str(status)).inc()
+    brain_call_seconds.labels(tier=str(tier), status=str(status)).observe(max(0.0, seconds))
+    brain_turns.observe(max(0, turns))
+    brain_tool_calls.observe(max(0, tool_calls))
 
-sandbox_unresolved_input_total = Counter(
-    "discord_bot_sandbox_unresolved_input_total",
-    "Thread messages still unresolved when a sandbox run ended, by status",
-    ["status"],
-)
 
-sandbox_continuations_total = Counter(
-    "discord_bot_sandbox_continuations_total",
-    "Extra sandbox runner passes started to account for thread input",
-)
+def inc_brain_loop_stop(kind: str) -> None:
+    brain_loop_stops_total.labels(kind=str(kind)).inc()
+
+
+def inc_brain_facts_dropped(count: int) -> None:
+    if count > 0:
+        brain_facts_dropped_total.inc(count)
+
+
+def inc_persona_escalation(result: str) -> None:
+    persona_escalations_total.labels(result=str(result)).inc()
+
+
+def inc_brain_question(outcome: str) -> None:
+    brain_questions_total.labels(outcome=str(outcome)).inc()
+
+
+def inc_skill_saved(source: str, result: str) -> None:
+    skills_saved_total.labels(source=str(source), result=str(result)).inc()
+
+
+def inc_skill_used() -> None:
+    skills_used_total.inc()
+
+
+def inc_skill_success() -> None:
+    skill_success_total.inc()
+
+
+def inc_skill_reflection(action: str) -> None:
+    skill_reflection_total.labels(action=str(action)).inc()
+
+
+def inc_skill_curator_change(kind: str) -> None:
+    skill_curator_changes_total.labels(kind=str(kind)).inc()
+
+
+def set_skills_live(count: int) -> None:
+    skills_live_gauge.set(max(0, int(count)))
+
+
+def observe_brain_slot_wait(seconds: float) -> None:
+    brain_slot_wait_seconds.observe(max(0.0, seconds))
+
+
+def set_queue_workers(n: int) -> None:
+    queue_workers_gauge.set(n)
+
+
+def observe_workspace_start(kind: str, seconds: float) -> None:
+    workspace_starts_total.labels(kind=kind).inc()
+    workspace_start_seconds.labels(kind=kind).observe(seconds)
+
+
+def set_workspaces_warm(n: int) -> None:
+    workspaces_warm.set(n)
+
+
+def observe_workspace_snapshot(seconds: float, size: int) -> None:
+    workspace_snapshot_seconds.observe(seconds)
+    workspace_snapshot_bytes.observe(size)
+
+
+def inc_workspace_snapshot_failure(reason: str) -> None:
+    workspace_snapshot_failures_total.labels(reason=reason).inc()
+
+
+def inc_workspace_reaped(n: int = 1) -> None:
+    workspace_reaped_total.inc(n)
 
 # ---------------------------------------------------------------------------
 # Convenience helpers (labels are always strings; IDs come in as ints)
@@ -526,32 +762,65 @@ def observe_llm_prompt_tokens(guild_id, tokens: int) -> None:
     llm_prompt_tokens.labels(guild_id=_guild_label(guild_id)).observe(tokens)
 
 
-def inc_sandbox_thread_message(outcome: str) -> None:
-    sandbox_thread_messages_total.labels(outcome=str(outcome)).inc()
+def inc_workflow_thread_message(outcome: str) -> None:
+    workflow_thread_messages_total.labels(outcome=str(outcome)).inc()
 
 
-def observe_sandbox_input_presentation(seconds: float) -> None:
-    sandbox_input_presentation_seconds.observe(max(0.0, seconds))
+workflows_total = Counter(
+    "discord_bot_workflows_total",
+    "Tier 3 workflows ended, by trigger and end state", ["trigger", "end_state"])
+workflow_seconds = Histogram(
+    "discord_bot_workflow_seconds", "Wall-clock seconds of one workflow", ["end_state"],
+    buckets=(60, 300, 600, 1200, 1800, 3600, 7200, 14400))
+workflow_subagents = Histogram(
+    "discord_bot_workflow_subagents", "Steps (subagent runs) per workflow",
+    buckets=(0, 1, 2, 3, 4, 6, 8))
+workflow_turns = Histogram(
+    "discord_bot_workflow_turns", "Model turns per workflow, every agent together",
+    buckets=(5, 10, 25, 50, 100, 200, 350, 500))
+workflow_tokens = Histogram(
+    "discord_bot_workflow_tokens", "Tokens, in and out, per workflow, every agent together",
+    buckets=(10_000, 50_000, 100_000, 500_000, 1_000_000, 2_000_000, 5_000_000, 10_000_000,
+             20_000_000, 50_000_000))
+workflow_verdicts_total = Counter(
+    "discord_bot_workflow_verdicts_total", "Checks of finished workflow work", ["outcome"])
+workflow_plan_approval_total = Counter(
+    "discord_bot_workflow_plan_approval_total", "How workflow plans were approved", ["outcome"])
+workflow_scouts_total = Counter(
+    "discord_bot_workflow_scouts_total", "Scouts sent before a workflow's plan", ["outcome"])
+workflow_plan_questions_total = Counter(
+    "discord_bot_workflow_plan_questions_total", "Questions asked before a workflow's plan",
+    ["outcome"])
+workflows_running_gauge = Gauge("discord_bot_workflows_running", "Workflows running in this process")
 
 
-def observe_sandbox_input_response(seconds: float) -> None:
-    sandbox_input_response_seconds.observe(max(0.0, seconds))
+def observe_workflow(trigger: str, end_state: str, seconds: float, subagents: int,
+                     turns: int, tokens: int = 0) -> None:
+    workflows_total.labels(trigger=str(trigger), end_state=str(end_state)).inc()
+    workflow_seconds.labels(end_state=str(end_state)).observe(max(0.0, seconds))
+    workflow_subagents.observe(max(0, subagents))
+    workflow_turns.observe(max(0, turns))
+    workflow_tokens.observe(max(0, tokens))
 
 
-def inc_sandbox_stale_action_blocked() -> None:
-    sandbox_stale_actions_blocked_total.inc()
+def inc_workflow_plan_approval(outcome: str) -> None:
+    workflow_plan_approval_total.labels(outcome=str(outcome)).inc()
 
 
-def inc_sandbox_question(mode: str, outcome: str) -> None:
-    sandbox_questions_total.labels(mode=str(mode), outcome=str(outcome)).inc()
+def inc_workflow_verdict(outcome: str) -> None:
+    workflow_verdicts_total.labels(outcome=str(outcome)).inc()
 
 
-def inc_sandbox_unresolved_input(status: str) -> None:
-    sandbox_unresolved_input_total.labels(status=str(status)).inc()
+def inc_workflow_scout(outcome: str) -> None:
+    workflow_scouts_total.labels(outcome=str(outcome)).inc()
 
 
-def inc_sandbox_continuation() -> None:
-    sandbox_continuations_total.inc()
+def inc_workflow_plan_question(outcome: str) -> None:
+    workflow_plan_questions_total.labels(outcome=str(outcome)).inc()
+
+
+def set_workflows_running(count: int) -> None:
+    workflows_running_gauge.set(max(0, count))
 
 
 def set_slot_context(tokens: int | None) -> None:
@@ -616,20 +885,56 @@ def inc_web_fetch_failure(reason: str) -> None:
     web_fetch_failures_total.labels(reason=str(reason)).inc()
 
 
-def set_context_window_from_env() -> None:
-    """Publish LLM_CONTEXT_LENGTH as the context-window gauge.
+def set_context_window(host: str, tokens: int | None) -> None:
+    """Publish a server's total context; None (not read) keeps the last value."""
+    if tokens:
+        llm_context_window_tokens.labels(host=str(host)).set(tokens)
 
-    Fail-soft like start_metrics_server_from_env(): an unset or unparseable
-    value leaves the gauge at 0 rather than raising out of startup - a
-    dashboard dividing by it then reads +Inf, which is at least obviously
-    wrong rather than quietly plausible. Only reachable outside the chart
-    (docker-compose dev), which sets it unconditionally.
-    """
-    raw = os.environ.get("LLM_CONTEXT_LENGTH", "").strip()
-    try:
-        llm_context_window_tokens.set(int(raw))
-    except (TypeError, ValueError):
-        logger.info(f"LLM_CONTEXT_LENGTH not set or unparseable ({raw!r}); context-window gauge left at 0")
+
+_slot_sources: dict[str, str] = {}
+
+
+def set_llm_slots(host: str, slots: int, source: str) -> None:
+    """Publish a server's slot count; one series per host."""
+    host = str(host)
+    old = _slot_sources.get(host)
+    if old is not None and old != source:
+        try:
+            llm_slots.remove(host, old)
+        except KeyError:
+            pass
+    _slot_sources[host] = source
+    llm_slots.labels(host=host, source=source).set(slots)
+
+
+def inc_empty_retry(lane: str) -> None:
+    llm_empty_retries_total.labels(lane=str(lane)).inc()
+
+
+def observe_lane_wait(lane: str, seconds: float) -> None:
+    llm_lane_wait_seconds.labels(lane=str(lane)).observe(max(0.0, seconds))
+
+
+class _LaneCollector:
+    """In use / waiting per server and lane, read from llm_lanes at scrape
+    time (the scrape runs on the metrics thread; snapshot() only reads ints
+    and deque lengths, so it never iterates a deque the loop is changing)."""
+
+    def collect(self):
+        in_use = GaugeMetricFamily("discord_bot_llm_lane_in_use",
+                                   "LLM slots held, per server and lane", labels=["host", "lane"])
+        waiting = GaugeMetricFamily("discord_bot_llm_lane_waiting",
+                                    "Model calls waiting for an LLM slot, per server and lane",
+                                    labels=["host", "lane"])
+        for host, lanes in llm_lanes.all_lanes().items():
+            for lane, counts in lanes.snapshot().items():
+                in_use.add_metric([host, lane], counts["in_use"])
+                waiting.add_metric([host, lane], counts["waiting"])
+        yield in_use
+        yield waiting
+
+
+REGISTRY.register(_LaneCollector())
 
 
 # ---------------------------------------------------------------------------

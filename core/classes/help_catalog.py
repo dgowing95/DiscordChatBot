@@ -2,38 +2,39 @@
 
 Hand-written on purpose: generating it with the LLM on every call would be
 slow, and a small local model can invent or misdescribe features. To stop it
-going stale, core/tests/help_catalog_tests.py fails when an agent tool
-(text_llm_handler.agent_tools) or a slash command (main.register_commands)
-has no entry here. Adding a tool or command therefore means adding a line.
+going stale, core/tests/help_catalog_tests.py fails when a brain tool
+(brain_tools.brain_tools: since v3 every tool is the brain's, and the persona
+only has ask_brain) or a slash command (main.register_commands) has no entry
+here. Adding a tool or command therefore means adding a line.
 
 Entries with `requires` are hidden when that feature is switched off for the
-deployment (IMAGE_GEN_ENABLED / SANDBOX_ENABLED / EVENTS_ENABLED ...), so /help never offers
+deployment (IMAGE_GEN_ENABLED / EVENTS_ENABLED ...), so /help never offers
 something the bot cannot do.
 """
 from dataclasses import dataclass
 
-from classes.whats_new import EMBED_COLOR, MAX_FIELD_VALUE
 
 IMAGE = "image"
-SANDBOX = "sandbox"
 AUTOMATIONS = "automations"
 VOICE = "voice"
 EVENTS = "events"
+SKILLS = "skills"
+WORKFLOWS = "workflows"
 
 
 @dataclass(frozen=True)
 class HelpEntry:
     name: str
     description: str
-    # The agent tool names this entry explains (what the sync test checks).
+    # The brain tool names this entry explains (what the sync test checks).
     tools: tuple = ()
     # The slash command this entry IS ("" for an ask-me entry).
     command: str = ""
     requires: str = ""
 
 
-# "Just ask me" - agent tools, described by what a person asks for rather
-# than by tool name, since nobody calls them directly.
+# "Just ask me" - the brain's tools, described by what a person asks for
+# rather than by tool name, since nobody calls them directly.
 ASK_ENTRIES = (
     HelpEntry("🔎 Search the web", "Ask about news or anything recent and I'll look it up, "
               "read the top results and tell you what they say, with links.",
@@ -56,10 +57,17 @@ ASK_ENTRIES = (
     HelpEntry("🎨 Make images", "Ask me to draw a picture, or to change one I made "
               "(reply to it, or just say what to change).",
               tools=("generate_image",), requires=IMAGE),
-    HelpEntry("🐳 Run code", "Ask me to build or run something with code (scripts, charts, "
-              "gifs...). I work in a thread: reply there to steer me, or @mention me there "
-              "later to carry on.",
-              tools=("run_code_sandbox",), requires=SANDBOX),
+    HelpEntry("💻 Code, files and charts", "Ask me to build or run something with code "
+              "(scripts, charts, gifs, a file you attach...). The files come back here, and "
+              "you can ask for changes after.",
+              tools=("attach_file", "save_messages_to_file")),
+    HelpEntry("📘 Skills", "When a job takes several steps worth repeating, I save how I did it "
+              "as a skill and use it next time. Ask me to use, save or update one.",
+              tools=("use_skill", "save_skill", "search_skills"), requires=SKILLS),
+    HelpEntry("🧵 Big jobs", "Ask for something large (a report from many sources, a small "
+              "program) and I'll plan it in a thread. You approve the plan, then I work on it "
+              "and tell you here when it's done.",
+              tools=("start_workflow",), requires=WORKFLOWS),
     HelpEntry("⏰ Schedules and rules", "Ask me to schedule or follow up on something, or react to a word.",
               tools=("list_schedules", "get_schedule", "create_schedule", "schedule_followup",
                      "update_schedule", "delete_schedule",
@@ -80,8 +88,12 @@ COMMAND_ENTRIES = (
     HelpEntry("/get_chance", "Show that chance.", command="get_chance"),
     HelpEntry("/generate_image", "Make an image straight from a prompt.",
               command="generate_image", requires=IMAGE),
-    HelpEntry("/sandbox_progress_updates", "Turn live progress for code runs on or off.",
-              command="sandbox_progress_updates", requires=SANDBOX),
+    HelpEntry("/workspace", "The server's workspace for code tasks: status and reset (both "
+              "need Manage Server), and live progress on or off.", command="workspace"),
+    HelpEntry("/task", "Start a big job in its own thread: I post a plan, you approve, edit "
+              "or cancel it, then I do the work.", command="task", requires=WORKFLOWS),
+    HelpEntry("/skills", "List, read, edit, delete, restore, revert or export the skills I "
+              "have saved in this server.", command="skills", requires=SKILLS),
     HelpEntry("/schedule", "Create, list, view, edit, delete, pause or resume schedules.",
               command="schedule", requires=AUTOMATIONS),
     HelpEntry("/rule", "Create, list, view, edit, delete, pause or resume message rules.",
@@ -91,60 +103,60 @@ COMMAND_ENTRIES = (
 )
 
 TIPS = (
-    "• @mention me to get a reply; otherwise I only join in now and then (see /chance).\n"
-    "• Send `!reset_history` to make me forget the conversation above it.\n"
-    "• I can see images you attach."
+    "- @mention me to get a reply; otherwise I only join in now and then (see /chance).\n"
+    "- Send `!reset_history` to make me forget the conversation above it.\n"
+    "- I can see images you attach."
 )
 
 HELP_TITLE = "🤖 What I can do"
 
 
-def _shown(entry: HelpEntry, image_enabled: bool, sandbox_enabled: bool) -> bool:
+def _shown(entry: HelpEntry, image_enabled: bool) -> bool:
     if entry.requires == IMAGE:
         return image_enabled
-    if entry.requires == SANDBOX:
-        return sandbox_enabled
     if entry.requires == AUTOMATIONS:
         from classes.automation_policy import settings
         return settings()["enabled"]
     if entry.requires == EVENTS:
         from classes.event_format import events_enabled
         return events_enabled()
+    if entry.requires == SKILLS:
+        from classes.skill_format import enabled
+        return enabled()
+    if entry.requires == WORKFLOWS:
+        from classes.workflow_policy import enabled
+        return enabled()
     if entry.requires == VOICE:
         from classes.voice_policy import settings
         return settings()["enabled"]
     return True
 
 
-def _fields(name: str, lines: list) -> list:
-    """`lines` as one field, or as several ("name (more)") when they would
-    pass Discord's 1024-character field limit."""
-    groups, current = [], []
-    for line in lines:
-        if current and len("\n".join(current + [line])) > MAX_FIELD_VALUE:
-            groups.append(current)
-            current = []
-        current.append(line)
-    if current:
-        groups.append(current)
-    return [{"name": name if i == 0 else f"{name} (more)", "value": "\n".join(group)}
-            for i, group in enumerate(groups)]
+HELP_LEAD = "@mention me and ask in your own words. Here's what I'm good at."
+HELP_FOOTER = "/whats_new shows what's new in this version"
 
 
-def help_embed_data(image_enabled: bool, sandbox_enabled: bool) -> dict:
-    """The /help embed as plain data (see classes.common.embed_from_data).
-    One field per group keeps it compact on mobile; a group past Discord's
-    field limit carries on in a second field."""
-    ask = [e for e in ASK_ENTRIES if _shown(e, image_enabled, sandbox_enabled)]
-    commands = [e for e in COMMAND_ENTRIES if _shown(e, image_enabled, sandbox_enabled)]
-    return {
-        "title": HELP_TITLE,
-        "color": EMBED_COLOR,
-        "fields": (_fields("Just ask me", [f"**{e.name}** — {e.description}" for e in ask])
-                   + _fields("Slash commands", [f"`{e.name}` — {e.description}" for e in commands])
-                   + [{"name": "Tips", "value": TIPS}]),
-        "footer": "",
-    }
+def help_card(image_enabled: bool, avatar_url: str | None = None):
+    """The /help card (classes/card_kit.py): a header with the bot's own
+    picture, then each group under its heading. A long one goes over several
+    cards, so nothing is cut."""
+    from classes import card_kit as K
+    ask = [e for e in ASK_ENTRIES if _shown(e, image_enabled)]
+    commands = [e for e in COMMAND_ENTRIES if _shown(e, image_enabled)]
+    head = (f"## {HELP_TITLE}", K.small(HELP_LEAD))
+    body = [K.Section(head, K.Thumb(avatar_url)) if avatar_url else K.Text("\n".join(head)),
+            K.Divider(),
+            K.Text("### 💬 Just ask me\n" + "\n".join(f"**{e.name}** — {e.description}" for e in ask)),
+            K.Divider(),
+            K.Text("### ⌨️ Slash commands\n" + "\n".join(f"`{e.name}` — {e.description}"
+                                                           for e in commands)),
+            K.Divider(),
+            K.Text("### 💡 Tips\n" + TIPS)]
+    return K.CardSpec(body=body, footer=HELP_FOOTER)
+
+
+# Brain tools that are its own bookkeeping, not something a person asks for.
+INTERNAL_TOOLS = frozenset({"ask_user", "report"})
 
 
 def documented_tools() -> set:

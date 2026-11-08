@@ -25,8 +25,10 @@ class UserMemory:
         value = await self.redis.get(self.key)
         if value is not None:
             json_data = json.loads(value)
-            deduped = list(set(json_data))
-            return deduped
+            # Order-keeping dedupe: the list is stored oldest first, and the
+            # persona is shown the NEWEST memories (text_llm_handler
+            # trailing_block). list(set(...)) lost that order.
+            return [m for m in dict.fromkeys(json_data) if isinstance(m, str)]
         return None
 
     async def remove(self, data):

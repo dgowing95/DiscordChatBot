@@ -1,3 +1,5 @@
+{{- include "dcb.failOnRemoved" . }}
+{{- include "dcb.checkStrataKeys" . }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -6,16 +8,25 @@ metadata:
 data:
   # Credentials are NOT here - see secret.yaml (same values.yaml keys).
   REDIS_HOST: {{ .Values.redisHost | toString | quote }}
-  # llm_host, else the selected engine's in-cluster service (see _helpers.tpl)
+  # llm.host, else the selected engine's in-cluster service (see _helpers.tpl).
+  # The key is in secret.yaml (llm.apiKey), or the Strata secret (core.yaml).
   LLM_HOST: {{ include "dcb.llmHost" . }}
-  # A placeholder for llama.cpp; with llmEngine=strata core.yaml overrides it
-  # with the real key from the Strata secret.
-  LLM_PASS: {{ .Values.llm_pass }}
-  MODEL: {{ .Values.model }}
-  REASONING_EFFORT: {{ .Values.reasoningEffort | quote }}
-  LLM_MAX_TURNS: {{ .Values.llmMaxTurns | toString | quote }}
-  LLM_CALL_TIMEOUT_SECONDS: {{ .Values.llmCallTimeout | toString | quote }}
-  MSG_HISTORY_LIMIT: {{ .Values.message_history | toString | quote }}
+  LLM_MODEL: {{ .Values.llm.model | quote }}
+  # Slots: used only when the server's /props does not report them.
+  LLM_SLOTS: {{ include "dcb.llmSlots" . | quote }}
+  LLM_CHAT_RESERVED: {{ .Values.llm.chatReserved | toString | quote }}
+  # The persona's LLM: empty model/host fall back to the bot's own (LLM_*);
+  # its key lives in secret.yaml.
+  {{- if .Values.persona.model }}
+  PERSONA_MODEL: {{ .Values.persona.model | quote }}
+  {{- end }}
+  {{- if .Values.persona.llmHost }}
+  PERSONA_LLM_HOST: {{ .Values.persona.llmHost | quote }}
+  {{- end }}
+  PERSONA_REASONING_EFFORT: {{ .Values.persona.reasoningEffort | quote }}
+  PERSONA_MAX_TURNS: {{ .Values.persona.maxTurns | toString | quote }}
+  PERSONA_CALL_TIMEOUT_SECONDS: {{ .Values.persona.callTimeout | toString | quote }}
+  MSG_HISTORY_LIMIT: {{ .Values.history.limit | toString | quote }}
   MSG_HISTORY_MODE: {{ .Values.history.mode | quote }}
   MSG_HISTORY_REFRESH_MESSAGES: {{ .Values.history.refreshMessages | toString | quote }}
   MSG_HISTORY_RESERVE_TOKENS: {{ .Values.history.reserveTokens | toString | quote }}
@@ -24,8 +35,8 @@ data:
   DOUBLE_REPLY_CHANCE: {{ .Values.doubleReply.chance | toString | quote }}
   DOUBLE_REPLY_COOLDOWN_REPLIES: {{ .Values.doubleReply.cooldownReplies | toString | quote }}
   # Queue concurrency: worker task count + bounded queue size (see core/main.py)
-  WORKER_COUNT: {{ .Values.worker_count | toString | quote }}
-  QUEUE_MAX_SIZE: {{ .Values.queue_max_size | toString | quote }}
+  QUEUE_WORKERS: {{ .Values.queue.workers | toString | quote }}
+  QUEUE_MAX_SIZE: {{ .Values.queue.maxSize | toString | quote }}
   AUTOMATIONS_ENABLED: {{ .Values.automations.enabled | quote }}
   AUTOMATIONS_TIMEZONE: {{ .Values.automations.timezone | quote }}
   SCHEDULE_MIN_INTERVAL_HOURS: {{ .Values.schedules.minIntervalHours | toString | quote }}
@@ -68,7 +79,7 @@ data:
   WEB_CACHE_FAILURE_TTL_SECONDS: {{ .Values.webFetch.failureCacheTtlSeconds | int64 | toString | quote }}
   BROWSER_MIN_CHARS: {{ .Values.webFetch.browserMinChars | int64 | toString | quote }}
   # web_search's brief: a CORE-side LLM call. Unset model/host fall back to
-  # the bot's own MODEL/LLM_HOST; the key lives in secret.yaml.
+  # the bot's own LLM_MODEL/LLM_HOST; the key lives in secret.yaml.
   RESEARCH_BRIEF_ENABLED: {{ .Values.research.enabled | quote }}
   RESEARCH_PAGES: {{ .Values.research.pages | toString | quote }}
   RESEARCH_PAGE_CHARS: {{ .Values.research.pageChars | int64 | toString | quote }}
@@ -106,7 +117,7 @@ data:
   {{- end }}
   # Prompt rewriter: a CORE-side LLM call (not the diffusion pod) that turns a
   # request into an SDXL prompt + negative prompt. Unset model/host fall back
-  # to the bot's own MODEL/LLM_HOST; the key lives in secret.yaml.
+  # to the bot's own LLM_MODEL/LLM_HOST; the key lives in secret.yaml.
   IMAGE_PROMPT_REWRITE_ENABLED: {{ .Values.diffusion.promptRewrite.enabled | quote }}
   IMAGE_PROMPT_TIMEOUT: {{ .Values.diffusion.promptRewrite.timeout | toString | quote }}
   {{- if .Values.diffusion.promptRewrite.model }}
@@ -127,49 +138,110 @@ data:
   {{- if .Values.diffusion.review.llmHost }}
   IMAGE_REVIEW_LLM_HOST: {{ .Values.diffusion.review.llmHost }}
   {{- end }}
-  # Code sandbox: core registers the run_code_sandbox tool when SANDBOX_ENABLED
-  # is true; tasks run in throwaway containers on the node via the Docker
-  # socket mounted into the core pod (see core.yaml)
-  SANDBOX_ENABLED: {{ .Values.sandbox.enabled | quote }}
-  SANDBOX_IMAGE: {{ .Values.sandbox.image }}
-  SANDBOX_MAX_TURNS: {{ .Values.sandbox.maxTurns | toString | quote }}
-  SANDBOX_TIMEOUT: {{ .Values.sandbox.timeout | toString | quote }}
-  SANDBOX_ASK_USER_TIMEOUT: {{ .Values.sandbox.askUserTimeout | toString | quote }}
-  SANDBOX_PERSIST_TIMEOUT_SECONDS: {{ .Values.sandbox.persistTimeout | toString | quote }}
-  SANDBOX_REQUEST_TIMEOUT_SECONDS: {{ .Values.sandbox.requestTimeout | toString | quote }}
-  SANDBOX_MAX_RETRIES: {{ .Values.sandbox.maxRetries | toString | quote }}
-  SANDBOX_SNAPSHOT_MAX_BYTES: {{ .Values.sandbox.snapshotMaxBytes | toString | quote }}
-  SANDBOX_INPUT_MAX_BYTES: {{ .Values.sandbox.inputMaxBytes | int64 | toString | quote }}
-  SANDBOX_SNAPSHOT_TTL_SECONDS: {{ .Values.sandbox.snapshotTtlSeconds | toString | quote }}
-  {{- with .Values.sandbox.memoryLimit }}
-  {{- /* Refused here: core would otherwise run every sandbox uncapped over a typo */}}
+  # Tier 3 workflows and their helpers (subagents). Empty subagent
+  # model/host fall back to the brain's; the key lives in secret.yaml.
+  WORKFLOW_ENABLED: {{ .Values.workflows.enabled | quote }}
+  WORKFLOW_ASK_TIMEOUT: {{ .Values.workflows.askTimeout | toString | quote }}
+  WORKFLOW_PLAN_APPROVAL_SECONDS: {{ .Values.workflows.planApprovalSeconds | toString | quote }}
+  WORKFLOW_PLAN_REVISIONS: {{ .Values.workflows.planRevisions | toString | quote }}
+  WORKFLOW_MAX_STEPS: {{ .Values.workflows.maxSteps | toString | quote }}
+  WORKFLOW_TIMEOUT: {{ .Values.workflows.timeout | toString | quote }}
+  WORKFLOW_MAX_TURNS: {{ .Values.workflows.maxTurns | toString | quote }}
+  WORKFLOW_MAX_TOKENS: {{ .Values.workflows.maxTokens | int64 | toString | quote }}
+  WORKFLOW_MAX_PER_GUILD: {{ .Values.workflows.maxPerGuild | toString | quote }}
+  {{- if .Values.subagents.model }}
+  SUBAGENT_MODEL: {{ .Values.subagents.model | quote }}
+  {{- end }}
+  {{- if .Values.subagents.llmHost }}
+  SUBAGENT_LLM_HOST: {{ .Values.subagents.llmHost | quote }}
+  {{- end }}
+  {{- if .Values.subagents.reasoningEffort }}
+  SUBAGENT_REASONING_EFFORT: {{ .Values.subagents.reasoningEffort | quote }}
+  {{- end }}
+  {{- if .Values.subagents.callTimeout }}
+  SUBAGENT_CALL_TIMEOUT_SECONDS: {{ .Values.subagents.callTimeout | toString | quote }}
+  {{- end }}
+  SUBAGENT_MAX_TURNS: {{ .Values.subagents.maxTurns | toString | quote }}
+  SUBAGENT_MAX_CONCURRENT: {{ .Values.subagents.maxConcurrent | toString | quote }}
+  # The server workspace container runs on the node's Docker daemon, through
+  # the socket mounted in core.yaml.
+  {{- with .Values.brain.workspace }}
+  WORKSPACE_IMAGE: {{ .image | quote }}
+  # Namespace + release name: the reaper only removes containers with its own
+  # label, so two same-named releases in different namespaces must not share it.
+  WORKSPACE_INSTANCE: {{ printf "%s-%s" $.Release.Namespace $.Release.Name | quote }}
+  WORKSPACE_IDLE_SECONDS: {{ .idleSeconds | int64 | toString | quote }}
+  WORKSPACE_SNAPSHOT_INTERVAL_SECONDS: {{ .snapshotIntervalSeconds | int64 | toString | quote }}
+  WORKSPACE_MAX_WARM: {{ .maxWarm | int64 | toString | quote }}
+  WORKSPACE_JOB_RETENTION_HOURS: {{ .jobRetentionHours | int64 | toString | quote }}
+  WORKSPACE_PIDS_LIMIT: {{ .pidsLimit | int64 | toString | quote }}
+  WORKSPACE_SNAPSHOT_MAX_BYTES: {{ .snapshotMaxBytes | int64 | toString | quote }}
+  WORKSPACE_SNAPSHOT_TTL_SECONDS: {{ .snapshotTtlSeconds | int64 | toString | quote }}
+  WORKSPACE_SNAPSHOT_TIMEOUT_SECONDS: {{ .snapshotTimeout | int64 | toString | quote }}
+  WORKSPACE_INPUT_MAX_BYTES: {{ .inputMaxBytes | int64 | toString | quote }}
+  WORKSPACE_PREWARM: {{ .prewarm | toString | quote }}
+  {{- /* Compared as text, not with `with`: a numeric 0 would be skipped as
+       empty, and core reads 0 as no cap, so it is refused like a typo */}}
+  {{- $cpu := toString .cpuLimit }}
+  {{- if not (has $cpu (list "" "<nil>")) }}
+  {{- if or (not (regexMatch "^[0-9]+([.][0-9]+)?$" $cpu)) (regexMatch "^[0.]+$" $cpu) }}
+  {{- fail (printf "brain.workspace.cpuLimit must be a number of CPUs greater than 0, like 2 or 0.5, not %q" $cpu) }}
+  {{- end }}
+  WORKSPACE_CPU_LIMIT: {{ $cpu | quote }}
+  {{- end }}
+  {{- with .memoryLimit }}
+  {{- /* Refused here: core would otherwise run every workspace uncapped over a typo */}}
   {{- if or (not (regexMatch "^[0-9]+([.][0-9]+)?([bkmgBKMG][bB]?)?$" (toString .))) (regexMatch "^[0.]+[a-zA-Z]*$" (toString .)) }}
-  {{- fail (printf "sandbox.memoryLimit must be a size like 4g, 4gb or 512m, not %q" (toString .)) }}
+  {{- fail (printf "brain.workspace.memoryLimit must be a size like 4g, 4gb or 512m, not %q" (toString .)) }}
   {{- end }}
-  SANDBOX_MEMORY_LIMIT: {{ . | toString | quote }}
+  WORKSPACE_MEMORY_LIMIT: {{ . | toString | quote }}
   {{- end }}
-  {{- if .Values.sandbox.model }}
-  SANDBOX_MODEL: {{ .Values.sandbox.model }}
   {{- end }}
-  {{- if .Values.sandbox.llmHost }}
-  SANDBOX_LLM_HOST: {{ .Values.sandbox.llmHost }}
+  # The brain's LLM: empty model/host fall back to the bot's own (LLM_*); its
+  # key lives in secret.yaml.
+  {{- if .Values.brain.model }}
+  BRAIN_MODEL: {{ .Values.brain.model | quote }}
   {{- end }}
-  {{- if .Values.openaiBaseUrl }}
-  OPENAI_BASE_URL: {{ .Values.openaiBaseUrl }}
+  {{- if .Values.brain.llmHost }}
+  BRAIN_LLM_HOST: {{ .Values.brain.llmHost | quote }}
   {{- end }}
-  {{- if .Values.moderationModel }}
-  MODERATION_MODEL: {{ .Values.moderationModel }}
+  BRAIN_REASONING_EFFORT: {{ .Values.brain.reasoningEffort | quote }}
+  BRAIN_CALL_TIMEOUT_SECONDS: {{ .Values.brain.callTimeout | toString | quote }}
+  BRAIN_MAX_TURNS: {{ .Values.brain.maxTurns | toString | quote }}
+  BRAIN_TIMEOUT: {{ .Values.brain.timeout | toString | quote }}
+  BRAIN_REPEAT_LIMIT: {{ .Values.brain.repeatLimit | toString | quote }}
+  BRAIN_TRIM_KEEP_RECENT: {{ .Values.brain.trimKeepRecent | toString | quote }}
+  BRAIN_UNPROMPTED_MAX_TURNS: {{ .Values.brain.unprompted.maxTurns | toString | quote }}
+  BRAIN_UNPROMPTED_TIMEOUT: {{ .Values.brain.unprompted.timeout | toString | quote }}
+  BRAIN_ASK_TIMEOUT: {{ .Values.brain.askTimeout | toString | quote }}
+  BRAIN_MAX_CONCURRENT: {{ .Values.brain.maxConcurrent | toString | quote }}
+  BRAIN_QUEUE_WAIT: {{ .Values.brain.queueWait | toString | quote }}
+  SKILLS_ENABLED: {{ .Values.skills.enabled | quote }}
+  SKILLS_MAX_PER_GUILD: {{ .Values.skills.maxPerGuild | toString | quote }}
+  SKILLS_MAX_VERSIONS: {{ .Values.skills.maxVersions | toString | quote }}
+  SKILLS_MAX_BYTES: {{ .Values.skills.maxBytes | toString | quote }}
+  SKILLS_MAX_BODY_CHARS: {{ .Values.skills.maxBodyChars | toString | quote }}
+  SKILLS_MAX_FILES: {{ .Values.skills.maxFiles | toString | quote }}
+  SKILLS_INDEX_MAX: {{ .Values.skills.indexMax | toString | quote }}
+  SKILLS_REFLECTION_ENABLED: {{ .Values.skills.reflection.enabled | quote }}
+  SKILLS_REFLECTION_MIN_TOOL_CALLS: {{ .Values.skills.reflection.minToolCalls | toString | quote }}
+  SKILLS_CURATOR_ENABLED: {{ .Values.skills.curator.enabled | quote }}
+  SKILLS_CURATOR_INTERVAL_HOURS: {{ .Values.skills.curator.intervalHours | toString | quote }}
+  SKILLS_CURATOR_MIN_SKILLS: {{ .Values.skills.curator.minSkills | toString | quote }}
+  SKILLS_RETIRE_DAYS: {{ .Values.skills.curator.retireDays | toString | quote }}
+  # Content guard (moderation of web and workspace input); the key lives in
+  # secret.yaml.
+  CONTENT_GUARD_ENABLED: {{ .Values.contentGuard.enabled | quote }}
+  {{- if .Values.contentGuard.baseUrl }}
+  CONTENT_GUARD_BASE_URL: {{ .Values.contentGuard.baseUrl | quote }}
   {{- end }}
-  CONTENT_GUARD_MAX_RETRIES: {{ .Values.guardMaxRetries | toString | quote }}
-  CONTENT_GUARD_RETRY_BACKOFF: {{ .Values.guardRetryBackoff | toString | quote }}
-  MODERATION_CACHE_TTL: {{ .Values.moderationCacheTtl | toString | quote }}
+  {{- if .Values.contentGuard.model }}
+  CONTENT_GUARD_MODEL: {{ .Values.contentGuard.model | quote }}
+  {{- end }}
+  CONTENT_GUARD_MAX_RETRIES: {{ .Values.contentGuard.maxRetries | toString | quote }}
+  CONTENT_GUARD_RETRY_BACKOFF: {{ .Values.contentGuard.retryBackoff | toString | quote }}
+  CONTENT_GUARD_CACHE_TTL_SECONDS: {{ .Values.contentGuard.cacheTtlSeconds | toString | quote }}
+  CONTENT_GUARD_DEBUG: {{ .Values.contentGuard.debug | quote }}
   # Prometheus metrics: core serves /metrics on METRICS_PORT; empty disables
   # the metrics server (helm: metrics.enabled)
   METRICS_PORT: {{ if .Values.metrics.enabled }}{{ .Values.metrics.port | toString | quote }}{{ else }}""{{ end }}
-  # The LLM server's total context window, which only its own pod knew about
-  # (llama.cpp: LLAMA_ARG_CTX_SIZE; Strata: per-slot CONTEXT x PARALLEL, see
-  # _helpers.tpl). core exports it as a gauge so a dashboard can show
-  # prompt sizes as a fraction of it. llama.cpp rounds this up to a block
-  # boundary (80000 -> 80128), so the fraction reads ~0.2% high — not worth
-  # modelling.
-  LLM_CONTEXT_LENGTH: {{ include "dcb.llmContextLength" . | quote }}

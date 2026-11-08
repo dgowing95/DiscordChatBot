@@ -1,7 +1,7 @@
 """Which guilds the bot is in a voice call in (PURE, stdlib only).
 
 While a guild is here, its text work stops: on_message ignores the guild's
-messages (sandbox steering aside), queued messages and automation jobs are
+messages (workflow steering aside), queued messages and automation jobs are
 dropped at dequeue, due schedules wait, and /generate_image refuses. The
 bot then never talks in text and voice in one guild at once, and that
 guild's llama.cpp time goes to the call.

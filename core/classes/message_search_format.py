@@ -18,7 +18,7 @@ Shapes worth knowing (Discord's docs; check them again if this breaks):
   * thread names come in `threads`: an archived thread is often not in
     discord.py's cache.
 
-Saving messages to a file (save_messages_to_file, sandbox runs only) pages
+Saving messages to a file (save_messages_to_file, brain calls only) pages
 through the same search, 25 at a time, with `offset`. Discord refuses an
 offset over 9975, so one search can reach 10000 messages at most. Every
 message is written in full, as one JSON object per line, for code to read:
@@ -138,7 +138,7 @@ def _embed(embed: dict) -> str:
     """An embed as one line: author and title, then the description and each
     field as "name: value". Bots (game trackers, feeds) put everything that
     matters in the body and fields; showing only the title once left a
-    sandbox run with 25 copies of "[embed: Group Shared Storage]" and none
+    brain call with 25 copies of "[embed: Group Shared Storage]" and none
     of the items or values it had been asked to add up. Code-block fences
     are dropped and the whole is cut at EMBED_CHARS; the footer and images
     are left out."""
@@ -152,10 +152,55 @@ def _embed(embed: dict) -> str:
     return f"[embed: {text}]" if text else ""
 
 
+def _card_text(message: dict) -> str:
+    """The text of a card (classes/card.py), which has no content or embeds.
+    The raw API's form of card.text_of."""
+    lines = []
+
+    def walk(items) -> None:
+        for item in items or []:
+            if isinstance(item, dict):
+                if item.get("content"):
+                    lines.append(str(item["content"]))
+                walk(item.get("components"))
+
+    walk(message.get("components"))
+    return "\n".join(lines)
+
+
+def _url_name(url) -> str:
+    from urllib.parse import unquote, urlsplit
+    return unquote(urlsplit(str(url or "")).path.rsplit("/", 1)[-1])
+
+
+def _file_names(message: dict) -> list[str]:
+    """The names of a message's files: its attachments, and those inside a
+    card, which Discord lists in no attachments (a File component has its
+    name, a gallery picture only its URL). The raw API's form of
+    card.files_of."""
+    names = [str(a["filename"]) for a in message.get("attachments") or []
+             if isinstance(a, dict) and a.get("filename")]
+
+    def walk(items) -> None:
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            file = item.get("file") or {}
+            if item.get("type") == 13 and file.get("attachment_id"):
+                names.append(str(item.get("name") or _url_name(file.get("url"))))
+            for entry in item.get("items") or []:
+                media = (entry.get("media") or {}) if isinstance(entry, dict) else {}
+                if media.get("attachment_id"):
+                    names.append(_url_name(media.get("url")))
+            walk(item.get("components"))
+
+    walk(message.get("components"))
+    return [name for name in names if name]
+
+
 def _content(message: dict) -> str:
-    text = _cut(message.get("content"), CONTENT_CHARS)
-    extras = [f"[attached: {a.get('filename')}]" for a in message.get("attachments") or []
-              if a.get("filename")]
+    text = _cut(message.get("content") or _card_text(message), CONTENT_CHARS)
+    extras = [f"[attached: {name}]" for name in _file_names(message)]
     extras += [e for e in (_embed(e) for e in message.get("embeds") or [] if isinstance(e, dict))
                if e]
     poll = (message.get("poll") or {}).get("question") or {}
@@ -307,10 +352,9 @@ def export_record(message: dict, guild_id, channel_names: dict) -> dict:
         "author_id": str(author.get("id", "")),
         "bot": bool(author.get("bot")),
         "timestamp": str(message.get("timestamp") or ""),
-        "content": str(message.get("content") or ""),
+        "content": str(message.get("content") or _card_text(message)),
         "embeds": embeds,
-        "attachments": [a.get("filename") for a in message.get("attachments") or []
-                        if a.get("filename")],
+        "attachments": _file_names(message),
     }
 
 
@@ -325,7 +369,7 @@ def export_filename(query: str, where: str, author: str) -> str:
 
 def export_summary(path: str, saved: int, total: int, first: dict | None,
                    stopped: str = "") -> str:
-    """What the sandbox model is told: where the file is, how much is in it,
+    """What the brain is told: where the file is, how much is in it,
     its shape (one real record, cut short), and why it stopped if it did."""
     if not saved:
         return "No messages matched, so no file was written."

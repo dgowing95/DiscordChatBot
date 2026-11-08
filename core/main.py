@@ -2,39 +2,43 @@ import logging
 import discord
 import os
 import asyncio
+import contextvars
 import random
+import signal
 import time
 import aiohttp
-import io
+import sys
 from classes.message_handler import MessageHandler, close_http_session
 from classes.text_llm_handler import TextLLMHandler
-from classes.llm_config import llm_model
+from classes.llm_roles import PERSONA, role_config, role_warnings
 from classes.config_manager import configManager
 from classes.image_generation import (
     GENERATED_IMAGE_FILENAME,
+    ImageBlocked,
     create_image,
     image_generation_enabled,
 )
-from classes.sandbox_agent import sandbox_enabled
-from classes import attachment_cache, help_catalog, sandbox_thread_inbox, whats_new
-from classes.common import embed_from_data
+from classes import attachment_cache, brain_inbox, help_catalog, thread_inbox, settings_check, whats_new
+from classes import card, card_kit as K, tool_cards
 from classes.redis_client import text_client
-from classes import automation_runner, voice_gate
+from classes import automation_runner, skill_format, voice_gate
 from classes.polls import remember_poll
+from classes.workflows import WorkflowDone, defer_done as workflows_defer_done, reply_done as workflows_reply_done
 from classes.automation_policy import settings as automation_settings
 from classes.voice_policy import settings as voice_settings
+from classes import message_queue as queue_policy
 from classes.message_queue import (
-    get_channel_lock, make_message_queue, mark_enqueued, pop_enqueued, worker_count,
+    get_channel_lock, make_message_queue, mark_enqueued, mark_unprompted, pop_enqueued, queue_workers,
 )
 from classes.metrics import (
     inc_messages_processed,
     inc_messages_received,
     inc_queue_drop,
-    inc_sandbox_thread_message,
+    inc_workflow_thread_message,
     observe_queue_wait,
+    set_queue_workers,
     observe_reply_latency,
     set_attachment_cache_bytes,
-    set_context_window_from_env,
     set_message_queue_size,
     start_metrics_server_from_env,
 )
@@ -48,9 +52,9 @@ logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
 )
-# CONTENT_GUARD_DEBUG=1 (the default) means the guard's per-request detail is
+# CONTENT_GUARD_DEBUG=1 (default off) means the guard's per-request detail is
 # wanted, which is DEBUG on its own logger rather than on the root.
-if os.environ.get("CONTENT_GUARD_DEBUG", "1").strip().lower() not in ("0", "false", "no", "off"):
+if os.environ.get("CONTENT_GUARD_DEBUG", "").strip().lower() in ("1", "true", "yes", "on"):
     logging.getLogger("classes.content_guard").setLevel(logging.DEBUG)
 # VOICE_DEBUG=1 logs what is heard and said in voice calls (every transcript,
 # so off by default); the voice sidecar reads the same switch.
@@ -64,13 +68,26 @@ intents.message_content = True
 
 
 class Bot(discord.Client):
+    async def setup_hook(self):
+        install_sigterm_handler(self, asyncio.get_running_loop())
+
     async def close(self):
+        # super().close() always runs: if our own shutdown raised, the gateway
+        # would stay open and client.run() would never return.
+        try:
+            await self._shut_down()
+        finally:
+            await super().close()
+
+    async def _shut_down(self):
         for task in getattr(self, "background_tasks", []):
             task.cancel()
         if getattr(self, "background_tasks", None):
             await asyncio.gather(*self.background_tasks, return_exceptions=True)
         while not message_queue.empty():
             item = message_queue.get_nowait()
+            if isinstance(item, WorkflowDone):
+                logger.info("Shutting down with a workflow's completion reply still queued")
             if isinstance(item, automation_runner.AutomationJob) and item.renewal_task:
                 item.renewal_task.cancel()
             message_queue.task_done()
@@ -80,13 +97,49 @@ class Bot(discord.Client):
         from classes.voice_bridge import get_bridge
         if get_bridge() is not None:
             await get_bridge().close()
-        await super().close()
+        # Changed workspaces are snapshotted; their containers keep running
+        # for the next process to re-attach to.
+        # Running workflows are cancelled but left live, so the next start
+        # marks them interrupted and tells their threads.
+        from classes import workflows
+        await workflows.shutdown()
+        from classes.workspace_manager import workspaces
+        await workspaces().shutdown()
+
+
+def install_sigterm_handler(bot, loop) -> bool:
+    """Run bot.close() on SIGTERM, once.
+
+    docker stop and Kubernetes stop core with SIGTERM, which Python's default
+    handling turns into an immediate exit, so close() never ran: the server
+    workspaces were not snapshotted at shutdown (their containers survive,
+    so nothing was lost, but the snapshot was older than it had to be).
+    discord.py only handles Ctrl+C. Returns False where the loop has no
+    signal support (Windows)."""
+    closing = []
+
+    async def _close():
+        try:
+            await bot.close()
+        except Exception:
+            logger.exception("SIGTERM: closing the bot failed")
+
+    def _on_sigterm():
+        if not closing:
+            logger.info("SIGTERM: closing")
+            closing.append(asyncio.ensure_future(_close()))
+
+    try:
+        loop.add_signal_handler(signal.SIGTERM, _on_sigterm)
+    except (NotImplementedError, RuntimeError):
+        return False
+    return True
 
 
 client = Bot(intents=intents)
 config = configManager()
 
-# Bounded queue shared by the worker pool. Sizing (WORKER_COUNT /
+# Bounded queue shared by the worker pool. Sizing (QUEUE_WORKERS /
 # QUEUE_MAX_SIZE), the per-channel locks and the concurrency model live in
 # classes/message_queue.py (pure, unit-tested in core/tests/).
 message_queue = make_message_queue()
@@ -102,78 +155,89 @@ async def refresh_slot_context_forever():
         await asyncio.sleep(SLOT_CONTEXT_REFRESH_SECONDS)
 
 
+def make_command_tree():
+    """The slash command tree. Every command is server-only by default
+    (allowed_contexts): the bot works only in servers and never answers
+    direct messages, so a command must never be offered in one."""
+    return discord.app_commands.CommandTree(
+        client=client, fallback_to_global=True,
+        allowed_contexts=discord.app_commands.AppCommandContext(
+            guild=True, dm_channel=False, private_channel=False))
+
+
 async def register_commands():
     logger.info("Registering commands")
-    command_tree = discord.app_commands.CommandTree(client=client, fallback_to_global=True)
+    command_tree = make_command_tree()
     if automation_settings()["enabled"]:
         from classes.automation_commands import register_automation_commands
         register_automation_commands(command_tree)
     if voice_settings()["enabled"]:
         from classes.voice_commands import register_voice_commands
         register_voice_commands(command_tree, client)
+    from classes.workspace_commands import register_workspace_commands
+    register_workspace_commands(command_tree)
+    from classes import skill_format
+    if skill_format.enabled():
+        from classes.skill_commands import register_skill_commands
+        register_skill_commands(command_tree)
+    from classes import workflow_policy
+    if workflow_policy.enabled():
+        from classes.task_commands import register_task_commands
+        register_task_commands(command_tree, client)
 
     @command_tree.command(name="system", description="Change the behaviour/personality of the bot")
     async def change_system(ctx, system: str):
         await config.update_setting("system", system, ctx.guild.id)
-        await ctx.response.send_message(content=f"System updated to: \"{system}\"")
+        await card.reply(ctx, K.done("🎭 Personality updated", K.quote(system),
+                                     footer="See it any time with /get_system"), ephemeral=False)
 
     @command_tree.command(name="get_system", description="See the existing behaviour/personality of the bot")
     async def get_system(ctx):
         system = await config.get_setting("system", ctx.guild.id)
-        await ctx.response.send_message(content=f"System is currently: \"{system}\"")
+        await card.reply(ctx, K.info("🎭 Current personality", K.quote(system or "(none set)"),
+                                     footer="Change it with /system"), ephemeral=False)
 
     @command_tree.command(name="temperature", description="Change the randomness of responses, max of 2.0 is max random")
     async def change_temperature(ctx, temperature: float):
         await config.update_setting("temperature", temperature, ctx.guild.id)
-        await ctx.response.send_message(content=f"Temperature updated to: \"{temperature}\"")
+        await card.reply(ctx, K.done("⚙️ Setting changed", f"**Temperature** is now **{temperature}**",
+                                     footer="0 is predictable, 2 is very random"), ephemeral=False)
 
     @command_tree.command(name="chance", description="Change the chance (0-50%) that the bot replies without being mentioned, default 5%")
     async def change_chance(ctx, chance: discord.app_commands.Range[int, 0, 50]):
         await config.update_setting("response_chance", chance, ctx.guild.id)
-        await ctx.response.send_message(content=f"Response chance updated to: \"{chance}%\"")
+        await card.reply(ctx, K.done("⚙️ Setting changed", f"**Reply chance** is now **{chance}%**",
+                                     footer="How often I join in without being mentioned"),
+                         ephemeral=False)
 
     @command_tree.command(name="get_chance", description="See the current chance that the bot replies without being mentioned")
     async def get_chance(ctx):
         chance = await config.get_setting("response_chance", ctx.guild.id) or 5
-        await ctx.response.send_message(content=f"Response chance is currently: \"{chance}%\"")
+        await card.reply(ctx, K.info("⚙️ Reply chance", f"**{chance}%**",
+                                     footer="How often I join in without being mentioned · "
+                                            "change it with /chance"), ephemeral=False)
     
     # Ephemeral, so neither reply ever lands in channel.history (and so in a
     # prompt), and nobody else's channel fills up with a help listing.
     @command_tree.command(name="help", description="See everything the bot can do")
     async def help_cmd(ctx):
-        data = help_catalog.help_embed_data(image_generation_enabled(), sandbox_enabled())
-        await ctx.response.send_message(embed=embed_from_data(data), ephemeral=True)
+        avatar = getattr(getattr(client.user, "display_avatar", None), "url", None)
+        await card.reply(ctx, help_catalog.help_card(image_generation_enabled(), avatar))
 
     @command_tree.command(name="whats_new", description="See the new features in the current version")
     async def whats_new_cmd(ctx):
         version = whats_new.app_version()
         notes = whats_new.load_notes() if version else []
         if notes:
-            await ctx.response.send_message(
-                embed=embed_from_data(whats_new.notes_embed_data(version, notes)), ephemeral=True)
+            await card.reply(ctx, whats_new.notes_card(version, notes))
         elif version:
-            await ctx.response.send_message(
-                content=f"No new features in {version}. Try /help to see everything I can do.",
-                ephemeral=True)
+            await card.reply(ctx, K.info(f"✨ What's new · {version}", "No new features in this version.",
+                                         footer="/help shows everything I can do"))
         else:
-            await ctx.response.send_message(
-                content="I don't know which version I'm running (a development build), "
-                        "so there are no release notes. Try /help.",
-                ephemeral=True)
+            await card.reply(ctx, K.info("✨ What's new", "I don't know which version I'm running (a "
+                                                         "development build), so there are no release notes.",
+                                         footer="/help shows everything I can do"))
 
-    # Only offered when the code sandbox is enabled (SANDBOX_ENABLED; set
-    # from the helm chart's sandbox.enabled). Per-guild toggle, default off:
-    # when true, run_code_sandbox streams the sandbox's commands and output
-    # to the channel in a live-updating message; when false it only sends
-    # the one static run embed.
-    if sandbox_enabled():
-
-        @command_tree.command(name="sandbox_progress_updates",
-                              description="Enable/disable live progress updates (commands & output) for code sandbox runs in this server")
-        async def change_sandbox_progress_updates(ctx, enabled: bool):
-            await config.update_setting("sandbox_progress_updates", str(enabled), ctx.guild.id)
-            await ctx.response.send_message(content=f"Sandbox progress updates are now: \"{enabled}\"")
-    
     # Only offered when the diffusion service is enabled (IMAGE_GEN_ENABLED;
     # set from the helm chart's diffusion.enabled).
     if image_generation_enabled():
@@ -183,7 +247,7 @@ async def register_commands():
             # Its prompt rewrite and image check use the LLM, which is the
             # call's while the bot is in voice here.
             if voice_gate.active(ctx.guild_id):
-                await ctx.response.send_message(VOICE_BUSY_REPLY, ephemeral=True)
+                await card.reply(ctx, K.heads_up(VOICE_BUSY_LABEL, VOICE_BUSY_REPLY))
                 return
             # Image generation is slow (queue + GPU): defer first (spinner) so
             # the command doesn't time out, then respond to the deferred
@@ -200,16 +264,21 @@ async def register_commands():
             # result is checked against.
             try:
                 result = await create_image(prompt, prompt)
+            except ImageBlocked:
+                await card.answer_deferred(ctx, K.error(
+                    "That prompt was blocked by the safety check.", "🚫 Couldn't make the image"))
+                return
             except Exception as e:
                 logger.warning(f"Image generation failed: {e}")
-                await ctx.edit_original_response(
-                    content="❌ Image generation failed — the image service may be down or busy. Try again later."
-                )
+                await card.answer_deferred(ctx, K.error(
+                    "The image service may be down or busy. Try again in a minute.",
+                    "❌ Couldn't make the image"))
                 return
-            await ctx.edit_original_response(
-                content="🎨",
-                attachments=[discord.File(io.BytesIO(result.png), filename=GENERATED_IMAGE_FILENAME)],
-            )
+            # The picture in its card, uploaded under the name the next edit
+            # finds; a long prompt (its footer) goes on in a follow-up.
+            await card.answer_deferred(
+                ctx, tool_cards.image_card(prompt, filename=GENERATED_IMAGE_FILENAME),
+                files={GENERATED_IMAGE_FILENAME: result.png})
 
     synced_commands = await command_tree.sync()
     for synced_command in synced_commands:
@@ -220,16 +289,39 @@ async def on_ready():
     logger.info(f'Logged in as {client.user}')
     # Prometheus /metrics endpoint (METRICS_PORT; empty/0 disables).
     start_metrics_server_from_env()
-    # The context window the LLM server was started with (LLM_CONTEXT_LENGTH),
-    # published as a gauge so a dashboard can express prompt sizes as a
-    # fraction of it without hard-coding the number.
-    set_context_window_from_env()
-    # The per-slot context (llama.cpp /props) is what one request can actually
-    # use, and what the history token budget is measured against.
+    # Every role's server (llama.cpp /props): its slots size its lanes, and
+    # the persona's per-slot context is what the history token budget is
+    # measured against; the same read publishes each total context gauge.
     if not getattr(client, "background_tasks", None):
         client.background_tasks = [client.loop.create_task(refresh_slot_context_forever())]
+        # The server workspaces' timed snapshots, idle stops and reaper
+        # (classes/workspace_manager.py); the first tick also reaps what an
+        # earlier process left behind.
+        from classes.workspace_manager import workspaces
+        client.background_tasks.append(client.loop.create_task(workspaces().run_forever()))
         if automation_settings()["enabled"]:
             client.background_tasks.append(client.loop.create_task(schedule_forever()))
+        if skill_format.enabled():
+            # The daily skills tidy-up (classes/skill_curator.py), which also
+            # keeps the live-skills gauge; it checks SKILLS_CURATOR_ENABLED.
+            from classes.skill_curator import Curator
+            from classes.skill_store import SkillStore
+            curator = Curator(SkillStore(), client.get_channel, client.user.id)
+            client.background_tasks.append(client.loop.create_task(
+                curator.run_forever(lambda: [guild.id for guild in client.guilds])))
+        # Tier 3 workflows: the completion reply rides the queue, the plan's
+        # buttons work across restarts, and any workflow a previous process
+        # left running is marked interrupted (classes/workflows.py).
+        from classes import workflow_views, workflows
+        workflows.configure(queue=message_queue, client=client)
+        client.add_dynamic_items(workflow_views.WorkflowButton)
+        # The Restore button on a deleted or retired skill's card.
+        from classes.skill_tools import RestoreButton
+        client.add_dynamic_items(RestoreButton)
+        # The Leave button on a voice call's card.
+        from classes.voice_commands import LeaveButton
+        client.add_dynamic_items(LeaveButton)
+        client.background_tasks.append(client.loop.create_task(workflows.interrupt_all(client)))
         if voice_settings()["enabled"]:
             from classes.voice_bridge import start_bridge
             bridge = start_bridge(voice_settings()["bridge_url"], client, voice_settings()["bridge_token"])
@@ -237,16 +329,17 @@ async def on_ready():
     # Start the worker pool immediately so the bot still consumes messages
     # even if the model check or command sync fails (e.g. server not up yet
     # after a power cycle).
-    count = worker_count()
+    count = queue_workers()
     logger.info(f"Starting {count} queue worker(s)")
     if not getattr(client, "workers_started", False):
         client.workers_started = True
+        queue_policy.set_spawner(start_worker)
         for _ in range(count):
-            client.background_tasks.append(client.loop.create_task(process_messages()))
+            start_worker()
     try:
-        # Same accessor the bot itself uses, so an unset MODEL cannot make
-        # the readiness check verify a different model than the one requested.
-        model = llm_model()
+        # Same accessor the bot itself uses, so the readiness check verifies
+        # the model that is actually requested.
+        model = role_config(PERSONA).model
         await TextLLMHandler.check_model_ready(model)
     except Exception as e:
         logger.warning(f"Failed to check model: {e}")
@@ -287,22 +380,23 @@ async def on_message(message):
     # Every poll, the bot's own included, is recorded so check_polls can
     # find it after it scrolls out of the history window (no-op otherwise).
     await remember_poll(message)
-    # A sandbox run in flight in this thread takes the message instead of
-    # the outer LLM, so people can steer a run while it happens ("make it
-    # blue instead") without an @mention. Returning here is also the
-    # concurrency guard: a second run in the same thread would race the
-    # first to persist dcb:sandbox_snapshot:{thread_id} on teardown and
-    # silently clobber it. Answers to the sandbox's ask_user questions come
-    # through here too — the ledger is the one pipeline for thread input.
+    # A workflow running in this thread takes its messages (changes to the
+    # plan, "stop", answers) instead of the persona (classes/workflows.py).
     if (message.author != client.user and not message.author.bot
-            and sandbox_thread_inbox.is_run_active(message.channel.id)):
-        await route_to_sandbox(message)
+            and thread_inbox.is_run_active(message.channel.id)):
+        await route_to_workflow(message)
         return
-    if await voice_dev_inject(message):
+    # A Discord Reply to the brain's open question (ask_user) by the person
+    # it asked is the answer, not a new request. Any other message is
+    # handled as usual (classes/brain_inbox.py). Before the voice gate, so a
+    # reply in a call's thread counts too.
+    if message.author != client.user and _answers_brain_question(message):
+        await answer_brain_question(message)
+        return
+    if await voice_dev_inject(message) or await workflow_dev_inject(message):
         return
     # In a voice call in this guild: no text replies, rules or queueing
-    # (classes/voice_gate.py). Sandbox steering above still works, so a run
-    # started from the call can be steered in its thread.
+    # (classes/voice_gate.py).
     if message.guild is not None and voice_gate.active(message.guild.id):
         await voice_busy_notice(message)
         return
@@ -319,7 +413,7 @@ async def on_message(message):
     guild_id = message.guild.id if message.guild else 0
 
     # Backpressure: the queue is bounded (QUEUE_MAX_SIZE). When it's full the
-    # bot is behind (e.g. a 10-minute sandbox run) — dropping beats answering
+    # bot is behind (e.g. a 10-minute brain job) — dropping beats answering
     # stale messages against stale history. Mentioned messages get a short
     # busy reply so they aren't silently ignored; random-chance messages
     # drop quietly.
@@ -328,80 +422,101 @@ async def on_message(message):
         inc_queue_drop(guild_id)
         if client.user in message.mentions:
             try:
-                await message.reply("⏳ I'm still working through my queue — try me again in a moment.")
+                await card.send_card(message.channel, K.heads_up(
+                    "⏳ Busy", "I'm still working through my queue. Try me again in a moment."),
+                    reference=message, mention_author=True)
             except Exception as e:
                 logger.warning(f"Could not send busy reply to {message.id}: {e}")
         return
 
     inc_messages_received(guild_id)
     mark_enqueued(message.id)
+    if client.user not in message.mentions:
+        mark_unprompted(message.id)
     await message_queue.put(message)
     set_message_queue_size(message_queue.qsize())
 
 
-# What a person sees for each delivery result (sandbox_thread_inbox.deliver).
+def _answers_brain_question(message) -> bool:
+    """A Reply (not a forward, which also points at the message) in the
+    question's own channel, by the person it asked."""
+    reference = getattr(message, "reference", None)
+    question_id = getattr(reference, "message_id", None)
+    return (question_id is not None and message.guild is not None
+            and getattr(reference, "type", None) != discord.MessageReferenceType.forward
+            and getattr(reference, "channel_id", None) == message.channel.id
+            and brain_inbox.requester(question_id) == message.author.id)
+
+
+async def answer_brain_question(message) -> None:
+    """Hands the reply to the waiting brain call and reacts ✅; a reply
+    with no text gets a short note and the question stays open."""
+    outcome = brain_inbox.deliver(message.reference.message_id, message.author.id, message.content)
+    try:
+        if outcome == brain_inbox.ACCEPTED:
+            await message.add_reaction("✅")
+        elif outcome == brain_inbox.EMPTY:
+            await card.send_card(message.channel, K.heads_up(
+                "✏️ Answer in words", "I need your answer as text, please."),
+                reference=message, mention_author=False)
+    except Exception as e:
+        logger.warning(f"Could not acknowledge an answer to the brain: {e}")
+
+
+# What a person sees for each delivery result (thread_inbox.deliver).
 # A reaction is the receipt; the replies explain every case where the run
 # will NOT act on the message, so nobody mistakes 🚫 for "seen".
-_SANDBOX_REACTIONS = {
-    sandbox_thread_inbox.ACCEPTED: "📨",
-    sandbox_thread_inbox.FINISHING: "⏳",
+_WORKFLOW_REACTIONS = {
+    thread_inbox.ACCEPTED: "📨",
 }
-_SANDBOX_REPLIES = {
-    sandbox_thread_inbox.EMPTY: (
-        "🚫 The running sandbox can only read text — send that as a text message."),
-    sandbox_thread_inbox.FINISHING: (
-        "⏳ This sandbox run is finishing, so that hasn't been applied. Once it "
-        "closes, @mention me in this thread to carry on with it."),
-    sandbox_thread_inbox.ATTACHMENT_ONLY: (
-        "🚫 The running sandbox can't open attachments — paste the relevant part "
+_WORKFLOW_REPLIES = {
+    thread_inbox.EMPTY: (
+        "🚫 The running workflow can only read text — send that as a text message."),
+    thread_inbox.ATTACHMENT_ONLY: (
+        "🚫 The running workflow can't open attachments — paste the relevant part "
         "as text instead."),
-    sandbox_thread_inbox.TOO_LONG: (
-        f"🚫 That's too long to pass to the running sandbox (max "
-        f"{sandbox_thread_inbox.MAX_MESSAGE_CHARS} characters) — shorten it or split it up."),
-    sandbox_thread_inbox.FULL: (
-        "🚫 The sandbox has too many unanswered messages right now — give it a "
+    thread_inbox.TOO_LONG: (
+        f"🚫 That's too long to pass to the running workflow (max "
+        f"{thread_inbox.MAX_MESSAGE_CHARS} characters) — shorten it or split it up."),
+    thread_inbox.FULL: (
+        "🚫 The workflow has too many unanswered messages right now — give it a "
         "moment to catch up, then send that again."),
 }
-# How often "received, I'll review it before my next step" may be posted
-# while a command runs: rapid messages get one notice, not one each.
-SANDBOX_RECEIPT_NOTICE_SECONDS = 30
 
 
-async def route_to_sandbox(message) -> None:
-    """Delivers one thread message to the sandbox run claimed there and
+async def route_to_workflow(message) -> None:
+    """Delivers one thread message to the workflow claimed there and
     acknowledges it accurately: 📨 means the run WILL see it, and says
-    nothing about whether it has been applied — the sandbox answers that
-    itself (respond_to_updates)."""
-    ledger = sandbox_thread_inbox.get_run(message.channel.id)
+    nothing about whether it has been applied — the workflow's manager
+    answers it between steps."""
+    from classes.workflow_policy import is_stop_word
     reference = getattr(message, "reference", None)
-    outcome = sandbox_thread_inbox.deliver(
+    outcome = thread_inbox.deliver(
         message.channel.id, message.id,
         message.author.id, message.author.display_name, message.content,
         reply_to=getattr(reference, "message_id", None),
         has_attachments=bool(getattr(message, "attachments", None)),
+        stop_word=is_stop_word(message.content or ""),
     )
-    inc_sandbox_thread_message(outcome)
-    if outcome == sandbox_thread_inbox.DUPLICATE:
+    inc_workflow_thread_message(outcome)
+    if outcome == thread_inbox.DUPLICATE:
         return
     try:
-        await message.add_reaction(_SANDBOX_REACTIONS.get(outcome, "🚫"))
+        await message.add_reaction(_WORKFLOW_REACTIONS.get(outcome, "🚫"))
     except Exception as e:
-        logger.warning(f"Sandbox inbox: could not acknowledge {message.id}: {e}")
-    reply = _SANDBOX_REPLIES.get(outcome)
-    if (reply is None and outcome == sandbox_thread_inbox.ACCEPTED and ledger is not None
-            and ledger.busy_since is not None
-            and time.monotonic() - ledger.last_receipt_notice > SANDBOX_RECEIPT_NOTICE_SECONDS):
-        ledger.last_receipt_notice = time.monotonic()
-        reply = "📨 Received — a command is still running; I'll review this before my next step."
+        logger.warning(f"Workflow inbox: could not acknowledge {message.id}: {e}")
+    reply = _WORKFLOW_REPLIES.get(outcome)
     if reply is None:
         return
     try:
-        await message.reply(reply, mention_author=False)
+        await card.send_card(message.channel, K.heads_up("🚫 Not passed on", reply),
+                             reference=message, mention_author=False)
     except Exception as e:
-        logger.warning(f"Sandbox inbox: could not reply to {message.id}: {e}")
+        logger.warning(f"Workflow inbox: could not reply to {message.id}: {e}")
 
 
-VOICE_BUSY_REPLY = "🎙️ I'm in a voice call right now — talk to me there, or use /voice leave."
+VOICE_BUSY_LABEL = "🎙️ In a voice call"
+VOICE_BUSY_REPLY = "I'm in a voice call right now. Talk to me there, or use /voice leave."
 # How often the "in a call" notice may be posted per channel.
 VOICE_NOTICE_SECONDS = 60
 _voice_notice_at: dict[int, float] = {}
@@ -416,9 +531,33 @@ async def voice_busy_notice(message) -> None:
         return
     _voice_notice_at[message.channel.id] = now
     try:
-        await message.reply(VOICE_BUSY_REPLY, mention_author=False)
+        await card.send_card(message.channel, K.heads_up(VOICE_BUSY_LABEL, VOICE_BUSY_REPLY),
+                             reference=message, mention_author=False)
     except Exception as e:
         logger.warning(f"Could not send the in-a-call notice: {e}")
+
+
+async def workflow_dev_inject(message) -> bool:
+    """WORKFLOW_DEV_INJECT=1 only (local testing and E2E, never in the chart):
+    "!workflow <request>" starts a workflow, as /task does, with its plan
+    approved at once. A webhook cannot use a slash command or press Approve,
+    and the brain's own hand-off is the model's choice, so a check going
+    through it fails at random."""
+    from classes import workflow_policy, workflows
+    content = message.content or ""
+    if not content.startswith("!workflow ") or message.guild is None:
+        return False
+    if not workflow_policy.dev_inject() or message.author == client.user:
+        return False
+    context = {"guild_id": message.guild.id, "user_id": message.author.id,
+               "requester_name": message.author.display_name, "channel": message.channel,
+               "discord_client": client}
+    result = await workflows.start_workflow(context, content.partition(" ")[2],
+                                            trigger=workflows.TRIGGER_DEV, message=message)
+    if not result.ok:
+        await card.send_card(message.channel, K.error(result.text), reference=message,
+                             mention_author=False)
+    return True
 
 
 async def voice_dev_inject(message) -> bool:
@@ -443,7 +582,8 @@ async def voice_dev_inject(message) -> bool:
                 await session.heard(message.author.id, message.author.display_name, argument)
     except Exception as e:
         logger.warning(f"Voice dev inject failed: {e}")
-        await message.reply(f"❌ {e}", mention_author=False)
+        await card.send_card(message.channel, K.error(str(e)), reference=message,
+                             mention_author=False)
     return True
 
 
@@ -466,9 +606,13 @@ async def on_voice_state_update(member, before, after):
 async def should_handle_message(message) -> bool:
     # Decides whether the bot should reply to a message; called from
     # on_message before enqueueing, so no-reply messages never reach the
-    # queue. Rules (in order): must have content/embeds/attachments, must
+    # queue. Rules (in order): must be in a server (never a direct message),
+    # must have content/embeds/attachments, must
     # not be from the bot, must not be a history reset, mentions always
     # reply, otherwise roll the per-guild response chance (default 5%).
+    # The bot works only in servers: a direct message is never answered.
+    if message.guild is None:
+        return False
     if len(message.content) == 0 and len(message.embeds) == 0 and not message.attachments:
         return False
     if message.author == client.user:
@@ -481,8 +625,7 @@ async def should_handle_message(message) -> bool:
 
 
 async def random_chance_reply(message) -> bool:
-    guild_id = message.guild.id if message.guild else 0
-    chance = await config.get_setting("response_chance", guild_id) or 5
+    chance = await config.get_setting("response_chance", message.guild.id) or 5
     try:
         chance = min(max(float(chance), 0), 50)
     except (ValueError, TypeError):
@@ -491,7 +634,7 @@ async def random_chance_reply(message) -> bool:
 
 
 async def maybe_announce_whats_new(message) -> None:
-    """Posts this version's What's New embed in the message's channel the
+    """Posts this version's What's New card in the message's channel the
     first time a guild triggers the bot on it (see classes/whats_new.py).
 
     One atomic SET ... GET claims the announcement, so two workers handling
@@ -516,10 +659,10 @@ async def maybe_announce_whats_new(message) -> None:
         previous = await redis.set(key, version, get=True)
         if previous == version:
             return
-        embed = embed_from_data(whats_new.notes_embed_data(version, notes))
+        spec = whats_new.notes_card(version, notes)
         try:
             async with get_channel_lock(message.channel.id):
-                await message.channel.send(embed=embed)
+                await card.send_card(message.channel, spec)
         except Exception:
             if previous is None:
                 await redis.delete(key)
@@ -530,10 +673,55 @@ async def maybe_announce_whats_new(message) -> None:
         logger.warning(f"What's New announcement failed: {e}")
 
 
+def start_worker() -> None:
+    """Starts one queue worker; also how a brain call gets its spare
+    (classes/message_queue.py). Counted in before it runs. A fresh context:
+    a spare started from inside a brain call must not inherit its context
+    variables (the brain's LLM lane), or every chat reply it handled would
+    run as brain work."""
+    queue_policy.worker_started()
+    set_queue_workers(queue_policy.pool_workers())
+    task = asyncio.get_running_loop().create_task(process_messages(), context=contextvars.Context())
+    tasks = getattr(client, "background_tasks", None)
+    if tasks is None:
+        tasks = client.background_tasks = []
+    tasks[:] = [t for t in tasks if not t.done()]
+    tasks.append(task)
+
+
 async def process_messages():
+    try:
+        await _process_messages()
+    except BaseException:
+        # Cancelled at shutdown, or died: counted out. A worker that exits
+        # because the pool is above target was counted out by claim_exit.
+        queue_policy.worker_stopped()
+        raise
+    finally:
+        set_queue_workers(queue_policy.pool_workers())
+
+
+async def _process_messages():
     while True:
+        # Before taking an item, so every path through the loop (automatic
+        # runs and dropped messages continue early) passes it: the pool
+        # shrinks back once brain calls end.
+        if queue_policy.claim_exit():
+            logger.info("Queue worker exiting: the pool is above target")
+            return
         message = await message_queue.get()
         set_message_queue_size(message_queue.qsize())
+        if isinstance(message, WorkflowDone):
+            try:
+                # No text in a guild that is in a voice call: tried again
+                # once the call ends.
+                if voice_gate.active(message.workflow.guild_id):
+                    workflows_defer_done(message)
+                else:
+                    await workflows_reply_done(message, client)
+            finally:
+                message_queue.task_done()
+            continue
         if isinstance(message, automation_runner.AutomationJob):
             try:
                 # Its guild went into a voice call while it waited.
@@ -600,5 +788,19 @@ async def schedule_forever():
 if __name__ == "__main__":
     # Guarded so the module can be imported (by the tests, and by anything
     # that just wants to inspect it) without connecting to Discord.
+    # Renamed or missing settings stop the bot before anything starts
+    # (classes/settings_check.py): a stale config must not run on defaults.
+    settings_error = settings_check.check()
+    if settings_error:
+        logger.error(settings_error)
+        sys.exit(1)
+    for warning in role_warnings():
+        logger.warning(warning)
+    # Docker is required: every server's workspace is a container on it.
+    from classes.workspace_manager import check_docker
+    docker_error = check_docker()
+    if docker_error:
+        logger.error(docker_error)
+        sys.exit(1)
     automation_settings()
     client.run(os.environ['DISCORD_TOKEN'])

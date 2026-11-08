@@ -97,11 +97,14 @@ async def test_a_mention_gets_one_fixed_notice_per_minute():
         second = _message(mentions=[bot.user], msg_id=2)
         plain = _message(msg_id=3, channel_id=78)
         for msg in (first, second, plain):
+            msg.channel.send = AsyncMock()
             await main.on_message(msg)
-    first.reply.assert_awaited_once()
-    assert "voice call" in first.reply.await_args.args[0]
-    second.reply.assert_not_awaited()
-    plain.reply.assert_not_awaited()
+    from card_checks import view_text
+    first.channel.send.assert_awaited_once()
+    sent = first.channel.send.await_args.kwargs
+    assert "voice call" in view_text(sent["view"]) and sent["reference"] is first
+    second.channel.send.assert_not_awaited()
+    plain.channel.send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -120,8 +123,8 @@ async def test_other_guilds_are_unaffected():
 async def test_sandbox_steering_still_reaches_a_running_sandbox():
     main = _import_main()
     voice_gate.enter(GUILD, object())
-    with patch.object(main.sandbox_thread_inbox, "is_run_active", return_value=True), \
-         patch.object(main, "route_to_sandbox", AsyncMock()) as route:
+    with patch.object(main.thread_inbox, "is_run_active", return_value=True), \
+         patch.object(main, "route_to_workflow", AsyncMock()) as route:
         await main.on_message(_message(content="make it blue"))
     route.assert_awaited_once()
 
@@ -216,10 +219,8 @@ async def test_generate_image_command_refuses_during_a_call(monkeypatch):
     monkeypatch.setattr(main.discord.app_commands, "CommandTree", Tree)
     await main.register_commands()
     voice_gate.enter(GUILD, object())
-    ctx = MagicMock()
-    ctx.guild_id = GUILD
-    ctx.response.send_message = AsyncMock()
-    ctx.response.defer = AsyncMock()
+    from card_checks import interaction
+    ctx = interaction(guild_id=GUILD)
     await commands["generate_image"](ctx, "a cat")
     ctx.response.send_message.assert_awaited_once()
     ctx.response.defer.assert_not_awaited()
@@ -230,6 +231,40 @@ async def test_dev_inject_is_off_by_default(monkeypatch):
     main = _import_main()
     monkeypatch.delenv("VOICE_DEV_INJECT", raising=False)
     assert await main.voice_dev_inject(_message(content="!voice_say hey sparky hi")) is False
+
+
+@pytest.mark.asyncio
+async def test_the_workflow_command_is_off_by_default(monkeypatch):
+    main = _import_main()
+    monkeypatch.delenv("WORKFLOW_DEV_INJECT", raising=False)
+    assert await main.workflow_dev_inject(_message(content="!workflow do a big job")) is False
+
+
+@pytest.mark.asyncio
+async def test_the_workflow_command_starts_one_when_switched_on(monkeypatch):
+    from classes import workflows
+    main = _import_main()
+    monkeypatch.setenv("WORKFLOW_DEV_INJECT", "1")
+    start = AsyncMock(return_value=workflows.StartResult(True, thread_url="link"))
+    monkeypatch.setattr(workflows, "start_workflow", start)
+    message = _message(content="!workflow do a big job")
+    assert await main.workflow_dev_inject(message) is True
+    assert start.await_args.args[1] == "do a big job"
+    assert start.await_args.kwargs["message"] is message
+
+
+@pytest.mark.asyncio
+async def test_the_workflow_command_says_why_it_did_not_start(monkeypatch):
+    from classes import workflows
+    main = _import_main()
+    monkeypatch.setenv("WORKFLOW_DEV_INJECT", "1")
+    monkeypatch.setattr(workflows, "start_workflow",
+                        AsyncMock(return_value=workflows.StartResult(False, text="One is running.")))
+    message = _message(content="!workflow do a big job")
+    message.channel.send = AsyncMock()
+    assert await main.workflow_dev_inject(message) is True
+    from card_checks import view_text
+    assert "One is running." in view_text(message.channel.send.await_args.kwargs["view"])
 
 
 # ---------------------------------------------------------------------------

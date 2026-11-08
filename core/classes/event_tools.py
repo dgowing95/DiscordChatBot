@@ -49,8 +49,8 @@ def _timezone() -> str:
 def _guild_and_actor(context):
     """The server and the person asking. A voice turn or an automatic run
     has no message; the speaker or the entry's editor is `user_id`. A
-    sandbox run has no message either, and passes the requester it fetched
-    as `requester` (sandbox_agent._resolve_requester): without the members
+    brain call has no message either, and passes the requester it fetched
+    as `requester` (workspace_tools._resolve_requester): without the members
     intent, get_member below usually misses for them."""
     guild = getattr(context.get("channel"), "guild", None)
     actor = (getattr(context.get("original_message"), "author", None)

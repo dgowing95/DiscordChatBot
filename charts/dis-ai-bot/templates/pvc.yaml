@@ -16,7 +16,7 @@ spec:
 # llama.cpp (ex-Ollama) volume: PV/PVC names and hostPath are INTENTIONALLY still
 # "ollama" so the pre-existing PV keeps matching and the data on the node is
 # preserved on upgrade (renaming would create a new empty volume). Rendered
-# whatever llmEngine is, so switching to Strata and back neither deletes nor
+# whatever llm.engine is, so switching to Strata and back neither deletes nor
 # re-binds it.
 apiVersion: v1
 kind: PersistentVolume
@@ -73,9 +73,9 @@ spec:
       storage: {{ .Values.pvc.strataSize }}
 ---
 {{- end }}
-# Image generation model cache (HF_HOME). Only rendered when diffusion is
-# enabled (templates/diffusion.yaml mounts the claim).
-{{- if .Values.diffusion.enabled }}
+# Image generation model cache (HF_HOME). Only rendered when this release runs
+# the diffusion pod (dcb.diffusionPod; templates/diffusion.yaml mounts it).
+{{- if include "dcb.diffusionPod" . }}
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -147,7 +147,7 @@ spec:
     requests:
       storage: {{ .Values.pvc.llamacppSize }}
 ---
-{{- if .Values.diffusion.enabled }}
+{{- if include "dcb.diffusionPod" . }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

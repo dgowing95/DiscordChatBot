@@ -87,10 +87,18 @@ def test_settings_defaults_and_bounds(monkeypatch):
 
 def test_the_brief_model_falls_back_to_the_bots_own(monkeypatch):
     monkeypatch.delenv("RESEARCH_MODEL", raising=False)
-    monkeypatch.setenv("MODEL", "main-model")
-    assert rf.research_model() == "main-model"
+    monkeypatch.delenv("BRAIN_MODEL", raising=False)
+    monkeypatch.setenv("LLM_MODEL", "main-model")
+    assert rf.research_config().model == "main-model"
     monkeypatch.setenv("RESEARCH_MODEL", "other")
-    assert rf.research_model() == "other"
+    assert rf.research_config().model == "other"
+
+
+def test_the_brief_timeout_is_research_timeout(monkeypatch):
+    monkeypatch.delenv("RESEARCH_TIMEOUT", raising=False)
+    assert rf.research_config().call_timeout == 90.0
+    monkeypatch.setenv("RESEARCH_TIMEOUT", "30")
+    assert rf.research_config().call_timeout == 30.0
 
 
 # -------------------------------- web_research --------------------------------

@@ -7,7 +7,7 @@ CI"); this file covers how it runs.
 
 | File | What it does |
 |---|---|
-| `start_stack.sh` | Starts Redis, the speech service, the voice sidecar, core and (in CI, always) a CPU image service with a tiny model, all from the checked-out source. Logs go to `e2e/logs/`. |
+| `start_stack.sh` | Starts Redis, the speech service, the voice sidecar, core and (in CI, always) a CPU image service with a tiny model, all from the checked-out source. Core's server workspaces run on the runner's own Docker (labelled `dcb.instance=e2e`). Logs go to `e2e/logs/`. |
 | `run_checks.py` | Talks to the bot through a webhook in a private test server and checks the replies through Discord's REST API. |
 | `stop_stack.sh` | Stops everything `start_stack.sh` started. |
 
@@ -18,11 +18,14 @@ Structure, never wording:
 | Check | Passes when |
 |---|---|
 | speech service | A sentence sent to `/speak` and back through `/transcribe` comes back with its words |
-| slash commands | core's log shows `help`, `whats_new`, `system`, `generate_image` (and `voice`) synced |
+| slash commands | core's log shows `help`, `whats_new`, `system`, `generate_image`, `workspace`, `task` (and `voice`) synced |
 | chat reply | The bot answers a mention with text, and does not mark it ❌ |
-| memory tool | After "remember my favourite colour is teal", Redis holds a memory with "teal" |
-| image | The reply has a `generated-image.png` PNG attachment |
+| memory tool | After "remember my favourite colour is teal" (a brain call), Redis holds a memory with "teal" |
+| memory recall | After `!reset_history` (so the history no longer has it), asked "what is my favourite colour?", the reply says teal and `discord_bot_brain_calls_total` did not go up: saved memories are in the persona's prompt |
+| image | The reply has a `generated-image.png` PNG, in its card (a card's files are in its components, not `attachments`) |
 | poll | The bot posts a real Discord poll with at least two answers |
+| workspace task | Asked to make a CSV, the bot asked the brain (`discord_bot_brain_calls_total` went up), which posted a `.csv` file in the channel |
+| workflow | `!workflow <a big research job>` (`WORKFLOW_DEV_INJECT`: a webhook cannot use `/task`, and the brain's own hand-off is the model's choice) starts one within a minute: a plan card and a `🧵 Big job · …` closing card (told apart by their container ids, `core/classes/card_kit.py`) and a reply after it are posted, and `discord_bot_workflows_total` goes up. A webhook cannot press Approve and an unanswered plan is cancelled, so `!workflow` approves its plan at once; it may end done or partly done |
 | voice call | `!voice_join` joins the voice channel (Discord shows it), the greeting is spoken, a spoken question is answered aloud, and "leave" ends the call |
 | no tracebacks | core's log has no Python traceback |
 
@@ -39,7 +42,7 @@ Dependabot secrets: Dependabot's runs can only see the second store.
 | `E2E_DISCORD_TOKEN` | Token of a bot made only for testing. Never the real bot's. |
 | `E2E_WEBHOOK_URL` | Webhook in the test server's text channel. The server and channel are read from it. |
 | `E2E_VOICE_CHANNEL_ID` | A voice channel in the test server. Empty skips the voice check. |
-| `OPENCODE_API_KEY` | OpenCode Go key for the LLM below, given to `start_stack.sh` as `E2E_LLM_API_KEY` and to core only as `LLM_PASS`. Not test-only: it is also `review.yml`'s key, so the PR code this job runs can read it (see AGENTS.md's security rules). Dependabot's runs need it in the Dependabot store too. |
+| `OPENCODE_API_KEY` | OpenCode Go key for the LLM below, given to `start_stack.sh` as `E2E_LLM_API_KEY` and to core only as `LLM_API_KEY`. Not test-only: it is also `review.yml`'s key, so the PR code this job runs can read it (see AGENTS.md's security rules). Dependabot's runs need it in the Dependabot store too. |
 
 The job runs on a GitHub-hosted runner (`ubuntu-latest`). The rest of its
 settings are plain values in `e2e.yaml`:

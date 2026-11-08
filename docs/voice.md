@@ -1,12 +1,12 @@
 # Voice calls
 
-The bot can join a voice channel and talk out loud. Ask it in chat ("join voice", "come talk to us") and it joins the voice channel you are in, or use `/voice join` (optionally naming a channel). It opens a thread called "🎙️ Voice: <channel>" in the text channel you asked from, and reuses that thread on later calls. Pictures, code sandbox runs and other tool output from the call go there.
+The bot can join a voice channel and talk out loud. Ask it in chat ("join voice", "come talk to us") and it joins the voice channel you are in, or use `/voice join` (optionally naming a channel). It opens a thread called "🎙️ Voice: <channel>" in the text channel you asked from, and reuses that thread on later calls. Pictures, files and other tool output from the call go there.
 
 ## Talking to it
 
 It only answers when addressed. Start with the wake phrase, which by default is "hey" and the first word of its display name, with CamelCase split ("CleverHelperBot" is "hey clever helper bot"). Renaming the bot changes it, even during a call. Say the phrase and your question in one go ("hey sparky, what's the weather in London?"), or say the phrase alone, wait for the chime, then ask. Speech recognition sometimes clips a leading "hey", so a name of two or more words that starts what you say also counts on its own; a one-word name, or the name later in a sentence, needs the greeting. A short chime means it heard you: it plays as it starts on your request, before the answer, and also after the wake phrase on its own. Everything else said in the call is heard but not answered. It stays in the conversation as context, so "hey sparky, what do you think?" works.
 
-Before a tool runs (a web search, a picture, a code run) the bot says a short line about what it is doing, then gives the answer. Answers are spoken a sentence at a time while the rest is still being written.
+When a question needs work (a web search, a picture, some code) the bot does it like any request ([brain.md](brain.md)): it first says a short "hold on" line about what it is doing, then gives the answer. If it needs to ask you something, it says the question aloud and your next words are the answer. Big jobs are not started from a call: ask in text, or use `/task` after the call. Answers are spoken a sentence at a time while the rest is still being written.
 
 - "hey sparky, stop" (or "shut up", "be quiet", "that's enough") stops it talking, with whatever wake phrase the server uses. Work already started, such as a picture or a code run, still finishes and appears in the thread.
 - "hey sparky, leave" (or "goodbye", "go away"), `/voice leave`, or asking it to leave in other words ends the call.
@@ -25,7 +25,7 @@ Voice ids start with a language and gender letter: `a` American English, `b` Bri
 
 ## While it is in a call
 
-While the bot is in a call in a server, it does not reply in text there. @mentions get a short "I'm in a voice call" note, messages that were waiting in the queue are dropped, rules don't fire, and schedules wait until it leaves. `/generate_image` is refused until then. Other servers are unaffected. A sandbox run in the call's thread can still be steered by typing in the thread.
+While the bot is in a call in a server, it does not reply in text there. @mentions get a short "I'm in a voice call" note, messages that were waiting in the queue are dropped, rules don't fire, and schedules wait until it leaves. `/generate_image` and `/task` are refused until then. Other servers are unaffected. A workflow already running carries on in its thread, which still takes messages, and its reply in the channel waits until the call ends.
 
 ## How it works (for operators)
 

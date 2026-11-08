@@ -11,7 +11,6 @@ import discord
 
 from classes.automation_policy import matches, settings, validate_schedule
 from classes.automation_store import AutomationStore, PREFIX
-from classes.common import send_with_files
 from classes.message_queue import get_channel_lock
 from classes.response_filter import filter_response as clean_response, chunk_for_discord, format_thinking_for_discord
 from classes.text_llm_handler import TextLLMHandler
@@ -237,12 +236,6 @@ async def execute(job, client):
                 send_started = True
                 for chunk in chunk_for_discord(output):
                     await channel.send(chunk)
-                if handler.sandbox_thread:
-                    # With the files the run made, so they are here too, unless
-                    # it ran here (no thread could be made): they already are.
-                    elsewhere = handler.sandbox_thread.id != channel.id
-                    await send_with_files(channel, f"Sandbox work: {handler.sandbox_thread.mention}",
-                                          getattr(handler, "sandbox_files", None) if elsewhere else None)
                 if handler.reasoning and os.getenv("SHOW_THINKING", "0").lower() in ("1", "true"):
                     for chunk in format_thinking_for_discord(handler.reasoning):
                         await channel.send(chunk)
@@ -265,9 +258,12 @@ async def execute(job, client):
                 logger.exception("Could not record automation failure")
         if channel and not send_started:
             try:
-                await channel.send(f"⏸️ An automatic {kind} was suspended: {exc}. Resume it with /{kind} resume."
-                                   if isinstance(exc, AccessLost) else
-                                   "❌ An automatic run failed. Check its status with /schedule or /rule.")
+                from classes import card, card_kit as K
+                await card.send_card(channel, K.heads_up(
+                    f"⏸️ Automatic {kind} suspended", f"{exc}.", footer=f"Resume it with /{kind} resume")
+                    if isinstance(exc, AccessLost) else
+                    K.error("An automatic run failed.", "❌ Automatic run failed",
+                            footer="Check its status with /schedule or /rule"))
             except Exception:
                 logger.warning("Could not send the failure notice for %s", [r["id"] for r in rows], exc_info=True)
     finally:

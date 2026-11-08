@@ -1,6 +1,6 @@
 """
 Unit tests for the message queue concurrency model:
-  - core/classes/message_queue.py — pure module: env-var sizing (WORKER_COUNT
+  - core/classes/message_queue.py — pure module: env-var sizing (QUEUE_WORKERS
     / QUEUE_MAX_SIZE), the bounded queue factory, the per-channel lock
     registry (no discord/agents imports needed).
   - the queue wiring in core/main.py — the bounded drop policy in
@@ -38,12 +38,12 @@ def test_no_double_module_under_both_import_paths():
 
 
 def test_worker_count_env(monkeypatch):
-    monkeypatch.delenv("WORKER_COUNT", raising=False)
-    assert mq.worker_count() == mq.DEFAULT_WORKER_COUNT == 2
+    monkeypatch.delenv("QUEUE_WORKERS", raising=False)
+    assert mq.queue_workers() == mq.DEFAULT_QUEUE_WORKERS == 2
     for value, expected in [("1", 1), ("4", 4), (" 3 ", 3),
                             ("0", 2), ("-2", 2), ("abc", 2), ("", 2)]:
-        monkeypatch.setenv("WORKER_COUNT", value)
-        assert mq.worker_count() == expected, value
+        monkeypatch.setenv("QUEUE_WORKERS", value)
+        assert mq.queue_workers() == expected, value
 
 
 def test_queue_max_size_env(monkeypatch):
@@ -109,10 +109,19 @@ def _message(content="hi", guild_id=42, channel_id=77, user_id=777,
     typing_cm.__aenter__ = AsyncMock(return_value=None)
     typing_cm.__aexit__ = AsyncMock(return_value=False)
     channel.typing = MagicMock(return_value=typing_cm)
+    channel.send = AsyncMock()
     msg.channel = channel
     msg.mentions = [] if mentions is None else mentions
     msg.reply = AsyncMock()
     return msg
+
+
+def _replied(msg) -> str:
+    """The text of the card the bot sent back as a reply to `msg`."""
+    from card_checks import view_text
+    kwargs = msg.channel.send.await_args.kwargs
+    assert kwargs["reference"] is msg
+    return view_text(kwargs["view"])
 
 
 def _counter(metric, **labels):
@@ -162,8 +171,9 @@ async def test_on_message_drops_mention_with_busy_reply_when_full():
     assert _counter(metrics.messages_received_total,
                     guild_id="42") == received_before
     # a mention is not silently ignored: short busy reply
-    msg.reply.assert_awaited_once()
-    assert "working through my queue" in msg.reply.await_args.args[0]
+    msg.channel.send.assert_awaited_once()
+    assert "working through my queue" in _replied(msg)
+    assert msg.channel.send.await_args.kwargs["mention_author"] is True
 
 
 @pytest.mark.asyncio
@@ -240,12 +250,12 @@ async def test_process_messages_worker_pool_runs_messages_concurrently():
         "(different channels run concurrently)"
     )
 
-# ---------------------- on_message: routing into a running sandbox ----------------------
+# ---------------------- on_message: routing into a running workflow ----------------------
 
 @pytest.fixture
 def claimed_thread():
-    """A sandbox run claimed in channel 77 (the _message() default)."""
-    from classes import sandbox_thread_inbox as inbox
+    """A workflow claimed in channel 77 (the _message() default)."""
+    from classes import thread_inbox as inbox
     inbox._RUNS.clear()
     ledger = inbox.claim_run(77, requester_id=777)
     ledger.state = inbox.RUNNING
@@ -291,34 +301,6 @@ async def test_a_redelivered_message_is_recorded_once(claimed_thread):
 
 
 @pytest.mark.asyncio
-async def test_a_message_while_a_command_runs_gets_one_receipt_notice(claimed_thread):
-    import time as _time
-    main_mod = _import_main()
-    claimed_thread.busy_since = _time.monotonic()
-    with patch.object(main_mod, "client", MagicMock()):
-        first, second = _thread_message(msg_id=1), _thread_message("and bigger", msg_id=2)
-        await main_mod.on_message(first)
-        await main_mod.on_message(second)
-
-    first.reply.assert_awaited_once()
-    assert "review this before my next step" in first.reply.await_args.args[0]
-    second.reply.assert_not_awaited()  # coalesced
-
-
-@pytest.mark.asyncio
-async def test_a_message_as_the_run_finishes_is_told_it_was_not_applied(claimed_thread):
-    main_mod = _import_main()
-    claimed_thread.finalize()
-    with patch.object(main_mod, "client", MagicMock()):
-        msg = _thread_message("and a csv")
-        await main_mod.on_message(msg)
-
-    msg.add_reaction.assert_awaited_once_with("⏳")
-    assert "hasn't been applied" in msg.reply.await_args.args[0]
-    assert claimed_thread.follow_ups[0].text == "and a csv"
-
-
-@pytest.mark.asyncio
 async def test_an_attachment_only_message_is_not_acknowledged_as_read(claimed_thread):
     main_mod = _import_main()
     with patch.object(main_mod, "client", MagicMock()):
@@ -327,7 +309,7 @@ async def test_an_attachment_only_message_is_not_acknowledged_as_read(claimed_th
         await main_mod.on_message(msg)
 
     msg.add_reaction.assert_awaited_once_with("🚫")
-    assert "can't open attachments" in msg.reply.await_args.args[0]
+    assert "can't open attachments" in _replied(msg)
     assert claimed_thread.events == []
 
 
@@ -351,7 +333,7 @@ async def test_an_empty_message_is_explained_too(claimed_thread):
         await main_mod.on_message(msg)
 
     msg.add_reaction.assert_awaited_once_with("🚫")
-    assert "only read text" in msg.reply.await_args.args[0]
+    assert "only read text" in _replied(msg)
 
 
 # ------------------------- enqueue timestamps (queue-wait metrics) -------------------------
@@ -480,3 +462,85 @@ async def test_closing_the_bot_closes_the_download_session():
         await m.client.close()
     close.assert_awaited_once()
     parent_close.assert_awaited_once()
+
+
+class _SignalLoop:
+    def __init__(self, supported=True):
+        self.handlers = {}
+        self.supported = supported
+
+    def add_signal_handler(self, sig, callback):
+        if not self.supported:
+            raise NotImplementedError
+        self.handlers[sig] = callback
+
+
+@pytest.mark.asyncio
+async def test_sigterm_closes_the_bot_once():
+    """docker stop / Kubernetes send SIGTERM; without a handler close() never
+    ran, so workspaces were not snapshotted at shutdown."""
+    import signal
+    m = _import_main()
+    bot = MagicMock(close=AsyncMock())
+    loop = _SignalLoop()
+    assert m.install_sigterm_handler(bot, loop) is True
+    loop.handlers[signal.SIGTERM]()
+    loop.handlers[signal.SIGTERM]()
+    await asyncio.sleep(0)
+    bot.close.assert_awaited_once()
+
+
+def test_sigterm_handler_is_skipped_without_signal_support():
+    m = _import_main()
+    assert m.install_sigterm_handler(MagicMock(), _SignalLoop(supported=False)) is False
+
+
+@pytest.mark.asyncio
+async def test_a_failing_close_on_sigterm_is_logged(caplog):
+    import signal
+    m = _import_main()
+    bot = MagicMock(close=AsyncMock(side_effect=RuntimeError("boom")))
+    loop = _SignalLoop()
+    m.install_sigterm_handler(bot, loop)
+    loop.handlers[signal.SIGTERM]()
+    for _ in range(3):
+        await asyncio.sleep(0)
+    assert "closing the bot failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_the_gateway_closes_even_when_our_shutdown_raises():
+    m = _import_main()
+    with patch.object(m, "close_http_session", AsyncMock(side_effect=RuntimeError("x"))), \
+            patch("discord.Client.close", AsyncMock()) as parent_close:
+        with pytest.raises(RuntimeError):
+            await m.client.close()
+    parent_close.assert_awaited_once()
+
+
+
+# --------------------------- servers only ---------------------------
+
+@pytest.mark.asyncio
+async def test_a_direct_message_is_never_answered():
+    # The bot works only in servers: even a mention in a DM is ignored.
+    main_mod = _import_main()
+    bot = MagicMock()
+    queue = asyncio.Queue(maxsize=2)
+    with patch.object(main_mod, "client", bot), \
+         patch.object(main_mod, "message_queue", queue):
+        msg = _message(mentions=[bot.user])
+        msg.guild = None
+        assert await main_mod.should_handle_message(msg) is False
+        await main_mod.on_message(msg)
+    assert queue.qsize() == 0
+    msg.reply.assert_not_awaited()
+
+
+def test_slash_commands_are_offered_in_servers_only():
+    main_mod = _import_main()
+    with patch.object(main_mod.discord.app_commands, "CommandTree") as tree_cls:
+        main_mod.make_command_tree()
+    contexts = tree_cls.call_args.kwargs["allowed_contexts"]
+    assert contexts.guild is True
+    assert contexts.dm_channel is False and contexts.private_channel is False

@@ -4,593 +4,483 @@ Overview of this repository and how to work with it (for humans and AI coding ag
 
 ## What this is
 
-A Python Discord bot that answers messages using a local LLM (llama.cpp server serving a GGUF model, e.g. `ggml-org/Qwen3.8-27B-GGUF:Q4_K_M`;
-or, with the chart's `llmEngine: strata`, a [Strata](https://github.com/Niko1221/Strata) server for large mixture-of-experts models).
-It is primarily deployed on **Kubernetes** via the Helm chart in `charts/dis-ai-bot`
-(releases are cut by `.github/workflows/auto-tag.yaml`, which bumps a `vMAJOR.MINOR` tag on every
-push to `main`, and the tag push starts `release.yaml`; a prebuilt chart is downloadable from GitHub
-releases -- see Releasing below).
-Redis is used as the settings store and user-memory store.
+A Python Discord bot that answers messages using a local LLM: a llama.cpp server serving a GGUF model
+(e.g. `ggml-org/Qwen3.8-27B-GGUF:Q4_K_M`) or, with the chart's `llm.engine: strata`, a
+[Strata](https://github.com/Niko1221/Strata) server for large mixture-of-experts models. It is deployed
+on **Kubernetes** with the Helm chart in `charts/dis-ai-bot` (see Releasing). Redis holds settings,
+memories and the other per-guild state. It works in servers only, never in direct messages.
+
+This file says what lives where and the rules that break something when missed. **Why** each part works
+the way it does is in its module's docstring: read that before changing it.
 
 ## Repository layout
 
+`P` = pure: stdlib only (plus `prometheus_client` for metrics), so it is unit-tested without the
+discord or agents SDKs. Keep those modules pure.
+
 ```
-core/                  # the main bot (the app that runs in production)
-  main.py              # entrypoint: discord.Client, message queue, slash commands
+core/                    # the bot (what runs in production)
+  main.py                # entrypoint: discord.Client, on_message, queue workers, slash commands
+  whats_new.md           # the NEXT release's user-facing features (see "What's New notes")
   classes/
-    message_handler.py     # per-message orchestration: history build, send/chunking
-    history_policy.py      # PURE (stdlib-only) which history goes in a prompt: sliding vs
-                           #   anchored window, per-channel anchor store, token budget
-    attachment_cache.py    # PURE (stdlib-only) encoded images kept between prompt builds:
-                           #   LRU + TTL, shared in-flight loads, delete/edit invalidation
-    message_queue.py       # PURE (stdlib-only) queue sizing (WORKER_COUNT / QUEUE_MAX_SIZE),
-                           #   bounded queue factory + per-channel locks (scoped to build+send)
-                           #   + in-flight task registry (prompt hint for still-running slow tools)
-    text_llm_handler.py    # builds an `agents` Agent against the LLM server's (llama.cpp or Strata)
-                           #   OpenAI-compat API
-    response_filter.py     # PURE (stdlib-only) response cleaning / thinking-block stripping
-    content_guard.py       # OpenAI Moderations-based safety guard for web_search / fetch_url /
-                           #   run_code_sandbox
-    llm_config.py          # PURE (stdlib-only) MODEL / LLM_HOST / LLM_PASS defaults and the
-                           #   temperature parser, shared by the main and sandbox agents
-    redis_client.py        # the two shared, lazily-built Redis clients (str + binary); the
-                           #   stores below hold no client of their own
-    metrics.py             # PURE (stdlib + prometheus_client) Prometheus metrics:
-                           #   all metric definitions + /metrics HTTP server (METRICS_PORT)
-    user_memory.py         # JSON lists in Redis per (guild, user)
+    # messages and the persona
+    message_handler.py     # one message: history, prompt build, generate, send
+    history_policy.py      # P which history goes in a prompt: sliding / anchored, token budget
+    attachment_cache.py    # P encoded images kept between prompt builds
+    message_queue.py       # P queue sizing, elastic worker pool, per-channel locks, in-flight hint
+    reply_policy.py        # P occasional double replies
+    text_llm_handler.py    # the persona: an agents-SDK Agent with one tool, ask_brain
+    response_filter.py     # P answer cleaning, reasoning extraction, Discord chunking
+    content_guard.py       # moderation check for web_search / fetch_url / image generation
+    user_memory.py         # saved memories: JSON lists in Redis per (guild, user)
     config_manager.py      # per-guild settings in Redis (system prompt, temperature, ...)
-    tool_functions.py      # agent function tools: web_search, fetch_url, memory tools, create_poll,
-                           #   check_polls, generate_image, run_code_sandbox
-    poll_format.py         # PURE (stdlib-only) create_poll's input checks + how a poll (and
-                           #   Discord's "poll ended" message) reads in a prompt
-    polls.py               # reading Discord polls: voter lookup, prompt text, recording
-                           #   each poll (on_message) for check_polls
-    poll_store.py          # which polls each channel has had (message ids), in Redis
-    image_generation.py    # create_image (prompt, generate, check, retry), diffusion
-                           #   client, /health capabilities, which image to edit
-    image_prompt.py        # LLM rewrite of an image request -> SDXL prompt + negative prompt
-    research_format.py     # PURE (stdlib-only) web_search: RESEARCH_* settings, which
-                           #   results are read, the brief prompt, what the model is told
-    web_research.py        # web_search's I/O: DuckDuckGo, pages via web_reader, the brief
-    image_review.py        # vision check of a generated image: what it shows, what's missing
-    side_llm.py            # shared client + thinking-off latch for those two side calls
-    sandbox_agent.py       # nested SandboxAgent + run_sandbox_task (throwaway Docker sandbox)
-                           #   + the pure builders for what the outer model is told
-                           #   (sandbox_tool_result and friends)
-    sandbox_progress.py    # streams sandbox commands/output to one edited Discord message
-                           #   (single embed: one field per command, state-coloured)
-    sandbox_snapshot_store.py  # Redis-backed workspace snapshots, keyed by thread id
-    sandbox_inputs.py      # PURE (stdlib-only) chat files given to a run (in/): which,
-                           #   caps, and what the sandbox / outer model are told
-    sandbox_thread_inbox.py    # PURE (stdlib-only) ledger of thread messages to a run in
-                               #   flight: staged events, atomic per-thread claim
-    sandbox_conversation.py    # conversation coordinator: model-input filter, tool gate,
-                               #   respond_to_updates / ask_user, continuation nudges
-    sandbox_conversation_store.py  # per-thread record of loose ends (late messages,
-                               #   open question) for the next run, in Redis
-    common.py              # shared helpers (Discord tool embeds, embed_from_data)
-    tool_embeds.py         # PURE (stdlib-only) how tool embeds read: action titles,
-                           #   per-tool colours, link labels, sandbox run/closing text
-    whats_new.py           # PURE (stdlib-only) What's New notes: parse core/whats_new.md,
-                           #   APP_VERSION / WHATS_NEW_ENABLED, embed data + Discord limits
-    help_catalog.py        # PURE (stdlib-only) the hand-written /help listing
-    automation_policy.py   # PURE (stdlib-only) schedule timing, DST, minimum gap,
-                           #   rule matching, AUTOMATIONS_* / SCHEDULE_* / RULE_* settings
-    automation_store.py    # versioned Redis records, quotas, revisions, atomic claims
-    automation_runner.py   # rule admission, 15s schedule poll, automatic run execution
-    automation_commands.py # /schedule and /rule slash command groups
-    automation_tools.py    # the matching chat tools (list/get/create/update/delete,
-                           #   schedule_followup)
-    event_format.py        # PURE (stdlib-only) Discord events: input checks, time
-                           #   parsing, how an event reads in a prompt, EVENTS_ENABLED
-    event_tools.py         # create_event / list_events / update_event agent tools
-    web_policy.py          # PURE (stdlib-only) reading links: WEB_* / BROWSER_* settings,
-                           #   URL clean-up + routing (YouTube/Reddit/Steam/page), cache
-                           #   key, public-address check, browser trigger, paging
-    site_format.py         # PURE (stdlib-only) how a Reddit feed, a Steam app or a YouTube
-                           #   transcript reads in a prompt
-    web_reader.py          # fetch_url's reader: Redis cache, one load per URL, site
-                           #   readers, plain fetch + trafilatura, browser fallback
-    message_search_format.py  # PURE (stdlib-only) Discord message search: query params,
-                           #   how results read, the endpoint's quirks; message links
-                           #   and how the messages around one read
-    message_search_tools.py   # the search_messages and read_messages_around agent tools,
-                           #   plus save_messages_to_file (sandbox runs only)
-    voice_policy.py        # PURE (stdlib-only) voice calls: VOICE_* settings, wake-phrase
-                           #   match, leave/stop commands, anchored history, sentence
-                           #   splitter + markdown stripping, VOICE_INSTRUCTIONS
-    voice_gate.py          # PURE (stdlib-only) which guilds are in a call (text work stops)
-    voice_bridge.py        # WebSocket client to the voice sidecar + SidecarVoiceProtocol
-                           #   (discord.py's side of the voice handshake)
-    voice_session.py       # one call: utterance -> wake -> streamed turn -> speech,
-                           #   hold-on lines, idle leave, cache prefill
-    voice_commands.py      # the /voice slash command group
-  whats_new.md         # the NEXT release's user-facing features (see "What's New
-                       #   notes" below) - rewritten by every feature PR
-  tests/               # pytest suite (see Testing below)
-  Dockerfile           # python:3.13-slim image, runs main.py
-  requirements.txt     # runtime only
-  requirements-dev.txt # the above plus pytest et al (what CI installs)
-diffusionservice/      # standalone image service (text->image; FastAPI + diffusers,
-                       #   queued single-worker, sd-turbo by default,
-                       #   CPU-offloaded for low VRAM)
-                       #   generation_params.py is the stdlib-only half (guidance /
-                       #   negative-prompt policy), so it is unit-testable without torch
-browserservice/        # headless Chromium (FastAPI + Playwright) that renders pages
-                       #   needing their scripts run, for fetch_url; egress_proxy.py
-                       #   (Chromium's only way out: public addresses only) and
-                       #   render_policy.py are the stdlib-only, tested halves
-speechservice/         # voice calls' speech-to-text (faster-whisper) and text-to-speech
-                       #   (Kokoro-82M), CPU only; speech_params.py is the stdlib-only half
-voicesidecar/          # Node: Discord voice I/O via @discordjs/voice (DAVE receive),
-                       #   bridged to core over a WebSocket; README.md has the protocol
-docs/automations.md    # user-facing guide to schedules, follow-ups and rules
-docs/events.md         # user-facing guide to server events
-docs/voice.md          # user-facing guide to voice calls
-e2e/                   # end-to-end CI: start the PR's bot, talk to it through
-                       #   Discord, check the replies (README.md there)
-charts/dis-ai-bot/     # Helm chart (credentials render into templates/secret.yaml,
-                       #   everything else into templates/configmap.yaml); llmEngine
-                       #   picks templates/llamacpp.yaml (default) or templates/strata.yaml
-pyproject.toml         # pytest configuration - why bare `pytest` works from the repo root
-docker-compose.yaml    # local dev: redis + llamacpp or strata (GPU; COMPOSE_PROFILES in .env picks
-                       #   one) + diffusion (GPU) + core (mounts ./core)
-                       #   + speech + voice (CPU; used when VOICE_ENABLED=1)
-.env / .env.example    # environment configuration (never commit .env)
+    redis_client.py        # the two shared, lazily built Redis clients (str + binary)
+    settings_check.py      # P settings removed in v3, and the startup check that exits on them
+    metrics.py             # P Prometheus metrics and the /metrics server
+    common.py              # shared Discord helpers (QuietChannel, send_with_files)
+    card_kit.py            # P the bot's cards: colours, blocks, splitting, markdown safety, readback
+    card.py                # cards in Discord: send / LiveCard / reply, Card (questions), text_of, kind_of
+    tool_cards.py          # P what each tool's card says: labels, link labels, helper lines
+    whats_new.py           # P What's New notes: parse, limits, the card
+    help_catalog.py        # P the hand-written /help listing
+    # LLM connections
+    llm_roles.py           # P model / host / key / effort / timeout per role and side job
+    llm_lanes.py           # P priority lanes over a self-hosted server's slots
+    laned_model.py         # SDK Model wrapper: lane slot, call timeout, one retry per model call
+    side_llm.py            # shared client for side calls (research brief, image rewrite / check)
+    # the brain (runtime item 7)
+    tool_functions.py      # ask_brain (the persona's tool) and most of the brain's tools
+    brain.py               # run_brain, its SandboxAgent, BRAIN_INSTRUCTIONS, report
+    brain_tools.py         # the one list of the brain's tools, gated per kind of run
+    brain_result.py        # P BrainReport and what the persona is told
+    brain_policy.py        # P BRAIN_* limits (unprompted replies, questions, slots)
+    brain_inbox.py         # P questions the brain is waiting on, one per question message
+    brain_question.py      # the question in Discord (buttons) and ask(): the one flow of ask_user and ask_requester
+    persona_voice.py       # the brain's questions and a manager's thread replies, in the persona's voice
+    skill_format.py        # P skills: SKILLS_* settings, name/limit checks, SKILL.md, the index and its ranking
+    skill_store.py         # skills in Redis: every version kept, soft delete, revert, export
+    skill_tools.py         # the brain's use_skill / save_skill / search_skills, every skill card, Restore
+    skill_commands.py      # the /skills group (list, show, history, edit, delete, restore, revert, export)
+    skill_reflection.py    # after a long job, one background call decides whether to save a skill
+    skill_curator.py       # the daily tidy-up: merge, retire, describe (its rules are pure)
+    loop_guard.py          # P stops a brain run that repeats itself (also a page or search asked again)
+    context_trim.py        # P cuts old tool outputs in a long brain run; keeps a local run in its slot
+    brain_progress.py      # the "Working on it" status card and live command output
+    brain_status.py        # the card's one-line status in plain words ("Creating the script")
+    workspace_tools.py     # shell wrappers, attach_file and delivery, in/ files, thread tools
+    workspace_inputs.py    # P which chat files go to a brain call's in/
+    workspace_lifecycle.py # P the per-guild workspace state machine, WORKSPACE_* settings
+    workspace_manager.py   # one Docker container per server: start, resume, snapshot, stop, reap
+    workspace_snapshot_store.py    # workspace snapshots in Redis, one per guild
+    workspace_commands.py  # /workspace (status, reset, progress)
+    # Tier 3 workflows (runtime item 13)
+    workflows.py           # start, approval, steps, questions, finish, the completion reply
+    workflow_planning.py   # the plan stage: scouts, questions before the plan, submit_plan
+    workflow_verify.py     # the checks: research before it is built on, the finished work
+    workflow_steering.py   # the requester's messages reaching the steps they are about
+    workflow_policy.py     # P plans, waves, states, WORKFLOW_* / SUBAGENT_* settings
+    workflow_store.py      # records and each server's running slot, in Redis
+    workflow_tools.py      # start_workflow (brain); discover, ask_requester, submit_plan,
+                           #   submit_review (manager); submit_verdict (verifier)
+    workflow_views.py      # the plan card's Approve / Edit / Cancel buttons (work across restarts)
+    task_commands.py       # /task
+    thread_inbox.py        # P thread-message ledger (a workflow claims its thread's)
+    # tools and features
+    image_generation.py    # create_image: prompt, generate, check, retry; which image to edit
+    image_prompt.py        # request -> SDXL prompt + negative prompt
+    image_review.py        # vision check of a generated image
+    poll_format.py         # P create_poll's checks, how a poll reads in a prompt
+    polls.py               # reading polls (voters), recording each one for check_polls
+    poll_store.py          # each channel's polls, in Redis
+    research_format.py     # P web_search's settings, which results are read, the brief prompt
+    web_research.py        # web_search: DuckDuckGo, read the results, write the brief
+    search_worker.py       # P the search itself, in a process of its own (one at a time)
+    web_policy.py          # P fetch_url's rules: URL routing, cache keys, public-address check
+    site_format.py         # P how Reddit / Steam / YouTube read in a prompt
+    web_reader.py          # fetch_url's reader: cache, site readers, browser fallback
+    message_search_format.py  # P Discord message search: params, results, quirks
+    message_search_tools.py   # search_messages, read_messages_around, save_messages_to_file
+    event_format.py        # P Discord events: checks, time parsing, prompt text
+    event_tools.py         # create_event / list_events / update_event
+    automation_policy.py   # P schedule timing, DST, rule matching, AUTOMATIONS_* settings
+    automation_store.py    # versioned Redis records, quotas, atomic claims
+    automation_runner.py   # rule admission, schedule poll, automatic runs
+    automation_commands.py # /schedule and /rule
+    automation_tools.py    # the matching brain tools, schedule_followup
+    voice_policy.py        # P voice settings, wake phrase, commands, sentences, voice prompts
+    voice_gate.py          # P which guilds are in a call
+    voice_bridge.py        # WebSocket client to the voice sidecar, discord.py's voice handshake
+    voice_session.py       # one call: utterance -> turn -> speech, prefill
+    voice_commands.py      # /voice
+  tests/                 # pytest suite (see Testing)
+  Dockerfile, requirements.txt, requirements-dev.txt
+diffusionservice/        # image service (FastAPI + diffusers, one image at a time);
+                         #   generation_params.py is its pure, tested half
+browserservice/          # headless Chromium for fetch_url; egress_proxy.py and
+                         #   render_policy.py are its pure, tested halves
+speechservice/           # speech-to-text (faster-whisper) and text-to-speech (Kokoro), CPU only;
+                         #   speech_params.py is its pure half
+voicesidecar/            # Node: Discord voice I/O (@discordjs/voice, DAVE); README has the protocol
+docs/                    # user guides (automations, events, voice) and upgrading-to-v3.md;
+                         #   cards.md is for developers: how to build and extend the bot's cards
+e2e/                     # end-to-end CI (README.md there)
+charts/dis-ai-bot/       # Helm chart: credentials in templates/secret.yaml, the rest in
+                         #   configmap.yaml; llm.engine picks llamacpp.yaml (default) or strata.yaml
+docker-compose.yaml      # local dev: redis, llamacpp or strata (COMPOSE_PROFILES), diffusion,
+                         #   core (mounts ./core and the Docker socket), browser, speech, voice
+pyproject.toml           # pytest configuration (why bare `pytest` works from the repo root)
+.env / .env.example      # environment configuration (never commit .env)
 ```
 
 ## Runtime architecture
 
-1. `main.py:` every Discord message is first checked by `should_handle_message()`
-   in `on_message` (has content/embeds/attachments, not from the bot, not
-   `!reset_history`, and either the bot is mentioned or the per-guild random
-   reply-chance roll hits); only messages that pass go on a BOUNDED
-   `asyncio.Queue` (`QUEUE_MAX_SIZE`, default 10 — once full, new messages are
-   dropped and a mention gets a short "busy" reply), and a POOL of worker
-   tasks (`WORKER_COUNT`, default 2) pops messages, builds a `MessageHandler`,
-   and handles them. A per-channel `asyncio.Lock` (keyed by channel id) is
-   SCOPED to the two fast phases of a handle — prompt build and the chunked
-   send (`MessageHandler.handle_message`) — so the slow LLM/tool phase runs
-   UNLOCKED: different channels run concurrently, AND a free worker can
-   answer a NEW message in the SAME channel while the first is stuck in a
-   slow tool (no interleaved chunks, consistent `channel.history()`
-   snapshots, no deadlock — the lock is never held across an LLM/tool
-   await). While a slow tool (sandbox / image gen) is running,
-   `ToolMetricsHooks` registers it in the per-channel IN-FLIGHT REGISTRY
-   (`classes/message_queue.py`) and any newer same-channel message's prompt
-   gets a one-line hint ("🐳 code sandbox running for 4m 12s — <task>").
-   Sizing, the queue factory, the lock registry and the in-flight registry
-   live in `core/classes/message_queue.py` (pure, unit-tested).
-2. `MessageHandler.handle_message()` builds the prompt
-   (channel history -- the messages BEFORE the triggering one, up to
-   `MSG_HISTORY_LIMIT` (default 5) including the trigger; the user's stored
-   Redis memories are exposed to the agent through its function tools) and
-   calls `TextLLMHandler.generate()`. History is read before the trigger's id,
-   not as "newest N minus one", because a trigger that waited in the queue has
-   newer messages above it. `MSG_HISTORY_MODE=anchored` keeps the start of the
-   window fixed between refreshes so llama.cpp can reuse its cached prompt
-   prefix (`classes/history_policy.py` has the rules and why); every message,
-   the trigger included, is formatted by the one `_format_group`, so a trigger
-   serializes exactly as it will as history on the next turn. Older history is
-   dropped whole when the prompt would not fit the llama.cpp per-slot context
-   (read from its `/props`) minus `MSG_HISTORY_RESERVE_TOKENS`.
-   The build has two halves: `select_messages` (under the channel lock: reads
-   Discord and picks the window, estimating a flat token cost per image) and
-   `prepare_messages` (after the lock: downloads and encodes the images). Encoded
-   images are kept in `classes/attachment_cache.py` (64 MiB, 15 minutes, keyed by
-   channel/message/attachment id, not URL), at most 4 downloads run at once
-   through one shared aiohttp session, and Discord's raw delete/edit events in
-   `main.py` drop a message's images; a history message deleted while images
-   download is left out of the prompt.
-   **Polls** (the `create_poll` tool posts them) have no text or embeds, so
-   `_format_group` gives them their own entry from `classes/poll_format.py`:
-   question, each option's count and voter names, and the end as an ABSOLUTE
-   time (a relative "ends in 3h" would change on every build and cost
-   llama.cpp its cached prefix). Voter names cost one Discord request per
-   option with votes, so `prepare_messages` fetches them after the lock, all at
-   once, bounded at 5 seconds and fail-soft (counts only); an ended poll's are
-   kept in-process. Discord's "poll ended" system message is rendered from its
-   embed fields, which the generic embed path drops. New votes do change an
-   entry, so they cost the cached prefix from that message on.
-   A poll that has scrolled out of the window is found with the `check_polls`
-   tool instead of being kept in every prompt: `on_message` records every
-   poll's message id (`classes/poll_store.py`, a Redis sorted set per channel
-   scored by end time, kept a week after the poll ends), and the tool fetches
-   the newest few live from Discord. So nothing extra is in the prompt until
-   someone asks, and it is also how voice turns and automatic runs, which have
-   no channel history, can see results.
-3. `TextLLMHandler` uses the **OpenAI `agents` SDK** pointed at the LLM
-   server's OpenAI-compatible endpoint (`LLM_HOST/v1`) with function tools attached.
-   That server is llama.cpp by default, or Strata (chart `llmEngine: strata`, compose
-   profile `strata`). Strata copies llama.cpp's API closely enough (`/props`,
-   `reasoning_content`, `timings`, prefix reuse) that core treats both the same: the
-   only differences are that Strata checks `LLM_PASS` (so core's own `/props` and
-   `/v1/models` calls send it, `llm_config.llm_auth_headers`), lists its one model
-   only in the OpenAI `data` shape, and answers whatever model name is asked for.
-4. The returned text is cleaned by `MessageHandler.filter_response()` (delegate:
-   `core/classes/response_filter.py`, a pure module) and sent in **2000-char chunks**
-   (`textwrap.wrap`, one `asyncio.sleep(1)` between sends). The model's reasoning
-   is kept out of that answer and, by default, dropped; with `SHOW_THINKING=1` it is
-   sent as follow-up message(s) wrapped in a spoiler-hidden code block
-   (`||```...```||`, closed by default — click to reveal), chunked the same way
-   (`response_filter.format_thinking_for_discord`, capped at
-   `MAX_THINKING_CHUNKS` messages — a tool-calling run reasons on every turn).
-   **The reasoning does not travel in the answer string.** With llama.cpp's
-   default `--reasoning-format auto` and a thinking-enabled template, the server
-   returns it out of band in `reasoning_content`; the SDK turns that into its own
-   `reasoning_item` in `RunResult.new_items`, so `final_output` is already clean
-   and there are no `<think>` tags left to find. `TextLLMHandler.generate()`
-   therefore collects it with `response_filter.extract_reasoning_items(new_items)`
-   (all turns, in order) and exposes it as `self.reasoning` for `MessageHandler`
-   to send — `generate()` still returns the plain answer string, so its `"Error"`
-   sentinel is unchanged. `extract_thinking()` on the answer text remains as a
-   fallback for a server running `--reasoning-format none`, which does inline the
-   tags. **The reasoning also survives a failed run**: when `Runner.run` raises
-   (`MaxTurnsExceeded` after a reply chains several tool calls is the common one)
-   `generate()` returns the `"Error"` sentinel as before, but first recovers the
-   reasoning from the completed turns the SDK hangs off the exception
-   (`AgentsException.run_data.new_items`), and `MessageHandler` sends it after the
-   ❌. Without that, a failed tool run left the tool's embeds and files in the
-   channel — posted during the unlocked phase, before the failure — with no answer
-   and no reasoning, which reads as the bot going quiet mid-task.
-   **Running out of turns is answered, not failed**: `generate()` passes the SDK
-   a `max_turns` error handler (`TextLLMHandler._wrap_up`) that makes one more
-   model call with the same tools but `tool_choice="none"` (so the cached
-   prefix still matches) and `WRAP_UP_INSTRUCTION` last, and that text is the
-   reply. It calls the model directly, so a tool call written anyway is never
-   run, and one it writes out as `<tool_call>` text (Strata drops the tools
-   from the template under `"none"`, seen live) is stripped
-   (`response_filter.strip_tool_call_text`); no text, or a failed call, falls
-   back to the ❌ above. Text replies
-   only: a voice turn speaks what streams. `max_turns_wrap_up_tests.py` runs it
-   on the real Runner.
-5. Per-guild settings live in Redis under the `dcb` namespace; per-user memories under
+1. **Messages in** (`main.py`, `message_queue.py`). `on_message` runs `should_handle_message()`: a
+   server message with content, embeds or attachments, not from the bot, not `!reset_history`, and
+   either mentioning the bot or winning the per-guild reply-chance roll. Those go on a bounded queue
+   (`QUEUE_MAX_SIZE`; when it is full a mention gets a short "busy" reply) served by `QUEUE_WORKERS`
+   workers. A brain call on a worker starts a spare one (up to `BRAIN_MAX_CONCURRENT`), so chat keeps
+   `QUEUE_WORKERS` free; the pool shrinks back as workers finish. A message let in by the reply chance
+   is marked unprompted, and its brain call gets the `BRAIN_UNPROMPTED_*` limits. A per-channel lock covers only the two fast phases, the prompt build and the send. The slow
+   LLM and tool phase runs unlocked, so channels run side by side and a new message can be answered
+   while an earlier one in the same channel waits on the brain. **Never hold the lock across an LLM or
+   tool await.** A brain call that has run 10 s shows in that channel's newer prompts as a one-line hint;
+   finished calls are never listed (the persona read them as "done").
+2. **The prompt** (`MessageHandler`, `history_policy.py`, `attachment_cache.py`). History is the
+   messages before the trigger's id (a queued trigger has newer messages above it), up to
+   `MSG_HISTORY_LIMIT`, each formatted by the one `_format_group`, so a trigger reads the same later as
+   history. `MSG_HISTORY_MODE=anchored` keeps the window's start fixed so the LLM server reuses its
+   cached prefix. Older history is dropped whole past the per-slot context (`/props`) minus
+   `MSG_HISTORY_RESERVE_TOKENS`. The build is `select_messages` (under the lock: reads Discord) then
+   `prepare_messages` (after it: downloads and encodes images, cached by ids, never the signed URL, and
+   dropped on Discord's delete/edit events). Anything in a history message must stay byte-stable between
+   builds: a poll's entry (`poll_format.py`) gives an absolute end time, never "ends in 3h". Polls that
+   scrolled out are found with `check_polls` (`poll_store.py`).
+3. **The persona** (`TextLLMHandler`). An agents-SDK Agent on the LLM server's OpenAI-compatible API
+   (`LLM_HOST/v1`) with ONE tool, `ask_brain` (item 7), in chat, voice turns and automatic runs. The asker's
+   saved memories (newest 20, at most 1,500 characters) go in the trailing message with the date and
+   time, after the history, so a memory change never breaks the cached prefix; automatic runs get none.
+   `PERSONA_MAX_TURNS` is 4, and running out of turns is answered, not failed (`_wrap_up`: one more
+   call with `tool_choice="none"`; tool-call text it writes anyway is stripped). Strata is treated like llama.cpp; it differs only in checking
+   `LLM_API_KEY` (core's own `/props` and `/v1/models` calls send it, `RoleConfig.auth_headers`), listing
+   its model only in the OpenAI `data` shape, and answering any model name.
+
+   **Roles and lanes.** Every model call has a role (`llm_roles.py`: persona, brain, later subagent;
+   each with its own model, host, key, effort and call timeout, falling back to `LLM_*`) and a lane
+   (`llm_lanes.py`: chat > brain > subagent > background over a self-hosted server's slots, with
+   `LLM_CHAT_RESERVED` slots for chat only). Side jobs (research brief, image rewrite and check) fall back
+   to the brain's connection. A key only ever falls back to a key for the same host, so a brain on a
+   hosted API never gets the local Strata key. A server is laned when its `/props` answers (sized by
+   `total_slots`, else `LLM_SLOTS`); a remote API never is. `LanedModel` takes the slot for one model
+   call, never across a tool (a side call inside a tool would deadlock against its own run), and applies
+   the call timeout after the slot is taken, so laned agents leave `ModelSettings.timeout` unset (it
+   would count the wait). It also asks once more when a call is cut off before any output. A side call
+   takes the lane of the work making it (`llm_lanes.current_lane`).
+4. **The answer** (`response_filter.py`). Cleaned and sent in 2000-character chunks through
+   `chunk_for_discord`; never call `textwrap.wrap` directly, as it returns a long unbroken word as one
+   oversized chunk that Discord rejects. Reasoning comes out of band (`reasoning_content`, which the SDK
+   makes a `reasoning_item`; `extract_reasoning_items`) or, with `--reasoning-format none`, as inline
+   think tags (`extract_thinking`). It is dropped, or with `SHOW_THINKING=1` sent as spoiler-hidden
+   follow-ups (`MAX_THINKING_CHUNKS`). A failed run returns the `"Error"` sentinel (a ❌), and its
+   reasoning is still recovered from the exception's `run_data` and sent.
+5. **Redis keys.** Per-guild settings under the `dcb` namespace; memories under
    `guild:<id>:user:<id>`.
-6. Image generation: when enabled (`IMAGE_GEN_ENABLED`, set from the chart's
-   `diffusion.enabled`), the agent gets a `generate_image(prompt, edit_previous)`
-   tool plus a `/generate_image <prompt>` slash command (registered in
-   `main.py`). Both go through `image_generation.create_image`, which POSTs to
-   the standalone diffusion service (`DIFFUSION_URL/generate`); that runs in its
-   own pod/container, queues requests (one image at a time) and replies with a
-   PNG. Generation settings (`IMAGE_MODEL`, `IMAGE_STEPS`, `IMAGE_WIDTH`/`HEIGHT`,
-   `IMAGE_GUIDANCE`, `IMAGE_NEGATIVE_PROMPT`, `IMAGE_LONG_PROMPT`,
-   `IMAGE_OFFLOAD`, `IMAGE_QUANTIZE`, `IMAGE_QUEUE_SIZE`) live in the same
-   configmap/env the diffusion pod reads.
+6. **Images** (`IMAGE_GEN_ENABLED`: the brain's `generate_image` and `/generate_image`). Both go through
+   `image_generation.create_image` to the diffusion service (`DIFFUSION_URL/generate`, queued, one at a
+   time), which reports its model family on `/health` (`prompt_style`, `edits`):
 
-   The service handles two model families (`generation_params.pipeline_family`,
-   read from the repo's `model_index.json`), and reports which on `/health` as
-   `prompt_style` and `edits`; core reads that through
-   `image_generation.service_capabilities` (only a successful read is cached —
-   `/health` is 503 for minutes while a model loads):
-
-   | | SD 1.5 / SDXL (e.g. Juggernaut-XL) | FLUX.2 [klein] 4B (prod) |
+   | | SD 1.5 / SDXL | FLUX.2 [klein] 4B (prod) |
    |---|---|---|
-   | Prompt | `image_prompt.build_image_prompt` rewrites it into an SDXL-shaped prompt + negative prompt (falls back to the request verbatim on any failure) | sent as written: its Qwen3 text encoder reads sentences |
-   | Long prompts | chunk-encoded by compel (`CompelForSDXL`) past CLIP's 77 tokens | n/a |
-   | Editing | no | yes: a `reference_image`, the tool's `edit_previous` |
-   | Distilled pin | `guidance_scale=0.0`, negative prompt dropped | `guidance_scale=1.0` |
-   | 8 GB card | fp16 + model CPU offload | `IMAGE_QUANTIZE=nf4` + model CPU offload; text encoder computes fp32 where the card lacks bf16 |
+   | Prompt | rewritten into an SDXL prompt + negative prompt (`image_prompt.py`; verbatim on failure) | sent as written |
+   | Long prompts | chunk-encoded by compel past CLIP's 77 tokens | n/a |
+   | Editing | no | yes (`edit_previous`) |
+   | Distilled pin | `guidance_scale=0.0`, no negative prompt | `guidance_scale=1.0` |
+   | 8 GB card | fp16 + model CPU offload | `IMAGE_QUANTIZE=nf4` + model CPU offload |
 
-   The rewrite lives in core, not the `generate_image` docstring, because the
-   slash command never reads that docstring.
-
-   **Every image is looked at before it is posted** (`image_review.py`): one
-   vision call to the bot's own LLM (llama.cpp has the model's vision projector
-   loaded) returns what the picture shows and what was asked for but is
-   missing. A miss earns one retry with those items stressed
-   (`IMAGE_REVIEW_RETRIES`), the better attempt is posted, and the tool's return
-   string tells the outer model what the posted image actually shows. Before
-   this the bot captioned images from its own prompt, and so claimed exactly
-   what the image model had missed. Checking fails soft (posted unchecked).
-   A miss that survives the retry tells the model not to call the tool again
-   in that reply, and `MAX_IMAGE_CALLS` (3) caps it anyway: on Strata the
-   model otherwise re-called it for a subject the image model could not draw
-   (5 calls, ~5.5 minutes, seen live).
-
-   **Editing** works only on images the bot generated
-   (`image_generation.pick_edit_source`: attachment `generated-image.png` from
-   the bot — the replied-to one, else the newest among the channel's 20
-   newest messages, which may be NEWER than the request: the model often
-   makes a picture and then edits it within the same reply).
-   Uploaded photos are never edited, which keeps "make him fatter" off photos of
-   real people.
-7. Code sandbox: when enabled (`SANDBOX_ENABLED`, from the chart's
-   `sandbox.enabled`), the agent gets a `run_code_sandbox(task)` tool (no slash
-   command). It runs a nested `SandboxAgent` in a THROWAWAY Docker container via
-   `agents.sandbox.DockerSandboxClient` and returns that agent's own report.
-   The core container needs the Docker daemon socket mounted (compose: a bind
-   mount; chart: a hostPath gated on `sandbox.enabled`) plus the `docker` and
-   `websocket-client` packages. Tasks go through the content guard first, and
-   `SANDBOX_MAX_TURNS`/`SANDBOX_TIMEOUT` bound each run.
-
-   How the pieces fit:
+   Every image is looked at before it is posted (`image_review.py`, one vision call on the side-job
+   connection): something missing earns a retry (`IMAGE_REVIEW_RETRIES`), the better attempt is posted,
+   and the tool tells the model what the image really shows. `MAX_IMAGE_CALLS` (3) per reply. Only
+   images the bot generated can be edited (`pick_edit_source`), never an uploaded photo. The rewrite
+   lives in core, not the tool docstring, because the slash command never reads that docstring.
+7. **The brain.** The persona has ONE tool, `ask_brain(request, files)`, in chat, voice turns and
+   automatic runs alike, and every other tool is the brain's (`brain_tools.py`; maintainer, 2026-11-02:
+   with one tool the persona's choice is "answer, or ask the brain", which fixed its habit of trying jobs
+   it could not do). A brain call (`brain.run_brain`) runs a `SandboxAgent` in the server's workspace
+   that does the work with its tools and ends by calling `report`; the persona gets the facts back
+   (`brain_result.tool_result_for_persona`) and puts them in its own voice. **Docker is required**: core
+   needs the daemon's socket (compose: a bind mount; chart: a hostPath) and exits at startup when it
+   cannot reach it (`workspace_manager.check_docker`). With Docker down later, a brain call fails and
+   says so; there is no brain without the workspace.
 
    | Concern | Where it lives |
    |---|---|
-   | Orchestration: thread, claim, guard, progress, artifacts, closing note | `tool_functions.run_code_sandbox` |
-   | What the outer model is told about a finished run | `sandbox_agent.sandbox_tool_result` (pure) |
-   | Nested agent, its prompt, session/container lifecycle, artifact selection | `sandbox_agent.py` |
-   | Live progress streamed into one edited message | `sandbox_progress.py` |
-   | Workspace snapshots in Redis, keyed by thread id | `sandbox_snapshot_store.py` |
-   | Thread messages: ledger, stages, per-thread claim (pure) | `sandbox_thread_inbox.py` |
-   | Steering enforcement: input filter, gate, acks, questions, finishing | `sandbox_conversation.py` |
-   | Loose ends carried to the next run in a thread | `sandbox_conversation_store.py` |
+   | The persona's one tool | `tool_functions.ask_brain` |
+   | One brain call: workspace, task, run, files, report | `brain.run_brain` |
+   | The brain's agent, its prompt, `report` | `brain.py` (`build_brain_agent`, `BRAIN_INSTRUCTIONS`) |
+   | Which tools a call gets | `brain_tools.py` |
+   | What the persona is told; must-keep facts | `brain_result.py` |
+   | Loop guard, context trimming, limits | `loop_guard.py`, `context_trim.py`, `brain_policy.py` |
+   | Status card, live command output | `brain_progress.py` (its status line: `brain_status.py`) |
+   | Shell wrappers, `attach_file`, delivery, `in/` files | `workspace_tools.py` |
+   | The server's container | `workspace_manager.py` (rules: `workspace_lifecycle.py`) |
+   | Handing a big job to a workflow (`start_workflow`) | `workflow_tools.py`, `workflows.py` (item 13) |
 
-   The behaviour worth knowing before you change anything:
+   Which tools a brain call gets, in a fixed order so its tool schemas stay a cached prefix:
 
-   - **Every call runs in a Discord thread.** `ensure_sandbox_thread` creates one
-     off the triggering message (or reuses the thread you are already in), and
-     everything — embeds, files, previews, questions — goes there. The one
-     copy: the outer reply and the files the run sent are also posted in the
-     channel the work was asked for in, which for a follow-up typed inside
-     the bot's thread is the thread's parent channel
-     (`MessageHandler._post_sandbox_copy`, from the run context's
-     `sandbox_files`; an automatic run attaches them to its thread link).
-   - **The container is disposable; the workspace is not.** In a thread, the
-     workspace is persisted to Redis before teardown and restored on the next
-     call in that SAME thread. Resume is thread-local by construction: the
-     snapshot id IS the thread id, so asking anywhere else starts fresh.
-   - **A run is a conversation, and steering is enforced, not hoped for.**
-     Messages posted in a claimed thread go to the run's ledger instead of the
-     outer LLM (📨 = the run WILL see it, never "applied"). They reach the
-     model as their own user-role items at the next model call
-     (`RunConfig.call_model_input_filter` — the one delivery path; the SDK
-     does not keep filter-added items, so the ledger re-inserts each one at
-     its anchor every call). Until the model answers with
-     `respond_to_updates`, new shell commands, `attach_file` and previews are
-     refused; a final answer with input unanswered gets a bounded
-     continuation in the same container. Each message ends with a recorded
-     outcome (done / accepted-but-unconfirmed / declined / never answered /
-     arrived too late), and that — not "the sandbox adapted" — is what the
-     outer model and the closing note report. A message that lands during a
-     model call cannot interrupt it (mid-inference cancellation was judged
-     unsafe); its stale actions are refused instead.
-   - **One run per thread, claimed atomically.** `claim_run` happens right
-     after the thread is resolved and before any other await, and is held
-     through artifact delivery and the closing note. Messages after the
-     finalization boundary become follow-ups (⏳), saved with the thread's
-     conversation record and offered to the next run there.
-   - **The sandbox agent chooses what is delivered** (`attach_file`) and writes
-     the closing message the user reads. The outer model adds at most a
-     sentence.
-   - **A stopped run is never told to retry.** Timeout, max-turns and
-     model-error each become `SandboxResult(ok=False, error=...)`, artifacts are
-     recovered from the still-live container, and the model is pointed at a
-     follow-up in the thread instead — which resumes rather than starting over.
-   - **Files from the chat go in `in/`** (`sandbox_inputs.py`). The asking
-     message's and its reply target's attachments always; anything else the
-     outer model names in `files` (as `[Attached: ...]` shows it in the
-     prompt, user messages only), found among the channel's 20 newest
-     messages, which is how the bot's own `generated-image.png` is reached.
-     Written with `session.write` before the run (checked live against
-     Docker), capped by `SANDBOX_INPUT_MAX_BYTES`, and named at the top of the
-     task; what was left out is told to both models.
-   - **It shares the main agent's lookup tools** (`tool_functions.shared_tools`:
-     web_search, fetch_url, search_messages, read_messages_around and the
-     event tools) as the same
-     objects, never copies of their code. Which ones is an allowlist
-     (`_SANDBOX_SHARED_TOOLS`), so a new shared tool stays out of a run with
-     internet access until added there. The poll tools are left out: in the
-     sandbox they would only post to and read its own thread, and the sandbox
-     copy of `create_event` drops its "poll, then follow-up" advice, since a
-     call to a tool the run lacks aborts it. The run
-     context also carries `channel` / `discord_client` / `user_id` (= the
-     thread, the client, the requester), which is what those tools read. The
-     two that change something are gated through a COPY of the tool
-     (`_sandbox_shared_tools`), so the main agent's own are never gated.
-     Before the run, `_resolve_requester` fetches the requester as a Member
-     (`requester` in the context): the bot has no members intent, so the
-     cache usually misses them, and without it every event call was refused.
+   | Tools | Chat | Automatic | Voice |
+   |---|---|---|---|
+   | web, message search/read, polls, events, `change_personality` | yes | yes | yes |
+   | memory, schedules / rules / follow-ups | yes | no | yes |
+   | `join_voice_channel` / `leave_voice_channel` (`VOICE_ENABLED`) | join | no | leave |
+   | `generate_image` (`IMAGE_GEN_ENABLED`) | yes | yes | yes |
+   | `use_skill`, `save_skill`, `search_skills` (`SKILLS_ENABLED`) | yes | yes | yes |
+   | `start_workflow` (`WORKFLOW_ENABLED`; never in a reply nobody asked for) | yes | no | no |
+   | `attach_file`, `save_messages_to_file`, `ask_user`, `report`, the Shell tools | yes | yes | yes |
 
-   Every one of these carries its full rationale — the production incident that
-   produced it, and what breaks if it is undone — in the docstring of the
-   function that implements it. Read those before editing; they are the primary
-   source, and this list is only a map. Start with `sandbox_agent.py`'s module
-   docstring, then `run_sandbox_task`, `_deliver` and `sandbox_tool_result`.
+   - **It works inline, in the channel**, not in a thread: each tool posts its own card, attached files
+     are posted before the persona replies, and the "🧠 Working on it" card appears only once it uses
+     the workspace. With `/workspace progress` off it carries one line on what the brain is doing
+     ("⏳ Creating the script"): a side call (`brain_status.py`, the brain's connection, background
+     lane) writes it from the newest tool calls at most every 30 s, and until then (or when it
+     fails) the line is `tool_cards.helper_line`'s. Never a raw command.
+   - **The run context is the persona's**: the same dict plus a few brain keys removed when the call
+     ends (`brain._BRAIN_KEYS`). So every tool reads what it always read, per-reply caps hold across
+     brain calls, and the persona's counters say what was posted (`brain._posted_things`).
+   - **It sees the conversation as text**: the history window, the request, who asked and their
+     memories, its folder and the channel's earlier job folders, the input files and the time, all in
+     the first user message, so the system prompt and tool schemas stay byte-stable.
+   - **It answers through `report`** (`StopAtTools`), whose arguments are recorded in the context; the
+     report is built after the run, with `files_posted` from what was really sent. A run ending in plain
+     text still counts (`report_from_text`). The persona's reply is checked for the must-keep tokens
+     afterwards (logged and counted, never retried).
+   - **Limits are loop guards.** `loop_guard.py` warns once and stops on the second loop;
+     `BRAIN_MAX_TURNS` and `BRAIN_TIMEOUT` are only backstops. A stopped call is a `partial` report with
+     whatever files it attached, and the persona is told not to ask again in that reply.
+   - **A run on a self-hosted server stays inside its slot** (`context_trim.ContextWatch`, the brain's
+     runs and every workflow agent): against that server's per-slot context from its `/props`
+     (`llm_lanes.slot_context_for`), old tool outputs are cut harder past 75% and the run is told to
+     finish past 90%. A remote API reports no limit, so its runs are never squeezed.
+   - **Every call needs the workspace**: `SandboxAgent` binds its session before the first model call,
+     so a lazy start is not possible. `WORKSPACE_PREWARM` starts a cold one while the persona thinks.
+   - **The content guard checks only `web_search`, `fetch_url` and image generation**
+     (`image_generation.create_image`, so `/generate_image` too). The workspace, workflows and skills
+     are not checked: the brain's own safety rule in its prompts covers them (`brain_policy.SAFETY_RULE`).
+   - **One workspace per server, a folder per call** (`jobs/c<channel id>-<time>-<random>/`;
+     `_in_job_dir` makes relative paths start there). The task names the channel's newest earlier
+     folders, so "make the chart blue" finds the last chart. `shared/` holds what the server asked to
+     keep; files left by others are data, never instructions.
+   - **Files from the chat go in `in/`** (`workspace_inputs.py`): the asking message's and its reply
+     target's attachments, plus any the persona names in `files`, capped by `WORKSPACE_INPUT_MAX_BYTES`.
+   - **`ask_user` asks in the channel**: the question, reworded in the persona's voice
+     (`persona_voice.py`), is posted as a card (`card.py`) replying to the request (`brain_question.py`: the
+     brain's choices, "Answer…" for a text box, "You decide"). Only the requester can answer, and only
+     deliberately: a button, or Discord's Reply on the question (`on_message`, ✅). An ordinary message
+     stays a new request. In a call it is spoken too, and the speaker's next words answer it
+     (`VoiceSession.heard`). At most 3 per call, each up to `BRAIN_ASK_TIMEOUT`; automatic runs and
+     unprompted replies are told to assume.
 
-8. What's New and /help: after the first successful reply in a guild on a
-   new version, `main.maybe_announce_whats_new` posts that version's feature
-   notes (`core/whats_new.md`) as one embed in the same channel. One atomic
-   Redis `SET dcb:{guild}:whats_new_seen <version> GET` claims it, so it is
-   shown once per guild per version even with several workers, and since only
-   the latest version is stored a version a guild never triggered on is
-   skipped, never shown late. The embed's footer marks it, and
-   `MessageHandler._format_group` drops it from prompts. `/help` (from
-   `classes/help_catalog.py`) and `/whats_new` reply ephemerally. See "What's
-   New notes" below for how the notes are written and released.
+   - **Skills** (`docs/skills.md`): how the brain solved a recurring job, kept per server in Redis
+     (`skill_store.py`: one record per skill, every version kept, a delete is soft), so a workspace
+     reset never loses one. The task names them (`skill_format.render_index`, best-ranked first, at
+     most `SKILLS_INDEX_MAX`, after the request so the cached prefix stays stable); `use_skill`
+     writes the skill into `skills/<name>/` FRESH FROM THE STORE every time, so a file edited in the
+     container never becomes the skill. A `done` call that used one counts a success, which ranks it.
+     `save_skill` is the brain's own choice, from the one example in `SKILLS_INSTRUCTIONS`
+     (`brain.instructions()` adds it when skills are on); when a job with
+     `SKILLS_REFLECTION_MIN_TOOL_CALLS`+ tool calls ends without one, a review is left on the
+     persona's run context and `MessageHandler` starts it AFTER the reply is sent
+     (`skill_reflection.py`, background lane). Chat replies only: voice and automatic runs are not
+     reviewed. Anyone in the server manages skills with `/skills` (no permission check by decision,
+     since every change is a version and a delete is undoable). Every event posts its own card
+     (`tool_cards`: 📘 saved, 📗 updated, 📖 used, 🗑️ deleted, ♻️ restored, ⏪ reverted); a deleted or
+     retired skill's card has a Restore button (`skill_tools.RestoreButton`, a `DynamicItem`).
+     **The tidy-up** (`skill_curator.py`, a loop started in `on_ready`): every
+     `SKILLS_CURATOR_INTERVAL_HOURS`, one background call per server with
+     `SKILLS_CURATOR_MIN_SKILLS`+ skills proposes at most 3 merges, retires or clearer descriptions.
+     The model only proposes: code decides which skills are stale (`SKILLS_RETIRE_DAYS`), drops
+     anything else, and makes each change only if the skill is still at the version it read
+     (`expect_version`), so a person's edit made meanwhile wins. An undo sticks: a skill a person
+     restored, reverted or edited with `/skills` within `SKILLS_RETIRE_DAYS` is `protected` and never
+     changed, or the next pass would retire again what was just restored. When a pass is due is kept in Redis
+     (`...:curator`, with a signature of what it saw, taken after its own changes), and a lock per
+     server keeps two processes from running one twice. Its cards (🗑️ retired, 📗 updated, label
+     "daily tidy-up") go to the skill's last channel, used or saved.
 
-9. Schedules and rules (`docs/automations.md`): per-guild automations stored
-   under `dcb:automations:v1` in Redis. `automation_policy.py` is the pure half
-   (timing, DST, matching, settings); `automation_store.py` keeps versioned
-   records and does quotas, optimistic-revision edits and claims atomically
-   (WATCH/MULTI and Lua). Automatic work rides the SAME bounded queue as chat,
-   as `AutomationJob` items, so `WORKER_COUNT` and the channel locks still
-   bound it. `schedule_forever` (main.py) polls due schedules every 15 seconds
-   and admits only what the queue has room for; rule matching runs in
-   `on_message` after sandbox steering and, when a rule is admitted, replaces
-   the ordinary reply. An automatic run builds a `TextLLMHandler` with
-   `automatic=True`, `actor_id` (the entry's last editor) and `channel`
-   instead of a source message: memory and automation tools are left off, no
-   personal memory is loaded, and double replies are off. A run is never
-   replayed after it starts (a `started` marker survives the claim), since
-   tools may already have posted; the next poll records it as `interrupted`.
-   A lost channel, a departed editor or a bot without send permission
-   suspends the entry instead of failing every occurrence. Interval schedules
-   store their anchor (`timing.start`) at creation, so the grid never drifts.
+   Before editing, read `brain.py`'s module docstring, then `run_brain`, `workspace_tools._deliver` and
+   `brain_result.tool_result_for_persona`.
 
-   **Follow-ups** are one-off schedules the bot sets itself
-   (`schedule_followup`, record flag `followup: true`): their own quota
-   (`FOLLOWUP_MAX_PER_GUILD`), and any two by the same person in a server at
-   least `SCHEDULE_MIN_INTERVAL_HOURS` apart (`automation_policy.followup_conflict`,
-   checked inside `create`'s transaction, counting ones that ran in the last
-   week, even deleted: `followup-last:{guild}:{person}`). Without the spacing
-   a one-off, exempt from the minimum gap, would be a faster repeating
-   schedule. It is per person so one member's follow-up never blocks
-   another's; the quota bounds the server's total. The run's prompt names the requester and their message
-   (`automation_runner.followup_prompt`), since it sees no history. A
-   follow-up cannot set another one: automatic runs get no automation tools.
+   **The server workspace** (`workspace_manager.py`, rules in `workspace_lifecycle.py`): one container
+   per guild, labelled `dcb.role=workspace`, `dcb.guild` and `dcb.instance` (`WORKSPACE_INSTANCE`), so
+   the reaper only removes its own.
+   - **Getting it**: warm in this process, else `DockerSandboxClient.resume` from the Redis record
+     `dcb:workspace:v1:guild:{id}` (survives a core restart), else a new container, filled from the
+     guild's snapshot if there is one. The session has **no SDK `RemoteSnapshot`**: with one, `start()`
+     after a resume restores the snapshot over the live files.
+   - **Many calls share it** (a refcount). Nothing stops or resets it while a call holds it;
+     `WORKSPACE_MAX_WARM` evicts the least recently used idle one or makes the new call wait (120 s).
+     When the last call ends, everything it left running is killed.
+   - **Snapshots** on a timer when changed, before an idle stop and at core shutdown (containers are
+     left running). One over `WORKSPACE_SNAPSHOT_MAX_BYTES` keeps the previous snapshot and the
+     container is only stopped, not removed.
+   - **Limits** (`WORKSPACE_MEMORY_LIMIT` / `CPU` / `PIDS`) go on every container through one wrapper
+     of the docker client's `containers.create`, since the SDK has no option for them.
+   - **Kubernetes**: core uses its node's daemon. A core pod that moves node starts from the snapshot;
+     the old container is reaped when core runs on that node again.
 
-10. Voice calls (`docs/voice.md`, off unless `VOICE_ENABLED`): `/voice join`
-   or the `join_voice_channel` tool start a `VoiceSession`
-   (`classes/voice_session.py`); `end()` is the only way out.
+8. **What's New and /help.** After the first successful reply in a guild on a new version,
+   `main.maybe_announce_whats_new` posts that version's notes (`core/whats_new.md`) as one card. One
+   atomic Redis `SET ... GET` claims it, so it shows once per guild per version even with several
+   workers. `_format_group` drops it from prompts (its kind is `ANNOUNCE`). `/help` and `/whats_new`
+   reply ephemerally.
+9. **Schedules and rules** (`docs/automations.md`), stored under `dcb:automations:v1`. Automatic work
+   rides the same queue as chat (`AutomationJob`), so `QUEUE_WORKERS` and the channel locks bound it.
+   `schedule_forever` polls due schedules every 15 s and admits only what the queue has room for; an
+   admitted rule replaces the ordinary reply. An automatic run has no source message (`automatic=True`,
+   `actor_id` = the entry's last editor): no memory or automation tools, no memories, no double replies.
+   A started run is never replayed, since tools may already have posted. It never starts a workflow
+   (`brain_policy.effective_tier`, and `workflows.start_workflow` refuses one): nobody is there to
+   approve the plan. A lost channel, a departed
+   editor or a missing permission suspends the entry. **Follow-ups** (`schedule_followup`) are one-off
+   schedules with their own quota, at least `SCHEDULE_MIN_INTERVAL_HOURS` apart per person
+   (`automation_policy.followup_conflict`); a follow-up cannot set another.
+10. **Voice calls** (`docs/voice.md`, off unless `VOICE_ENABLED`). `/voice join` or `join_voice_channel`
+    starts a `VoiceSession`; `end()` is the only way out.
 
-   | Concern | Where it lives |
-   |---|---|
-   | Discord voice I/O (DAVE), per-speaker segmenting, playback queue | `voicesidecar/` (Node, `@discordjs/voice`) |
-   | Speech-to-text / text-to-speech, CPU only | `speechservice/` (faster-whisper, Kokoro-82M) |
-   | discord.py's half of the handshake, the bridge WebSocket | `classes/voice_bridge.py` |
-   | Wake phrase, commands, history window, sentence splitting (pure) | `classes/voice_policy.py` |
-   | Which guilds are in a call (pure) | `classes/voice_gate.py` |
-   | What a call does with each utterance; turns; prefill | `classes/voice_session.py` |
+    | Concern | Where it lives |
+    |---|---|
+    | Discord voice I/O (DAVE), per-speaker segmenting, playback | `voicesidecar/` (Node) |
+    | Speech-to-text / text-to-speech, CPU only | `speechservice/` |
+    | discord.py's half of the handshake, the bridge WebSocket | `voice_bridge.py` |
+    | Wake phrase, commands, history window, sentences | `voice_policy.py` |
+    | What a call does with each utterance; turns; prefill | `voice_session.py` |
 
-   The behaviour worth knowing before you change anything:
+    - **Why a Node sidecar**: discord.py cannot receive DAVE-encrypted audio, which Discord made
+      mandatory. discord.py keeps the gateway and forwards the voice handshake
+      (`SidecarVoiceProtocol`); audio never reaches Python, only transcripts and sentences.
+    - **Text stops in a guild while it is in a call** (`voice_gate`): mentions get a rate-limited
+      notice, queued messages are dropped, automation jobs are given back, due schedules stay due and
+      `/generate_image` refuses. In-process only: a restart ends every call.
+    - The wake phrase is matched fuzzily in the transcript (`voice_policy.match_wake`); Whisper gets no
+      prompt (given one, it leaves those words out). "leave" / "stop" never go to the LLM.
+    - Turns stream sentence by sentence with thinking off (`VOICE_THINKING`). A tool call is covered by
+      a spoken hold-on line, written by a side call (`HOLD_ON_PROMPT`) if the model wrote none.
+    - **The cache is kept warm**: anchored history (`VOICE_HISTORY_*`) and a rate-limited `prefill()`
+      per transcript with exactly a turn's prefix (pinned by `voice_prefill_tests.py`).
+    - Output (images, brain files) goes to a session thread off the channel the join came from.
+      `original_message` is None in a voice turn: tools read `context["channel"]`, `user_id` and
+      `request_text`.
+11. **Server events** (`docs/events.md`, `event_tools.py`): create, list and move/cancel Discord
+    scheduled events. **The person asking must hold Create Events or Manage Events**, not just the bot,
+    resolved like `automation_tools._scope`, so the check also runs in voice turns and automatic runs
+    (as the entry's editor). A follow-up skips the person's check, not the bot's
+    (`event_tools._checks_requester`). Only events the bot made can be changed. Naive times are read in
+    `AUTOMATIONS_TIMEZONE`; results give `<t:unix:F>`. Finding a time is a poll plus a follow-up.
+12. **Links and message search.**
+    - `fetch_url(url, part)` (`web_reader.py`): `web_policy.route` picks YouTube captions, Reddit's RSS
+      feeds, Steam's `appdetails`, else a plain GET read by trafilatura, with the browser service
+      (`BROWSER_URL`) when that text is too thin. Cached in Redis (`dcb:webcache:v1:<sha256>`), one load
+      per URL at a time; long pages come in parts (`WEB_FETCH_PART_CHARS`).
+    - **It never reaches private addresses**: one aiohttp session whose resolver drops non-public
+      addresses, plus a check of every redirect hop for a private IP literal. Chromium's only way out is
+      the browser service's egress proxy (`browserservice/egress_proxy.py`), because Playwright's route
+      handlers never see a redirect's later hops. The chart adds a NetworkPolicy.
+    - `web_search` (`web_research.py`): DuckDuckGo, the top `RESEARCH_PAGES` read through the same
+      reader, and a side call writes a brief of at most 200 words; the source list is built from the
+      real results. On failure it returns the plain results. **The search runs in a worker process**
+      (`search_worker.py`, `python -m classes.search_worker`), one at a time across the bot: the
+      search library's native code once crashed the whole bot with four searches at once. In the
+      worker a crash costs one search, and the next search starts a new worker; one past
+      `SEARCH_TIMEOUT_SECONDS` (30) is killed the same way.
+    - `search_messages` / `read_messages_around` (`message_search_tools.py`): Discord's Search Guild
+      Messages endpoint (not wrapped by discord.py; a 202 means not indexed yet) and the messages around
+      one link. Both read what the bot can see, in this server only. `save_messages_to_file` writes every
+      match (up to 10000, 20 MB) as JSON lines into the brain's `in/`, so code can count or chart them.
+13. **Tier 3 workflows** (`docs/workflows.md`, `workflows.py`; off with `WORKFLOW_ENABLED=0`). A job too
+    big for one brain call runs in its own thread. The brain hands it over with `start_workflow` (which
+    ends its run like `report`; the persona is told `started_workflow` and the thread link), or a person
+    uses `/task`. One per server (`WORKFLOW_MAX_PER_GUILD`, `workflow_store.py`).
 
-   - **Why a Node sidecar.** Discord made DAVE end-to-end encryption
-     mandatory in March 2026. discord.py can send DAVE audio but nothing
-     maintained for it can RECEIVE it; the one working option replaced
-     discord.py with a one-person fork. `@discordjs/voice` >= 0.19.2 decrypts
-     received audio, so the voice connections live there, and discord.py keeps
-     the gateway: `SidecarVoiceProtocol` forwards the bot's voice state/server
-     updates to the sidecar and sends the op-4 payloads it asks for (the
-     Lavalink/wavelink pattern). Audio never reaches Python; core gets
-     transcripts and sends sentences. One WebSocket carries every guild.
-   - **Text stops in a guild while it is in a call** (`voice_gate`):
-     `on_message` returns right after sandbox steering (so a run started from
-     the call can still be steered in its thread), mentions get a fixed
-     rate-limited notice, the worker drops queued messages and gives back
-     automation jobs (`automation_runner.discard`), `poll_schedules` leaves
-     due schedules due, and `/generate_image` refuses. Work already running
-     when the bot joins finishes. The gate is in-process only: a restart ends
-     every call (the sidecar leaves when core disconnects).
-   - **The wake phrase is matched in the transcript**, fuzzily
-     (`voice_policy.match_wake`), because it is per-guild and wake-word
-     engines need a model per phrase. Every utterance is transcribed. Whisper
-     is given NO prompt or hotwords: given the wake phrase as one, it tends to
-     leave exactly those words out of the transcript.
-   - **"leave" / "stop" never go to the LLM** (`parse_command`), so they work
-     at once even mid-turn. A stop mutes the turn; its tools still finish.
-   - **Turns are streamed** (`TextLLMHandler.generate_streamed`), sentence by
-     sentence, with thinking off (`side_llm.NO_THINKING`; `VOICE_THINKING=1`
-     turns it on). Text the model writes before a tool call is the spoken
-     "hold on" line; if it writes none, a small side call writes one, so it
-     is never canned. `_OrderedSpeech` keeps a slow hold-on line ahead of the
-     answer.
-   - **The llama.cpp cache is kept warm.** The history is anchored
-     (`VoiceHistory`: grows from `VOICE_HISTORY_LIMIT` by
-     `VOICE_HISTORY_REFRESH`, then rebases) and every transcript, wake phrase
-     or not, triggers a rate-limited `TextLLMHandler.prefill()`: the same
-     request a turn sends, minus the trailing datetime message, with
-     `max_tokens=1`. `voice_prefill_tests.py` pins the identical prefix;
-     measured on the dev stack a turn then processes ~50 prompt tokens
-     instead of ~2400. Other guilds still share the one slot; llama.cpp's
-     `--cache-ram` restores the voice prefix after them.
-   - **Output goes to a session thread** off the channel the join was asked
-     from (reused across calls; the voice channel's own chat when no thread
-     can be made), so pictures and sandbox runs (snapshots, steering) work as
-     in chat. `original_message` is None in a voice turn: tools read
-     `context["channel"]`, `user_id` and `request_text`.
+    | Phase | What runs | Lane / role | Ends at |
+    |---|---|---|---|
+    | Discovery, if asked for | up to 2 scouts (a SandboxAgent, `SCOUT_INSTRUCTIONS`, mode scout) | subagent | `report` |
+    | Questions, if asked for | up to 3 in the thread (`ask_requester`), one at a time | - | a button, a thread message, or `WORKFLOW_ASK_TIMEOUT` |
+    | Plan | the manager (a plain Agent, `MANAGER_INSTRUCTIONS`, `brain_tools(mode="manager")`), a fresh run after each round above | brain | `discover`, `ask_requester` or `submit_plan` |
+    | Approval | the plan card with Approve / Edit / Cancel (`workflow_views.py`), requester only | - | a button, a thread message (a change), or `WORKFLOW_PLAN_APPROVAL_SECONDS`, which cancels it |
+    | Steps, in waves (`next_wave`): researchers side by side, an implementer alone | a helper per step (a SandboxAgent, `SUBAGENT_INSTRUCTIONS`, mode researcher / implementer) | subagent | `report` |
+    | Between steps | the manager answers waiting thread messages, may change the remaining steps | brain | `submit_review` |
+    | Before the first implementer after researchers | a verifier checks what every researcher not yet checked found; a wrong one runs again at once | subagent | `submit_verdict` |
+    | Check | a verifier (`workflow_verify.py`, mode verifier) compares the work with the request; one failed step and the steps built on it run again, then one more check | subagent | `submit_verdict` |
+    | Finish | the manager's final report; files echoed in the origin channel | brain | `report` |
+    | Reply | `WorkflowDone` on the queue; the persona with NO tools, in the origin channel | chat | - |
 
-11. Server events (`docs/events.md`, `classes/event_tools.py`): the agent can
-   create, list (with who is interested) and move/cancel Discord scheduled
-   events. **The person asking must hold Create Events or Manage Events**,
-   not just the bot: otherwise any member could make events through the bot
-   that the server does not let them make. The actor is resolved like
-   `automation_tools._scope` (message author, else `user_id`), so the check
-   also runs in voice turns and in automatic runs, as the entry's editor.
-   **Except in a follow-up**, by the owner's choice: `followup` in the run
-   context (from the record, through `TextLLMHandler`) skips the person's
-   check, not the bot's (`event_tools._checks_requester`). Without the members
-   intent the editor is often not in the cache, so the check refused people
-   who had the permission. A sandbox run fetches its requester instead
-   (`sandbox_agent._resolve_requester`). Event tools stay in the AUTOMATIC tool set on purpose: the usual
-   follow-up is "read the poll, make the event". Only events the bot made
-   (`creator_id`) can be changed. Naive times are read in
-   `AUTOMATIONS_TIMEZONE`; results give `<t:unix:F>` so readers see their
-   own timezone. The flow for finding a time across people is a poll
-   (`create_poll`'s result gives its absolute end) plus a follow-up at its
-   end; there is no separate availability system.
-
-12. Reading links and searching messages. **`fetch_url(url, part)`**
-   (`classes/web_reader.py`) routes a URL (`web_policy.route`) to a reader:
-   YouTube captions (`youtube-transcript-api`, plus oEmbed for the title;
-   no captions = says so, no transcription), Reddit through its RSS feeds,
-   Steam through `appdetails` plus the store page's review lines, else a
-   plain GET whose text trafilatura extracts. When that text is too thin to
-   be the page (`web_policy.needs_browser`), it asks the browser service
-   (`BROWSER_URL`, `browserservice/`) to render it. `site_format.py`'s
-   docstring records why each site is read the way it is (in 2026 Reddit
-   refuses unauthenticated `.json` and old.reddit, and shows a headless
-   browser a "prove your humanity" page; its feeds allow ~1 request a minute
-   per address, which `_reddit_feed` respects from the `x-ratelimit` headers).
-
-   - **Cached in Redis** (`dcb:webcache:v1:<sha256 of the canonical URL>`):
-     tool results are not kept between replies, so without it a link still
-     in the channel was fetched again on every reply. Pages 6h, YouTube
-     transcripts 30 days, failures 5 minutes (Reddit's: until its reset). One
-     load per URL at a time, shared through `asyncio.shield`.
-   - **Never reaches private addresses**: one aiohttp session whose resolver
-     drops non-public addresses, plus a check of every redirect hop for a
-     private IP literal (aiohttp skips the resolver for those). Chromium's
-     only way out is the browser service's own egress proxy
-     (`browserservice/egress_proxy.py`), which connects to public addresses
-     only. Playwright's route handlers are not enough: they never see a
-     redirect's later hops, so a public link redirecting to a private address
-     was followed unchecked (reproduced before the proxy existed). The chart
-     adds a NetworkPolicy as well.
-   - **Long pages come in parts** (`WEB_FETCH_PART_CHARS`); the result's last
-     line tells the model which `part` to ask for next.
-
-   **`web_search(search_request)`** (`classes/web_research.py`, rules in
-   `research_format.py`) searches DuckDuckGo, reads the top `RESEARCH_PAGES`
-   results through the same `web_reader.read` (cache, private-address checks),
-   and a side LLM call writes a brief of at most 200 words with numbered
-   sources; the source list itself is built from the real results. It
-   replaced the old snippet-only search instead of sitting beside it, because
-   a small model given "search" and "research" picks the wrong one. The cost
-   is an LLM call per search, which at `parallel: 1` also takes llama.cpp's
-   slot (`RESEARCH_LLM_HOST` can move it). No page read, or a failed brief,
-   returns the search results as plain text.
-
-   **`search_messages(query, channel, author, limit)`**
-   (`classes/message_search_tools.py`) calls Discord's Search Guild Messages
-   endpoint (`GET /guilds/{id}/messages/search`, open to bots since
-   2026-03-19; needs Read Message History and the Message Content intent),
-   which discord.py does not wrap. Whole server by default; results come only
-   from channels the bot can read (sandbox runs included: by the owner's
-   choice it is not limited to what the person asking can read). A server Discord has not indexed yet
-   answers 202 (code 110000), which discord.py returns as a normal body.
-   No cap on calls per reply (there were 3, which stopped a sandbox task
-   that needed far more): the agent's own turn limit bounds a loop, and
-   discord.py waits out Discord's rate limits. Read-only, so automatic runs and
-   voice turns get it too.
-
-   **`read_messages_around(message, before, after)`** (same module) shows
-   the conversation around one message: a search result's link, or one
-   someone pasted. Search hits no longer carry their surrounding messages,
-   so it fetches the message plus `GET /channels/{id}/messages` with
-   `before=` / `after=` (at most 12 each side). Paging is driven by the
-   result's last lines, which name the oldest and newest link to call again
-   with, as `fetch_url`'s `part` line does. A link to another server is
-   refused (the bot is in several), the channel is resolved only within
-   this one (an uncached thread is fetched; `Guild.fetch_channel` refuses
-   another server's), and an age-restricted channel is read only from one.
-   Like search it reads what the bot can see, with no cap on calls. Both
-   tools show a message's embeds in full (author, title, description,
-   fields; 400 characters each): a bot's embed is often the whole message,
-   and showing only its title left a sandbox task with none of the data it
-   was asked to add up.
-
-   **`save_messages_to_file(query, channel, author, max_messages)`** is for
-   sandbox runs only (`sandbox_agent._sandbox_only_tools`): it needs the
-   run's workspace. It pages through the same search, 25 at a time, newest
-   first (a relevance order shifts between pages), and writes every match in
-   full as JSON lines to `in/discord-<words>.jsonl` with `session.write`, so
-   code can count or chart them. Up to 10000 (Discord's search offset stops
-   at 9975) and 20MB; a message seen twice while pages shift is written
-   once. The reason it exists: a sandbox task asked to chart ~2,000 of a
-   tracker bot's embeds could see at most 25 per search, each only as its
-   title. In a sandbox, a search that found more than it shows says so and
-   names this tool.
+    - **Rounds before the plan** (`workflow_planning.py`): each is one stop tool, done by code, which then
+      takes the tool away, so there is at most one of each. **Discovery is not research** (maintainer,
+      2026-11-04): scouts report where the data is and how it is laid out, and the plan's steps find
+      the answers. The manager only names `subjects`, and code writes the question
+      (`wp.scout_question`), because a question in its own words asked for the answers and got them.
+      The manager has no web tools, and the `workflow_policy` constants keep it a quick look (2 scouts,
+      12 turns, 5 minutes, 3 facts, 2700 characters of findings). A scout is told to finish two turns
+      before its limit (`FINISH_UP`), and one that reaches a limit gets one last call that can only be
+      `report` (`_last_report`), so what it found is kept. Findings and answers go to every later run
+      by code (`planning_text`).
+    - **One card per scout and researcher** (`brain_progress.HelperProgress`): their last tool call
+      and turn, trimmed, edited at most every 30 s since two share a thread's edits. Their tools post
+      nothing (`common.QuietChannel` drops notice cards), which replaced dozens of them a run. An
+      implementer keeps the status card and its tools' own, since a picture has to reach the thread.
+      Steps are named on their cards by the `title` the planner gives each (`submit_plan`), else their
+      role ("🔬 Research · step 1 of 3"); the plan has a `title` too.
+    - **Told a plan is coming**: the persona's start reply and `/task`'s message say so, and discovery
+      leaves a note in the thread. Only the plan and a question ping the requester.
+    - **Its own run context**, built once (`_run_context`): the thread is `channel`, there is no source
+      message, and `image_cap` is `workflow_policy.MAX_IMAGES`. D19 (the persona's dict) cannot hold:
+      the reply ends long before the workflow does. Each helper runs on a copy (`_helper_ctx`), since two
+      run at once; `_SHARED_KEYS` come back so the picture cap covers the whole job.
+    - **Started from an empty `contextvars.Context`**, and every agent run sets its lane, so nothing of
+      the `ask_brain` call that started it leaks in.
+    - **No brain slot** (`BRAIN_MAX_CONCURRENT`): a workflow runs far longer than a brain call. It holds
+      the server's workspace lease from approval to the end, so the workspace is never stopped or reset
+      under it, and at most `WORKSPACE_MAX_WARM` - 1 run per process, so other servers still get one.
+      Before approval only the scouts hold it: nothing does while a person is waited on.
+    - **Steering**: the workflow claims the thread's ledger (`thread_inbox.claim_run`, inside its own
+      task), so `on_message` routes thread messages to it (📨). A bare "stop" from the requester, or
+      Cancel, cancels at once (`request_cancel`: every running helper's task is cancelled, files kept);
+      with a question open their message answers it; while the plan is being written it goes into the
+      next run; while the plan waits it is a change to it; while the work runs it also goes to the steps
+      it is about (`workflow_steering.py`: one call picks them from the steps not finished, all of them
+      if it fails), at a helper's next model call (the SDK drops what a filter adds, so each run puts it
+      back where it was first shown, after the trim). Every message waits for the review between
+      steps (and once more after the last step), which answers it (in the persona's voice, `persona_voice.voice_replies`) and records an outcome. The thread
+      is open to the server: only the requester can change the steps, and only their words reach
+      helpers.
+    - **The check** (`workflow_verify.py`): every job that finished, unless a limit or a cancel stopped
+      it or it made nothing. The verifier has the shell, `fetch_url` and `view_image`, and nothing that
+      posts. Code runs the step it names once more, then every step that depends on it and every
+      implementer that ran after it (`wp.redo_chain`), in waves, while there is room, and checks again; a second fail is PARTIAL
+      with the notes, and no verdict changes nothing but says so. Research is checked before it is
+      built on (`check_research`, in the steps' budget, not the reserves), once the next step is an
+      implementer, not after each wave (one helper slot means a wave per researcher): a wrong
+      researcher runs again at once and is left to the end check after that. A fail about a file
+      later steps make is dropped (`wp.research_verdict`). Verifier and
+      implementers see pictures through `view_image`: one vision call on `IMAGE_REVIEW_*`, so their
+      own model needs no vision.
+    - **One way to ask** (`workflows.ask_requester`): the buttons of the brain's `ask_user`, or the
+      requester's next thread message (a Discord Reply lands there too, since the thread is claimed).
+      One question at a time, `WORKFLOW_ASK_TIMEOUT` each. A helper that reports `needs_input` asks this
+      way, and the step runs once more with the answer.
+    - **A helper's picture** (`keep_image`) is also saved in its folder's `images/`, not `out/`, which
+      `_deliver` would post again, and reaches the channel with the job's files.
+    - **Folders** `jobs/c<thread id>-w<id>-<step>/`: each helper is told the earlier steps' folders, and
+      a later brain call in the thread finds them as that channel's earlier jobs.
+    - **Limits cap the cost**: `WORKFLOW_TIMEOUT` (1 h), `WORKFLOW_MAX_TURNS` (300) and
+      `WORKFLOW_MAX_TOKENS` (4M; every agent together) stop it with what exists (PARTIAL);
+      `SUBAGENT_MAX_TURNS` per helper. Helpers leave 40 turns (`wp.turn_reserve`) and 300 seconds more
+      than the final report's for the check. The clock restarts when the plan is answered, so waiting
+      on a person is not work time.
+    - **Restarts**: resume is out of scope. A workflow cancelled at shutdown stays live in Redis, and
+      at startup `interrupt_all` marks this instance's live ones INTERRUPTED and posts a note in their
+      threads. The buttons are `DynamicItem`s registered once, so an old one answers "This workflow has
+      stopped" instead of failing.
+    - A completion reply for a guild in a voice call waits for the call to end (`defer_done`); a full
+      queue is retried, then a plain note is posted.
 
 ### What's New notes (write these in every feature PR)
 
@@ -615,223 +505,278 @@ being merged:
   announcement; set it in `.env` to try one.
 - A changed file also goes at the top of the GitHub release page.
 
-**/help is hand-written** (`classes/help_catalog.py`). A new agent tool
-(`text_llm_handler.agent_tools`) or slash command (`main.register_commands`)
+**/help is hand-written** (`classes/help_catalog.py`). A new brain tool
+(`brain_tools.brain_tools`) or slash command (`main.register_commands`)
 needs an entry there, gated with `requires` when it can be switched off;
 `core/tests/help_catalog_tests.py` fails until it has one.
 
+### Cards (every bot message that is not a chat reply)
+
+Every status, tool, panel and system message is a Discord Components V2 card (`card_kit.py`, pure;
+`card.py` sends it). Persona replies, their reasoning spoilers, the manager's quoted thread replies
+and the plan's text fallback stay plain text. **To add or change one, follow `docs/cards.md`**
+(recipes: a notice, a live card, a reply, a panel with buttons, files, tests, extending the kit).
+
+- **One shape**: a small label line in plain words ("🔎 Searching the web"), an optional title, the
+  body, then a small footer. Build it with a `CardSpec` (or `card_kit.info` / `done` / `heads_up` /
+  `error`), never a `discord.Embed`. Items of a list are split by a `Gap`, groups by a `Divider`.
+- **Colour is the state** (decided 2026-11-07): blurple active, yellow working, green done, orange
+  partly / heads-up, red failed, grey over, pink waiting on someone.
+- **Nothing is cut**: past 4000 characters or 40 components a card goes on in more messages
+  (`card_kit.split`; the label and title only on the first, the footer on the last).
+- **A mention in a card pings**, so `send_card` allows none unless given `mentions`.
+- **Text the bot did not write** goes through `card_kit.safe` / `quote`, so it never becomes a heading.
+- **History**: the container's id says what a card is (`KIND_IDS`). A `NOTICE` reads in a prompt as a
+  status card, not as something the bot said; an `ANNOUNCE` is left out; a `CARD` (question, plan)
+  reads as its text.
+- **Files a card shows** are sent with that message (`card.safe_filename` keeps the name Discord
+  stores). Discord lists them in no `message.attachments`, only in the card: read a message's
+  files with `card.files_of` (the image edit, the brain's chat files, history images do).
+- Buttons that must work after a restart are `DynamicItem`s registered in `main.on_ready`
+  (`WorkflowButton`, `RestoreButton`, `LeaveButton`); a panel's own buttons re-check permissions.
+
 ### Prompt surface
 
-   Everything the models are told lives in code, in three places: the
-   `@function_tool` docstrings in `tool_functions.py` (what the outer model
-   sees), each tool's return strings (read at reply-writing time — these are
-   the ones that actually change behaviour), and `SANDBOX_INSTRUCTIONS` +
-   its bullets in `sandbox_agent.py` (what the nested sandbox model sees).
-   The outer agent's *system* prompt is not a lever: it is entirely
-   `f"Answer as if you are {redis['dcb:{guild}:system']}"`, user-owned via
-   `/system` and the `change_personality` tool. The one exception is a voice
-   turn, which appends `voice_policy.VOICE_INSTRUCTIONS` (how to talk in a
-   call); `voice_policy.GREETING_PROMPT` writes its hello on joining and
-   `voice_policy.HOLD_ON_PROMPT` is the side call that writes a
-   "hold on" line when the model calls a tool silently. Those three are the
-   voice prompts' one home.
+Everything the models are told lives in code. The persona sees one tool: the `ask_brain` docstring
+(its whole routing rule, with one positive example per kind) and its return string,
+`brain_result.tool_result_for_persona`. The brain sees `BRAIN_INSTRUCTIONS` (`brain.py`), every other
+tool's `@function_tool` docstring and each tool's return strings (read at reply-writing time; these
+are the ones that actually change behaviour). The persona's *system* prompt is not a lever: it is
+`f"Answer as if you are {redis['dcb:{guild}:system']}"`, user-owned via `/system` and
+`change_personality`. The one exception is a voice turn, which appends
+`voice_policy.VOICE_INSTRUCTIONS`; `voice_policy` is also the one home of `GREETING_PROMPT` and
+`HOLD_ON_PROMPT`. Each side job has one prompt of its own: `persona_voice.PROMPT` (~130 characters, a
+question in the persona's voice) and `REPLY_PROMPT` (~140, a workflow manager's thread reply), `image_prompt.SYSTEM_PROMPT` (~2050, the SDXL rewrite),
+`image_review.SYSTEM_PROMPT` / `VIEW_PROMPT` (~1080 / ~150, the picture check) and
+`research_format.SYSTEM_PROMPT` (~780, the research brief); `brain_status.PROMPT` (~225, ceiling 300,
+the status line on the brain's card).
 
-   **One home per concept.** Both prompts grew by accretion — every observed
-   bug fixed by adding text, none ever removed — until `SANDBOX_INSTRUCTIONS`
-   was ~5000 characters with `out/` explained in five bullets and two of them
-   flatly contradicting each other. Duplicated guidance is worse than terse
-   guidance on a small local model: copies drift, and a model handed two
-   versions of a rule follows neither reliably. So when adding guidance, edit
-   the existing home rather than restating it nearby — the comment block above
-   `SANDBOX_INSTRUCTIONS` records which bullets were merged and why.
-   Sizes worth re-measuring before adding: `SANDBOX_INSTRUCTIONS` ~3890 chars
-   formatted (pinned by a test, ceiling 3950), `run_code_sandbox` ~2000
-   including its JSON schema.
-
-   **Prefer a positive example over a list of prohibitions.** The design-
-   ownership rule once carried a 350-character negative list ("no dimensions,
-   colours or RGB values, no frame counts, no library choices…"); the model
-   then retried a failed run with an invented canvas size, frame count and
-   library — three items straight off that list. It now shows the shape
-   instead: `task="Generate a gif of a cow doing a backflip."`
+- **One home per concept.** When adding guidance, edit its existing home rather than restating it
+  nearby: a small model handed two versions of a rule follows neither reliably.
+- **Prefer a positive example over a list of prohibitions.** A model given a list of things not to
+  choose went on to choose items straight off the list. The prompts show the shape instead
+  (`ask_brain`'s examples, the `report(...)` call in `BRAIN_INSTRUCTIONS`).
+- **One safety rule** (`brain_policy.SAFETY_RULE`, ~220 characters, ceiling 250, pinned by
+  `brain_tests.py`) ends the prompt of every agent that works: the brain, and a workflow's manager,
+  helpers, scouts and verifier. Each builder appends it, so the sizes below leave it out. The
+  content guard checks only search, links and pictures; this is what covers the rest.
+- Sizes are pinned by `brain_tests.py`: `BRAIN_INSTRUCTIONS` ~2240 characters (ceiling 2300; 2500 with `WORKFLOW_INSTRUCTIONS`, ~245, put first and only in calls offered `start_workflow`),
+  `ask_brain` ~1750 including its JSON schema (ceiling 1760). Re-measure before adding. Skills have
+  their own homes, pinned by `skill_tools_tests.py`: `SKILLS_INSTRUCTIONS` ~270 characters (ceiling
+  400, added to the brain's prompt only when skills are on), `REFLECTION_PROMPT` ~730 (ceiling
+  1000, the one prompt of the after-job review) and `CURATOR_PROMPT` ~860 (ceiling 1000, the
+  tidy-up's). Workflows' are pinned by `workflows_tests.py`: `MANAGER_INSTRUCTIONS` ~1395 (ceiling
+  1400; every manager run: plan, review, finish; `MANAGER_IMAGE_LINE` ~100 is added when the bot can
+  draw) and `SUBAGENT_INSTRUCTIONS` ~1170 (ceiling 1400, plus one `ROLE_LINES` line per helper), by
+  `workflow_verify_tests.py`: `VERIFIER_INSTRUCTIONS` ~850 (ceiling 1000), `ROUTE_PROMPT` ~360
+  (ceiling 500, `workflow_steering.py`), and
+  by `workflow_planning_tests.py`: `SCOUT_INSTRUCTIONS` ~890 (ceiling 900) and `discover`'s docstring
+  (ceiling 650), the home of "the shape, not the answers". The other workflow tools' docstrings
+  (`workflow_tools.py`) and the tasks `workflows.py` and `workflow_planning.py` build are the rest of
+  their surface.
 
 ### Environment variables
 
+v3 keeps no aliases for renamed settings: an old name in the environment makes core log it with its
+replacement and exit (`settings_check.py`), and an old values key fails `helm template`
+(`templates/_removed.tpl`). Every rename goes in `settings_check.REMOVED`, `_removed.tpl` (values keys)
+and `docs/upgrading-to-v3.md` in the same PR. `settings_docs_tests.py` checks that every env var core
+reads has a row here and a line in `.env.example`, that every row is read by something, and that every
+`values.yaml` key is used by a template. Defaults are in brackets.
+
 | Var | Purpose |
 |---|---|
-| `DISCORD_TOKEN` | required; bot token. Chart: `discordToken`, or bring your own Secret via `existingSecret` (keys = these env var names: `DISCORD_TOKEN`, `OPENAI_API_KEY`, `SANDBOX_LLM_API_KEY`, `IMAGE_PROMPT_LLM_API_KEY`); `llamacpp.existingSecret` does the same for the llamacpp pod's `HF_TOKEN` |
+| `DISCORD_TOKEN` | required; bot token. Chart: `discordToken`, or bring your own Secret via `existingSecret` (keys = env var names: `DISCORD_TOKEN`, `LLM_API_KEY`, `CONTENT_GUARD_API_KEY`, `BRAIN_LLM_API_KEY`, `IMAGE_PROMPT_LLM_API_KEY`, `IMAGE_REVIEW_LLM_API_KEY`, `RESEARCH_LLM_API_KEY`, `PERSONA_LLM_API_KEY`); `llamacpp.existingSecret` does the same for `HF_TOKEN` |
 | `REDIS_HOST` | required; Redis host |
-| `LLM_HOST` | LLM server base URL (OpenAI-compat; core appends `/v1`). docker-compose (dev): the `llamacpp` service on :8081, or `http://strata:8080`. Helm chart: `llm_host`, empty by default = the in-cluster service of `llmEngine`; the in-code fallback is `http://llamacpp:8080` |
-| `LLM_PASS` | the LLM server's API key. A placeholder for llama.cpp, which does not authenticate (the OpenAI client requires a non-empty key); the real key for Strata, which checks it (the chart takes it from `strata.apiKey` / `strata.existingSecret`, key `STRATA_API_KEY`; compose gives the same `.env` value to the `strata` service) |
-| `LLM_EXTRA_HEADERS` | extra headers sent with every request to `LLM_HOST`, as comma-separated `name=value` pairs (default: none). For a hosted API that needs more than a key: OpenCode Go refuses requests without `x-opencode-session` (E2E sets one per run). A side job or the sandbox agent given its own `*_LLM_HOST` sends none; `Authorization` is skipped (`LLM_PASS` sets it) |
-| `MODEL` | the model, single source of truth: the bot requests this name AND the compose `llamacpp` service serves it (as `LLAMA_ARG_HF_REPO`); in the Helm chart the one `model` value feeds both. With Strata it is only the requested name (Strata picks its model from `strata.model`, `STRATA_MODEL` in compose, and answers any name). In-code default `qwen3:4b` |
-| `OPENAI_API_KEY` | API key for the free OpenAI Moderations endpoint (web-tool guard); fail-open if unset. The agents SDK would also upload every run to OpenAI's trace dashboard with it; that is switched off in code (`set_tracing_disabled(True)` in `text_llm_handler.py` and `sandbox_agent.py`), with no setting to turn it back on |
-| `OPENAI_BASE_URL` | moderation API base (default `https://api.openai.com/v1`); any OpenAI-compatible `/v1/moderations` endpoint works. Chart: `openaiBaseUrl` |
-| `MODERATION_MODEL` | moderation model name, e.g. `text-moderation-latest`; unset omits the parameter and uses the server default. Chart: `moderationModel` |
-| `CONTENT_GUARD_ENABLED` | `0`/`false` disables the content guard on web tools (default: on) |
-| `CONTENT_GUARD_DEBUG` | `0`/`false` silences content-guard debug logging (default: on) |
-| `WEB_FETCH_PART_CHARS` / `WEB_FETCH_MAX_CHARS` | characters of a page the model gets per `fetch_url` call, and most kept per page across all parts (defaults 10000 / 200000). Chart: `webFetch.partChars` / `maxChars` |
-| `WEB_FETCH_MAX_BYTES` / `WEB_FETCH_TIMEOUT` | most bytes downloaded for one page, and seconds to wait (defaults 5000000 / 15). Chart: `webFetch.maxBytes` / `timeout` |
-| `WEB_CACHE_TTL_SECONDS` / `WEB_CACHE_VIDEO_TTL_SECONDS` / `WEB_CACHE_FAILURE_TTL_SECONDS` | how long a read page / a YouTube transcript / a failure stays cached in Redis (defaults 21600 / 2592000 / 300). Chart: `webFetch.*TtlSeconds` |
-| `BROWSER_URL` | the browser service core asks to render thin pages; empty = no fallback. Compose: `http://browser:8000`; chart: `browser.url`, else the in-cluster service when `browser.enabled` |
-| `BROWSER_MIN_CHARS` | a plain fetch with less text than this goes to the browser (default 400). Chart: `webFetch.browserMinChars` |
-| `RESEARCH_BRIEF_ENABLED` | `0`/`false`: `web_search` returns the search results alone, with no pages read and no brief (default: on). Chart: `research.enabled` |
-| `RESEARCH_PAGES` / `RESEARCH_PAGE_CHARS` | results `web_search` reads in full (default 3, max 5), and characters of each given to the brief (default 6000). Chart: `research.pages` / `pageChars` |
-| `RESEARCH_FETCH_TIMEOUT` / `RESEARCH_TIMEOUT` | seconds to wait for those pages (default 25; a page not read by then is left out) and for the brief (default 90). Chart: `research.fetchTimeout` / `timeout` |
-| `RESEARCH_MODEL` / `RESEARCH_LLM_HOST` / `RESEARCH_LLM_API_KEY` | the brief's own LLM connection; each falls back to `MODEL` / `LLM_HOST` / `LLM_PASS`, like `IMAGE_PROMPT_*`. Chart: `research.*` (the key via secret.yaml) |
-| `BROWSER_CONCURRENCY` / `BROWSER_QUEUE_SIZE` | browser service: pages rendered at once, and renders allowed to wait before a 503 (defaults 2 / 8). Chart: `browser.concurrency` / `queueSize` |
-| `BROWSER_TIMEOUT` / `BROWSER_SETTLE_SECONDS` | browser service: seconds for one render, and seconds to let a page's scripts settle (defaults 30 / 5); core reads both to know how long to wait. Chart: `browser.timeout` / `settleSeconds` |
-| `METRICS_PORT` | port to serve the Prometheus `/metrics` endpoint on (default 9464); empty/`0` disables. Chart: `metrics.enabled`/`metrics.port` also add a ClusterIP Service, the pod port, and a kube-prometheus-stack ServiceMonitor (labelled `release: kube-prometheus-stack` — the operator only imports ServiceMonitors with that label). The same `metrics.enabled` switch turns on **llama.cpp's own** `/metrics` (`LLAMA_ARG_ENDPOINT_METRICS`, off upstream by default) plus a second ServiceMonitor for it; with `llmEngine: strata` that second one scrapes Strata's `/metrics` instead (`vllm:*` / `strata:*` names), sending the Strata key |
-| `LLM_CONTEXT_LENGTH` | the TOTAL context window the LLM server was started with (chart: `llamacppContextLength`, which also sets the server's `LLAMA_ARG_CTX_SIZE`; with Strata, whose `strata.context` is per slot, that times `strata.parallel`), exported as the `discord_bot_llm_context_window_tokens` gauge so a dashboard can express prompt sizes as a fraction of it. Unset leaves the gauge at 0 |
-| `LOG_LEVEL` | root log level (default `INFO`); `DEBUG` also dumps the raw agent run result. Logging replaced bare `print()` calls, which had no level to tune |
-| `MSG_HISTORY_LIMIT` | messages in a (refreshed) history window, the trigger included, default 5. Chart: `message_history` |
-| `MSG_HISTORY_MODE` | `sliding` (default: always the newest window) or `anchored` (the window's start stays fixed and grows, so the LLM server can reuse its cached prefix, until a refresh). Chart: `history.mode` |
-| `MSG_HISTORY_REFRESH_MESSAGES` | anchored mode: new channel messages since the last refresh (bot replies included, the trigger counted) that move the anchor to the newest window, default 10. Chart: `history.refreshMessages` |
-| `MSG_HISTORY_RESERVE_TOKENS` | tokens of the llama.cpp per-slot context (its `/props`, re-read every 5 minutes) kept free for the system prompt, tool schemas/results and the answer; older history messages are dropped whole past that, default 12000. Nothing is trimmed while the per-slot context is unknown. Chart: `history.reserveTokens` |
-| `REASONING_EFFORT` | sent to the LLM as the OpenAI-compat `reasoning_effort` field (low/medium/high, default medium). Chart: `reasoningEffort` |
-| `LLM_MAX_TURNS` | max model turns for ONE reply from the main agent (helm: `llmMaxTurns`), default 20. A turn is one model response, however many tool calls it carries. Passed explicitly to `Runner.run` because the SDK's own default of 10 is easily overrun by a reply that chains several sandbox/image calls — and overrunning raises `MaxTurnsExceeded`, which costs the whole answer |
-| `LLM_CALL_TIMEOUT_SECONDS` | wall-clock seconds ONE model call from the main agent may take, the OpenAI client's own retries included (helm: `llmCallTimeout`), default 600 — the same as the client's own timeout, so a slow local generation is no more likely to be cut off than before. Applied as `ModelSettings.timeout`, which the SDK runner enforces by cancelling the call. Needed because the client's timeout is per-read: a server that keeps the connection warm while it works (OpenRouter pads non-streaming responses with whitespace) resets it on every byte and was previously unbounded |
-| `WHATS_NEW_ENABLED` | `0`/`false` stops the automatic What's New embed (default: on); `/whats_new` still works. Chart: `whatsNew.enabled` |
-| `APP_VERSION` | the release tag, baked into the core image by `release.yaml` (`--build-arg`), not configured. Unset = no What's New announcement |
-| `SHOW_THINKING` | `1`/`true` sends the model's reasoning as spoiler-hidden follow-up message(s); default (off) drops it entirely. Chart: `showThinking` |
-| `DOUBLE_REPLY_CHANCE` | Probability of offering two short chat messages from one generation (default `0.08`, range 0–1; `0` disables). The model may choose one. Chart: `doubleReply.chance` |
-| `DOUBLE_REPLY_COOLDOWN_REPLIES` | Successful replies per channel required after a pair (default `10`, nonnegative). Process-local state, capped at 4096 channels; resets on restart/eviction. Chart: `doubleReply.cooldownReplies` |
-| `AUTOMATIONS_ENABLED` | `0`/`false` stops schedules and rules from running and hides `/schedule`, `/rule` and their chat tools; stored entries are kept (default: on). Chart: `automations.enabled` |
-| `AUTOMATIONS_TIMEZONE` | default IANA timezone for new schedules (default `Europe/London`); validated at startup. Chart: `automations.timezone` |
-| `SCHEDULE_MIN_INTERVAL_HOURS` | minimum hours between runs of a recurring schedule, catch-ups included (default 4, min 1). One-offs are exempt. Chart: `schedules.minIntervalHours` |
-| `SCHEDULE_MAX_PER_GUILD` / `RULE_MAX_PER_GUILD` | active entries per server (defaults 1 / 4; 0 blocks new ones). Lowering a limit keeps existing entries. Chart: `schedules.maxPerGuild` / `rules.maxPerGuild` |
-| `RULE_COOLDOWN_SECONDS` | seconds before the same rule can fire again (default 60). Chart: `rules.cooldownSeconds` |
-| `FOLLOWUP_MAX_PER_GUILD` | follow-ups waiting at once per server (default 3; 0 turns them off), apart from `SCHEDULE_MAX_PER_GUILD`. Any two by the same person are at least `SCHEDULE_MIN_INTERVAL_HOURS` apart. Chart: `followups.maxPerGuild` |
-| `EVENTS_ENABLED` | `0`/`false` removes the event tools (default: on). The bot's role needs Create Events. Chart: `events.enabled` |
-| `WORKER_COUNT` | queue worker tasks (default 2, min 1); each handles one message at a time, a per-channel lock keeps same-channel order. Chart: `worker_count` |
-| `QUEUE_MAX_SIZE` | max messages waiting on the bounded queue (default 10, min 1); when full new messages are dropped (a mention gets a short "busy" reply). Chart: `queue_max_size` |
-| `LLAMA_ARG_CACHE_TYPE_K`, `LLAMA_ARG_CACHE_TYPE_V` | optional; compose `llamacpp` service only: KV cache quantization type (llama.cpp `-ctk`/`-ctv`), default `q4_0`; in the Helm chart set via `llamacpp.cacheTypeK`/`cacheTypeV` |
-| `IMAGE_GEN_ENABLED` | `0`/`false` removes the `generate_image` tool from the LLM (default: on). Chart: `diffusion.enabled` also removes the diffusion pod/PVC |
-| `DIFFUSION_URL` | base URL of the diffusion service (core appends `/generate`); compose `diffusion` service on :8000 in dev, in-cluster `*-diffusion-service` in the chart; in-code fallback `http://diffusion:8000` |
-| `IMAGE_MODEL` | HF repo id for the diffusion service (default `stabilityai/sd-turbo` — smallest practical model); the service downloads it into its `HF_HOME` volume on first boot |
-| `IMAGE_STEPS` / `IMAGE_WIDTH` / `IMAGE_HEIGHT` | generation settings for the diffusion service (defaults: 4 steps, 512x512) |
-| `IMAGE_GUIDANCE` | CFG scale; unset leaves the pipeline's own (7.5 SD1.5 / 5.0 SDXL). Pinned on distilled models (0.0 SD family, 1.0 FLUX.2 [klein]). Chart: `diffusion.guidance` |
-| `IMAGE_NEGATIVE_PROMPT` | baseline negative prompt, merged BEHIND the per-request one the rewriter produces, and the only one left when that rewrite is off or falls soft. Compose and the chart ship the same non-empty default; dropped automatically on distilled models, unused by FLUX.2. Chart: `diffusion.negativePrompt` |
-| `IMAGE_QUANTIZE` | `none` (default) / `nf4`: load FLUX.2 [klein]'s transformer and text encoder in 4-bit (bitsandbytes), which is what fits it on an 8 GB card; ignored for SD/SDXL. Chart: `diffusion.quantize` |
-| `IMAGE_LONG_PROMPT` | `0`/`false` reverts to truncating prompts at 77 CLIP tokens instead of chunk-encoding them (default: on). Chart: `diffusion.longPrompt` |
-| `IMAGE_OFFLOAD` | `model` (default: one pipeline component on GPU at a time, text encoder in CPU RAM) / `sequential` (lowest VRAM, slowest) / `none` (all on GPU) |
-| `IMAGE_QUEUE_SIZE` | max queued image requests in the diffusion service (default 16); over that it returns 503 |
-| `IMAGE_GEN_TIMEOUT` | seconds core waits on the diffusion service (default 300) |
-| `IMAGE_PROMPT_REWRITE_ENABLED` | `0`/`false` sends image requests to the service verbatim instead of rewriting them first (default: on). Chart: `diffusion.promptRewrite.enabled` |
-| `IMAGE_PROMPT_MODEL` / `IMAGE_PROMPT_LLM_HOST` / `IMAGE_PROMPT_LLM_API_KEY` / `IMAGE_PROMPT_TIMEOUT` | the prompt rewrite's own LLM connection; each falls back to the bot's `MODEL` / `LLM_HOST` / `LLM_PASS` (timeout default 60s), exactly like the `SANDBOX_*` equivalents. Chart: `diffusion.promptRewrite.*` (the key via secret.yaml) |
-| `IMAGE_REVIEW_ENABLED` | `0`/`false` posts generated images unchecked (default: on). Chart: `diffusion.review.enabled` |
-| `IMAGE_REVIEW_RETRIES` | extra attempts when the check finds something asked for missing (default 1, max 2; `0` = check only, so captions stay honest). Each costs a generation plus another check. Chart: `diffusion.review.retries` |
-| `IMAGE_REVIEW_MODEL` / `IMAGE_REVIEW_LLM_HOST` / `IMAGE_REVIEW_LLM_API_KEY` / `IMAGE_REVIEW_TIMEOUT` | the check's own LLM connection — it must be a vision model; each falls back to `MODEL` / `LLM_HOST` / `LLM_PASS` (timeout default 60s). Chart: `diffusion.review.*` (the key via secret.yaml) |
-| `SANDBOX_ENABLED` | `0`/`false` removes the `run_code_sandbox` tool from the LLM (default: on). Chart: `sandbox.enabled` also removes the Docker-socket hostPath mount |
-| `SANDBOX_IMAGE` | container image for the sandbox workspace, pulled once onto the daemon (default `python:3.14-slim`). Chart: `sandbox.image` |
-| `SANDBOX_MAX_TURNS` | max model turns for one sandbox task (default 10). Chart: `sandbox.maxTurns` |
-| `SANDBOX_MODEL` | model id for the nested sandbox agent; empty (default) = the main bot's `MODEL`. Chart: `sandbox.model` |
-| `SANDBOX_LLM_HOST` | base URL of the sandbox agent's LLM (core appends `/v1`); empty (default) = the main `LLM_HOST`. E.g. `https://openrouter.ai/api` for OpenRouter. Chart: `sandbox.llmHost` |
-| `SANDBOX_LLM_API_KEY` | API key for the sandbox agent's LLM; empty (default) = the main `LLM_PASS` placeholder. Chart: `sandbox.apiKey` |
-| `SANDBOX_ASK_USER_TIMEOUT` | max seconds the sandbox's `ask_user` tool waits for a reply in its thread before telling the model to proceed on its own (default 300); also clamped to whatever of the run's own `SANDBOX_TIMEOUT` budget remains. Chart: `sandbox.askUserTimeout` |
-| `SANDBOX_PERSIST_TIMEOUT_SECONDS` | seconds allowed to persist a thread's workspace snapshot to Redis on container teardown, after `SANDBOX_TIMEOUT` has already elapsed (default 180 — generous since the `Memory` capability's own extraction runs here too). Chart: `sandbox.persistTimeout` |
-| `SANDBOX_REQUEST_TIMEOUT_SECONDS` | seconds of silence on one HTTP request to the sandbox's LLM before the client gives up (default 180, down from the OpenAI client's unstated 600). This is the HTTP client's per-read timeout: it catches a hung connection or a server that sends nothing, but NOT one that dribbles keep-alive padding while it works (OpenRouter pads non-streaming responses) — that case is caught by the wall-clock bound below. Chart: `sandbox.requestTimeout` |
-| `SANDBOX_MAX_RETRIES` | how many times that client retries a failed request (default 2; 0 disables). One model call is also wall-clock bounded (`ModelSettings.timeout`, see `sandbox_model_call_timeout()`) at (1 + this) x `SANDBOX_REQUEST_TIMEOUT_SECONDS` — the figure that was already the documented worst case for a silent server, now enforced for a padding one too. Chart: `sandbox.maxRetries` |
-| `SANDBOX_SNAPSHOT_MAX_BYTES` | max size of one thread's stored workspace snapshot in Redis (default 50MB). Chart: `sandbox.snapshotMaxBytes` |
-| `SANDBOX_INPUT_MAX_BYTES` | most bytes of chat files copied into a run's `in/`, all together (default 25MB; at most 10 files). Kept under the snapshot cap, since `in/` is saved with the workspace. Chart: `sandbox.inputMaxBytes` |
-| `SANDBOX_SNAPSHOT_TTL_SECONDS` | how long an unused thread's workspace snapshot survives in Redis (default 604800 = 7 days). Chart: `sandbox.snapshotTtlSeconds` |
-| `SANDBOX_MEMORY_LIMIT` | memory cap for each sandbox container, Docker notation (`4g`, `512m`; swap capped at the same figure); empty (default) = no cap. The containers run on the node's Docker daemon, outside Kubernetes accounting. The SDK has no option for it, so `build_sandbox_client` wraps the docker client's `containers.create`. Chart: `sandbox.memoryLimit` |
-| `VOICE_ENABLED` | `1`/`true` turns voice calls on: `/voice`, the join/leave tools and the bridge to the sidecar (default: off in code; the chart sets it from `voice.enabled`, default true, which also adds the sidecar container and the speech pod/PVC |
-| `VOICE_BRIDGE_URL` | the voice sidecar's WebSocket (default `ws://voice:8765`; the chart sets `ws://127.0.0.1:<voice.bridgePort>`, same pod). The sidecar reads `VOICE_BRIDGE_HOST`/`VOICE_BRIDGE_PORT` to bind it |
-| `VOICE_BRIDGE_TOKEN` | optional shared secret: when set, the sidecar refuses a bridge connection that does not send it (core sends it as a Bearer header). For compose, where the bridge listens on the whole compose network; the chart binds it to localhost in the core pod and leaves it unset |
-| `SPEECH_URL` | the speech service, used by the sidecar and by `/voice voice`'s autocomplete (default `http://speech:8000`; in-cluster service in the chart, or `voice.speechUrl`) |
-| `VOICE_IDLE_LEAVE_SECONDS` | seconds the bot stays after the last person leaves a call (default 30). Chart: `voice.idleLeaveSeconds` |
-| `VOICE_HISTORY_LIMIT` / `VOICE_HISTORY_REFRESH` | transcribed clips kept in a call's prompt, and how many more it grows by before rebasing (defaults 10 / 10; an anchored window for llama.cpp's cache). Chart: `voice.historyLimit` / `voice.historyRefresh` |
-| `VOICE_FOLLOWUP_SECONDS` | after the wake phrase alone, how long that speaker's next words count as the request (default 8). Chart: `voice.followupSeconds` |
-| `VOICE_THINKING` | `1`/`true` lets the model think before a spoken reply (default off: a reply waits for every reasoning token). Chart: `voice.thinking` |
-| `VOICE_DEFAULT_VOICE` | Kokoro voice for servers that have not picked one (default `af_heart`); read by core and the speech service. Chart: `voice.defaultVoice` |
-| `VOICE_SILENCE_MS` | silence that ends an utterance, read by the sidecar (default 800). Chart: `voice.silenceMs` |
-| `VOICE_PREFILL_MIN_SECONDS` | minimum seconds between two cache-warming prefills of a call's prompt (default 5). Chart: `voice.prefillMinSeconds` |
-| `VOICE_DEBUG` | `1` logs every transcript and spoken sentence (core) and the voice connection's debug output (sidecar). Off by default: it is everything said in a call |
-| `VOICE_DEV_INJECT` | local testing only, never in the chart: `!voice_join <channel id>` / `!voice_say <text>` drive a call from text (with `TEST_WEBHOOK_URL`, no speaker needed) |
-| `STT_MODEL` / `STT_THREADS` / `STT_CONCURRENCY` | speech service: faster-whisper model (default `small.en`, int8), CPU threads per transcription (4) and transcriptions at once (2). Chart: `voice.stt*` |
-| `TTS_THREADS` / `TTS_CONCURRENCY` / `SPEECH_QUEUE_SIZE` | speech service: Kokoro CPU threads per sentence (4), sentences at once (2), requests allowed to wait per kind before a 503 (16). Chart: `voice.tts*`, `voice.queueSize` |
+| `LLM_HOST` | the bot's own LLM server (core appends `/v1`), every role's fallback. Compose: the `llamacpp` service (:8081) or `http://strata:8080`. Chart: `llm.host`, empty = the in-cluster service of `llm.engine` [`http://llamacpp:8080`] |
+| `LLM_API_KEY` | that server's key: a placeholder for llama.cpp (no auth, but the client needs one); the real key for Strata, which checks it (chart: `strata.apiKey` / `strata.existingSecret`, key `STRATA_API_KEY`; compose gives `strata` the same value). Chart: `llm.apiKey` for a server outside the chart |
+| `LLM_EXTRA_HEADERS` | comma-separated `name=value` headers on every request to `LLM_HOST` (none), e.g. OpenCode Go's required `x-opencode-session` (E2E sets one per run). Never sent to another host; `Authorization` is skipped |
+| `LLM_SLOTS` | slots of a self-hosted server whose `/props` has no `total_slots` [1]. Chart: `llm.slots`, empty = `llamacpp.parallel` or `strata.parallel` |
+| `LLM_CHAT_RESERVED` | slots per self-hosted server only chat replies may use [1]. Chart: `llm.chatReserved` |
+| `PERSONA_MODEL` / `PERSONA_LLM_HOST` / `PERSONA_LLM_API_KEY` | the persona's own connection; empty = `LLM_*` (the key only when the host is `LLM_HOST`). Chart: `persona.model` / `llmHost` / `apiKey` |
+| `LLM_MODEL` | **required**; the model the bot requests and compose's `llamacpp` serves (`LLAMA_ARG_HF_REPO`); the chart's one `llm.model` feeds both. With Strata only the requested name (Strata serves `strata.model` / `STRATA_MODEL`) |
+| `CONTENT_GUARD_API_KEY` | key for the moderation call (an OpenAI-compatible Moderations endpoint; OpenAI's is free); unset = fail-open. Chart: `contentGuard.apiKey` |
+| `CONTENT_GUARD_BASE_URL` | moderation API base [`https://api.openai.com/v1`]. Chart: `contentGuard.baseUrl` |
+| `CONTENT_GUARD_MODEL` | moderation model; unset = the server's default. Chart: `contentGuard.model` |
+| `CONTENT_GUARD_CACHE_TTL_SECONDS` | seconds a verdict stays cached [600; 0 = off]. Chart: `contentGuard.cacheTtlSeconds` |
+| `CONTENT_GUARD_MAX_RETRIES` / `CONTENT_GUARD_RETRY_BACKOFF` | retries on 429/5xx [2] and base backoff seconds, doubled per retry [2]. Chart: `contentGuard.maxRetries` / `retryBackoff` |
+| `CONTENT_GUARD_ENABLED` | `0` turns the guard off [on]. Chart: `contentGuard.enabled` |
+| `CONTENT_GUARD_DEBUG` | `1` logs per-request detail [off]. Chart: `contentGuard.debug` |
+| `WEB_FETCH_PART_CHARS` / `WEB_FETCH_MAX_CHARS` | characters per `fetch_url` part / most kept per page [10000 / 200000]. Chart: `webFetch.partChars` / `maxChars` |
+| `WEB_FETCH_MAX_BYTES` / `WEB_FETCH_TIMEOUT` | most bytes downloaded per page / seconds to wait [5000000 / 15]. Chart: `webFetch.maxBytes` / `timeout` |
+| `WEB_CACHE_TTL_SECONDS` / `WEB_CACHE_VIDEO_TTL_SECONDS` / `WEB_CACHE_FAILURE_TTL_SECONDS` | Redis cache life of a page / a YouTube transcript / a failure [21600 / 2592000 / 300]. Chart: `webFetch.*TtlSeconds` |
+| `BROWSER_URL` | the browser service for thin pages; empty = none. Compose: `http://browser:8000`; chart: `browser.url`, else the in-cluster service when `browser.enabled` |
+| `BROWSER_MIN_CHARS` | a plain fetch with less text goes to the browser [400]. Chart: `webFetch.browserMinChars` |
+| `RESEARCH_BRIEF_ENABLED` | `0`: `web_search` returns the plain results, no pages read and no brief [on]. Chart: `research.enabled` |
+| `RESEARCH_PAGES` / `RESEARCH_PAGE_CHARS` | results read in full [3, max 5] and characters of each given to the brief [6000]. Chart: `research.pages` / `pageChars` |
+| `RESEARCH_FETCH_TIMEOUT` / `RESEARCH_TIMEOUT` | seconds for those pages [25] and for the brief [90]. Chart: `research.fetchTimeout` / `timeout` |
+| `RESEARCH_MODEL` / `RESEARCH_LLM_HOST` / `RESEARCH_LLM_API_KEY` | the brief's connection; empty = the brain's, then `LLM_*` (the key only for the same host). Chart: `research.*` |
+| `BROWSER_CONCURRENCY` / `BROWSER_QUEUE_SIZE` | browser service: pages rendered at once / renders waiting before a 503 [2 / 8]. Chart: `browser.concurrency` / `queueSize` |
+| `BROWSER_TIMEOUT` / `BROWSER_SETTLE_SECONDS` | browser service: seconds per render / for scripts to settle [30 / 5]; core reads both to know how long to wait. Chart: `browser.timeout` / `settleSeconds` |
+| `METRICS_PORT` | Prometheus `/metrics` port [9464]; empty/`0` = off. Chart: `metrics.enabled` / `metrics.port` add a Service and a ServiceMonitor (label `release: kube-prometheus-stack`), and turn on llama.cpp's or Strata's own `/metrics` with a second ServiceMonitor |
+| `LOG_LEVEL` | root log level [`INFO`]; `DEBUG` also dumps raw agent run results |
+| `MSG_HISTORY_LIMIT` | messages in a (refreshed) history window, the trigger included [5]. Chart: `history.limit` |
+| `MSG_HISTORY_MODE` | `sliding` [default] or `anchored` (the window's start stays fixed, for prefix reuse). Chart: `history.mode` |
+| `MSG_HISTORY_REFRESH_MESSAGES` | anchored mode: new messages that move the anchor [10]. Chart: `history.refreshMessages` |
+| `MSG_HISTORY_RESERVE_TOKENS` | per-slot context kept free for the system prompt, tools and answer; older history is dropped past it [12000]. Chart: `history.reserveTokens` |
+| `PERSONA_REASONING_EFFORT` | the persona's `reasoning_effort` [medium]. Chart: `persona.reasoningEffort` |
+| `PERSONA_MAX_TURNS` | model turns per persona reply [4]: ask the brain, maybe again, answer. An overrun is still answered. Chart: `persona.maxTurns` |
+| `PERSONA_CALL_TIMEOUT_SECONDS` | wall-clock seconds per persona model call, client retries included [600], applied after the lane wait; also the per-read timeout. A per-read timeout alone never trips on a server that pads its responses (OpenRouter). Chart: `persona.callTimeout` |
+| `WHATS_NEW_ENABLED` | `0` stops the automatic What's New card; `/whats_new` still works [on]. Chart: `whatsNew.enabled` |
+| `APP_VERSION` | the release tag, baked into the core image by `release.yaml`; unset = no announcement |
+| `SHOW_THINKING` | `1` sends the model's reasoning as spoiler-hidden follow-ups [off]. Chart: `showThinking` |
+| `DOUBLE_REPLY_CHANCE` | chance of offering two short messages from one generation [0.08; 0 = off]. Chart: `doubleReply.chance` |
+| `DOUBLE_REPLY_COOLDOWN_REPLIES` | replies per channel needed after a pair [10]; in-process only. Chart: `doubleReply.cooldownReplies` |
+| `AUTOMATIONS_ENABLED` | `0` stops schedules and rules and hides their commands and tools; entries are kept [on]. Chart: `automations.enabled` |
+| `AUTOMATIONS_TIMEZONE` | default IANA timezone for new schedules [`Europe/London`]. Chart: `automations.timezone` |
+| `SCHEDULE_MIN_INTERVAL_HOURS` | minimum hours between runs of a recurring schedule [4, min 1]; one-offs are exempt. Chart: `schedules.minIntervalHours` |
+| `SCHEDULE_MAX_PER_GUILD` / `RULE_MAX_PER_GUILD` | active entries per server [1 / 4; 0 blocks new ones]. Chart: `schedules.maxPerGuild` / `rules.maxPerGuild` |
+| `RULE_COOLDOWN_SECONDS` | seconds before the same rule can fire again [60]. Chart: `rules.cooldownSeconds` |
+| `FOLLOWUP_MAX_PER_GUILD` | follow-ups waiting at once per server [3; 0 = off]. Chart: `followups.maxPerGuild` |
+| `EVENTS_ENABLED` | `0` removes the event tools [on]; the bot's role needs Create Events. Chart: `events.enabled` |
+| `QUEUE_WORKERS` | queue workers [2, min 1]. Chart: `queue.workers` |
+| `QUEUE_MAX_SIZE` | messages waiting on the queue [10, min 1]. Chart: `queue.maxSize` |
+| `CORE_ENV_FILE` | compose only: the env file handed to core [`.env`]. A second env file (`.env.v3`) sets it to its own name, since `--env-file` alone only changes compose's own values |
+| `LLAMA_CTX_SIZE` / `LLAMA_PARALLEL` / `LLAMA_CACHE_RAM_MIB` | compose `llamacpp` only: total context over all slots [80000; keep 32000+ per slot], slots [1], host-RAM prompt cache in MiB [8192]. Chart: `llamacpp.contextPerSlot` (x `parallel`), `llamacpp.parallel`, `llamacpp.cacheRamMiB` |
+| `LLAMA_CACHE_TYPE_K`, `LLAMA_CACHE_TYPE_V` | compose `llamacpp` only: KV cache type [`q4_0`]. Chart: `llamacpp.cacheTypeK` / `cacheTypeV` |
+| `IMAGE_GEN_ENABLED` | `0` removes `generate_image` [on]. Chart: `diffusion.enabled`, which also removes the diffusion pod and PVC |
+| `DIFFUSION_URL` | the diffusion service (core appends `/generate`) [`http://diffusion:8000`]; in-cluster service in the chart |
+| `IMAGE_MODEL` | HF repo for the diffusion service [`stabilityai/sd-turbo`], downloaded on first boot |
+| `IMAGE_STEPS` / `IMAGE_WIDTH` / `IMAGE_HEIGHT` | generation settings [4 steps, 512x512] |
+| `IMAGE_GUIDANCE` | CFG scale; unset = the pipeline's own. Pinned on distilled models. Chart: `diffusion.guidance` |
+| `IMAGE_NEGATIVE_PROMPT` | baseline negative prompt, behind the rewriter's; dropped on distilled models, unused by FLUX.2. Chart: `diffusion.negativePrompt` |
+| `IMAGE_QUANTIZE` | `none` [default] / `nf4`: FLUX.2 [klein] in 4-bit, to fit an 8 GB card; ignored for SD/SDXL. Chart: `diffusion.quantize` |
+| `IMAGE_LONG_PROMPT` | `0` truncates prompts at 77 CLIP tokens instead of chunk-encoding them [on]. Chart: `diffusion.longPrompt` |
+| `IMAGE_OFFLOAD` | `model` [default] / `sequential` (lowest VRAM, slowest) / `none` |
+| `IMAGE_QUEUE_SIZE` | image requests queued before a 503 [16] |
+| `IMAGE_GEN_TIMEOUT` | seconds core waits on the diffusion service [300] |
+| `IMAGE_PROMPT_REWRITE_ENABLED` | `0` sends image requests verbatim [on]. Chart: `diffusion.promptRewrite.enabled` |
+| `IMAGE_PROMPT_MODEL` / `IMAGE_PROMPT_LLM_HOST` / `IMAGE_PROMPT_LLM_API_KEY` / `IMAGE_PROMPT_TIMEOUT` | the rewrite's connection; empty = the brain's, then `LLM_*` (the key only for the same host); timeout [60]. Chart: `diffusion.promptRewrite.*` |
+| `IMAGE_REVIEW_ENABLED` | `0` posts generated images unchecked and removes workflow helpers' `view_image` [on]. Chart: `diffusion.review.enabled` |
+| `IMAGE_REVIEW_RETRIES` | extra attempts when something asked for is missing [1, max 2; 0 = check only]. Chart: `diffusion.review.retries` |
+| `IMAGE_REVIEW_MODEL` / `IMAGE_REVIEW_LLM_HOST` / `IMAGE_REVIEW_LLM_API_KEY` / `IMAGE_REVIEW_TIMEOUT` | the check's connection (a vision model), falling back like `IMAGE_PROMPT_*`. Chart: `diffusion.review.*` |
+| `BRAIN_MAX_TURNS` | backstop on model turns per brain call [100]. Chart: `brain.maxTurns` |
+| `BRAIN_TIMEOUT` | backstop on a brain call's seconds, lane waits included [1800]. Chart: `brain.timeout` |
+| `BRAIN_REPEAT_LIMIT` | loop guard: the same call this many times in a row, eight calls that bring nothing new, or the same page or search this many times in one run, warns; a second time stops the call [3, min 2]. Chart: `brain.repeatLimit` |
+| `BRAIN_UNPROMPTED_MAX_TURNS` / `BRAIN_UNPROMPTED_TIMEOUT` | backstops for a brain call in a reply the bot was not asked for (the random reply chance): nobody is waiting on it [40 / 180]. Chart: `brain.unprompted.maxTurns` / `timeout` |
+| `BRAIN_ASK_TIMEOUT` | seconds `ask_user` waits for the requester's answer in the channel, cut to what the call has left [120]. Chart: `brain.askTimeout` |
+| `SKILLS_ENABLED` | `0`/`false` turns skills off: no skill tools for the brain, no `/skills`, no index in its task; saved skills are kept (default: on). Chart: `skills.enabled` |
+| `SKILLS_MAX_PER_GUILD` / `SKILLS_MAX_VERSIONS` | live skills per server (default 100; deleted ones do not count), and versions kept per skill (default 50; past it the oldest goes). Chart: `skills.maxPerGuild` / `maxVersions` |
+| `SKILLS_MAX_BYTES` / `SKILLS_MAX_BODY_CHARS` / `SKILLS_MAX_FILES` | limits on one skill: all its text together (default 65536), its steps (8000 characters), files kept with it (10). Chart: `skills.maxBytes` / `maxBodyChars` / `maxFiles` |
+| `SKILLS_INDEX_MAX` | skills named in the brain's task (default 20, best ranked first); the rest are found with `search_skills`. Chart: `skills.indexMax` |
+| `SKILLS_REFLECTION_ENABLED` / `SKILLS_REFLECTION_MIN_TOOL_CALLS` | after a brain job with at least this many tool calls (default 6) that ended done or partial without saving a skill, one background call decides whether to save one (default: on). Chart: `skills.reflection.enabled` / `minToolCalls` |
+| `SKILLS_CURATOR_ENABLED` / `SKILLS_CURATOR_INTERVAL_HOURS` / `SKILLS_CURATOR_MIN_SKILLS` | the tidy-up: on [default], hours between passes per server [24, min 1], and live skills a server needs for one [5, min 2]. A server with no change since its last pass gets no model call. Chart: `skills.curator.enabled` / `intervalHours` / `minSkills` |
+| `SKILLS_RETIRE_DAYS` | a skill neither used nor changed for this many days may be retired by the tidy-up [60, min 1]; nothing else can be. Chart: `skills.curator.retireDays` |
+| `BRAIN_MAX_CONCURRENT` / `BRAIN_QUEUE_WAIT` | brain calls at once (each on a queue worker starts a spare worker), and seconds a call waits for a slot before it is told the bot is busy [3 / 120]. Chart: `brain.maxConcurrent` / `queueWait` |
+| `BRAIN_TRIM_KEEP_RECENT` | tool outputs kept whole in a long brain call; older ones are cut to their first and last 400 characters [6]. Chart: `brain.trimKeepRecent` |
+| `WORKSPACE_IMAGE` | the workspace's container image, pulled at startup if missing [`python:3.14-slim`]. Chart: `brain.workspace.image` |
+| `WORKSPACE_IDLE_SECONDS` | seconds after the last task before a workspace is saved and stopped [900]. Chart: `brain.workspace.idleSeconds` |
+| `WORKSPACE_SNAPSHOT_INTERVAL_SECONDS` | seconds between saves of a running workspace that changed; 0 = only when it stops [1800]. Chart: `brain.workspace.snapshotIntervalSeconds` |
+| `WORKSPACE_MAX_WARM` | workspaces running at once per core [4]; the least recently used idle one stops first. Chart: `brain.workspace.maxWarm` |
+| `WORKSPACE_JOB_RETENTION_HOURS` | job folders older than this are deleted before each save [72]. Chart: `brain.workspace.jobRetentionHours` |
+| `WORKSPACE_MEMORY_LIMIT` / `WORKSPACE_CPU_LIMIT` / `WORKSPACE_PIDS_LIMIT` | per container: memory (`4g`; swap capped the same), CPUs, processes [512; 0 = none]; empty = no cap. Outside Kubernetes accounting. Chart: `brain.workspace.memoryLimit` / `cpuLimit` / `pidsLimit` |
+| `WORKSPACE_INSTANCE` | label on this bot's containers, so two bots on one daemon never remove each other's [`dcb-dev`]. The chart sets `<namespace>-<release name>` |
+| `WORKSPACE_PREWARM` | start a server's workspace when the bot is about to answer there [1; 0 = off]. Chart: `brain.workspace.prewarm` |
+| `BRAIN_MODEL` | the brain's model; empty = `LLM_MODEL`. Chart: `brain.model` |
+| `BRAIN_LLM_HOST` | the brain's server (core appends `/v1`), e.g. `https://openrouter.ai/api`; empty = `LLM_HOST`. Chart: `brain.llmHost` |
+| `BRAIN_LLM_API_KEY` | the brain's key; empty = `LLM_API_KEY`, but only when the brain's host is `LLM_HOST` (else none; startup warns). Chart: `brain.apiKey` |
+| `BRAIN_REASONING_EFFORT` | the brain's `reasoning_effort` [medium]. Chart: `brain.reasoningEffort` |
+| `WORKFLOW_ENABLED` | `0`/`false` removes `/task` and `start_workflow` [on]. Chart: `workflows.enabled` |
+| `WORKFLOW_ASK_TIMEOUT` | seconds a workflow step's question in the thread waits for the requester [300]. Chart: `workflows.askTimeout` |
+| `WORKFLOW_PLAN_APPROVAL_SECONDS` | seconds a plan waits for Approve before it is cancelled [900]. Chart: `workflows.planApprovalSeconds` |
+| `WORKFLOW_PLAN_REVISIONS` | changes a plan may get before it must be approved or cancelled [3]. Chart: `workflows.planRevisions` |
+| `WORKFLOW_MAX_STEPS` | steps in one plan [8]. Chart: `workflows.maxSteps` |
+| `WORKFLOW_TIMEOUT` / `WORKFLOW_MAX_TURNS` / `WORKFLOW_MAX_TOKENS` | backstops on one workflow: wall-clock seconds [3600], model turns [300] and tokens in and out [4000000; 0 = off] across all its agents; out of any stops it with what exists. Chart: `workflows.timeout` / `maxTurns` / `maxTokens` |
+| `WORKFLOW_MAX_PER_GUILD` | workflows running at once per server [1]. Chart: `workflows.maxPerGuild` |
+| `WORKFLOW_DEV_INJECT` | local testing and E2E only, never in the chart: `!workflow <request>` starts a workflow with its plan approved at once, since a webhook cannot use `/task` or press Approve |
+| `SUBAGENT_MODEL` / `SUBAGENT_LLM_HOST` / `SUBAGENT_LLM_API_KEY` | a workflow helper's connection; empty = the brain's, then `LLM_*` (the key only for the same host). Chart: `subagents.model` / `llmHost` / `apiKey` |
+| `SUBAGENT_REASONING_EFFORT` / `SUBAGENT_CALL_TIMEOUT_SECONDS` | a helper's; empty = the brain's. Chart: `subagents.reasoningEffort` / `callTimeout` |
+| `SUBAGENT_MAX_TURNS` | backstop on one helper's model turns [100]. Chart: `subagents.maxTurns` |
+| `SUBAGENT_MAX_CONCURRENT` | researchers running at once [2], cut to the slots a self-hosted server has beside chat's; an implementer always runs alone. Chart: `subagents.maxConcurrent` |
+| `WORKSPACE_SNAPSHOT_TIMEOUT_SECONDS` | seconds for one workspace save, and for all of them at shutdown [120]. Chart: `brain.workspace.snapshotTimeout` |
+| `BRAIN_CALL_TIMEOUT_SECONDS` | like `PERSONA_CALL_TIMEOUT_SECONDS`, for the brain [600]. Chart: `brain.callTimeout` |
+| `WORKSPACE_SNAPSHOT_MAX_BYTES` | most bytes of one saved workspace [50MB]; over it the previous save is kept and the container is stopped, not removed. Chart: `brain.workspace.snapshotMaxBytes` |
+| `WORKSPACE_INPUT_MAX_BYTES` | chat files copied into a task's `in/`, all together [25MB, at most 10 files]. Chart: `brain.workspace.inputMaxBytes` |
+| `WORKSPACE_SNAPSHOT_TTL_SECONDS` | how long an unused server's saved workspace lasts [604800 = 7 days]. Chart: `brain.workspace.snapshotTtlSeconds` |
+| `VOICE_ENABLED` | `1` turns voice calls on [off in code]. The chart sets it from `voice.enabled` [true], which also adds the sidecar container and the speech pod |
+| `VOICE_BRIDGE_URL` | the voice sidecar's WebSocket [`ws://voice:8765`; chart: `ws://127.0.0.1:<voice.bridgePort>`]. The sidecar binds `VOICE_BRIDGE_HOST` / `VOICE_BRIDGE_PORT` |
+| `VOICE_BRIDGE_TOKEN` | optional shared secret the sidecar requires of a bridge connection; for compose, where the bridge listens on the whole compose network. The chart binds it to localhost and leaves it unset |
+| `SPEECH_URL` | the speech service, used by the sidecar and `/voice voice`'s autocomplete [`http://speech:8000`]; chart: the in-cluster service, or `voice.speechUrl` |
+| `VOICE_IDLE_LEAVE_SECONDS` | seconds the bot stays after the last person leaves [30]. Chart: `voice.idleLeaveSeconds` |
+| `VOICE_HISTORY_LIMIT` / `VOICE_HISTORY_REFRESH` | clips kept in a call's prompt, and how many more before rebasing [10 / 10]. Chart: `voice.historyLimit` / `voice.historyRefresh` |
+| `VOICE_FOLLOWUP_SECONDS` | after the wake phrase alone, how long that speaker's next words count as the request [8]. Chart: `voice.followupSeconds` |
+| `VOICE_THINKING` | `1` lets the model think before a spoken reply [off]. Chart: `voice.thinking` |
+| `VOICE_DEFAULT_VOICE` | Kokoro voice for servers that have not picked one [`af_heart`]; read by core and the speech service. Chart: `voice.defaultVoice` |
+| `VOICE_SILENCE_MS` | silence that ends an utterance, read by the sidecar [800]. Chart: `voice.silenceMs` |
+| `VOICE_PREFILL_MIN_SECONDS` | minimum seconds between two prefills of a call's prompt [5]. Chart: `voice.prefillMinSeconds` |
+| `VOICE_DEBUG` | `1` logs every transcript and spoken sentence (core) and the voice connection's debug output (sidecar) [off: it is everything said in a call] |
+| `VOICE_DEV_INJECT` | local testing only, never in the chart: `!voice_join <channel id>` / `!voice_say <text>` drive a call from text |
+| `STT_MODEL` / `STT_THREADS` / `STT_CONCURRENCY` | speech service: faster-whisper model [`small.en`, int8], CPU threads per transcription [4], transcriptions at once [2]. Chart: `voice.stt*` |
+| `TTS_THREADS` / `TTS_CONCURRENCY` / `SPEECH_QUEUE_SIZE` | speech service: Kokoro threads per sentence [4], sentences at once [2], requests waiting per kind before a 503 [16]. Chart: `voice.tts*`, `voice.queueSize` |
 
 ## Releasing
 
-- Dependabot's patch/minor PRs merge themselves once E2E passes (see "End-to-end
-  CI" below), and each merge is a release like any other.
-- Every push to `main` runs `auto-tag.yaml`, which bumps the highest `vMAJOR.MINOR`
-  tag by one minor and pushes it. That tag push is what starts `release.yaml`
-  (tests -> five images -> chart -> GitHub release). Nothing dispatches
-  `release.yaml`; its `workflow_dispatch` trigger is a manual escape hatch for
-  re-running a release against an existing tag.
-- The packaged chart is published twice from that one `.tgz`: as a GitHub
-  release asset (`dchatbot-vX.Y.tgz`) and as an OCI artifact at
-  `oci://ghcr.io/dgowing95/charts/dchatbot` (tag = the git tag, e.g. `v2.29`).
-  The OCI copy is what lets a Helm-repo-aware consumer (ArgoCD, `helm install
-  oci://...`) resolve versions and semver ranges without a chart index; both
-  carry `appVersion` = the tag, which is where the `core-<tag>` /
-  `diffusion-<tag>` image tags in the templates come from.
+- Every push to `main` runs `auto-tag.yaml`, which bumps the highest `vMAJOR.MINOR` tag by one minor and
+  pushes it. That tag push starts `release.yaml` (tests -> five images -> chart -> GitHub release); its
+  `workflow_dispatch` trigger is only for re-running a release against an existing tag. Dependabot's
+  auto-merged PRs are releases like any other.
+- **A new major version** is set by `.github/release-major` (one number; the rule is
+  `.github/scripts/next_tag.sh`, pinned by `release_tag_tests.py`). One more than the latest tag's
+  major: the next tag is `v<major>.0` (so merging `v3` released `v3.0`, not `v2.102`); equal, the
+  minor is bumped as always; anything else (smaller, a jump of two, `08`, not a number, the file
+  missing) fails the job
+  rather than tag a typo. Never make a major tag by hand: it races the job, which skips only a HEAD
+  that is already tagged. To start v4, the PR that releases it sets the file to `4`. The tag is worked
+  out in a step with no token; only the step that creates it gets `TAG_PUSH_TOKEN`.
+- The chart `.tgz` is published as a GitHub release asset (`dchatbot-vX.Y.tgz`) and as an OCI artifact
+  at `oci://ghcr.io/dgowing95/charts/dchatbot` (tag = the git tag), which is what ArgoCD and
+  `helm install oci://...` resolve. Both carry `appVersion` = the tag, which picks the `core-<tag>` /
+  `diffusion-<tag>` image tags.
 - **`TAG_PUSH_TOKEN` (the `release-tag` environment secret) creates the tag**, and it expires.
-  `GITHUB_TOKEN` cannot do the job for two independent reasons: the "Restrict
-  Tagging" ruleset allows ref creation only for repo admins, and it acts as the
-  GitHub Actions app rather than a user; and a ref pushed with it deliberately
-  fires no `push` event, so `release.yaml` would never start.
-- To mint a replacement: your **account** settings (not the repo's) → Developer
-  settings → Personal access tokens → Fine-grained tokens → Generate new token,
-  scoped to `dgowing95/DiscordChatBot` only, with **Repository permissions →
-  Contents: Read and write** (nothing else; `workflow` is not needed, the job
-  pushes a tag and never touches `.github/workflows`). Then store it in the
-  **repo's** settings → Environments → `release-tag` → Environment secrets, as
-  `TAG_PUSH_TOKEN`. The environment is restricted to the protected `main` branch.
-- How the Auto Tag job fails tells you which half is wrong. Secret unset: the
-  `gh api` step fails authentication. PAT expired or revoked: the same step gets
-  a 401. A ruleset rejection while creating `refs/tags/<version>` means the token
-  is valid but its owner is not a bypass actor on the tag ruleset.
+  `GITHUB_TOKEN` cannot: the "Restrict Tagging" ruleset lets only repo admins create tags, and a ref
+  pushed with it fires no `push` event, so `release.yaml` would never start.
+- To mint a replacement: your **account** settings (not the repo's) → Developer settings → Personal
+  access tokens → Fine-grained tokens → Generate new token, scoped to `dgowing95/DiscordChatBot` only,
+  with **Repository permissions → Contents: Read and write** (nothing else). Store it in the **repo's**
+  settings → Environments → `release-tag` → Environment secrets, as `TAG_PUSH_TOKEN`. The environment
+  is restricted to the protected `main` branch.
+- How Auto Tag fails tells you what is wrong: secret unset = the `gh api` step fails authentication;
+  expired or revoked = a 401; a ruleset rejection on `refs/tags/<version>` = the token works but its
+  owner is not a bypass actor on the tag ruleset.
 
 ## Testing
 
-- **Framework:** `pytest`, configured in `pyproject.toml` at the repo root
-  (`python_files = *_tests.py` — the suite predates the default `test_*.py`
-  convention — plus `testpaths` and `pythonpath`).
-- **Prereq:** a Python 3.13+ venv with `pip install -r core/requirements-dev.txt`
-  (that pulls in `core/requirements.txt` and adds the test-only packages;
-  `response_filter` tests are pure-stdlib).
-- **How to run** — from the repo root, no arguments and no `PYTHONPATH`:
-
-  ```bash
-  pytest
-  ```
-
-  This is exactly what CI runs, so a new test file is picked up automatically;
-  there is no list to keep in step. ~1000 tests, roughly 20 seconds.
-
-  The voice sidecar is Node and has its own `node:test` suite (pure helpers:
-  audio, protocol validation, the playback queue): `cd voicesidecar && npm ci
-  && npm test`. CI runs it as a separate job.
-
-- Tests import production modules as `classes.X`, the same name the app uses
-  (it runs with cwd `/app`), and `pyproject.toml` puts `core/` on the path to
-  make that resolve. Do NOT import them as `core.classes.X`: that resolves as a
-  separate namespace package, giving a SECOND module object with its own
-  globals, so a patch applied to one copy leaves the other untouched and any
-  import-time state (metric registration, the channel-lock and in-flight
-  registries) exists twice.
-  `grep -rn "core\.classes\|core\.tests" core/` should stay empty.
-- One test module may borrow a helper from another (message_handler_tests
-  reuses response_filter_tests' reasoning-item builders), but import it by its
-  BARE name -- `from response_filter_tests import _reasoning_item`. pytest puts
-  core/tests on sys.path; the repo root only lands there when something else
-  puts the cwd there, so a `core.tests.X` import resolves under `python -m
-  pytest` and IDE runners but raises ModuleNotFoundError under bare `pytest`,
-  locally and in CI alike.
-- Nothing in the suite may write to `os.environ` directly — use `monkeypatch`.
-  A bare `os.environ.setdefault("REDIS_HOST", "localhost")` in a test helper
-  leaked process-wide and made every later test that touched `configManager`
-  block on a real Redis connect timeout, which is what made the full suite
-  appear to hang.
+- **Framework:** `pytest`, configured in `pyproject.toml` at the repo root (`python_files = *_tests.py`,
+  plus `testpaths` and `pythonpath`).
+- **Prereq:** a Python 3.13+ venv with `pip install -r core/requirements-dev.txt`.
+- **Run** from the repo root, no arguments and no `PYTHONPATH`: `pytest`. This is exactly what CI runs
+  (`tests.yaml`, and again as `release.yaml`'s gate), so a new test file is picked up with no list to
+  update. ~1500 tests, roughly 25 seconds. A new setting fails it until it has an env-table row and an
+  `.env.example` line.
+- The voice sidecar has its own `node:test` suite: `cd voicesidecar && npm ci && npm test` (a separate
+  CI job).
+- **One import name:** tests import production modules as `classes.X`, as the app does (cwd `/app`).
+  Never `core.classes.X`: that is a separate module object with its own globals, so a patch on one copy
+  misses the other and import-time state (metrics, lock and in-flight registries) exists twice.
+  `grep -rn "core\.classes\|core\.tests" core/` should stay empty. To borrow a helper from another test
+  module, import it by its bare name (`from response_filter_tests import _reasoning_item`).
+- **Never write to `os.environ` in a test**; use `monkeypatch`. A leaked `REDIS_HOST` once made the whole
+  suite seem to hang on Redis connect timeouts.
+- Stub Redis with fixtures and `unittest.mock`. Anything worth unit-testing goes in a pure module.
+- Test the SDK boundary against the **real `Runner`** with `agents.testing.ScriptedModel`
+  (`brain_tests.py`, `workflows_tests.py`, `max_turns_wrap_up_tests.py`) rather than mocking
+  `Runner`, so an SDK upgrade that changes the boundary fails a test.
+- Where the tests for the concurrency model live: `message_queue_tests.py` (also `main.py`'s
+  `on_message` / `process_messages`; importing `main.py` starts nothing), `task_registry_tests.py`,
+  `message_handler_tests.py` (scoped locks, image downloads) and `metrics_tests.py`. History:
+  `history_policy_tests.py` and `message_history_tests.py`, whose `FakeChannel` mirrors discord.py's
+  `history()` (`after=` keeps the OLDEST `limit` messages). A passing history test shows the message list
+  is stable, not that llama.cpp reuses its cache; check `llamacpp:prompt_tokens_cached_total` for that.
+  Answer cleaning and reasoning: `response_filter_tests.py`; the image cache: `attachment_cache_tests.py`.
 
 ### Manual/live testing via a Discord webhook
 
-Beyond pytest, the bot can be driven end-to-end (tool calls, sandbox runs,
-image generation) against a real, running deployment by POSTing a message
-through a Discord webhook — no real Discord account/client needed:
+The bot can be driven end to end against a running deployment by POSTing through a Discord webhook:
 
 ```bash
 curl -sS -X POST "$TEST_WEBHOOK_URL" \
@@ -839,225 +784,90 @@ curl -sS -X POST "$TEST_WEBHOOK_URL" \
   -d '{"content": "<@BOT_USER_ID> your test message here"}'
 ```
 
-- The bot only reacts to messages that pass `should_handle_message()`
-  (`core/main.py`), so the content needs a real `<@id>` mention of the
-  bot's Discord user ID — Discord parses `mentions` from that numeric ID
-  in the content itself, regardless of who/what posted the message, so a
-  plain `@botname` text string does nothing. Get the ID from Discord
-  (right-click the bot → Copy User ID).
-- `TEST_WEBHOOK_URL` (`.env`, local dev only) holds a webhook for the dev
-  server/channel this points at. It is **not read by the app** — it's a
-  standing convenience for curling test messages so it doesn't need
-  rediscovering each session.
-- Watch it process: `docker compose logs core -f` (local dev) or
-  `kubectl -n <namespace> logs deployment/<release>-core-deployment -f`
-  (a cluster deploy). `core`'s source is bind-mounted in docker-compose
-  (`./core:/app`), so `docker compose restart core` alone picks up local
-  code edits — no rebuild needed.
-- **Never** commit a webhook URL, and never point `TEST_WEBHOOK_URL` (or
-  any webhook pasted into a session) at a production channel — a webhook
-  post is indistinguishable from real user traffic once it lands.
-
-- Keeping a module **pure and importable without the discord/agents SDKs** (like
-  `response_filter.py`) is the intended pattern for anything you want to unit test —
-  `MessageHandler` itself drags in `discord`, `agents`, Redis, etc.
-- Voice calls can be tested end to end without anyone speaking: with
-  `VOICE_ENABLED=1 VOICE_DEV_INJECT=1` in `.env` (and `docker compose up -d
-  speech voice core`), POST `!voice_join <voice channel id>` and then
-  `!voice_say hey <name>, ...` through `TEST_WEBHOOK_URL`; `VOICE_DEBUG=1`
-  logs what is heard and said. Hearing itself (Discord -> sidecar -> Whisper)
-  needs real audio in the channel.
-- **CI:** `.github/workflows/tests.yaml` runs `pytest` on every push, and
-  `release.yaml` runs it again as a gate the image/chart jobs depend on
-  (releases are cut straight off a push to `main`, so this is the only place
-  the shipped commit is tested). New test files need no CI change. The bot
-  itself is run and talked to by the end-to-end job below.
-- Conventions seen in existing tests: `pytest` fixtures + `unittest.mock` to stub
-  Redis; docstring-style comments at the top of test files documenting how to run them.
+- The content needs a real `<@id>` mention of the bot's user ID (a plain `@botname` does nothing).
+- `TEST_WEBHOOK_URL` (`.env`, local dev only) is not read by the app; it is there so it need not be
+  found again each session. **Never** commit a webhook URL, and never point one at a production channel:
+  a webhook post is indistinguishable from real user traffic.
+- A webhook author is not a member, so `schedule_followup` refuses it.
+- Watch it: `docker compose logs core -f`, or `kubectl -n <namespace> logs
+  deployment/<release>-core-deployment -f`. Compose bind-mounts `./core`, so `docker compose restart
+  core` picks up code edits.
+- Voice without anyone speaking: `VOICE_ENABLED=1 VOICE_DEV_INJECT=1` (and `docker compose up -d speech
+  voice core`), then POST `!voice_join <voice channel id>` and `!voice_say hey <name>, ...`;
+  `VOICE_DEBUG=1` logs what is heard and said.
 
 ### End-to-end CI (and Dependabot auto-merge)
 
-`.github/workflows/e2e.yaml` runs on every PR that touches `core/`,
-`speechservice/`, `voicesidecar/`, `diffusionservice/` or `e2e/`. It starts
-the PR's bot from source (`e2e/start_stack.sh`) against a real LLM and its
-own CPU image service and talks to it through a webhook in a private test server
-(`e2e/run_checks.py`): chat, the memory tool, an image, a poll, slash command
-sync, the speech service, and a voice call driven by `VOICE_DEV_INJECT`. It
-checks structure (a reply arrived, a fact is in Redis, a PNG was attached),
-never wording. `e2e/README.md` lists every check and its configuration. A
-failure shows in the run's step summary, and the full logs are in its
-`e2e-logs` artifact.
+`.github/workflows/e2e.yaml` runs on every PR touching `core/`, `speechservice/`, `voicesidecar/`,
+`diffusionservice/` or `e2e/`. It starts the PR's bot from source (`e2e/start_stack.sh`) against a real
+LLM and its own CPU image service, and talks to it through a webhook in a private test server
+(`e2e/run_checks.py`). It checks structure (a reply arrived, a fact is in Redis, a PNG was attached),
+never wording. `e2e/README.md` lists every check; a failure shows in the step summary and the logs are
+in the `e2e-logs` artifact.
 
-- **Runner.** `runs-on: ubuntu-latest`: a GitHub-hosted VM per job, deleted
-  afterwards, so the PR's unreviewed dependencies never run on a machine that
-  is kept. The LLM is a hosted API (DeepSeek V4.1 Flash on OpenCode Go, named
-  in `e2e.yaml`), not prod's model. Every run starts the PR's own image
-  service on CPU with a tiny model (`E2E_LOCAL_DIFFUSION`), with the vision
-  check off. That covers the tool, core's client, imports and library skew,
-  never the CUDA/nf4 paths or prod's image model, so `diffusionservice/` PRs
-  are never auto-merged.
-- **Secrets** `E2E_DISCORD_TOKEN`, `E2E_WEBHOOK_URL` and `E2E_VOICE_CHANNEL_ID`
-  belong to a bot and a server made only for testing. `OPENCODE_API_KEY` is
-  that LLM's key and is NOT test-only: it is `review.yml`'s key too, reused
-  by the owner's choice (see the security rules below). Each run sends its own
-  `x-opencode-session` header through `LLM_EXTRA_HEADERS`, which OpenCode Go
-  requires. Each one goes in **both**
-  the Actions secrets and the Dependabot secrets: a run started by Dependabot
-  sees only the latter.
-- **Security rules.** This repo is public and the job runs a PR's new
-  dependencies before anyone has reviewed them.
-  - Keep "Require approval for all external contributors" on (Settings →
-    Actions). A fork edits its own copy of the workflow, so `runs-on:` and
-    `if:` are not a boundary.
-  - The job must stay on GitHub-hosted runners. It has sudo and Docker
-    there, which is fine only because the VM is thrown away; never move it
-    to a self-hosted machine that is kept. Everything the job can read is
-    readable by the PR's code (core, its dependencies, the services). The
-    test bot's token is made for testing only; the OpenCode key is shared
-    with `review.yml` by the owner's choice, accepting that a PR (a
-    malicious dependency bump included) could read it or spend its quota.
-    If one ever does, rotate it in both the Actions and the Dependabot
-    secrets, and consider a key used only here. The code sandbox is still
-    off in E2E.
-  - Never switch this to `pull_request_target` to reach secrets.
-  - Only one run at a time across the repository (the e2e job's
-    `concurrency` group): two bots on one token would both answer. GitHub
-    keeps one run waiting and cancels it when a third arrives; a cancelled
-    `e2e` blocks that PR until it is re-run (or Dependabot rebases it).
-- **Required checks.** Both `e2e` and `e2e-changes` are required in
-  "Protect main". `e2e` alone would not be enough: if `e2e-changes` fails, `e2e` is
-  skipped, and GitHub counts a skipped job as passing.
-- **Auto-merge** (`dependabot-auto-merge.yaml`). A Dependabot patch/minor PR is
-  approved and set to auto-merge, so it merges once the required checks,
-  `e2e` included, pass. It is an **allowlist**: patch/minor, ecosystem pip or
-  docker, directory `/core`, `/speechservice` or `/voicesidecar`, and
-  ungrouped or the `core-minor` group. Everything else waits for a person:
-  majors, `github_actions` and npm (the `voice` group) bumps, `/diffusionservice` (CPU-only in E2E), `/`
-  (docker-compose, not run by E2E), and the `openai` / `huggingface` /
-  `speech` / `voice` groups, which allow majors. A new ecosystem, directory or
-  group in `dependabot.yml` stays manual until it is added to that list.
-  Only Dependabot's own pushes are approved: a commit a maintainer pushes onto
-  a Dependabot branch is left for them. For a single-package PR, Dependabot's
-  current commit metadata has no old version, so `fetch-metadata` reports no
-  update type; the job then reads it from the title ("from 3.14.3 to
-  3.14.4"), plain numeric versions only, and otherwise leaves the PR manual.
-  - The approval and merge use `AUTOMERGE_TOKEN`, a fine-grained PAT of the
-    code owner (Contents + Pull requests write), stored as a Dependabot secret.
-    "Protect main" needs a code-owner approval, and only a user token's merge
-    fires the push that releases. It expires: mint a new one the same way as
-    `TAG_PUSH_TOKEN` (see Releasing), with **Pull requests: Read and write**
-    added. If it is missing, the job leaves the PR for a person and does not
-    fail.
-  - **That token can also create release tags**: its owner is an admin and a
-    bypass actor on "Restrict Tagging". That is why the job holding it runs
-    no third-party action and no repository code, and why bumped actions are
-    never auto-merged.
-  - Auto-merge still waits for the required checks when the token's owner is
-    an admin: checked on a scratch PR (#149) before this went live. The admin
-    bypass on "Protect main" is not used by auto-merge.
+- **Runner**: `ubuntu-latest`, a VM thrown away after each job, so a PR's unreviewed dependencies never
+  run on a machine that is kept. The LLM is a hosted API (named in `e2e.yaml`), not prod's model. The
+  image service runs on CPU with a tiny model and the vision check off, so the CUDA/nf4 paths are never
+  covered and `diffusionservice/` PRs are never auto-merged.
+- **Secrets** `E2E_DISCORD_TOKEN`, `E2E_WEBHOOK_URL` and `E2E_VOICE_CHANNEL_ID` belong to a bot and
+  server made only for testing. `OPENCODE_API_KEY` is NOT test-only: it is `review.yml`'s key too, by the
+  owner's choice. Each run sends its own `x-opencode-session` through `LLM_EXTRA_HEADERS`. Every secret
+  goes in **both** the Actions and the Dependabot secrets (a Dependabot run sees only the latter).
+- **Security rules** (the repo is public and the job runs a PR's new dependencies before review):
+  - Keep "Require approval for all external contributors" on (Settings → Actions). A fork edits its own
+    copy of the workflow, so `runs-on:` and `if:` are not a boundary.
+  - Stay on GitHub-hosted runners; the job has sudo and Docker, which is fine only because the VM is
+    thrown away. Everything the job can read, the PR's code can read.
+  - **The workspace runs on the runner's own Docker** (`e2e/start_stack.sh`: the default socket,
+    `WORKSPACE_INSTANCE=e2e`), so the brain's code really runs there, inside the thrown-away VM. Never
+    point E2E at a kept machine's Docker: a PR's code would run code on it. If the OpenCode key is ever
+    misused, rotate it in both secret stores and consider a key used only here.
+  - Never switch to `pull_request_target` to reach secrets.
+  - One run at a time across the repo (the `concurrency` group): two bots on one token would both
+    answer. A cancelled `e2e` blocks its PR until it is re-run.
+- **Required checks**: both `e2e` and `e2e-changes` in "Protect main". `e2e` alone is not enough: if
+  `e2e-changes` fails, `e2e` is skipped, and a skipped job counts as passing.
+- **Auto-merge** (`dependabot-auto-merge.yaml`) approves a Dependabot PR and sets it to merge once the
+  required checks pass. It is an **allowlist**: patch/minor, ecosystem pip or docker, directory `/core`,
+  `/speechservice` or `/voicesidecar`, and ungrouped or the `core-minor` group. Everything else waits for
+  a person (majors, `github_actions`, npm, `/diffusionservice`, `/`, and the `openai` / `huggingface` /
+  `speech` / `voice` groups). A new ecosystem, directory or group stays manual until added there. Only
+  Dependabot's own pushes are approved. When `fetch-metadata` reports no update type (single-package
+  PRs), it is read from the title, plain numeric versions only, else the PR stays manual.
+  - It uses `AUTOMERGE_TOKEN`, a fine-grained PAT of the code owner (Contents + Pull requests write) in
+    the Dependabot secrets: "Protect main" needs a code-owner approval, and only a user token's merge
+    fires the push that releases. It expires: mint it like `TAG_PUSH_TOKEN`, adding **Pull requests:
+    Read and write**. If it is missing, the job leaves the PR for a person.
+  - **That token can also create release tags** (its owner is an admin and a tag-ruleset bypass actor),
+    which is why that job runs no third-party action and no repository code, and why bumped actions are
+    never auto-merged. Auto-merge still waits for the required checks for an admin's token.
   - Merging is deploying: every merge is a release, and prod follows releases.
-- **Rebase train** (`dependabot-rebase-train.yaml`). "Protect main" merges
-  only PRs that are up to date, and Dependabot rebases only on conflicts. So
-  after each push to main (and every 3 hours, in case a nudged PR then failed
-  and nothing merged) this posts `@dependabot rebase` on the oldest auto-merge
-  PR that is behind. A PR already nudged since its last commit is skipped, so
-  one that cannot rebase does not hold up the rest. It uses the same PAT from
-  the `automerge` environment (main only). It never uses `gh pr update-branch`: that would
-  make the PAT owner the last pusher and void their approval.
-- `review.yml` skips Dependabot's PRs: E2E is their check, and an open review
-  thread would hold up auto-merge.
+- **Rebase train** (`dependabot-rebase-train.yaml`): "Protect main" merges only up-to-date PRs and
+  Dependabot rebases only on conflicts, so after each push to main (and every 3 hours) it posts
+  `@dependabot rebase` on the oldest auto-merge PR that is behind, skipping one already nudged since its
+  last commit. It never uses `gh pr update-branch`, which would void the PAT owner's approval.
+- `review.yml` skips Dependabot's PRs: E2E is their check, and an open review thread would hold up
+  auto-merge.
 
 ## Conventions & gotchas
 
-- There is ONE import name: `from classes.X import ...`, in production code and in
-  tests alike (the app runs with cwd `/app`; `pyproject.toml` puts `core/` on the
-  test path). It used to be inconsistent — tests used `core.classes.X` — and because
-  the two resolve to separate module objects with separate globals, `metrics.py` and
-  `message_queue.py` each needed a `sys.modules` aliasing hack to keep their
-  import-time state from being created twice, and the sandbox tests had to know which
-  copy to patch. Don't reintroduce the second name.
-- A reasoning model delivers its thinking in one of two shapes: out of band in
-  `reasoning_content` (llama.cpp's default — becomes a `reasoning_item` on the run
-  result), or inline as open/close think-tags with an optional tab after the
-  bracket. Both are handled in `core/classes/response_filter.py` — keep it pure
-  (stdlib only; `extract_reasoning_items` duck-types the SDK's run items rather
-  than importing them) and cover new behaviour in
-  `core/tests/response_filter_tests.py`.
-- History selection lives in `core/classes/history_policy.py` — keep it pure
-  (stdlib only). Its per-channel state is two message ids, never content:
-  every build re-reads Discord, so edits and deletes need no event handling
-  and eviction only costs a cold refresh. Cover policy changes in
-  `core/tests/history_policy_tests.py` and the Discord-side behaviour
-  (queued triggers, ordering, anchored prefixes, resets, out-of-order
-  workers) in `core/tests/message_history_tests.py`, whose `FakeChannel`
-  mirrors discord.py's `history()` semantics (`after=` keeps the OLDEST
-  `limit` messages). A passing test shows the message list is stable, not
-  that llama.cpp reuses its cache — check `llamacpp:prompt_tokens_cached_total`
-  and the server's checkpoint-restore log lines for that.
-- The attachment cache (`core/classes/attachment_cache.py`) is pure too
-  (stdlib only). It keeps only the final base64 data URL, so a cached build
-  sends exactly the bytes an uncached one would (prefix reuse depends on it).
-  Keys are ids, never the signed CDN URL, which expires. Failed or
-  undecodable downloads are never stored, so the next build retries them.
-  Cover it in `core/tests/attachment_cache_tests.py` and the download path
-  (lock not held, concurrency limit, deletion during a download) in
-  `core/tests/message_handler_tests.py`.
-- The queue worker pool, bounded-queue sizing (WORKER_COUNT / QUEUE_MAX_SIZE),
-  the per-channel locks (SCOPED to build+send — the LLM/tool phase runs
-  unlocked) and the in-flight task registry (register_task_run /
-  in_flight_hint) live in `core/classes/message_queue.py` — keep it pure
-  (stdlib only). Cover changes to the concurrency model in
-  `core/tests/message_queue_tests.py` (which also tests the `on_message` /
-  `process_messages` wiring in `main.py`, imported directly — `main.py` guards
-  `client.run()` behind `if __name__ == "__main__"` and builds its Redis client
-  lazily, so importing it starts nothing and needs no environment), the registry itself in
-  `core/tests/task_registry_tests.py`, the scoped-lock behaviour of
-  `MessageHandler.handle_message` (concurrent generations, serialized sends,
-  prompt hint) in `core/tests/message_handler_tests.py`, and the slow-tool
-  registration in `ToolMetricsHooks` in `core/tests/metrics_tests.py`.
-- Sandbox thread-message state lives in `core/classes/sandbox_thread_inbox.py`
-  — keep it pure (stdlib only) and keep every mutating function free of
-  `await`: that is what makes `claim_run` / `deliver` / `finalize` atomic on
-  the one event loop. Cover it in `core/tests/sandbox_thread_inbox_tests.py`.
-  Runner-boundary behaviour (where filter-injected messages land, the tool
-  gate, continuations) is tested against the REAL SDK Runner with
-  `agents.testing.ScriptedModel` in `core/tests/sandbox_conversation_tests.py`;
-  extend those rather than mocking `Runner`, since the point is to catch an
-  SDK upgrade that changes the boundary. The `on_message` routing into a
-  running sandbox is tested in `core/tests/message_queue_tests.py`.
-- The free OpenAI Moderations endpoint is aggressively rate-limited (HTTP 429):
-  `content_guard.py` retries 429/5xx with backoff, caches verdicts per input, and
-  fails open when it cannot get an answer. Tunables are documented at the top of
-  that module and in `.env.example`.
-- `wrap(..., break_long_words=False)` does not drop a whitespace-less run longer than
-  the chunk size - it returns it as one OVERSIZED chunk, which Discord then rejects
-  with `HTTPException`, unwinding past `handle_message()` and costing the whole reply.
-  Both send paths therefore go through `response_filter.chunk_for_discord`, which
-  hard-splits anything still over the limit. Use it rather than calling `wrap` directly.
-- llama.cpp has no pull API: the `llamacpp` container downloads the model itself on boot
-  (`LLAMA_ARG_HF_REPO` into the `LLAMA_CACHE` volume). Changing the model therefore requires
-  restarting the server (`docker compose up -d` after editing `MODEL` in `.env`; `helm upgrade`
-  in k8s) — `compose restart` alone does not re-read `.env`. On startup `main.py` verifies
-  readiness by GETting `{LLM_HOST}/v1/models` and checking the configured `MODEL` is listed
-  (`TextLLMHandler.check_model_ready`, fail-soft — a first-boot model may still be downloading).
-- The chart's LLM PersistentVolume/Claim are still named `*-pvc-ollama` / `ollama-pv-claim`
-  (hostPath `…/ollama`) on purpose, so data survives the Ollama → llama.cpp switch and keeps
-  matching on upgrade — do not rename; the llamacpp pod mounts it at `/models`, which is also
-  its `LLAMA_CACHE`, so the GGUF model (downloaded once via `--hf-repo`) persists across redeploys.
-  It is rendered whatever `llmEngine` is, so switching to Strata and back keeps that model.
-- Strata (`templates/strata.yaml`) needs three things llama.cpp does not, each verified
-  against the real image: unlimited locked memory, because it page-locks the RAM holding
-  the experts. Kubernetes has no per-pod ulimit, so the pod gets `SYS_RESOURCE` and starts
-  under `prlimit` (`strata.raiseLimits`). An API key, because it never serves without one;
-  the render fails without `strata.apiKey`/`existingSecret` rather than let it make its own,
-  which core would never see. And a clean slate on every start: it saves each start's
-  settings as the preset `docker` and reuses saved ones for anything not given, so the
-  wrapper deletes that preset first (models and tuning are kept). Its `/data` must be on an
-  SSD. In `args`, Kubernetes turns `$$` into `$`, so the wrapper avoids `$$`.
-- The diffusion pod, its PVC and the `generate_image` tool are all gated by one switch:
-  `diffusion.enabled` in the chart (→ `IMAGE_GEN_ENABLED` in the configmap). The service
-  downloads its model into the `diffusers` volume on first boot, so first start is slow
-  (the readiness probe on `/health` allows ~15 min); changing `IMAGE_MODEL` needs a pod
-  restart (same as llamacpp: `compose restart`/`helm upgrade` re-uses the cached model,
-  a new one is downloaded into the volume).
-- Never commit `.env`; copy `.env.example` and fill in locally.
+- Docker is a hard requirement (runtime item 7); there is no fallback without it.
+- `thread_inbox.py`: keep every mutating function free of `await`; that is what makes
+  `claim_run` / `deliver` / `finalize` atomic on the one event loop. `claim_run` records the
+  claiming task as the owner, so a workflow claims its thread from inside its own task.
+- The free OpenAI Moderations endpoint rate-limits hard (429): `content_guard.py` retries with backoff,
+  caches verdicts and fails open.
+- llama.cpp has no pull API: the `llamacpp` container downloads `LLM_MODEL` on boot into its cache
+  volume, so a model change needs `docker compose up -d` (not `restart`, which does not re-read `.env`)
+  or `helm upgrade`. At startup `main.py` checks the model is listed on `/v1/models` (fail-soft).
+- The chart's LLM volume is still named `*-pvc-ollama` / `ollama-pv-claim` on purpose, so the downloaded
+  model survives upgrades. **Do not rename it.** It is rendered whatever `llm.engine` is.
+- Strata (`templates/strata.yaml`) needs three things llama.cpp does not: unlimited locked memory (the
+  pod gets `SYS_RESOURCE` and starts under `prlimit`, `strata.raiseLimits`); an API key (the render fails
+  without `strata.apiKey` / `existingSecret`); and a clean start (the wrapper deletes its saved `docker`
+  preset first). Its `/data` must be on an SSD. Kubernetes turns `$$` into `$` in `args`, so the wrapper
+  avoids `$$`.
+- One switch, `diffusion.enabled` (→ `IMAGE_GEN_ENABLED`), gates the diffusion pod, its PVC and the
+  `generate_image` tool. The first start downloads the model (readiness allows ~15 minutes); changing
+  `IMAGE_MODEL` needs a pod restart.
+- Never commit `.env`; copy `.env.example` and fill it in locally.

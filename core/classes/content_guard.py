@@ -1,7 +1,11 @@
-"""Safety guard for the web_search, fetch_url and run_code_sandbox tools.
+"""Safety guard for the web_search and fetch_url tools and image generation.
 
 Blocks requests that are classified as unsafe *before* the bot touches the
-internet. Uses the free OpenAI Moderations endpoint
+internet or draws anything. Only those: the brain's own work (its workspace,
+workflows, skills) is not checked here, and its prompts tell it to refuse
+harmful jobs instead (brain_policy.SAFETY_RULE).
+
+Uses the free OpenAI Moderations endpoint
 (https://developers.openai.com/api/reference/resources/moderations); the
 response contains a ``categories`` object of detected unsafe categories and
 a URL/query is considered unsafe if *any* of them is ``true``.
@@ -11,7 +15,7 @@ The free moderation endpoint is aggressively rate-limited (HTTP 429), so:
     ``Retry-After`` header when present), up to ``CONTENT_GUARD_MAX_RETRIES``
     times, and
   * verdicts for the same input are cached in memory for
-    ``MODERATION_CACHE_TTL`` seconds so repeated lookups don't burn
+    ``CONTENT_GUARD_CACHE_TTL_SECONDS`` seconds so repeated lookups don't burn
     rate-limit budget.
 
 If the moderation call itself keeps failing, we fail OPEN (allow, and log)
@@ -19,15 +23,16 @@ so a dead endpoint doesn't break the web tools entirely; disable with
 ``CONTENT_GUARD_ENABLED=0``.
 
 Environment variables:
-    OPENAI_API_KEY             API key for the moderation call (required
+    CONTENT_GUARD_API_KEY      API key for the moderation call (required
                                unless the guard is disabled)
-    OPENAI_BASE_URL            API base, default https://api.openai.com/v1
+    CONTENT_GUARD_BASE_URL     API base, default https://api.openai.com/v1
                                (any OpenAI-compatible /v1/moderations endpoint
                                works)
-    MODERATION_MODEL           model name to send, e.g. "text-moderation-latest";
+    CONTENT_GUARD_MODEL        model name to send, e.g. "text-moderation-latest";
                                if unset the parameter is omitted and the server
                                default is used
-    MODERATION_CACHE_TTL       seconds a verdict stays cached (default 600,
+    CONTENT_GUARD_CACHE_TTL_SECONDS
+                               seconds a verdict stays cached (default 600,
                                0 disables the cache)
     CONTENT_GUARD_MAX_RETRIES  retries after initial attempt on 429/5xx
                                (default 2)
@@ -35,8 +40,8 @@ Environment variables:
                                base backoff seconds, doubled per retry
                                (default 2)
     CONTENT_GUARD_ENABLED      set to "0"/"false"/"no" to disable the guard
-    CONTENT_GUARD_DEBUG        set to "0"/"false" to silence debug logging
-                               (default: on)
+    CONTENT_GUARD_DEBUG        set to "1"/"true" for per-request debug logging
+                               (default: off)
 """
 
 import logging
@@ -51,19 +56,19 @@ _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 
 def _debug_log(*args):
-    """Guard debug logging, gated on CONTENT_GUARD_DEBUG (default: on).
+    """Guard debug logging, gated on CONTENT_GUARD_DEBUG (default: off).
 
-    The env var is a documented part of the interface (AGENTS.md, .env.example),
-    so it is kept and mapped onto this module's logger level rather than
-    removed: on -> DEBUG is emitted, off -> it is not.
+    main.py maps the same switch onto this module's logger level, so on ->
+    DEBUG is emitted, off -> it is not. Off by default since v3: per-request
+    detail is for debugging, not for every deployment's logs.
     """
     if _debug_enabled():
         logger.debug(' '.join(str(a) for a in args))
 
 
 def _debug_enabled() -> bool:
-    return os.environ.get("CONTENT_GUARD_DEBUG", "1").strip().lower() not in (
-        "0", "false", "no", "off")
+    return os.environ.get("CONTENT_GUARD_DEBUG", "").strip().lower() in (
+        "1", "true", "yes", "on")
 
 
 def _env_float(name: str, default: float) -> float:
@@ -120,7 +125,7 @@ def _cache_lookup(text: str) -> bool | None:
 
 
 def _cache_store(text: str, verdict: bool):
-    ttl = _env_float("MODERATION_CACHE_TTL", 600.0)
+    ttl = _env_float("CONTENT_GUARD_CACHE_TTL_SECONDS", 600.0)
     if ttl <= 0:
         return
     if len(_verdict_cache) > 1000:  # crude bound: drop everything
@@ -167,14 +172,14 @@ async def moderate_with_openai(text: str) -> bool:
     if cached is not None:
         return cached
 
-    base_url = os.environ.get("OPENAI_BASE_URL", _DEFAULT_BASE_URL).rstrip("/")
-    api_key = os.environ.get("OPENAI_API_KEY", "")
+    base_url = os.environ.get("CONTENT_GUARD_BASE_URL", _DEFAULT_BASE_URL).rstrip("/")
+    api_key = os.environ.get("CONTENT_GUARD_API_KEY", "")
 
     if not api_key:
-        logger.warning("Content guard: OPENAI_API_KEY is not set; failing open.")
+        logger.warning("Content guard: CONTENT_GUARD_API_KEY is not set; failing open.")
         return True
 
-    model = os.environ.get("MODERATION_MODEL", "").strip()
+    model = os.environ.get("CONTENT_GUARD_MODEL", "").strip()
     _debug_log(
         f"moderating request (host={base_url}, model={model or 'server default'}): "
         f"{text[:200]!r}"
@@ -246,7 +251,8 @@ def guard_disabled() -> bool:
 
 
 async def check_web_request(text: str) -> tuple[bool, str]:
-    """Run the guard on a web_search query or fetch_url target.
+    """Run the guard on a web_search query, a fetch_url target or an image
+    description.
 
     Returns (allowed, reason). If blocked, reason explains why (safe to
     show to the user); if allowed, reason is "".

@@ -29,7 +29,6 @@ class Captured(Exception):
 @pytest.fixture
 def captured(monkeypatch):
     monkeypatch.setenv("VOICE_ENABLED", "1")
-    monkeypatch.setenv("SANDBOX_ENABLED", "0")
     monkeypatch.setenv("IMAGE_GEN_ENABLED", "0")
     calls = []
     client = AsyncOpenAI(base_url="http://llm.invalid/v1", api_key="x")
@@ -81,7 +80,7 @@ async def test_voice_turns_ask_for_no_thinking(captured):
     with pytest.raises(Captured):
         await _handler().prefill()
     request = captured[0]
-    assert request["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+    assert request["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}, "reasoning": {"enabled": False}}
     # Not sent at all (the client's omit marker), rather than "low".
     assert not isinstance(request.get("reasoning_effort"), str)
     system = request["messages"][0]["content"]
@@ -98,12 +97,13 @@ async def test_voice_thinking_can_be_turned_back_on(captured, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_voice_tools_leave_rather_than_join(captured):
+async def test_a_voice_turn_has_only_ask_brain(captured):
+    # The persona's one tool; leaving the call is a brain tool now
+    # (brain_tools_tests checks a voice call's brain leaves, not joins).
     with pytest.raises(Captured):
         await _handler().prefill()
     names = {tool["function"]["name"] for tool in captured[0]["tools"]}
-    assert "leave_voice_channel" in names and "join_voice_channel" not in names
-    assert "web_search" in names and "store_memory" in names
+    assert names == {"ask_brain"}
 
 
 @pytest.mark.asyncio
@@ -125,6 +125,6 @@ async def test_a_failed_retry_leaves_thinking_off(captured, monkeypatch):
         assert await _handler(request_text="hi").generate_streamed(
             AsyncMock(), AsyncMock(), AsyncMock()) == "Error"
     assert len(sent) == 2
-    assert sent[0]["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+    assert sent[0]["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}, "reasoning": {"enabled": False}}
     assert not sent[1].get("extra_body")
     assert text_llm_handler._voice_latch["send_no_thinking"] is True

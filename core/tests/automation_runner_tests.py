@@ -44,6 +44,54 @@ async def test_full_queue_does_not_claim_rule(monkeypatch):
     assert not await automation_runner.match_message(message(), queue)
 
 
+async def _run_with_handler(monkeypatch, reply, workflow_url):
+    sent = []
+    row = dict(id="r1", guild_id=1, channel_id=4, status="enabled", revision=1,
+               editor_id=8, kind="rule", action="find answer")
+
+    class Store:
+        async def get(self, guild, ident): return row
+        async def finish(self, record, outcome, detail="", started_at=None): pass
+        async def release(self, claim): pass
+
+    class Typing:
+        async def __aenter__(self): pass
+        async def __aexit__(self, *exc): pass
+
+    class Channel:
+        id = 4
+        def permissions_for(self, member):
+            return SimpleNamespace(view_channel=True, send_messages=True)
+        def typing(self): return Typing()
+        async def send(self, text): sent.append(text)
+
+    class Handler:
+        def __init__(self, *args, **kw):
+            self.reasoning = ""
+            self.workflow_url = workflow_url
+        async def generate(self): return reply
+
+    channel = Channel()
+    guild = SimpleNamespace(get_member=lambda user_id: SimpleNamespace(id=8))
+    client = SimpleNamespace(get_channel=lambda channel_id: channel,
+                             get_guild=lambda guild_id: guild, user=SimpleNamespace(id=42))
+    monkeypatch.setattr(automation_runner, "AutomationStore", Store)
+    monkeypatch.setattr(automation_runner, "TextLLMHandler", Handler)
+    trigger = message()
+    trigger.author.display_name = "Alice"
+    job = automation_runner.AutomationJob([row], [("key", "busy", "token")], trigger, 0)
+    await automation_runner.execute(job, client)
+    return sent
+
+
+
+@pytest.mark.asyncio
+async def test_a_link_the_reply_already_has_is_not_repeated(monkeypatch):
+    sent = await _run_with_handler(monkeypatch, "See https://example.com/thread",
+                                   "https://example.com/thread")
+    assert sent == ["See https://example.com/thread"]
+
+
 @pytest.mark.asyncio
 async def test_automatic_run_uses_saved_action_and_origin_channel(monkeypatch):
     sent = []
@@ -134,49 +182,6 @@ async def test_only_a_followup_run_is_marked_as_one(monkeypatch, followup):
     job = automation_runner.AutomationJob([row], [("key", "busy", "token")], None, 0)
     await automation_runner.execute(job, client)
     assert args[0]["followup"] is followup
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("thread_id, expected", [(9, ["chart.png"]), (4, [])])
-async def test_sandbox_files_go_with_the_link_unless_the_run_was_here(monkeypatch, thread_id, expected):
-    # Thread 9: the files are only in the thread, so the channel gets them
-    # with the link. "Thread" 4 is the channel itself (no thread could be
-    # made): the run already sent them here, so they are not sent again.
-    row = dict(id="s1", guild_id=1, channel_id=4, status="enabled", revision=1, editor_id=8,
-               kind="schedule", action="make a chart", next_run=1.0, timezone="Europe/London",
-               creator_id=8, created_at="2026-10-31T12:00:00+00:00")
-    class Redis:
-        async def set(self, *a, **kw): return True
-    class Store:
-        redis = Redis()
-        async def get(self, guild, ident): return row
-        async def finish(self, record, outcome, detail="", started_at=None): pass
-        async def release(self, claim): pass
-    class Typing:
-        async def __aenter__(self): pass
-        async def __aexit__(self, *exc): pass
-    files_sent = []
-    class Channel:
-        id = 4
-        def permissions_for(self, member):
-            return SimpleNamespace(view_channel=True, send_messages=True)
-        def typing(self): return Typing()
-        async def send(self, content=None, files=None, **kw):
-            files_sent.extend(f.filename for f in files or [])
-    guild = SimpleNamespace(get_member=lambda user_id: SimpleNamespace(id=8))
-    client = SimpleNamespace(get_channel=lambda channel_id: Channel(),
-                             get_guild=lambda guild_id: guild, user=SimpleNamespace(id=42))
-    class Handler:
-        def __init__(self, messages, guild_id, original_message, **kw):
-            self.reasoning = ""
-            self.sandbox_thread = SimpleNamespace(id=thread_id, mention=f"<#{thread_id}>")
-            self.sandbox_files = [("chart.png", b"png")]
-        async def generate(self): return "Done"
-    monkeypatch.setattr(automation_runner, "AutomationStore", Store)
-    monkeypatch.setattr(automation_runner, "TextLLMHandler", Handler)
-    job = automation_runner.AutomationJob([row], [("key", "busy", "token")], None, 0)
-    await automation_runner.execute(job, client)
-    assert files_sent == expected
 
 
 @pytest.mark.asyncio

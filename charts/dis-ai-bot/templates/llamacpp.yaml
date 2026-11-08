@@ -63,12 +63,12 @@ spec:
           value: {{ .Values.llamacpp.modelPath | quote }}
         - name: LLAMA_ARG_ALIAS
           # Served name in /v1/models. Without it llama.cpp names the model
-          # after the file, which would not match core's MODEL.
-          value: "{{ .Values.model }}"
+          # after the file, which would not match core's LLM_MODEL.
+          value: "{{ .Values.llm.model }}"
         {{- else }}
         - name: LLAMA_ARG_HF_REPO
-          # == .Values.model: the one model value shared with core's MODEL
-          value: "{{ .Values.model }}"
+          # == llm.model: the one model value shared with core's LLM_MODEL
+          value: "{{ .Values.llm.model }}"
         {{- end }}
         {{- if or .Values.llamacpp.hfToken .Values.llamacpp.existingSecret }}
         - name: HF_TOKEN
@@ -85,10 +85,15 @@ spec:
           value: {{ .Values.llamacpp.cacheTypeK | quote }}
         - name: LLAMA_ARG_CACHE_TYPE_V
           value: {{ .Values.llamacpp.cacheTypeV | quote }}
+        {{- with include "dcb.cacheRamMiB" . }}
+        - name: LLAMA_ARG_CACHE_RAM
+          value: {{ . | quote }}
+        {{- end }}
         - name: LLAMA_ARG_CTX_CHECKPOINTS
           value: {{ .Values.llamacpp.ctxCheckpoints | quote }}
         - name: LLAMA_ARG_CTX_SIZE
-          value: {{ .Values.llamacppContextLength | quote }}
+          # Total context: llama.cpp splits it across the slots
+          value: {{ mul (include "dcb.wholeNumber" (list "llamacpp.contextPerSlot" .Values.llamacpp.contextPerSlot) | int64) (include "dcb.wholeNumber" (list "llamacpp.parallel" .Values.llamacpp.parallel) | int64) | toString | quote }}
         - name: LLAMA_ARG_PORT
           value: {{ .Values.llamacpp.port | quote }}
         - name: LLAMA_ARG_N_PARALLEL

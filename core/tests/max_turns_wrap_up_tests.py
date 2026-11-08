@@ -1,7 +1,7 @@
 """A reply that runs out of turns is answered with a wrap-up, not a ❌.
 
 Run against the REAL SDK Runner with agents.testing.ScriptedModel, like
-sandbox_conversation_tests.py: the point is to catch an SDK upgrade that
+workflows_tests.py: the point is to catch an SDK upgrade that
 changes how the max_turns handler is called or what it is given.
 
 Run: pytest core/tests/max_turns_wrap_up_tests.py
@@ -46,7 +46,7 @@ def _looks(n):
 
 async def _generate(handler, max_turns=2):
     with patch("classes.text_llm_handler.get_current_datetime", AsyncMock(return_value="now")), \
-         patch("classes.text_llm_handler.llm_max_turns", return_value=max_turns), \
+         patch("classes.text_llm_handler.persona_max_turns", return_value=max_turns), \
          patch("classes.text_llm_handler.inc_llm_error", MagicMock()) as errors:
         answer = await handler.generate()
     return answer, errors

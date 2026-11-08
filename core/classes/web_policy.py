@@ -136,7 +136,7 @@ def normalize_url(url: str) -> str | None:
     if port and not ((scheme == "http" and port == 80) or (scheme == "https" and port == 443)):
         netloc += f":{port}"
     # Brackets come back percent-encoded from the bot's own "Reading a page"
-    # embed (tool_embeds.page_link encodes them, or Discord shows the link as
+    # card (tool_cards.link_target encodes them, or Discord shows the link as
     # raw text), and the model re-reads links from there. Decoded, so both
     # spellings are one page and one cache entry.
     path = re.sub("%29", ")", re.sub("%28", "(", parts.path or "/", flags=re.I), flags=re.I)

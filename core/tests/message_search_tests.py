@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import pytest
 
-from classes import message_search_format as msf
+from classes import card_kit as K, message_search_format as msf
 
 GUILD_ID = 100000000000000001
 GENERAL_ID = 200000000000000002
@@ -83,6 +83,17 @@ def test_format_unknown_channel_and_member_nick():
     assert "- Ali," in text and "in <#999>:" in text and "newest first" in text
 
 
+CARD = [{"type": 17, "components": [{"type": 10, "content": "### 🧵 Plan\nChart the cities"},
+                                    {"type": 1, "components": [{"type": 2, "label": "Approve"}]}]}]
+
+
+def test_a_cards_text_is_shown_and_saved():
+    card = _hit(1, content="", components=CARD)
+    text = msf.format_results(_body(card), GUILD_ID, {}, "x")
+    assert "Chart the cities" in text and "(no text)" not in text and "Approve" not in text
+    assert msf.export_record(card, GUILD_ID, {})["content"] == "### 🧵 Plan\nChart the cities"
+
+
 def test_an_embeds_body_and_fields_are_shown():
     # A game-tracker bot's message is nothing but an embed; the title alone
     # says nothing about what happened.
@@ -143,9 +154,12 @@ async def _search(context, **arguments):
 
 
 @pytest.fixture(autouse=True)
-def no_embeds(monkeypatch):
-    from classes.common import Common
-    monkeypatch.setattr(Common, "send_tool_discord_embed", AsyncMock())
+def no_cards(monkeypatch):
+    """The notice a tool posts: its card, whose show_soon a failure calls."""
+    from classes import card
+    live = MagicMock()
+    monkeypatch.setattr(card, "notice", AsyncMock(return_value=live))
+    return live
 
 
 @pytest.mark.asyncio
@@ -211,9 +225,12 @@ async def test_nsfw_follows_the_channel_asked_in():
 
 
 @pytest.mark.asyncio
-async def test_not_indexed_yet():
+async def test_not_indexed_yet(no_cards):
     context, _ = _env(body={"message": "Index not yet available. Try again later", "code": 110000})
     assert (await _search(context, query="x")) == msf.NOT_INDEXED_TEXT
+    # Its card does not keep saying it is searching.
+    closed = no_cards.show_soon.call_args.args[0]
+    assert closed.footer == "It didn't work" and closed.colour == K.CLOSED
 
 
 @pytest.mark.asyncio
@@ -228,7 +245,7 @@ async def test_discord_errors():
 
 @pytest.mark.asyncio
 async def test_searches_per_reply_are_not_capped():
-    # A sandbox task that tallies a bot's posts needs many searches; the
+    # A brain call that tallies a bot's posts needs many searches; the
     # agent's turn limit is what bounds a loop.
     context, http = _env()
     for _ in range(10):
@@ -432,7 +449,7 @@ async def test_reads_are_not_capped_and_need_a_server():
                                                    message=_link(20)))
 
 
-# --- saving messages to a file (sandbox runs) -----------------------------
+# --- saving messages to a file (brain calls) -------------------------------
 
 TRACKER_EMBED = {"author": {"name": "Team Ana"}, "title": "Shared Chest",
                  "description": "Team Ana withdrew:\n- 20 x Iron bar (4K)",
@@ -559,7 +576,7 @@ async def test_saving_stops_at_max_and_skips_repeats():
 @pytest.mark.asyncio
 async def test_saving_only_in_the_sandbox_and_failures():
     context, http = _env()
-    assert "only works inside the code sandbox" in (await _save(context, query="x"))
+    assert "needs the workspace" in (await _save(context, query="x"))
     http.request.assert_not_called()
     context["session"] = _FakeSession()
     http.request = AsyncMock(return_value=_body())
@@ -587,8 +604,19 @@ async def test_a_big_search_in_the_sandbox_points_at_saving():
     assert "To work with all 500 of them" in (await _search(context, query="x"))
 
 
-def test_only_the_sandbox_gets_the_save_tool():
-    from classes import sandbox_agent, tool_functions
-    assert "save_messages_to_file" not in {t.name for t in tool_functions.shared_tools()}
-    names = {t.name for t in sandbox_agent.build_sandbox_agent(None).tools}
+def test_the_brain_gets_the_save_tool_and_the_persona_does_not():
+    from classes.brain_tools import brain_tools
+    from classes.text_llm_handler import persona_tools
+    assert "save_messages_to_file" not in {t.name for t in persona_tools()}
+    names = {t.name for t in brain_tools()}
     assert {"save_messages_to_file", "read_messages_around", "search_messages"} <= names
+
+
+def test_a_cards_files_are_named_and_saved():
+    from card_checks import FILE_CARD
+    card = _hit(1, content="", components=FILE_CARD)
+    text = msf.format_results(_body(card), GUILD_ID, {}, "x")
+    assert "[attached: generated-image.png]" in text and "[attached: saturn_notes.md]" in text
+    assert "linked.png" not in text
+    assert msf.export_record(card, GUILD_ID, {})["attachments"] == [
+        "generated-image.png", "saturn_notes.md"]

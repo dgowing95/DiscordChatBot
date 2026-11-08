@@ -9,6 +9,7 @@ FLUX.2 [klein] reads plain sentences) and "edits" (whether it takes a reference
 image). service_capabilities() reads that.
 
 create_image() then:
+  0. runs the content guard on the description (ImageBlocked when it says no);
   1. builds the prompt (the rewrite only for "sdxl");
   2. generates;
   3. looks at the result (image_review.py) -- what it shows, what is missing;
@@ -36,7 +37,7 @@ GENERATION_TIMEOUT = int(os.environ.get("IMAGE_GEN_TIMEOUT", 300))
 CAPABILITIES_TTL_SECONDS = 300
 HEALTH_TIMEOUT_SECONDS = 10
 # What every generated image is posted as, and so how an image the bot made
-# can be told apart from the other images it posts (sandbox artifacts, charts),
+# can be told apart from the other images it posts (workspace files, charts),
 # which are not offered for editing.
 GENERATED_IMAGE_FILENAME = "generated-image.png"
 # How many of the channel's newest messages to look through for the picture to
@@ -47,10 +48,13 @@ EDIT_LOOKBACK_MESSAGES = 20
 # subject the image model could not draw (5 calls, 10 generations, ~5.5 min,
 # seen live). Three still allows "draw three versions".
 MAX_IMAGE_CALLS = 3
-TOO_MANY_IMAGES_TEXT = (
-    f"The limit of {MAX_IMAGE_CALLS} picture requests for this reply has been reached, "
-    "so no more can be made now. Tell the user what has already been made, and offer "
-    "to try again if they want.")
+
+
+def too_many_images_text(cap: int = MAX_IMAGE_CALLS, scope: str = "reply") -> str:
+    """What generate_image says past its cap (a workflow has a higher one)."""
+    return (f"The limit of {cap} picture requests for this {scope} has been reached, "
+            "so no more can be made now. Tell the user what has already been made, and offer "
+            "to try again if they want.")
 
 
 def image_generation_enabled() -> bool:
@@ -160,6 +164,10 @@ async def generate_image_from_api(prompt: str, negative_prompt: str = "",
 
 # ---------------------- make, look, maybe once more ----------------------
 
+class ImageBlocked(Exception):
+    """The content guard refused the description: nothing was made."""
+
+
 @dataclass(frozen=True)
 class ImageResult:
     png: bytes
@@ -186,9 +194,15 @@ async def create_image(description: str, user_request: str = "", reference: byte
     is awaited with the first prompt just before generating, so the caller can
     show it while the image is made.
 
-    Raises only when the FIRST generation fails; a failed retry posts the
+    Raises ImageBlocked when the content guard refuses the description, and
+    otherwise only when the FIRST generation fails; a failed retry posts the
     first attempt instead.
     """
+    from classes.content_guard import check_web_request
+    allowed, reason = await check_web_request(description)
+    if not allowed:
+        logger.warning(f"Image generation blocked by content guard: {reason}")
+        raise ImageBlocked(reason)
     capabilities = await service_capabilities()
     is_edit = reference is not None
     best = None
@@ -259,7 +273,8 @@ def generated_attachment(message, bot_id):
         return None
     if getattr(getattr(message, "author", None), "id", None) != bot_id:
         return None
-    for attachment in getattr(message, "attachments", None) or []:
+    from classes.card import files_of  # the picture is inside its card, in no attachments
+    for attachment in files_of(message):
         if getattr(attachment, "filename", None) == GENERATED_IMAGE_FILENAME:
             return attachment
     return None
@@ -271,7 +286,7 @@ def pick_edit_source(replied_to, recent, bot_id):
 
     Only images the bot generated qualify. Never an uploaded photo -- that
     would make "make him fatter" work on a photo of a real person -- and never
-    the bot's other images (sandbox output, charts)."""
+    the bot's other images (workspace files, charts)."""
     found = generated_attachment(replied_to, bot_id)
     if found is not None:
         return found
