@@ -1,16 +1,16 @@
-"""The brain's status embed ("🧠 Working on it") and its live progress.
+"""The brain's status card ("🧠 Working on it") and its live progress.
 
 Posted ONLY when the brain uses the server's workspace: its first shell
 command, file attachment or message export (D18). A brain call that only
-searches, saves a memory or posts a poll shows just that tool's own embed, as
-before; a status embed on top of a poll would be noise. So nothing is sent
+searches, saves a memory or posts a poll shows just that tool's own card, as
+before; a status card on top of a poll would be noise. So nothing is sent
 until the first workspace action (BrainProgressHooks.on_tool_start).
 
 Two forms, chosen per server with /workspace progress:
-  - off (the default): one static embed (title + the request), retitled
+  - off (the default): the card with the request (and its notes), relabelled
     when the call ends ("🧠 Done" / "🧠 Stopped").
-  - on: the same embed with every exec_command and its output streamed in,
-    one field per command, edited in place.
+  - on: the same card with every exec_command and its output streamed in,
+    a gap between each, edited in place.
 
 How it hooks in:
   The OpenAI Agents SDK fires on_tool_start / on_tool_end for every
@@ -23,25 +23,24 @@ How it hooks in:
 
 Discord rate limits:
   Sends are limited to 5 messages/5s per channel and EDITS to 5/minute per
-  channel, so after the first message progress is ONE message edited at most
-  every EDIT_INTERVAL seconds (15s, so at most 4 edits a minute), plus one
-  final flush when the call ends. Every network failure is swallowed (progress
+  channel, so after the first message progress is edited at most every
+  EDIT_INTERVAL seconds (15s, so at most 4 edits a minute), plus one final
+  flush when the call ends. Every network failure is swallowed (progress
   must never break the brain's run) with a backoff before the next attempt; a
   deleted message falls back to a fresh send.
 
 Rendering (streamed form):
-  One-line commands are the field NAME (bold, "$ cmd"); heredocs and long
-  commands use the name "⌨ Command" and carry their text in the value.
-  Output goes in a code fence followed by an "exit N" / "… still running"
-  status line. The accent colour is the overall state: teal (idle), yellow
-  (latest command still running), red (latest command failed). When the
-  queue outgrows Discord's embed budget (25 fields / 6000 characters) the
-  OLDEST fields are dropped first.
+  Each command in a ```sh block, its output (the newest OUTPUT_CHARS of it:
+  a live log) in a plain block, then a small status line (✅ / ❌ exit N /
+  ⏳ running). Nothing is dropped: when the commands outgrow one message the
+  card goes on in more (card.LiveCard), and while the call runs only its last
+  message is edited (EDIT_LAST), so the edit rate holds; the finish updates
+  them all.
 
 The pure parts (WorkTranscript, parse_exec_result) are unit-tested in
 core/tests/brain_progress_tests.py.
 
-A workflow's scouts and researchers have their own, smaller embed
+A workflow's scouts and researchers have their own, smaller card
 (HelperProgress): one each, posted when they start, showing only the last thing
 they did. Their tools post nothing (common.QuietChannel). Two can run in one
 thread, so each edits at most every HELPER_EDIT_SECONDS, which keeps the pair
@@ -51,15 +50,16 @@ import logging
 import json
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-import discord
 from agents import RunHooks
 
-from classes.tool_embeds import (
-    BRAIN_DONE, BRAIN_NOT_FINISHED, BRAIN_STOPPED, BRAIN_WORKING, COLOR_BRAIN, COLOR_DONE,
-    COLOR_STOPPED,
-    HELPER_TITLE_CHARS, helper_ending, helper_line, trim, work_task_text,
+from classes import card_kit as K
+from classes.card import LiveCard
+from classes.card_kit import CardSpec, Divider, Text
+from classes.tool_cards import (
+    BRAIN_DONE, BRAIN_NOT_FINISHED, BRAIN_STOPPED, BRAIN_WORKING,
+    helper_ending, helper_line, work_task_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -67,23 +67,11 @@ logger = logging.getLogger(__name__)
 EDIT_INTERVAL_SECONDS = 15.0  # Discord allows 5 edits/minute per channel
 HELPER_EDIT_SECONDS = 30.0    # two helpers share a thread's edits
 BACKOFF_SECONDS = 25.0        # wait before retrying after a failed update
-MAX_BODY_CHARS = 1850         # keeps the message body under Discord's 2000
-MAX_NOTES = 5                 # status notes kept for the body
-NOTE_CHARS = 200              # per-note cap
-
-# Embed limits (Discord hard caps: 25 fields per embed, 256-char field
-# names, 1024-char field values, 6000 chars of embed text in total).
-FIELD_NAME_CHARS = 200        # one-line commands that fit in a field NAME
-FIELD_VALUE_CHARS = 1024
-FIELD_CMD_CHARS = 400         # heredoc command text kept in the value
-MAX_FIELDS = 25
-EMBED_CHAR_BUDGET = 5800      # stay a bit under the 6000 hard cap
-DESCRIPTION_CHARS = 1000      # the task in the embed description (the model reads it back from history)
-
-# Accent colours: the single embed's state.
-COLOR_TOOL = COLOR_BRAIN      # teal — idle/initial, like the static embed
-COLOR_RUNNING = 0xFEE75C      # yellow — latest command still running
-COLOR_FAIL = COLOR_STOPPED    # red — latest command exited non-zero
+MAX_NOTES = 5                 # status notes kept
+NOTE_CHARS = 300              # per-note cap
+CMD_CHARS = 1500              # a command's text shown (a heredoc can be long)
+OUTPUT_CHARS = 1500           # the newest output of a command (a live log)
+PROGRESS_HINT = "live progress is on (/workspace progress)"
 
 _EXIT_RE = re.compile(r"Process exited with code (-?\d+)")
 _RUNNING_RE = re.compile(r"Process running with session ID (\d+)")
@@ -134,26 +122,6 @@ def _tool_args(context) -> dict:
 
 
 @dataclass
-class FieldSpec:
-    """One Discord embed field, without the discord library (pure)."""
-    name: str
-    value: str
-
-
-@dataclass
-class EmbedSpec:
-    """One Discord embed, described without the discord library (pure).
-
-    BrainProgressHooks turns this into a discord.Embed.
-    """
-    title: str
-    color: int
-    description: str | None = None
-    fields: list[FieldSpec] = field(default_factory=list)
-    footer: str | None = None
-
-
-@dataclass
 class _Block:
     """One command the brain ran, plus everything that came back."""
     cmd: str
@@ -161,12 +129,11 @@ class _Block:
     output: str = ""
     exit_code: int | None = None
     process_id: int | None = None
-    # Refused by the conversation gate: it never ran, so it must not sit in
-    # the embed looking like a command still running.
 
 
 def _fence(text: str, lang: str = "") -> str:
-    return f"```{lang}\n{text}\n```"
+    # A ``` inside would end the block early.
+    return f"```{lang}\n{text.replace('```', 'ˋˋˋ')}\n```"
 
 
 def _tail(text: str, cap: int) -> str:
@@ -183,25 +150,26 @@ def _head(text: str, cap: int) -> str:
     return text[: cap - 2] + "… "
 
 
-class WorkTranscript:
-    """The rolling queue of command/output blocks behind the live message.
+def _took(seconds: float) -> str:
+    minutes = round(seconds / 60)
+    return f"{max(1, round(seconds))} s" if minutes < 1 else f"{minutes} min"
 
-    Pure (no Discord/SDK interaction): append events, render the tail.
-    render_message() returns (body, EmbedSpec): the body (status notes /
-    thinking line) always fits Discord's 2000-char message limit and the
-    single embed always fits its 25-field / 6000-char budget — when the
-    queue is bigger, the OLDEST fields are dropped.
+
+class WorkTranscript:
+    """The commands and notes behind the live card.
+
+    Pure (no Discord/SDK interaction): append events, render a CardSpec.
     """
 
-    def __init__(self, task: str, *, title: str = BRAIN_WORKING, files=(),
-                 footer: str | None = None):
-        self._task = " ".join((task or "").split())
-        # The title (working / done / stopped), the chat files given to the
-        # call, and an optional footer: the same as the static embed.
+    def __init__(self, task: str, *, label: str = BRAIN_WORKING, title: str = "", files=(),
+                 started: float | None = None, hint: str = ""):
+        self._task = (task or "").strip()
+        self._label = label
         self._title = title
-        self._final_color: int | None = None
+        self._final: tuple | None = None  # (label, colour, seconds taken)
         self._files = list(files or ())
-        self._footer = footer
+        self._started = started
+        self._hint = hint
         self._blocks: list[_Block] = []
         self._notes: list[str] = []
         self._thinking = False
@@ -216,10 +184,7 @@ class WorkTranscript:
         del self._notes[:-MAX_NOTES]
 
     def add_command(self, cmd: str) -> _Block:
-        cmd = (cmd or "").strip("\n")
-        if len(cmd) > FIELD_CMD_CHARS:
-            cmd = _head(cmd, FIELD_CMD_CHARS)
-        block = _Block(cmd=cmd)
+        block = _Block(cmd=_head((cmd or "").strip("\n"), CMD_CHARS))
         self._blocks.append(block)
         return block
 
@@ -233,9 +198,7 @@ class WorkTranscript:
         if not chars:
             return
         block = self._current_block()
-        block.stdin = f"{block.stdin}\n{chars}".strip("\n")
-        if len(block.stdin) > FIELD_CMD_CHARS:
-            block.stdin = _head(block.stdin, FIELD_CMD_CHARS)
+        block.stdin = _head(f"{block.stdin}\n{chars}".strip("\n"), CMD_CHARS)
 
     def add_output(self, output: str, exit_code: int | None = None,
                    process_id: int | None = None, block: _Block | None = None) -> None:
@@ -247,157 +210,117 @@ class WorkTranscript:
             return
         block = block if block is not None else self._current_block()
         if out:
-            block.output = f"{block.output}\n{out}".strip("\n")
-            # the per-field value budget is enforced at render time; keep
-            # the raw tail bounded here as well
-            if len(block.output) > FIELD_VALUE_CHARS * 2:
-                block.output = _tail(block.output, FIELD_VALUE_CHARS * 2)
+            block.output = _tail(f"{block.output}\n{out}".strip("\n"), OUTPUT_CHARS * 2)
         block.exit_code = exit_code
         block.process_id = process_id
 
     def set_thinking(self, thinking: bool) -> None:
         self._thinking = bool(thinking)
 
-    def set_final(self, title: str, color: int) -> None:
-        """The call is over: its closing title and colour."""
-        self._title = title
-        self._final_color = color
+    def set_final(self, label: str, colour: int, seconds: float | None = None) -> None:
+        """The call is over: its closing label and colour."""
+        self._final = (label, colour, seconds)
 
     # -- render -----------------------------------------------------------
 
-    def render_message(self) -> tuple[str, EmbedSpec]:
-        return self._render_body(), self._render_embed()
-
-    def _render_body(self) -> str:
-        lines = list(self._notes[-3:])
-        if self._thinking:
-            lines.append("💭 model thinking…")
-        body = "\n".join(lines)
-        # notes are capped, so this normally never triggers
-        if len(body) > MAX_BODY_CHARS:
-            body = body[: MAX_BODY_CHARS - 1] + "…"
-        return body
-
-    def _state_color(self) -> int:
-        if self._final_color is not None:
-            return self._final_color
-        if self._blocks:
-            last = self._blocks[-1]
-            if last.exit_code is None:
-                return COLOR_RUNNING
-            if last.exit_code != 0:
-                return COLOR_FAIL
-        return COLOR_TOOL
-
-    def _status_line(self, block: _Block) -> str:
+    @staticmethod
+    def _status_line(block: _Block) -> str:
         if block.exit_code is not None:
-            if block.exit_code == 0:
-                return "exit 0"
-            return f"**exit {block.exit_code}**"
+            return "-# ✅ Finished" if block.exit_code == 0 else f"-# ❌ Failed · exit {block.exit_code}"
         if block.process_id is not None or block.output:
-            return "… still running"
-        return ""
+            return "-# ⏳ Running…"
+        return "-# ⏳ Starting…"
 
-    def _field_for_block(self, block: _Block) -> FieldSpec | None:
+    def _block_text(self, block: _Block) -> str | None:
         if (not block.cmd and not block.stdin and not block.output
                 and block.exit_code is None and block.process_id is None):
             return None
-        one_line = (bool(block.cmd) and not block.stdin
-                    and "\n" not in block.cmd
-                    and len(block.cmd) <= FIELD_NAME_CHARS)
-        if one_line:
-            name = f"$ {block.cmd}"
-            parts: list[str] = []
-        elif block.cmd:
-            name = "⌨ Command"
-            parts = [_fence(_head(block.cmd, FIELD_CMD_CHARS), "sh")]
-        else:
-            name = "⌨ stdin"
-            parts = []
+        parts = []
+        if block.cmd:
+            parts.append(_fence(block.cmd, "sh"))
         if block.stdin:
-            parts.append(_fence(_head(block.stdin, FIELD_CMD_CHARS), "sh"))
-        status = self._status_line(block)
+            parts.append("-# ⌨ typed in\n" + _fence(block.stdin, "sh"))
         if block.output:
-            # the output fence gets whatever of the 1024-char field budget
-            # the command/stdin/status parts do not use (tail kept)
-            used = sum(len(p) for p in parts) + len(status)
-            separators = 2 * (len(parts) + 1)  # "\n\n" between parts
-            room = FIELD_VALUE_CHARS - used - separators - 5  # 5 = fence
-            parts.append(_fence(_tail(block.output, max(room, 40))))
-        if status:
-            parts.append(status)
-        value = "\n\n".join(parts)
-        # defensive: the caps above should already keep this under 1024
-        return FieldSpec(name[:256], _tail(value, FIELD_VALUE_CHARS))
+            parts.append(_fence(_tail(block.output, OUTPUT_CHARS)))
+        parts.append(self._status_line(block))
+        return "\n".join(parts)
 
-    def _render_embed(self) -> EmbedSpec:
-        title = self._title
-        description = work_task_text(self._task, self._files, DESCRIPTION_CHARS)
-        # newest first: keep whole fields while they fit Discord's embed
-        # budget; older fields are evicted as a unit so a command never
-        # ends up separated from its output
-        fields: list[FieldSpec] = []
-        total = len(title) + len(description) + len(self._footer or "")
-        for block in reversed(self._blocks):
-            f = self._field_for_block(block)
-            if f is None:
-                continue
-            cost = len(f.name) + len(f.value)
-            if len(fields) >= MAX_FIELDS or total + cost > EMBED_CHAR_BUDGET:
-                break
-            fields.append(f)
-            total += cost
-        fields.reverse()
-        return EmbedSpec(title, self._state_color(), description, fields, self._footer)
+    def _head_label(self) -> str:
+        if self._final is not None:
+            label, _colour, seconds = self._final
+            return f"{label} · took {_took(seconds)}" if seconds is not None else label
+        if self._started:
+            return f"{self._label} · started <t:{int(self._started)}:R>"
+        return self._label
+
+    def render(self) -> CardSpec:
+        body = []
+        if self._task:
+            body.append(Text(work_task_text(self._task, self._files)))
+        commands = [t for t in (self._block_text(b) for b in self._blocks) if t]
+        if commands:
+            body += [Divider(), *K.listing(commands)]
+        if self._notes:
+            body += [Divider(), Text(K.safe("\n".join(self._notes)))]
+        footer = []
+        if self._final is None and self._thinking:
+            footer.append("💭 Thinking…")
+        if self._final is None and self._hint:
+            footer.append(self._hint)
+        colour = self._final[1] if self._final is not None else K.WORKING
+        return CardSpec(label=self._head_label(), title=self._title, body=body,
+                        footer=" · ".join(footer), colour=colour, whole=True)
 
 
 # The tools that use the server's workspace: the first of them posts the
-# status embed (D18).
+# status card (D18).
 WORKSPACE_TOOLS = frozenset({"exec_command", "write_stdin", "attach_file", "save_messages_to_file"})
 
 
 class HelperProgress(RunHooks):
-    """A scout's or researcher's one embed: what it is on, its last tool call
-    and its turn, out of `max_turns` (workflows._agent_run sets the run's real
-    share). Like the hooks below it never raises, and a failed edit only waits
-    for the next one."""
+    """A scout's, researcher's or check's one card: what it is, its last tool
+    call and its turn, out of `max_turns` (workflows._agent_run sets the run's
+    real share). Like the hooks below it never raises, and a failed edit only
+    waits for the next one.
 
-    def __init__(self, channel, title: str, *, max_turns: int,
+    `label` says in plain words what this helper is ("🔬 Research · step 1 of
+    3"), `title` names its job in a few words, `brief` is the whole of it (in
+    small text: nothing is cut)."""
+
+    def __init__(self, channel, label: str, *, max_turns: int, title: str = "", brief: str = "",
                  edit_interval: float = HELPER_EDIT_SECONDS):
         self.channel = channel
-        self.title = trim(title, HELPER_TITLE_CHARS)
+        self.label = label
+        self.title = title
+        self.brief = brief
         self.max_turns = max_turns
         self.edit_interval = edit_interval
         self.turn = 0
         self.line = ""
-        self._message = None
+        self.card = LiveCard(channel)
         self._last_sent = 0.0
         self._finalized = False
 
-    def _embed(self, description: str, color: int) -> discord.Embed:
-        embed = discord.Embed(title=self.title, description=description, color=color)
-        if self.turn:
-            embed.set_footer(text=f"Turn {self.turn} of {self.max_turns}")
-        return embed
+    def spec(self, text: str, colour: int, footer: str | None = None) -> CardSpec:
+        body = [Text(K.small(K.safe(self.brief)))] if self.brief else []
+        if footer is None:
+            footer = f"Turn {self.turn} of {self.max_turns}" if self.turn else ""
+        return CardSpec(label=self.label, title=self.title,
+                        body=body + [Divider(), Text(text)], footer=footer, colour=colour)
 
-    async def _send(self, embed: discord.Embed) -> None:
+    async def _send(self, spec: CardSpec) -> None:
         self._last_sent = time.monotonic()
         try:
-            if self._message is None:
-                self._message = await self.channel.send(embed=embed)
-            else:
-                await self._message.edit(embed=embed)
-        except discord.NotFound:
-            self._message = None
+            await self.card.show(spec)
         except Exception as e:
             logger.warning(f"Helper progress: update failed: {e}")
 
     async def start(self) -> None:
-        await self._send(self._embed("Starting…", COLOR_BRAIN))
+        await self._send(self.spec("Starting…", K.WORKING))
 
     async def _update(self) -> None:
         if not self._finalized and time.monotonic() - self._last_sent >= self.edit_interval:
-            await self._send(self._embed(self.line or "Thinking…", COLOR_BRAIN))
+            await self._send(self.spec(self.line or "Thinking…", K.WORKING))
 
     async def on_llm_start(self, context, agent, system_prompt, input_items) -> None:
         self.turn += 1
@@ -416,12 +339,13 @@ class HelperProgress(RunHooks):
         if self._finalized:
             return
         self._finalized = True
-        await self._send(self._embed(helper_ending(ok, note, found, self.line),
-                                     COLOR_DONE if ok else COLOR_STOPPED))
+        footer = " · ".join(([f"Last: {self.line}"] if self.line else [])
+                            + ([f"{self.turn} turns"] if self.turn else []))
+        await self._send(self.spec(helper_ending(ok, note, found), K.OK if ok else K.FAIL, footer))
 
 
 class BrainProgressHooks(RunHooks):
-    """RunHooks for a brain call: posts the status embed at its first
+    """RunHooks for a brain call: posts the status card at its first
     workspace action and, with `stream` on (/workspace progress), mirrors
     each exec_command / write_stdin call and its output into it (edited in
     place, throttled to stay under Discord's edit rate limit).
@@ -431,13 +355,17 @@ class BrainProgressHooks(RunHooks):
     """
 
     def __init__(self, channel, task: str, *, stream: bool = False, files=(),
-                 footer: str | None = None, edit_interval: float = EDIT_INTERVAL_SECONDS):
+                 label: str = BRAIN_WORKING, title: str = "",
+                 edit_interval: float = EDIT_INTERVAL_SECONDS, clock=time.time):
         self.channel = channel
         self.stream = stream
-        self.transcript = WorkTranscript(task, title=BRAIN_WORKING, files=files, footer=footer)
+        self.clock = clock
+        self.transcript = WorkTranscript(task, label=label, title=title, files=files,
+                                            hint=PROGRESS_HINT if stream else "")
         self.edit_interval = edit_interval
-        self._message: discord.Message | None = None
+        self.card = LiveCard(channel)
         self._started = False
+        self._started_at = 0.0
         self._dirty = False
         self._last_flush = 0.0
         self._backoff_until = 0.0
@@ -449,7 +377,7 @@ class BrainProgressHooks(RunHooks):
 
     @property
     def started(self) -> bool:
-        """Whether the status embed went out (the call used the workspace)."""
+        """Whether the status card went out (the call used the workspace)."""
         return self._started
 
     # -- lifecycle -----------------------------------------------------------
@@ -458,12 +386,14 @@ class BrainProgressHooks(RunHooks):
         if self._started or self._finalized or self.channel is None:
             return
         self._started = True
+        self._started_at = self.clock()
+        self.transcript._started = self._started_at
         await self._flush(force=True)
 
     async def finalize(self, ok: bool = True, note: str | None = None,
                        stopped: bool = True) -> None:
         """Flush the final state once the call is over. Nothing when the
-        embed never went out. `stopped` False: nothing stopped it, it only
+        card never went out. `stopped` False: nothing stopped it, it only
         reported that it did not finish."""
         if self._finalized:
             return
@@ -471,8 +401,9 @@ class BrainProgressHooks(RunHooks):
         if not self._started:
             return
         self.transcript.set_thinking(False)
-        title = BRAIN_DONE if ok else BRAIN_STOPPED if stopped else BRAIN_NOT_FINISHED
-        self.transcript.set_final(title, COLOR_DONE if ok else COLOR_STOPPED)
+        label, colour = ((BRAIN_DONE, K.OK) if ok else (BRAIN_STOPPED, K.FAIL) if stopped
+                         else (BRAIN_NOT_FINISHED, K.WARN))
+        self.transcript.set_final(label, colour, self.clock() - self._started_at)
         if note:
             self.transcript.add_note(note)
         await self._flush(force=True)
@@ -549,36 +480,19 @@ class BrainProgressHooks(RunHooks):
             return
         await self._flush(force=force)
 
-    def _build_embed(self, spec: EmbedSpec) -> discord.Embed:
-        embed = discord.Embed(title=spec.title, description=spec.description,
-                              color=spec.color)
-        for f in spec.fields:
-            embed.add_field(name=f.name, value=f.value, inline=False)
-        if spec.footer:
-            embed.set_footer(text=spec.footer)
-        return embed
-
     async def _flush(self, force: bool = False) -> None:
         try:
-            content, spec = self.transcript.render_message()
+            spec = self.transcript.render()
         except Exception as e:
             logger.warning(f"Brain progress: render failed: {e}")
             return
-        embed = self._build_embed(spec)
-        try:
-            if self._message is None:
-                self._message = await self.channel.send(content, embeds=[embed])
-            else:
-                await self._message.edit(content=content, embeds=[embed])
-        except discord.NotFound:
-            # The message was deleted; fall back to a fresh send.
-            self._message = None
-            logger.info("Brain progress: message deleted, will resend")
-            return
-        except Exception as e:
+        # Only a message whose content changed is edited: with the commands
+        # kept whole (render), that is the newest one while it works; the
+        # finish updates them all (their colour).
+        if not await self.card.show(spec):
             # Usually a Discord rate limit (edits: 5/minute per channel) or
             # a network error — back off and keep the brain's run going.
-            logger.warning(f"Brain progress: update failed, backing off: {e}")
+            logger.warning("Brain progress: update failed, backing off")
             self._backoff_until = time.monotonic() + BACKOFF_SECONDS
             return
         self._last_flush = time.monotonic()

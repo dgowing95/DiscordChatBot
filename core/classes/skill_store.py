@@ -215,7 +215,7 @@ class SkillStore:
 
         channel_id: where it was saved; kept as the skill's channel until a
         use sets one, so a skill never used still has somewhere for the
-        curator's embeds. expect_version: refuse unless the live skill is
+        curator's cards. expect_version: refuse unless the live skill is
         still at this version (the curator's changes lose to a person's edit
         made while it was thinking)."""
         name = skill_format.clean_name(name)

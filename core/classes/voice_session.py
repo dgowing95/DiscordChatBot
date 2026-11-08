@@ -68,6 +68,7 @@ from classes.voice_policy import (
     utterance_message,
 )
 
+from classes import card_kit
 logger = logging.getLogger(__name__)
 
 # How long a session waits for its last sentences to finish playing before
@@ -251,10 +252,11 @@ class VoiceSession:
     async def begin(self) -> None:
         await self.refresh_settings()
         self._worker = asyncio.create_task(self._run_turns())
-        await self._post(
-            f"🎙️ I'm in {self.voice_channel.mention}. Say **\"{self.wake_phrase}\"** and then what "
-            f"you'd like. Pictures and code results will appear here. Say "
-            f"\"{self.wake_phrase}, leave\" or use `/voice leave` to end the call.")
+        from classes.voice_commands import call_card
+        await self._post(call_card(
+            self.voice_channel.mention, self.wake_phrase,
+            f' Pictures and code results will appear here. Say "{self.wake_phrase}, leave" or use '
+            "`/voice leave` to end the call."))
         # Not awaited: /voice join's reply should not wait on the LLM.
         self._greeting_task = asyncio.create_task(self._greet())
         self.members_changed()
@@ -319,7 +321,8 @@ class VoiceSession:
             except Exception as e:
                 logger.warning(f"Voice: leaving guild {self.guild.id} was not clean: {e}")
         if note:
-            await self._post(f"👋 {note}")
+            await self._post(card_kit.CardSpec(label="🎙️ Call ended", body=[card_kit.Text(f"👋 {note}")],
+                                               colour=card_kit.CLOSED))
         logger.info(f"Voice: session in guild {self.guild.id} ended ({note or 'asked'})")
 
     def moved(self, channel) -> None:
@@ -617,11 +620,12 @@ class VoiceSession:
 
     # -- text ---------------------------------------------------------------------
 
-    async def _post(self, content: str) -> None:
+    async def _post(self, spec) -> None:
         if self.text_channel is None:
             return
         try:
-            await self.text_channel.send(content)
+            from classes import card
+            await card.send_card(self.text_channel, spec)
         except Exception as e:
             logger.warning(f"Voice: could not post to the session channel: {e}")
 

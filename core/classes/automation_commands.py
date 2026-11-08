@@ -10,6 +10,7 @@ from datetime import datetime
 import discord
 from discord import app_commands
 
+from classes import card, card_kit as K
 from classes.automation_policy import (
     WEEKDAYS, form_values, schedule_text, settings, timing_from_form, timing_text,
 )
@@ -46,24 +47,75 @@ async def _show(ctx, kind, ident):
     return row
 
 
-def _display(row):
-    lines = [f"**{row['kind'].capitalize()} `{row['id']}`** in <#{row['channel_id']}> — {row['status']}"]
+_KIND_LABELS = {"schedule": "⏰ Schedule", "rule": "⚡ Rule"}
+_STATUS_COLOURS = {"enabled": K.ACTIVE, "paused": K.CLOSED, "suspended": K.WARN, "deleted": K.CLOSED}
+_STATUS_WORDS = {"enabled": "on", "paused": "paused", "suspended": "suspended", "deleted": "deleted"}
+TITLE_CHARS = 120  # a longer action reads badly in a heading's large type
+
+
+def _display(row, note: str = "") -> K.CardSpec:
+    """One schedule or rule as a card: its action as the title (or the body,
+    when long), then when and where it runs and how it last went."""
+    kind = "Follow-up" if row.get("followup") else _KIND_LABELS[row["kind"]].split(" ", 1)[1]
+    emoji = _KIND_LABELS[row["kind"]].split(" ", 1)[0]
+    label = f"{emoji} {kind} · {row['id']} · {_STATUS_WORDS.get(row['status'], row['status'])}"
+    pairs = []
     if row["kind"] == "schedule":
-        lines.append(f"Timing: {schedule_text(row)}")
+        pairs.append(("When", schedule_text(row)))
         if row["status"] == "enabled" and row.get("next_run"):
-            lines.append(f"Next run: <t:{int(row['next_run'])}:f> (<t:{int(row['next_run'])}:R>)")
+            pairs.append(("Next", f"<t:{int(row['next_run'])}:f> · <t:{int(row['next_run'])}:R>"))
     else:
-        lines.append(f"Matches: `{row['pattern']}` ({row['match_mode']})")
+        pairs.append(("Matches", f"`{row['pattern']}` ({row['match_mode']})"))
+    pairs.append(("Where", f"<#{row['channel_id']}>"))
     last = row.get("last_result")
     if last:
         detail = f" — {last['detail']}" if last.get("detail") else ""
         when = int(datetime.fromisoformat(last["at"]).timestamp())
-        lines.append(f"Last result: {last['status']}{detail} (<t:{when}:R>)")
+        pairs.append(("Last run", f"{last['status']}{detail} · <t:{when}:R>"))
     else:
-        lines.append("Last result: never run")
-    lines.append(f"Created by <@{row['creator_id']}>, last edited by <@{row['editor_id']}>")
-    lines.append(f"Action: {row['action']}")
-    return "\n".join(lines)[:1900]
+        pairs.append(("Last run", "never"))
+    action = " ".join(str(row["action"]).split())
+    short = len(action) <= TITLE_CHARS
+    body = ([] if short else [K.Text(K.safe(row["action"]))]) + [K.Text(K.details(pairs))]
+    if note:
+        body.append(K.Text(note))
+    return K.CardSpec(label=label, title=K.safe(action) if short else "", body=body,
+                      footer=f"Created by <@{row['creator_id']}> · last edited by <@{row['editor_id']}>",
+                      colour=_STATUS_COLOURS.get(row["status"], K.ACTIVE))
+
+
+ALREADY_STARTED = "A run that already started may still finish."
+PANEL_SECONDS = 600
+
+
+def _panel(kind, row, note: str = "") -> K.CardSpec:
+    """An entry's card with its buttons: Pause or Resume, Edit, Delete. Each
+    press checks access again, as the matching slash command does."""
+    spec = _display(row, note)
+    if row["status"] == "deleted":
+        return spec
+    ident = row["id"]
+
+    def run(status):
+        async def press(ctx):
+            try:
+                result = await _set_status(ctx, kind, ident, status)
+            except ERRORS as exc:
+                await card.reply(ctx, K.error(str(exc)))
+                return
+            await ctx.response.edit_message(view=card.views(result, timeout=PANEL_SECONDS)[0])
+        return press
+
+    async def edit(ctx):
+        await _open_editor(ctx, kind, ident)
+
+    pause = ("Resume", "▶️", "enabled") if row["status"] in ("paused", "suspended") else ("Pause", "⏸️", "paused")
+    buttons = [card.button(pause[0], discord.ButtonStyle.secondary, run(pause[2]), pause[1])]
+    if not row.get("followup"):
+        buttons.append(card.button("Edit", discord.ButtonStyle.secondary, edit, "✏️"))
+    buttons.append(card.button("Delete", discord.ButtonStyle.danger, run("deleted"), "🗑️"))
+    spec.body += [K.Divider(), K.Buttons(tuple(buttons))]
+    return spec
 
 
 def _summary(row):
@@ -73,11 +125,13 @@ def _summary(row):
 
 
 async def _respond(ctx, operation):
+    """The command's private answer: the card `operation` returns, or the error."""
     try:
         result = await operation()
-        await ctx.response.send_message(result, ephemeral=True)
     except ERRORS as exc:
-        await ctx.response.send_message(f"❌ {exc}", ephemeral=True)
+        await card.reply(ctx, K.error(str(exc)))
+        return
+    await card.reply(ctx, result, timeout=PANEL_SECONDS)
 
 
 def _text(form, name, label, description, values, placeholder=None, required=True, paragraph=False, max_length=None):
@@ -102,27 +156,26 @@ def _read(fields):
             else str(field.value) for name, field in fields.items()}
 
 
-class RetryView(discord.ui.View):
-    """Shown with a form error, so a rejected form can be reopened with what
-    was typed instead of starting again."""
-
-    def __init__(self, reopen):
-        super().__init__(timeout=600)
-        self.reopen = reopen
-
-    @discord.ui.button(label="Fix and try again", style=discord.ButtonStyle.primary)
-    async def retry(self, ctx, button):
-        await ctx.response.send_modal(self.reopen())
+def retry_card(message: str, reopen) -> K.CardSpec:
+    """A form's error, with a button that reopens the form with what was
+    typed instead of starting again."""
+    async def retry(ctx):
+        await ctx.response.send_modal(reopen())
+    return K.CardSpec(label="❌ Not saved", body=[K.Text(message), K.Buttons((
+        card.button("Fix and try again", discord.ButtonStyle.primary, retry, "✏️"),))],
+        colour=K.FAIL)
 
 
 async def _submit(ctx, operation, reopen):
     try:
         result = await operation()
-        await ctx.response.send_message(result, ephemeral=True)
     except QuotaError as exc:
-        await ctx.response.send_message(f"❌ {exc}", ephemeral=True)
+        await card.reply(ctx, K.error(str(exc), "❌ Not saved"))
+        return
     except ERRORS as exc:
-        await ctx.response.send_message(f"❌ {exc}", ephemeral=True, view=RetryView(reopen))
+        await card.reply(ctx, retry_card(str(exc), reopen), timeout=PANEL_SECONDS)
+        return
+    await card.reply(ctx, result, timeout=PANEL_SECONDS)
 
 
 class ScheduleForm(discord.ui.Modal):
@@ -170,29 +223,49 @@ class ScheduleForm(discord.ui.Modal):
                 _access(ctx, self.channel)
                 row = await store.create(ctx.guild.id, self.channel.id, ctx.user.id, "schedule", values["action"],
                                          timing=timing, timezone=values["timezone"].strip())
-            return _display(row)
+            return _panel("schedule", row, "✅ Saved.")
         await _submit(ctx, operation, lambda: ScheduleForm(self.kind, self.channel, self.row, values))
 
 
-class ScheduleTypePicker(discord.ui.View):
+def type_picker(channel, row=None) -> K.CardSpec:
     """The buttons /schedule create and /schedule edit show first. The
     current type of an edited schedule is highlighted."""
+    current = row["timing"]["type"] if row else None
 
-    def __init__(self, channel, row=None):
-        super().__init__(timeout=600)
-        current = row["timing"]["type"] if row else None
-        for kind, label in SCHEDULE_TYPES:
-            button = discord.ui.Button(
-                label=f"{label} (current)" if kind == current else label,
-                style=discord.ButtonStyle.primary if kind == current or not row else discord.ButtonStyle.secondary)
-            button.callback = self._opener(kind, channel, row)
-            self.add_item(button)
-
-    @staticmethod
-    def _opener(kind, channel, row):
+    def opener(kind):
         async def open_form(ctx):
             await ctx.response.send_modal(ScheduleForm(kind, channel, row))
         return open_form
+
+    buttons = tuple(card.button(
+        f"{label} (current)" if kind == current else label,
+        discord.ButtonStyle.primary if kind == current or not row else discord.ButtonStyle.secondary,
+        opener(kind)) for kind, label in SCHEDULE_TYPES)
+    if row:
+        return K.CardSpec(label=f"⏰ Editing schedule · {row['id']}",
+                          body=[K.Text(f"Now: {timing_text(row['timing'], row['timezone'])}"),
+                                K.Text("Pick the current type to change its time or action, or another "
+                                       "type to switch."), K.Buttons(buttons)])
+    return K.CardSpec(label="⏰ New schedule", title="What kind of schedule?",
+                      body=[K.Buttons(buttons)])
+
+
+async def _open_editor(ctx, kind, ident):
+    """/schedule edit and /rule edit, and an entry's Edit button."""
+    try:
+        row = await _show(ctx, kind, ident)
+    except ERRORS as exc:
+        await card.reply(ctx, K.error(str(exc)))
+        return
+    channel = ctx.guild.get_channel_or_thread(row["channel_id"])
+    if kind == "rule":
+        await ctx.response.send_modal(RuleForm(channel, row))
+        return
+    if row.get("followup"):
+        await card.reply(ctx, K.info("⏰ Follow-ups can't be edited",
+                                     f"Delete `{row['id']}` with `/schedule delete` and ask me for a new one."))
+        return
+    await card.reply(ctx, type_picker(channel, row), timeout=PANEL_SECONDS)
 
 
 class RuleForm(discord.ui.Modal):
@@ -224,7 +297,7 @@ class RuleForm(discord.ui.Modal):
                 _access(ctx, self.channel)
                 row = await store.create(ctx.guild.id, self.channel.id, ctx.user.id, "rule", values["action"],
                                          pattern=values["pattern"], match_mode=values["match_mode"])
-            return _display(row)
+            return _panel("rule", row, "✅ Saved.")
         await _submit(ctx, operation, lambda: RuleForm(self.channel, self.row, values))
 
 
@@ -259,10 +332,9 @@ def register_automation_commands(tree):
             _access(ctx, ctx.channel)
             await AutomationStore().check_quota(ctx.guild.id, "schedule")
         except AutomationError as exc:
-            await ctx.response.send_message(f"❌ {exc}", ephemeral=True)
+            await card.reply(ctx, K.error(str(exc)))
             return
-        await ctx.response.send_message("What kind of schedule?", view=ScheduleTypePicker(ctx.channel),
-                                        ephemeral=True)
+        await card.reply(ctx, type_picker(ctx.channel), timeout=PANEL_SECONDS)
 
     @rule.command(name="create", description="Create a message rule in this channel (opens a form)")
     async def rule_create(ctx: discord.Interaction):
@@ -270,7 +342,7 @@ def register_automation_commands(tree):
             _access(ctx, ctx.channel)
             await AutomationStore().check_quota(ctx.guild.id, "rule")
         except AutomationError as exc:
-            await ctx.response.send_message(f"❌ {exc}", ephemeral=True)
+            await card.reply(ctx, K.error(str(exc)))
             return
         await ctx.response.send_modal(RuleForm(ctx.channel))
 
@@ -288,37 +360,17 @@ def register_automation_commands(tree):
                             _access(ctx, channel)
                         except AutomationError:
                             continue
-                        outcome = (row.get("last_result") or {}).get("status", "never run")
-                        next_at = (f" next <t:{int(row['next_run'])}:f>" if row["kind"] == "schedule"
-                                   and row["status"] == "enabled" else "")
-                        label = " follow-up" if row.get("followup") else ""
-                        visible.append(f"`{row['id']}`{label} <#{row['channel_id']}> {row['status']} ({outcome}){next_at}"
-                                       f" — {row['action'][:60]}")
-                    return "\n".join(visible)[:1900] or "No entries you can access."
+                        visible.append(_list_entry(row))
+                    return K.CardSpec(label=f"{_KIND_LABELS[kind]}s · {len(visible)}",
+                                      body=K.listing(visible) or [K.Text("No entries you can access.")],
+                                      footer=f"See one with /{kind} view")
                 await _respond(ctx, op)
 
             async def view_entry(ctx: discord.Interaction, entry: str):
                 await _respond(ctx, lambda: _view(ctx, kind, entry))
 
             async def edit_entry(ctx: discord.Interaction, entry: str):
-                try:
-                    row = await _show(ctx, kind, entry)
-                except ERRORS as exc:
-                    await ctx.response.send_message(f"❌ {exc}", ephemeral=True)
-                    return
-                channel = ctx.guild.get_channel_or_thread(row["channel_id"])
-                if kind == "rule":
-                    await ctx.response.send_modal(RuleForm(channel, row))
-                    return
-                if row.get("followup"):
-                    await ctx.response.send_message(
-                        f"Follow-up `{row['id']}` can't be edited. Delete it with `/schedule delete` and ask me "
-                        "for a new one.", ephemeral=True)
-                    return
-                await ctx.response.send_message(
-                    f"Editing schedule `{row['id']}` ({timing_text(row['timing'], row['timezone'])}).\n"
-                    "Pick the current type to change its time or action, or another type to switch.",
-                    view=ScheduleTypePicker(channel, row), ephemeral=True)
+                await _open_editor(ctx, kind, entry)
 
             async def delete_entry(ctx: discord.Interaction, entry: str):
                 await _respond(ctx, lambda: _set_status(ctx, kind, entry, "deleted"))
@@ -343,13 +395,26 @@ def register_automation_commands(tree):
     tree.add_command(rule)
 
 
+def _list_entry(row) -> str:
+    """One line of /schedule list or /rule list, and its details under it."""
+    outcome = (row.get("last_result") or {}).get("status", "never run")
+    bits = [f"`{row['id']}`", f"<#{row['channel_id']}>", _STATUS_WORDS.get(row["status"], row["status"]),
+            f"last: {outcome}"]
+    if row.get("followup"):
+        bits.insert(1, "follow-up")
+    if row["kind"] == "schedule" and row["status"] == "enabled" and row.get("next_run"):
+        bits.append(f"next <t:{int(row['next_run'])}:R>")
+    return f"{K.safe(' '.join(str(row['action']).split()))}\n-# " + " · ".join(bits)
+
+
 async def _view(ctx, kind, ident):
-    return _display(await _show(ctx, kind, ident))
+    return _panel(kind, await _show(ctx, kind, ident))
 
 
 async def _set_status(ctx, kind, ident, status):
     row = await _show(ctx, kind, ident)
     updated = await AutomationStore().update(ctx.guild.id, ident, ctx.user.id, row["revision"], status=status)
     if status == "deleted":
-        return f"Deleted {kind} `{ident}`. A run that already started may still finish."
-    return _display(updated) + "\nA run that already started may still finish."
+        return K.CardSpec(label=f"🗑️ {kind.capitalize()} deleted · {ident}",
+                          body=[K.Text(K.safe(row["action"]))], footer=ALREADY_STARTED, colour=K.CLOSED)
+    return _panel(kind, updated, f"-# {ALREADY_STARTED}")

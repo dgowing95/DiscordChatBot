@@ -1,15 +1,18 @@
-"""The card a question or a plan is posted as (classes/card.py), built with the
-real discord.py classes, since their rules are what it is for."""
+"""The bot's cards in Discord (classes/card.py), built with the real
+discord.py classes, since their rules are what it is for: a question or a
+plan with its buttons inside, a card read back from a message, and how the
+bot's own cards come back in its history."""
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
 from discord.components import _component_factory
 
-from classes import brain_question, tool_embeds, workflow_views
-from classes.card import MAX_CARD_CHARS, Card, button, text_of
+from classes import brain_question, card_kit as K, workflow_views
+from classes.card import Card, KitView, button, kind_of, text_of, views
 from classes.message_handler import MessageHandler
+from card_checks import view_text
 
 
 def _button(label="Go"):
@@ -21,14 +24,23 @@ def _shape(view):
     return box, [c["type"] for c in box["components"]]
 
 
-def test_the_text_and_buttons_are_inside_one_box():
-    view = Card("Hello", note="small", rows=[[_button("A"), _button("B")], [_button("C")]])
+def test_the_text_and_buttons_are_inside_one_box_with_the_note_last():
+    view = Card("Hello", note="small", label="❓ Asked", rows=[[_button("A"), _button("B")], [_button("C")]])
     box, types = _shape(view)
     assert len(view.to_components()) == 1 and box["type"] == 17
-    assert types == [10, 10, 1, 1]  # the text, the note, two rows of buttons
-    assert box["components"][1]["content"] == "-# small"
+    assert types == [10, 10, 1, 1, 10]  # the label, the text, two rows of buttons, the note
+    assert box["components"][0]["content"] == "-# ❓ Asked"
+    assert box["components"][-1]["content"] == "-# small"
+    assert box["id"] == K.KIND_IDS[K.CARD] and box["accent_color"] == K.ASK
     assert view.has_components_v2()
     assert [b.label for b in view.buttons] == ["A", "B", "C"]
+
+
+def test_a_row_added_later_goes_above_the_note():
+    view = Card("Hello", note="small")
+    view.add_row([_button("A")])
+    _box, types = _shape(view)
+    assert types == [10, 1, 10]
 
 
 def test_an_empty_row_adds_nothing():
@@ -36,18 +48,14 @@ def test_an_empty_row_adds_nothing():
     assert types == [10]
 
 
-def test_it_fits_a_message_whatever_it_is_given():
-    view = Card("x" * 9000, note="y" * 900)
-    assert view.content_length() <= 4000 and len(view.text) + len(view.note) <= MAX_CARD_CHARS
-
-
-def test_finished_keeps_its_own_text_and_loses_its_buttons():
-    view = Card("Hello", note="Press one", rows=[[_button()]])
+def test_finished_keeps_its_text_loses_its_buttons_and_note_and_says_how_it_ended():
+    view = Card("Hello", note="Press one", label="❓ Asked", rows=[[_button()]])
     finished = view.finished("✅ Done")
-    assert finished.text == "Hello" and finished.note == "✅ Done" and finished.buttons == []
-    assert view.finished().note == "Press one"
-    assert finished.to_components()[0]["accent_color"] == tool_embeds.COLOR_DONE
-    assert finished.finished().text == "Hello"
+    assert finished.text == "Hello" and finished.outcome == "✅ Done" and finished.buttons == []
+    box, types = _shape(finished)
+    assert types == [10, 10, 10] and box["components"][2]["content"] == "✅ Done"
+    assert box["accent_color"] == K.CLOSED
+    assert finished.finished().outcome == "✅ Done"
 
 
 @pytest.mark.asyncio
@@ -70,6 +78,24 @@ def test_a_card_with_only_persistent_buttons_survives_a_restart():
     assert ids == ["workflow:abc:approve", "workflow:abc:edit", "workflow:abc:cancel"]
 
 
+def test_link_buttons_are_not_buttons_a_person_answers_with():
+    view = KitView([K.Text("x"), K.Buttons((K.Link("Open", "https://a.example"),))])
+    assert view.buttons == []
+
+
+def test_every_part_of_the_kit_builds():
+    spec = K.CardSpec(label="l", title="t", footer="f", body=[
+        K.Text("x"), K.Gap(), K.Divider(),
+        K.Section(("a", "b"), K.Link("Open", "https://a.example", "↗️")),
+        K.Section(("a",), K.Thumb("https://a.example/p.png")),
+        K.Gallery(("attachment://p.png",)), K.FileRef("f.csv"),
+        K.Buttons((K.Link("Go", "https://a.example"),))])
+    [view] = views(spec)
+    types = [c["type"] for c in view.to_components()[0]["components"]]
+    assert types == [10, 10, 10, 14, 14, 9, 9, 12, 13, 1, 10]
+    assert view.file_names() == {"p.png", "f.csv"}
+
+
 def _posted(view):
     """A card as Discord gives it back on a message."""
     state = MagicMock()
@@ -77,9 +103,18 @@ def _posted(view):
         content="", components=[_component_factory(c, state) for c in view.to_components()])
 
 
-def test_text_of_reads_a_card_back():
+def test_text_of_reads_a_card_back_sections_included():
     message = _posted(Card("### Which one?", note="<@5>", rows=[[_button()]]))
     assert text_of(message) == "### Which one?\n-# <@5>"
+    [view] = views(K.CardSpec(body=[K.Section(("a", "b"), K.Link("Open", "https://a.example"))]))
+    assert text_of(_posted(view)) == "a\nb"
+
+
+def test_kind_of_says_what_a_card_is():
+    assert kind_of(_posted(views(K.info("x"))[0])) == K.NOTICE
+    assert kind_of(_posted(views(K.CardSpec(kind=K.ANNOUNCE))[0])) == K.ANNOUNCE
+    assert kind_of(_posted(Card("q"))) == K.CARD
+    assert kind_of(SimpleNamespace(content="hi", components=[])) is None
 
 
 @pytest.mark.parametrize("message", [
@@ -88,20 +123,49 @@ def test_text_of_is_empty_for_any_other_message(message):
     assert text_of(message) == ""
 
 
-def test_the_bot_sees_in_the_history_what_it_asked():
+def _handler():
     handler = MessageHandler.__new__(MessageHandler)
     handler.client = SimpleNamespace(user=SimpleNamespace(id=42))
-    message = _posted(Card("### Which one?", rows=[[_button()]]))
+    return handler
+
+
+def _from_bot(view):
+    message = _posted(view)
     message.author = SimpleNamespace(id=42, name="bot")
     message.attachments, message.embeds = [], []
     message.poll, message.type = None, discord.MessageType.default
-    entries = handler._format_group(message, [])
+    return message
+
+
+def test_the_bot_sees_in_the_history_what_it_asked():
+    entries = _handler()._format_group(_from_bot(Card("### Which one?", rows=[[_button()]])), [])
     assert "Which one?" in entries[0]["content"] and entries[0]["role"] == "assistant"
+    assert entries[0]["content"].startswith("Message from 'bot'")
+
+
+def test_a_status_card_reads_as_one_not_as_something_the_bot_said():
+    [view] = views(K.info("🔎 Searching the web", "**keyboards**"))
+    [entry] = _handler()._format_group(_from_bot(view), [])
+    assert entry["role"] == "assistant"
+    assert entry["content"] == ("[Status card posted by 'bot', not a chat message]\n"
+                                "🔎 Searching the web\n**keyboards**")
+
+
+def test_the_announcement_is_left_out_of_the_history():
+    [view] = views(K.CardSpec(label="✨ What's new", body=[K.Text("x")], kind=K.ANNOUNCE))
+    assert _handler()._format_group(_from_bot(view), []) == []
+
+
+def test_someone_elses_card_reads_as_their_message():
+    [view] = views(K.info("🔎 Searching the web", "x"))
+    message = _from_bot(view)
+    message.author = SimpleNamespace(id=7, name="otherbot")
+    [entry] = _handler()._format_group(message, [])
+    assert entry["content"].startswith("Message from 'otherbot'")
 
 
 def test_a_question_has_green_choices_then_answer_and_you_decide_on_their_own_row():
     view = brain_question.QuestionView(5, ["A", "B", "C", "D"], 60, text="Which?")
-    _box, types = _shape(view)
     rows = [c["components"] for c in view.to_components()[0]["components"] if c["type"] == 1]
     assert [len(r) for r in rows] == [4, 2]
     assert {b["style"] for b in rows[0]} == {discord.ButtonStyle.success.value}
@@ -110,13 +174,215 @@ def test_a_question_has_green_choices_then_answer_and_you_decide_on_their_own_ro
         ("You decide", discord.ButtonStyle.primary.value)]
 
 
-def test_a_label_sits_small_above_the_question_and_stays_when_it_closes():
+def test_a_question_says_why_and_who_and_when_it_closes_and_keeps_that_when_closed():
     view = brain_question.QuestionView(5, [], 60, text="Which?", label="Planning needs more")
-    assert view.text == "-# Planning needs more\n### Which?"
-    assert view.finished("✅ That").text == view.text
+    assert view.label == "❓ Planning needs more · for <@5>"
+    assert view.text == "### Which?"
+    assert view.note.startswith("Only the person asked can answer · closes <t:")
+    closed = view.finished("✅ That")
+    assert closed.label == view.label and closed.text == view.text and closed.outcome == "✅ That"
 
 
 def test_a_short_question_is_a_heading_and_a_long_one_is_not():
     assert brain_question.question_text("Which?") == "### Which?"
     assert brain_question.question_text("x" * 200) == "x" * 200
     assert brain_question.question_text("One\nTwo") == "One\nTwo"
+    assert brain_question.question_text("# shout") == "### \\# shout"
+
+
+@pytest.mark.asyncio
+async def test_send_card_answers_an_interaction_then_follows_up_and_keeps_files_with_their_card():
+    interaction = MagicMock(spec=discord.Interaction)
+    interaction.response.is_done = MagicMock(side_effect=[False, True])
+    interaction.response.send_message = AsyncMock()
+    interaction.original_response = AsyncMock(return_value="first")
+    interaction.followup.send = AsyncMock(return_value="second")
+    from classes.card import send_card
+    spec = K.CardSpec(label="📘 Skills", body=[K.Text("word " * 900), K.FileRef("a.md")])
+    sent = await send_card(interaction, spec, files={"a.md": b"x"}, ephemeral=True)
+    assert sent == ["first", "second"]
+    first = interaction.response.send_message.await_args.kwargs
+    second = interaction.followup.send.await_args.kwargs
+    assert first["ephemeral"] and second["ephemeral"] and second["wait"]
+    assert "files" not in first and [f.filename for f in second["files"]] == ["a.md"]
+
+
+def _progress_views():
+    from classes.brain_progress import PROGRESS_HINT, WorkTranscript
+    t = WorkTranscript("chart the messages", files=["a.csv"], started=1000, hint=PROGRESS_HINT)
+    for i in range(12):
+        block = t.add_command(f"python step_{i}.py")
+        t.add_output("OUTPUT_LINE\n" * 60, 0, block=block)
+    t.add_note("⚠️ It kept repeating itself.")
+    return views(t.render())
+
+
+def test_a_live_runs_commands_and_output_stay_out_of_the_prompt():
+    built = _progress_views()
+    assert len(built) > 2
+    entries = [e for v in built for e in _handler()._format_group(_from_bot(v), [])]
+    text = "\n".join(e["content"] for e in entries)
+    assert "OUTPUT_LINE" not in text and "step_3.py" not in text and "Finished" not in text
+    assert "chart the messages" in text and "It kept repeating itself." in text
+    # a message that only went on with the commands adds nothing at all
+    assert len(entries) < len(built)
+
+
+@pytest.mark.asyncio
+async def test_a_card_that_gets_shorter_takes_down_the_messages_it_no_longer_needs():
+    from classes.card import LiveCard
+    sent = []
+
+    async def send(**kwargs):
+        message = MagicMock()
+        message.edit, message.delete = AsyncMock(), AsyncMock()
+        sent.append(message)
+        return message
+
+    channel = MagicMock()
+    channel.send = AsyncMock(side_effect=send)
+    live = LiveCard(channel)
+    long_one = K.CardSpec(label="🧠 Working", body=[K.Text("word " * 900)], footer="💭 Thinking…")
+    await live.show(long_one)
+    assert len(sent) == 2
+    await live.show(K.CardSpec(label="🧠 Done", body=[K.Text("word " * 100)], colour=K.OK))
+    sent[1].delete.assert_awaited_once()
+    assert len(live.messages) == 1
+    # when it cannot be deleted, it is emptied to a grey line instead
+    sent[0].delete = AsyncMock(side_effect=RuntimeError("no permission"))
+    live.messages.append(sent[0])
+    live._shown.append(None)
+    await live._drop(1, K.OK)
+    assert sent[0].edit.await_args.kwargs["view"].colour == K.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_two_updates_at_once_post_the_card_once():
+    # Seen live: two hooks updated a new status card together, both found no
+    # message yet, and the card was posted twice.
+    import asyncio
+    from classes.card import LiveCard
+    sent = []
+
+    async def send(**kwargs):
+        await asyncio.sleep(0.01)  # the post takes a while
+        message = MagicMock()
+        message.edit = AsyncMock()
+        sent.append(message)
+        return message
+
+    channel = MagicMock()
+    channel.send = AsyncMock(side_effect=send)
+    live = LiveCard(channel)
+    first = K.CardSpec(label="🧠 Working", body=[K.Text("one")])
+    second = K.CardSpec(label="🧠 Working", body=[K.Text("two")])
+    assert await asyncio.gather(live.show(first), live.show(second)) == [True, True]
+    assert len(sent) == 1 and live.messages == sent
+    assert "two" in view_text(sent[0].edit.await_args.kwargs["view"])
+
+
+@pytest.mark.asyncio
+async def test_files_of_reads_back_the_files_inside_a_card():
+    # Seen in E2E: a card's files are in no message.attachments, so the
+    # picture to edit and the chat files for the brain were not found.
+    from card_checks import posted_file_card
+    from classes.card import files_of
+    files = files_of(posted_file_card())
+    assert [(f.filename, f.size, f.content_type, f.id) for f in files] == [
+        ("generated-image.png", None, "image/png", 2),          # a linked picture is not a file
+        ("saturn_notes.md", 1962, "text/markdown", 3)]
+    assert await files[0].read() == b"PNG"
+    plain = SimpleNamespace(attachments=["a.csv"], components=[])
+    assert files_of(plain) == ["a.csv"] and files_of(SimpleNamespace()) == []
+
+
+def test_a_cards_picture_goes_into_the_prompt_like_an_attachment():
+    from card_checks import posted_file_card
+    from classes.card import files_of
+    from classes.message_handler import image_targets
+    assert image_targets(files_of(posted_file_card())) == [
+        (2, "https://media.example/attachments/1/2/generated-image.png?ex=1", "image/png")]
+
+
+@pytest.mark.parametrize("name, safe", [
+    ("chart.png", "chart.png"), ("my chart (1).png", "my_chart_1.png"),
+    ("图表.png", "file.png"), ("отчёт данные.csv", "file.csv"), ("café menu.md", "caf_menu.md"),
+    (".bashrc", "bashrc"), ("", "file"), ("noext", "noext"), ("a.tar.gz", "a.tar.gz"),
+    ("x" * 300 + ".png", "x" * 96 + ".png")])
+def test_a_safe_filename_keeps_its_extension(name, safe):
+    from classes.card import safe_filename
+    assert safe_filename(name) == safe
+
+
+@pytest.mark.asyncio
+async def test_a_deleted_later_message_is_sent_again_and_the_earlier_ones_kept():
+    from classes.card import LiveCard
+    sent = []
+
+    async def send(**kwargs):
+        message = MagicMock()
+        message.edit, message.delete = AsyncMock(), AsyncMock()
+        sent.append(message)
+        return message
+
+    channel = MagicMock()
+    channel.send = AsyncMock(side_effect=send)
+    live = LiveCard(channel)
+    await live.show(K.CardSpec(label="🧠 Working", body=[K.Text("word " * 900)], footer="one"))
+    assert len(sent) == 2
+    sent[1].edit = AsyncMock(side_effect=discord.NotFound(MagicMock(status=404), "gone"))
+    assert not await live.show(K.CardSpec(label="🧠 Working", body=[K.Text("word " * 900)], footer="two"))
+    assert live.messages == [sent[0]]
+    assert await live.show(K.CardSpec(label="🧠 Working", body=[K.Text("word " * 900)], footer="two"))
+    assert len(sent) == 3 and live.messages == [sent[0], sent[2]]  # the head is not posted again
+
+
+@pytest.mark.asyncio
+async def test_a_growing_live_transcript_edits_only_its_newest_message():
+    # Seen in review: a running command cut across two messages changed both
+    # on every update, and only the newest was edited, so its lines showed
+    # twice or not at all. Kept whole, it moves to the next message once.
+    from classes.brain_progress import WorkTranscript
+    from classes.card import LiveCard
+    shown = {}
+
+    async def send(**kwargs):
+        message = MagicMock()
+
+        async def edit(**kw):
+            shown[id(message)] = view_text(kw["view"])
+        message.edit = AsyncMock(side_effect=edit)
+        shown[id(message)] = view_text(kwargs["view"])
+        return message
+
+    channel = MagicMock()
+    channel.send = AsyncMock(side_effect=send)
+    live = LiveCard(channel)
+    t = WorkTranscript("chart it", started=1000)
+    for i in range(3):
+        t.add_output("done\n" * 200, 0, block=t.add_command(f"python step_{i}.py"))
+    running = t.add_command("python last.py")
+    edits_when_split = None
+    for i in range(6):
+        t.add_output(f"line {i}\n" * 40, block=running)
+        assert await live.show(t.render())
+        on_screen = "\n".join(shown[id(m)] for m in live.messages)
+        assert on_screen == "\n".join(view_text(v) for v in views(t.render()))
+        if len(live.messages) == 2 and edits_when_split is None:
+            edits_when_split = live.messages[0].edit.await_count
+    # Once the command has moved on to the second message, the first one
+    # (full, its commands finished) is never edited again.
+    assert edits_when_split is not None
+    assert live.messages[0].edit.await_count == edits_when_split
+
+
+@pytest.mark.asyncio
+async def test_an_interactions_answer_is_the_message_it_made_without_fetching_it():
+    from classes.card import send_card
+    made = MagicMock(spec=discord.InteractionMessage)
+    interaction = MagicMock(spec=discord.Interaction)
+    interaction.response.is_done = MagicMock(return_value=False)
+    interaction.response.send_message = AsyncMock(return_value=SimpleNamespace(resource=made))
+    interaction.original_response = AsyncMock()
+    assert await send_card(interaction, K.info("✅ Saved", "x"), interaction=True) == [made]
+    interaction.original_response.assert_not_awaited()

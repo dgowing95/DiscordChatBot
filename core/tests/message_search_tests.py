@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import pytest
 
-from classes import message_search_format as msf
+from classes import card_kit as K, message_search_format as msf
 
 GUILD_ID = 100000000000000001
 GENERAL_ID = 200000000000000002
@@ -154,9 +154,12 @@ async def _search(context, **arguments):
 
 
 @pytest.fixture(autouse=True)
-def no_embeds(monkeypatch):
-    from classes.common import Common
-    monkeypatch.setattr(Common, "send_tool_discord_embed", AsyncMock())
+def no_cards(monkeypatch):
+    """The notice a tool posts: its card, whose show_soon a failure calls."""
+    from classes import card
+    live = MagicMock()
+    monkeypatch.setattr(card, "notice", AsyncMock(return_value=live))
+    return live
 
 
 @pytest.mark.asyncio
@@ -222,9 +225,12 @@ async def test_nsfw_follows_the_channel_asked_in():
 
 
 @pytest.mark.asyncio
-async def test_not_indexed_yet():
+async def test_not_indexed_yet(no_cards):
     context, _ = _env(body={"message": "Index not yet available. Try again later", "code": 110000})
     assert (await _search(context, query="x")) == msf.NOT_INDEXED_TEXT
+    # Its card does not keep saying it is searching.
+    closed = no_cards.show_soon.call_args.args[0]
+    assert closed.footer == "It didn't work" and closed.colour == K.CLOSED
 
 
 @pytest.mark.asyncio
@@ -604,3 +610,13 @@ def test_the_brain_gets_the_save_tool_and_the_persona_does_not():
     assert "save_messages_to_file" not in {t.name for t in persona_tools()}
     names = {t.name for t in brain_tools()}
     assert {"save_messages_to_file", "read_messages_around", "search_messages"} <= names
+
+
+def test_a_cards_files_are_named_and_saved():
+    from card_checks import FILE_CARD
+    card = _hit(1, content="", components=FILE_CARD)
+    text = msf.format_results(_body(card), GUILD_ID, {}, "x")
+    assert "[attached: generated-image.png]" in text and "[attached: saturn_notes.md]" in text
+    assert "linked.png" not in text
+    assert msf.export_record(card, GUILD_ID, {})["attachments"] == [
+        "generated-image.png", "saturn_notes.md"]

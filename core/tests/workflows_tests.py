@@ -26,6 +26,9 @@ from classes import (brain, brain_result, llm_lanes, thread_inbox, workflow_stee
                      workflow_verify, workflows)
 from classes import workflow_policy as wp
 from classes.workflow_store import WorkflowStore
+from classes import card_kit as K
+from card_checks import interaction as card_interaction, label_of, replied_text, view_text
+from classes import card
 
 real_due = workflow_verify.due
 real_research_due = workflow_verify.research_due
@@ -73,14 +76,20 @@ class FakeChannel:
         yield
 
     def texts(self):
-        return [m.kwargs.get("content") or getattr(m.kwargs.get("view"), "text", "") or ""
-                for m in self.sent]
+        """Each message's text: its content, or every text of its card."""
+        return [m.kwargs.get("content") or (view_text(m.kwargs["view"]) if m.kwargs.get("view")
+                                            else "") for m in self.sent]
 
     def plans(self):
-        return [m for m in self.sent if "🧵 Plan" in getattr(m.kwargs.get("view"), "text", "")]
+        """The plan cards (the first message of each)."""
+        return [m for m in self.sent if getattr(m.kwargs.get("view"), "kind", None) == K.CARD
+                and label_of(m.kwargs["view"]).startswith("🧵 Plan")]
 
-    def embeds(self):
-        return [m.kwargs["embed"] for m in self.sent if m.kwargs.get("embed") is not None]
+    def closings(self):
+        """The labels of the notice cards a workflow ends with."""
+        return [view_text(m.kwargs["view"]).splitlines()[0].removeprefix("-# ") for m in self.sent
+                if getattr(m.kwargs.get("view"), "kind", None) == K.NOTICE
+                and label_of(m.kwargs["view"]).startswith("🧵 Big job")]
 
 
 def _plan_call(*steps, call_id="p1"):
@@ -206,8 +215,8 @@ async def test_plan_auto_approve_two_steps_report_and_the_completion_reply_is_qu
     second_task = json.dumps(env.model.calls[2].input)
     assert "$1,199" in second_task and f"../c500-w{wf.id}-s1/" in second_task
     # The plan was posted (approved automatically), then the closing embed.
-    assert env.thread.texts()[0].startswith("Started automatically.")
-    assert [e.title for e in env.thread.embeds()][-1] == "🧵 Workflow done"
+    assert "Started automatically." in env.thread.texts()[0]
+    assert env.thread.closings()[-1] == "🧵 Big job · finished"
     # The completion reply waits on the queue, with the manager's report.
     item = env.queue.get_nowait()
     assert isinstance(item, workflows.WorkflowDone)
@@ -282,10 +291,7 @@ async def test_a_workflow_out_of_time_stops_with_what_exists(env, monkeypatch):
 # --------------------------- approval ---------------------------
 
 def _press(wf, action, user_id=5):
-    interaction = MagicMock()
-    interaction.user.id = user_id
-    interaction.response.send_message = AsyncMock()
-    interaction.response.defer = AsyncMock()
+    interaction = card_interaction(user=SimpleNamespace(id=user_id))
     return interaction, workflows.on_button(interaction, wf.id, action)
 
 
@@ -306,7 +312,7 @@ async def test_the_requester_approves_and_nobody_else_can(env):
     assert "(voiced)" in env.thread.texts()[0] and "<@5>" in env.thread.texts()[0]
     other, call = _press(wf, "approve", user_id=6)
     await call
-    assert "Only <@5>" in other.response.send_message.await_args.args[0]
+    assert "Only <@5>" in replied_text(other)
     assert wf.state == wp.AWAITING_APPROVAL
     mine, call = _press(wf, "approve")
     await call
@@ -356,7 +362,7 @@ async def test_stop_in_the_thread_cancels_and_still_replies(env):
     thread_inbox.deliver(env.thread.id, 9002, 5, "Ana", "stop")
     await _finish(wf)
     assert wf.record["state"] == wp.CANCELLED
-    assert [e.title for e in env.thread.embeds()][-1] == "🧵 Workflow cancelled"
+    assert env.thread.closings()[-1] == "🧵 Big job · cancelled"
     assert env.queue.get_nowait().workflow is wf
 
 
@@ -781,7 +787,8 @@ async def test_a_message_after_the_last_review_is_told_it_was_not_applied(env, m
                            _report(call_id="f")])
     wf, _ = await _start(env)
     await _finish(wf)
-    late = [m for m in env.thread.sent if m.kwargs.get("content") == workflows.LATE_REPLY]
+    late = [m for m in env.thread.sent if m.kwargs.get("view") is not None
+            and workflows.LATE_REPLY in view_text(m.kwargs["view"])]
     assert len(late) == 1
     assert late[0].kwargs["reference"].message_id == 9801
     # Nothing reads steering now, so it was not routed (a guard and a model call).
@@ -826,9 +833,10 @@ async def test_a_cancelled_step_closes_its_embed(monkeypatch):
     monkeypatch.setattr(workflows, "_step_work", step_work)
     monkeypatch.setattr(workflows, "_update_plan_message", AsyncMock())
     monkeypatch.setattr("classes.brain_progress.HelperProgress", lambda *a, **k: Progress())
-    wf = SimpleNamespace(step_states={}, thread=None, guild_id=1, first_wave={}, wave=1)
-    task = asyncio.create_task(workflows._run_step(
-        wf, wp.Step(id="s1", role="researcher", brief="b")))
+    step = wp.Step(id="s1", role="researcher", brief="b")
+    wf = SimpleNamespace(step_states={}, thread=None, guild_id=1, first_wave={}, wave=1,
+                         plan=wp.Plan(goal="g", steps=[step]))
+    task = asyncio.create_task(workflows._run_step(wf, step))
     await asyncio.wait_for(started.wait(), 5)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -1212,10 +1220,10 @@ async def test_the_brains_start_workflow_ends_its_run_with_the_thread_link(monke
 
 @pytest.mark.asyncio
 async def test_a_button_of_a_stopped_workflow_says_so():
-    interaction = MagicMock()
-    interaction.response.send_message = AsyncMock()
+    interaction = card_interaction()
     await workflows.on_button(interaction, "deadbeef", "approve")
-    assert interaction.response.send_message.await_args.args[0] == "This workflow has stopped."
+    assert "This workflow has stopped" in replied_text(interaction)
+    assert interaction.response.send_message.await_args.kwargs["ephemeral"] is True
 
 
 @pytest.mark.asyncio
@@ -1225,7 +1233,8 @@ async def test_a_restart_tells_each_interrupted_workflows_thread(env):
     client = MagicMock()
     client.get_channel.return_value = env.thread
     assert await workflows.interrupt_all(client) == 1
-    assert env.thread.texts() == [workflows.INTERRUPTED_NOTE]
+    [text] = env.thread.texts()
+    assert workflows.INTERRUPTED_LABEL in text and workflows.INTERRUPTED_NOTE in text
     assert (await env.store.get(1, "a1"))["state"] == wp.INTERRUPTED
 
 
@@ -1272,7 +1281,10 @@ async def test_a_full_queue_is_retried_then_a_plain_note_is_posted(monkeypatch):
     finally:
         workflows._queue = None
     assert queue.qsize() == 1
-    assert origin.texts() == ["<@5> The workflow has ended: https://discord.com/channels/1/500"]
+    [text] = origin.texts()
+    assert "<@5> The workflow has ended: https://discord.com/channels/1/500" in text
+    # the ping still notifies: only the requester is allowed
+    assert [u.id for u in origin.sent[0].kwargs["allowed_mentions"].users] == [5]
 
 
 def test_the_prompts_stay_small():
@@ -1377,6 +1389,42 @@ async def test_new_steps_may_build_on_a_done_step_and_later_helpers_hear_the_thr
     later = json.dumps(env.model.calls[4].input)
     assert "Ana: add Elegoo too (reply: Adding Elegoo.)" in later
     assert wf.record["state"] == wp.DONE
+
+
+@pytest.mark.asyncio
+async def test_new_steps_keep_the_plans_title_and_count_only_the_plans_steps(env):
+    thread_id = env.thread.id
+
+    @function_tool
+    async def look() -> str:
+        """Look."""
+        thread_inbox.deliver(thread_id, 9310, 5, "Ana", "drop the rest, just write it")
+        return "ok"
+
+    env.subagent_tools = [look]
+    titled = _plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"]),
+                        ("s3", "implementer", ["s2"]))
+    titled.output[0].arguments = titled.output[0].arguments.replace(
+        '"goal"', '"title": "Printer showdown", "goal"', 1)
+    env.model = LaneModel([
+        titled, ModelStep(output=[function_call("look", {}, call_id="l")]), _report(call_id="a"),
+        ModelStep(output=[function_call("submit_review", {
+            "replies": [{"id": 1, "reply": "Writing it now."}],
+            "steps": [{"id": "s4", "role": "implementer", "brief": "Write it",
+                       "depends_on": ["s1"]}]}, call_id="rv")]),
+        _report(call_id="b"), _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    assert [s.id for s in wf.plan.steps] == ["s1", "s4"]
+    assert wf.plan.title == "Printer showdown" and wf.record["plan"]["title"] == "Printer showdown"
+    labels = [view_text(e["view"]).splitlines()[0] for m in env.thread.plans()
+              for e in m.edits if e.get("view")]
+    counts = [label for label in labels if "steps done" in label]
+    # s2 and s3 were taken out ("skipped"): they are not the plan's steps any more.
+    assert "-# 🧵 Plan · 1 of 2 steps done" in counts, counts
+    assert all(" of 2 steps done" in label for label in counts[counts.index(
+        "-# 🧵 Plan · 1 of 2 steps done"):]), counts
+    assert not any(" 3 of " in label or " 4 of " in label for label in labels), labels
 
 
 # --------------------------- review fixes ---------------------------
@@ -1490,10 +1538,10 @@ async def test_a_revised_plan_leaves_the_old_one_as_it_was_with_no_buttons(env, 
                  and not wf.approval.done())
     plans = env.thread.plans()
     assert [p.kwargs["view"].buttons != [] for p in plans][-1]
-    assert "s2" in plans[-1].kwargs["view"].text
+    assert "do s2" in view_text(plans[-1].kwargs["view"])
     for old in plans[:-1]:
         last = old.edits[-1]["view"] if old.edits else old.kwargs["view"]
-        assert "s2" not in last.text and (not old.edits or last.buttons == [])
+        assert "do s2" not in view_text(last) and (not old.edits or last.buttons == [])
     _, call = _press(wf, "approve")
     await call
     await _finish(wf)
@@ -1525,8 +1573,9 @@ async def test_a_cancel_while_the_plan_changes_leaves_the_old_card_closed(env, m
     assert wf.record["state"] == wp.CANCELLED
     [old] = env.thread.plans()
     assert len(old.edits) == 1  # closed once, never given the unseen plan
-    assert old.edits[0]["view"].note == workflows.PLAN_CLOSED
-    assert "s2" not in old.edits[0]["view"].text
+    closed = old.edits[0]["view"]
+    assert closed.buttons == [] and workflows.PLAN_CLOSED in view_text(closed)
+    assert "do s2" not in view_text(closed)
 
 
 @pytest.mark.asyncio
@@ -1558,7 +1607,7 @@ async def test_a_failed_revision_says_so_and_costs_nothing(env, monkeypatch):
     await _until(lambda: wf.approval is not None and not wf.approval.done())
     assert wf.revisions == 0 and len(wf.plan.steps) == 1
     old = env.thread.plans()[0].edits[-1]["view"]
-    assert old.note == workflows.PLAN_CLOSED and old.buttons == []
+    assert workflows.PLAN_CLOSED in view_text(old) and old.buttons == []
     _, call = _press(wf, "approve")
     await call
     await _finish(wf)
@@ -1607,23 +1656,30 @@ async def test_a_step_that_crashes_leaves_nothing_saying_it_is_running(env, monk
     wf, _ = await _start(env)
     await _finish(wf)
     assert wf.step_states["s1"] == "failed" and wf.record["state"] == wp.FAILED
-    embed = next(m for m in env.thread.sent if m.kwargs.get("embed") is not None
-                 and m.kwargs["embed"].title.startswith("🔬 s1"))
-    assert workflows.HELPER_FAILED in embed.edits[-1]["embed"].description
+    status = next(m for m in env.thread.sent if m.kwargs.get("view") is not None
+                  and label_of(m.kwargs["view"]) == "🔬 Research")
+    assert "step 1 of 1" in view_text(status.kwargs["view"])
+    assert workflows.HELPER_FAILED in view_text(status.edits[-1]["view"])
 
 
 @pytest.mark.asyncio
-async def test_a_researchers_embed_counts_to_its_real_share_of_turns(env, monkeypatch):
+async def test_a_researchers_card_counts_to_its_real_share_of_turns(env, monkeypatch):
+    from classes import brain_progress
     monkeypatch.setenv("WORKFLOW_MAX_TURNS", "60")  # less than SUBAGENT_MAX_TURNS (100)
+    seen = []
+    real = brain_progress.HelperProgress.finalize
+
+    async def _finalize(self, *args, **kwargs):
+        seen.append((self.label, self.max_turns))
+        return await real(self, *args, **kwargs)
+
+    monkeypatch.setattr(brain_progress.HelperProgress, "finalize", _finalize)
     env.model = LaneModel([_plan_call(("s1", "researcher", [])), _report(call_id="a"),
                            _report(call_id="f")])
     wf, _ = await _start(env)
     await _finish(wf)
-    embed = next(m for m in env.thread.sent if m.kwargs.get("embed") is not None
-                 and m.kwargs["embed"].title.startswith("🔬 s1"))
-    footer = embed.edits[-1]["embed"].footer.text
-    share = int(footer.rsplit(" ", 1)[-1])
-    assert footer.startswith("Turn 1 of ") and share < 60  # not "of 100"
+    [share] = [turns for label, turns in seen if label.startswith("🔬 Research")]
+    assert share < 60  # "Turn 1 of <share>", not "of 100"
 
 
 def test_runs_side_by_side_split_the_turns_left():
@@ -1709,13 +1765,18 @@ async def test_a_helper_stopped_during_the_check_leaves_it_for_the_next(monkeypa
     assert await brain._workspace_allowed(context)
 
 
-def test_the_longest_plan_fits_a_card():
-    steps = [wp.Step(id=f"s{n}", role="researcher", brief="b" * 3000, depends_on=[])
-             for n in range(1, 9)]
-    plan = wp.Plan(goal="g" * 3000, steps=steps, deliverables=["d" * 500], notes="")
-    wf = SimpleNamespace(plan=plan, step_states={}, plan_lead="<@5> " + "l" * 300)
-    view = workflows._plan_view(wf, note="Approve, Edit or Cancel.")
-    assert view.content_length() <= 4000 and "s8" in view.text
+def test_the_longest_plan_goes_over_several_cards_with_nothing_cut():
+    steps = [wp.Step(id=f"s{n}", role="researcher", brief=f"{n}" + "b" * wp.MAX_BRIEF_CHARS,
+                     depends_on=[], title=f"Part {n}") for n in range(1, 9)]
+    plan = wp.Plan(goal="g" * wp.MAX_GOAL_CHARS, steps=steps, deliverables=["d" * 200],
+                   notes="", title="Big plan")
+    wf = SimpleNamespace(id="abc", plan=plan, step_states={}, plan_lead="<@5> " + "l" * 300)
+    built = card.views(workflows._plan_spec(wf, "approval", "Starts by itself soon"))
+    assert len(built) > 1 and all(v.content_length() <= 4000 for v in built)
+    text = "\n".join(view_text(v) for v in built)
+    assert all(f"{n}" + "b" * wp.MAX_BRIEF_CHARS in text for n in range(1, 9))
+    assert text.count("## Big plan") == 1
+    assert built[-1].buttons and not any(v.buttons for v in built[:-1])
 
 
 @pytest.mark.asyncio
@@ -1734,11 +1795,12 @@ async def test_task_refuses_while_the_bot_is_in_a_call(monkeypatch):
     tree = SimpleNamespace(command=lambda **kw: (lambda f: commands.setdefault(kw["name"], f)))
     task_commands.register_task_commands(tree, client=None)
     monkeypatch.setattr(voice_gate, "active", lambda guild_id: True)
-    ctx = SimpleNamespace(guild_id=1, response=SimpleNamespace(send_message=AsyncMock()))
+    ctx = card_interaction(guild_id=1)
     start = AsyncMock()
     monkeypatch.setattr(workflows, "start_workflow", start)
     await commands["task"](ctx, "a big job")
-    assert ctx.response.send_message.await_args.kwargs == {"ephemeral": True}
+    assert ctx.response.send_message.await_args.kwargs["ephemeral"] is True
+    assert "voice call" in replied_text(ctx)
     start.assert_not_awaited()
 
 
@@ -1775,13 +1837,12 @@ async def test_the_task_message_says_a_plan_is_coming(monkeypatch):
     monkeypatch.setattr(voice_gate, "active", lambda guild_id: False)
     monkeypatch.setattr(workflows, "start_workflow",
                         AsyncMock(return_value=workflows.StartResult(True, thread_url="link")))
-    ctx = SimpleNamespace(guild_id=1, channel=None, user=SimpleNamespace(
-        id=5, display_name="Ana", name="ana"),
-        response=SimpleNamespace(send_message=AsyncMock()),
-        original_response=AsyncMock(return_value=SimpleNamespace()))
+    ctx = card_interaction(guild_id=1, channel=None, user=SimpleNamespace(
+        id=5, display_name="Ana", name="ana"))
     await commands["task"](ctx, "a big job")
-    text = ctx.response.send_message.await_args.args[0]
-    assert text.startswith("🧵 Workflow: a big job") and task_commands.PLAN_COMING in text
+    assert ctx.response.send_message.await_args.kwargs["ephemeral"] is False  # public
+    text = replied_text(ctx)
+    assert "🧵 Big job" in text and "> a big job" in text and task_commands.PLAN_COMING in text
 
 
 @pytest.mark.asyncio
@@ -1812,17 +1873,19 @@ async def test_a_refused_task_keeps_its_reason_and_pings_no_one(monkeypatch):
     task_commands.register_task_commands(tree, client=None)
     monkeypatch.setattr(voice_gate, "active", lambda guild_id: False)
     message = SimpleNamespace(edit=AsyncMock())
-    ctx = SimpleNamespace(guild_id=1, channel=None, user=SimpleNamespace(
-        id=5, display_name="Ana", name="ana"),
-        response=SimpleNamespace(send_message=AsyncMock()),
-        original_response=AsyncMock(return_value=message))
+    ctx = card_interaction(guild_id=1, channel=None, user=SimpleNamespace(
+        id=5, display_name="Ana", name="ana"))
+    ctx.original_response = AsyncMock(return_value=message)
     link = "https://discord.com/channels/1/500"
     monkeypatch.setattr(workflows, "start_workflow", AsyncMock(return_value=SimpleNamespace(
         ok=False, text="A workflow is already running here. " + "x" * 100 + link)))
     await commands["task"](ctx, "@everyone " + "y" * 1790)
     kwargs = message.edit.await_args.kwargs
-    assert kwargs["content"].endswith(link) and len(kwargs["content"]) <= 2000
+    text = view_text(kwargs["view"])
+    assert link in text and "y" * 1790 in text  # the request is not cut any more
+    assert kwargs["view"].content_length() <= 4000
     assert kwargs["allowed_mentions"].everyone is False
+    assert ctx.response.send_message.await_args.kwargs["allowed_mentions"].everyone is False
 
 
 @pytest.mark.asyncio
@@ -1973,7 +2036,7 @@ async def test_a_thread_message_the_guard_blocks_never_reaches_the_review(env, m
     await _finish(wf)
     assert wf.ledger.events[0].outcome == "declined"
     assert wf.said == [] and wf.record["state"] == wp.DONE
-    assert "I can't act on that message." in env.thread.texts()
+    assert any("I can't act on that message." in t for t in env.thread.texts())
 
 
 @pytest.mark.asyncio
@@ -2158,3 +2221,30 @@ def test_a_blank_dependency_is_ignored():
         max_steps=4)
     assert problems == []
     assert plan.steps[0].depends_on == []
+
+
+@pytest.mark.asyncio
+async def test_task_says_why_it_did_not_start_on_its_first_message(monkeypatch):
+    # A request of emoji counts double, so it can take two messages; the
+    # reason went in the footer, on the last one, which was never edited.
+    from classes import task_commands, voice_gate
+    commands = {}
+    tree = SimpleNamespace(command=lambda **kw: (lambda f: commands.setdefault(kw["name"], f)))
+    task_commands.register_task_commands(tree, client=None)
+    monkeypatch.setattr(voice_gate, "active", lambda guild_id: False)
+    first = MagicMock()
+    first.edit = AsyncMock()
+    ctx = card_interaction(guild_id=1, user=SimpleNamespace(id=5, name="ana", display_name="Ana"),
+                           channel=FakeChannel(77))
+    ctx.original_response = AsyncMock(return_value=first)
+    monkeypatch.setattr(workflows, "start_workflow", AsyncMock(return_value=SimpleNamespace(
+        ok=False, text="One is already running: https://discord.com/x. " + "It is a long one. " * 20
+        + "Tell them where it is.")))
+    await commands["task"](ctx, "🧵" * 1800)
+    shown = view_text(first.edit.await_args.kwargs["view"])
+    assert "not started" in shown and "https://discord.com/x" in shown
+    assert "Tell them" not in shown
+    # The card the request was posted as fit one message; with the reason it
+    # takes two, and the rest of the request goes on in a follow-up.
+    rest = view_text(ctx.followup.send.await_args.kwargs["view"])
+    assert rest.count("🧵") + shown.count("🧵") == 1800 + 1  # and the label's

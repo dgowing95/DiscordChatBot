@@ -139,6 +139,19 @@ async def test_input_files_fetch_an_unresolved_reply_and_report_failed_downloads
 
 
 @pytest.mark.asyncio
+async def test_input_files_find_a_file_the_bot_posted_in_a_card():
+    # A card's files are in no message.attachments (seen in E2E).
+    from card_checks import posted_file_card
+    from classes.brain import chat_input_files
+
+    trigger = SimpleNamespace(attachments=[], reference=None)
+    wrapper = SimpleNamespace(context={"original_message": trigger,
+                                       "channel": _Channel([posted_file_card(cdn=b"S")])})
+    inputs, problems, names = await chat_input_files(wrapper.context, ["saturn_notes.md"])
+    assert inputs == [("saturn_notes.md", b"S")] and problems == []
+
+
+@pytest.mark.asyncio
 async def test_no_message_and_no_names_gives_nothing():
     from classes.brain import chat_input_files
 
@@ -182,3 +195,24 @@ async def test_a_file_that_cannot_be_written_is_named_as_not_provided(out_dir, s
     # What the outer model is told comes from these, so a failed write is
     # never reported as given.
     assert given == [] and problems == ["a.csv (could not be copied in)"]
+
+
+def test_a_file_is_found_by_the_name_it_had_before_it_was_posted():
+    # The brain made "Sales Chart (Q1).png"; it was uploaded as
+    # "Sales_Chart_Q1.png" (card.safe_filename), and the persona knows the first.
+    posted = si.Candidate("Sales_Chart_Q1.png", 10, None)
+    chosen, missing, _ = si.select([], [posted], ["Sales Chart (Q1).png"], 1000)
+    assert chosen == [posted] and missing == []
+    assert si.select([], [posted], ["Sales Chart (Q2).png"], 1000)[1] == ["Sales Chart (Q2).png"]
+
+
+def test_names_of_other_letters_never_match_each_other():
+    report, plan = si.Candidate("отчёт.pdf", 10, None), si.Candidate("план.pdf", 10, None)
+    chosen, missing, _ = si.select([], [plan, report], ["отчёт.pdf"], 1000)
+    assert chosen == [report] and missing == []
+    assert si.select([], [plan], ["отчёт.pdf"], 1000)[1] == ["отчёт.pdf"]
+    # Uploaded by the bot, such a name is "file.pdf": found by its old name too.
+    posted = si.Candidate("file.pdf", 10, None)
+    assert si.select([], [posted], ["отчёт.pdf"], 1000)[0] == [posted]
+    no_extension = si.Candidate("报告", 10, None)
+    assert si.select([], [no_extension], ["报告"], 1000)[0] == [no_extension]

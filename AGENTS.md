@@ -37,10 +37,11 @@ core/                    # the bot (what runs in production)
     redis_client.py        # the two shared, lazily built Redis clients (str + binary)
     settings_check.py      # P settings removed in v3, and the startup check that exits on them
     metrics.py             # P Prometheus metrics and the /metrics server
-    common.py              # shared Discord helpers (tool embeds, QuietChannel)
-    card.py                # a message as one card with its buttons inside (questions, the plan)
-    tool_embeds.py         # P how tool embeds read: titles, colours, link labels
-    whats_new.py           # P What's New notes: parse, limits, embed
+    common.py              # shared Discord helpers (QuietChannel, send_with_files)
+    card_kit.py            # P the bot's cards: colours, blocks, splitting, markdown safety, readback
+    card.py                # cards in Discord: send / LiveCard / reply, Card (questions), text_of, kind_of
+    tool_cards.py          # P what each tool's card says: labels, link labels, helper lines
+    whats_new.py           # P What's New notes: parse, limits, the card
     help_catalog.py        # P the hand-written /help listing
     # LLM connections
     llm_roles.py           # P model / host / key / effort / timeout per role and side job
@@ -58,13 +59,13 @@ core/                    # the bot (what runs in production)
     persona_voice.py       # the brain's question reworded in the persona's voice
     skill_format.py        # P skills: SKILLS_* settings, name/limit checks, SKILL.md, the index and its ranking
     skill_store.py         # skills in Redis: every version kept, soft delete, revert, export
-    skill_tools.py         # the brain's use_skill / save_skill / search_skills, and every skill embed
+    skill_tools.py         # the brain's use_skill / save_skill / search_skills, every skill card, Restore
     skill_commands.py      # the /skills group (list, show, history, edit, delete, restore, revert, export)
     skill_reflection.py    # after a long job, one background call decides whether to save a skill
     skill_curator.py       # the daily tidy-up: merge, retire, describe (its rules are pure)
     loop_guard.py          # P stops a brain run that repeats itself (also a page or search asked again)
     context_trim.py        # P cuts old tool outputs in a long brain run; keeps a local run in its slot
-    brain_progress.py      # the "Working on it" status embed and live command output
+    brain_progress.py      # the "Working on it" status card and live command output
     workspace_tools.py     # shell wrappers, attach_file and delivery, in/ files, thread tools
     workspace_inputs.py    # P which chat files go to a brain call's in/
     workspace_lifecycle.py # P the per-guild workspace state machine, WORKSPACE_* settings
@@ -118,7 +119,8 @@ browserservice/          # headless Chromium for fetch_url; egress_proxy.py and
 speechservice/           # speech-to-text (faster-whisper) and text-to-speech (Kokoro), CPU only;
                          #   speech_params.py is its pure half
 voicesidecar/            # Node: Discord voice I/O (@discordjs/voice, DAVE); README has the protocol
-docs/                    # user guides (automations, events, voice) and upgrading-to-v3.md
+docs/                    # user guides (automations, events, voice) and upgrading-to-v3.md;
+                         #   cards.md is for developers: how to build and extend the bot's cards
 e2e/                     # end-to-end CI (README.md there)
 charts/dis-ai-bot/       # Helm chart: credentials in templates/secret.yaml, the rest in
                          #   configmap.yaml; llm.engine picks llamacpp.yaml (default) or strata.yaml
@@ -215,7 +217,7 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
    | Which tools a call gets | `brain_tools.py` |
    | What the persona is told; must-keep facts | `brain_result.py` |
    | Loop guard, context trimming, limits | `loop_guard.py`, `context_trim.py`, `brain_policy.py` |
-   | Status embed, live command output | `brain_progress.py` |
+   | Status card, live command output | `brain_progress.py` |
    | Shell wrappers, `attach_file`, delivery, `in/` files | `workspace_tools.py` |
    | The server's container | `workspace_manager.py` (rules: `workspace_lifecycle.py`) |
    | Handing a big job to a workflow (`start_workflow`) | `workflow_tools.py`, `workflows.py` (item 13) |
@@ -232,8 +234,8 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
    | `start_workflow` (`WORKFLOW_ENABLED`; never in a reply nobody asked for) | yes | with `WORKFLOW_FROM_AUTOMATIONS` | no |
    | `attach_file`, `save_messages_to_file`, `ask_user`, `report`, the Shell tools | yes | yes | yes |
 
-   - **It works inline, in the channel**, not in a thread: each tool posts its own embed, attached files
-     are posted before the persona replies, and the "🧠 Working on it" embed appears only once it uses
+   - **It works inline, in the channel**, not in a thread: each tool posts its own card, attached files
+     are posted before the persona replies, and the "🧠 Working on it" card appears only once it uses
      the workspace.
    - **The run context is the persona's**: the same dict plus a few brain keys removed when the call
      ends (`brain._BRAIN_KEYS`). So every tool reads what it always read, per-reply caps hold across
@@ -281,8 +283,9 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
      persona's run context and `MessageHandler` starts it AFTER the reply is sent
      (`skill_reflection.py`, background lane). Chat replies only: voice and automatic runs are not
      reviewed. Anyone in the server manages skills with `/skills` (no permission check by decision,
-     since every change is a version and a delete is undoable). Every event posts its own embed
-     (`tool_embeds`: 📘 saved, 📗 updated, 📖 used, 🗑️ deleted, ♻️ restored, ⏪ reverted).
+     since every change is a version and a delete is undoable). Every event posts its own card
+     (`tool_cards`: 📘 saved, 📗 updated, 📖 used, 🗑️ deleted, ♻️ restored, ⏪ reverted); a deleted or
+     retired skill's card has a Restore button (`skill_tools.RestoreButton`, a `DynamicItem`).
      **The tidy-up** (`skill_curator.py`, a loop started in `on_ready`): every
      `SKILLS_CURATOR_INTERVAL_HOURS`, one background call per server with
      `SKILLS_CURATOR_MIN_SKILLS`+ skills proposes at most 3 merges, retires or clearer descriptions.
@@ -292,8 +295,8 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
      restored, reverted or edited with `/skills` within `SKILLS_RETIRE_DAYS` is `protected` and never
      changed, or the next pass would retire again what was just restored. When a pass is due is kept in Redis
      (`...:curator`, with a signature of what it saw, taken after its own changes), and a lock per
-     server keeps two processes from running one twice. Its embeds (🗑️ retired, 📗 updated, footer
-     "tidy-up") go to the skill's last channel, used or saved.
+     server keeps two processes from running one twice. Its cards (🗑️ retired, 📗 updated, label
+     "daily tidy-up") go to the skill's last channel, used or saved.
 
    Before editing, read `brain.py`'s module docstring, then `run_brain`, `workspace_tools._deliver` and
    `brain_result.tool_result_for_persona`.
@@ -317,9 +320,10 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
      the old container is reaped when core runs on that node again.
 
 8. **What's New and /help.** After the first successful reply in a guild on a new version,
-   `main.maybe_announce_whats_new` posts that version's notes (`core/whats_new.md`) as one embed. One
+   `main.maybe_announce_whats_new` posts that version's notes (`core/whats_new.md`) as one card. One
    atomic Redis `SET ... GET` claims it, so it shows once per guild per version even with several
-   workers. `_format_group` drops the embed from prompts. `/help` and `/whats_new` reply ephemerally.
+   workers. `_format_group` drops it from prompts (its kind is `ANNOUNCE`). `/help` and `/whats_new`
+   reply ephemerally.
 9. **Schedules and rules** (`docs/automations.md`), stored under `dcb:automations:v1`. Automatic work
    rides the same queue as chat (`AutomationJob`), so `QUEUE_WORKERS` and the channel locks bound it.
    `schedule_forever` polls due schedules every 15 s and admits only what the queue has room for; an
@@ -405,10 +409,12 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
       before its limit (`FINISH_UP`), and one that reaches a limit gets one last call that can only be
       `report` (`_last_report`), so what it found is kept. Findings and answers go to every later run
       by code (`planning_text`). Automatic runs may look but not ask.
-    - **One embed per scout and researcher** (`brain_progress.HelperProgress`): their last tool call
+    - **One card per scout and researcher** (`brain_progress.HelperProgress`): their last tool call
       and turn, trimmed, edited at most every 30 s since two share a thread's edits. Their tools post
-      nothing (`common.QuietChannel`), which replaced dozens of embeds a run. An implementer keeps the
-      status embed and its tools' own, since a picture has to reach the thread.
+      nothing (`common.QuietChannel` drops notice cards), which replaced dozens of them a run. An
+      implementer keeps the status card and its tools' own, since a picture has to reach the thread.
+      Steps are named on their cards by the `title` the planner gives each (`submit_plan`), else their
+      role ("🔬 Research · step 1 of 3"); the plan has a `title` too.
     - **Told a plan is coming**: the persona's start reply and `/task`'s message say so, and discovery
       leaves a note in the thread. Only the plan and a question ping the requester.
     - **Its own run context**, built once (`_run_context`): the thread is `channel`, there is no source
@@ -492,6 +498,31 @@ being merged:
 needs an entry there, gated with `requires` when it can be switched off;
 `core/tests/help_catalog_tests.py` fails until it has one.
 
+### Cards (every bot message that is not a chat reply)
+
+Every status, tool, panel and system message is a Discord Components V2 card (`card_kit.py`, pure;
+`card.py` sends it). Persona replies, their reasoning spoilers, the manager's quoted thread replies
+and the plan's text fallback stay plain text. **To add or change one, follow `docs/cards.md`**
+(recipes: a notice, a live card, a reply, a panel with buttons, files, tests, extending the kit).
+
+- **One shape**: a small label line in plain words ("🔎 Searching the web"), an optional title, the
+  body, then a small footer. Build it with a `CardSpec` (or `card_kit.info` / `done` / `heads_up` /
+  `error`), never a `discord.Embed`. Items of a list are split by a `Gap`, groups by a `Divider`.
+- **Colour is the state** (decided 2026-11-07): blurple active, yellow working, green done, orange
+  partly / heads-up, red failed, grey over, pink waiting on someone.
+- **Nothing is cut**: past 4000 characters or 40 components a card goes on in more messages
+  (`card_kit.split`; the label and title only on the first, the footer on the last).
+- **A mention in a card pings**, so `send_card` allows none unless given `mentions`.
+- **Text the bot did not write** goes through `card_kit.safe` / `quote`, so it never becomes a heading.
+- **History**: the container's id says what a card is (`KIND_IDS`). A `NOTICE` reads in a prompt as a
+  status card, not as something the bot said; an `ANNOUNCE` is left out; a `CARD` (question, plan)
+  reads as its text.
+- **Files a card shows** are sent with that message (`card.safe_filename` keeps the name Discord
+  stores). Discord lists them in no `message.attachments`, only in the card: read a message's
+  files with `card.files_of` (the image edit, the brain's chat files, history images do).
+- Buttons that must work after a restart are `DynamicItem`s registered in `main.on_ready`
+  (`WorkflowButton`, `RestoreButton`, `LeaveButton`); a panel's own buttons re-check permissions.
+
 ### Prompt surface
 
 Everything the models are told lives in code. The persona sees one tool: the `ask_brain` docstring
@@ -517,7 +548,7 @@ question in the persona's voice), `image_prompt.SYSTEM_PROMPT` (~2050, the SDXL 
   their own homes, pinned by `skill_tools_tests.py`: `SKILLS_INSTRUCTIONS` ~270 characters (ceiling
   400, added to the brain's prompt only when skills are on), `REFLECTION_PROMPT` ~730 (ceiling
   1000, the one prompt of the after-job review) and `CURATOR_PROMPT` ~860 (ceiling 1000, the
-  tidy-up's). Workflows' are pinned by `workflows_tests.py`: `MANAGER_INSTRUCTIONS` ~1350 (ceiling
+  tidy-up's). Workflows' are pinned by `workflows_tests.py`: `MANAGER_INSTRUCTIONS` ~1395 (ceiling
   1400; every manager run: plan, review, finish; `MANAGER_IMAGE_LINE` ~100 is added when the bot can
   draw) and `SUBAGENT_INSTRUCTIONS` ~1170 (ceiling 1400, plus one `ROLE_LINES` line per helper), by
   `workflow_verify_tests.py`: `VERIFIER_INSTRUCTIONS` ~850 (ceiling 1000), `ROUTE_PROMPT` ~360
@@ -574,7 +605,7 @@ reads has a row here and a line in `.env.example`, that every row is read by som
 | `PERSONA_REASONING_EFFORT` | the persona's `reasoning_effort` [medium]. Chart: `persona.reasoningEffort` |
 | `PERSONA_MAX_TURNS` | model turns per persona reply [4]: ask the brain, maybe again, answer. An overrun is still answered. Chart: `persona.maxTurns` |
 | `PERSONA_CALL_TIMEOUT_SECONDS` | wall-clock seconds per persona model call, client retries included [600], applied after the lane wait; also the per-read timeout. A per-read timeout alone never trips on a server that pads its responses (OpenRouter). Chart: `persona.callTimeout` |
-| `WHATS_NEW_ENABLED` | `0` stops the automatic What's New embed; `/whats_new` still works [on]. Chart: `whatsNew.enabled` |
+| `WHATS_NEW_ENABLED` | `0` stops the automatic What's New card; `/whats_new` still works [on]. Chart: `whatsNew.enabled` |
 | `APP_VERSION` | the release tag, baked into the core image by `release.yaml`; unset = no announcement |
 | `SHOW_THINKING` | `1` sends the model's reasoning as spoiler-hidden follow-ups [off]. Chart: `showThinking` |
 | `DOUBLE_REPLY_CHANCE` | chance of offering two short messages from one generation [0.08; 0 = off]. Chart: `doubleReply.chance` |

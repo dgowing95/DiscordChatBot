@@ -104,7 +104,7 @@ def brain_tools(*, automatic: bool = False, voice: bool = False, workflows: bool
     if mode == MANAGER:
         tools = []
         if skill_format.enabled():
-            # search_skills only: use_skill posts a "Using a skill" embed, and a
+            # search_skills only: use_skill posts a "Using a skill" card, and a
             # planner opened unrelated skills just to read them (live, twice).
             tools.append(search_skills)
         tools.extend(tool for tool in (discover, ask_requester) if tool.name in rounds)

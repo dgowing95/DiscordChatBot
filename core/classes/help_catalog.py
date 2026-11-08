@@ -13,7 +13,6 @@ something the bot cannot do.
 """
 from dataclasses import dataclass
 
-from classes.whats_new import EMBED_COLOR, MAX_FIELD_VALUE
 
 IMAGE = "image"
 AUTOMATIONS = "automations"
@@ -104,9 +103,9 @@ COMMAND_ENTRIES = (
 )
 
 TIPS = (
-    "• @mention me to get a reply; otherwise I only join in now and then (see /chance).\n"
-    "• Send `!reset_history` to make me forget the conversation above it.\n"
-    "• I can see images you attach."
+    "- @mention me to get a reply; otherwise I only join in now and then (see /chance).\n"
+    "- Send `!reset_history` to make me forget the conversation above it.\n"
+    "- I can see images you attach."
 )
 
 HELP_TITLE = "🤖 What I can do"
@@ -133,35 +132,27 @@ def _shown(entry: HelpEntry, image_enabled: bool) -> bool:
     return True
 
 
-def _fields(name: str, lines: list) -> list:
-    """`lines` as one field, or as several ("name (more)") when they would
-    pass Discord's 1024-character field limit."""
-    groups, current = [], []
-    for line in lines:
-        if current and len("\n".join(current + [line])) > MAX_FIELD_VALUE:
-            groups.append(current)
-            current = []
-        current.append(line)
-    if current:
-        groups.append(current)
-    return [{"name": name if i == 0 else f"{name} (more)", "value": "\n".join(group)}
-            for i, group in enumerate(groups)]
+HELP_LEAD = "@mention me and ask in your own words. Here's what I'm good at."
+HELP_FOOTER = "/whats_new shows what's new in this version"
 
 
-def help_embed_data(image_enabled: bool) -> dict:
-    """The /help embed as plain data (see classes.common.embed_from_data).
-    One field per group keeps it compact on mobile; a group past Discord's
-    field limit carries on in a second field."""
+def help_card(image_enabled: bool, avatar_url: str | None = None):
+    """The /help card (classes/card_kit.py): a header with the bot's own
+    picture, then each group under its heading. A long one goes over several
+    cards, so nothing is cut."""
+    from classes import card_kit as K
     ask = [e for e in ASK_ENTRIES if _shown(e, image_enabled)]
     commands = [e for e in COMMAND_ENTRIES if _shown(e, image_enabled)]
-    return {
-        "title": HELP_TITLE,
-        "color": EMBED_COLOR,
-        "fields": (_fields("Just ask me", [f"**{e.name}** — {e.description}" for e in ask])
-                   + _fields("Slash commands", [f"`{e.name}` — {e.description}" for e in commands])
-                   + [{"name": "Tips", "value": TIPS}]),
-        "footer": "",
-    }
+    head = (f"## {HELP_TITLE}", K.small(HELP_LEAD))
+    body = [K.Section(head, K.Thumb(avatar_url)) if avatar_url else K.Text("\n".join(head)),
+            K.Divider(),
+            K.Text("### 💬 Just ask me\n" + "\n".join(f"**{e.name}** — {e.description}" for e in ask)),
+            K.Divider(),
+            K.Text("### ⌨️ Slash commands\n" + "\n".join(f"`{e.name}` — {e.description}"
+                                                           for e in commands)),
+            K.Divider(),
+            K.Text("### 💡 Tips\n" + TIPS)]
+    return K.CardSpec(body=body, footer=HELP_FOOTER)
 
 
 # Brain tools that are its own bookkeeping, not something a person asks for.

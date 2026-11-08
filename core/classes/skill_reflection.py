@@ -19,7 +19,7 @@ import json
 import logging
 import re
 
-from classes import llm_lanes, metrics, skill_format, tool_embeds
+from classes import llm_lanes, metrics, skill_format, tool_cards
 from classes.llm_roles import BRAIN, role_config
 from classes.response_filter import strip_thinking
 from classes.side_llm import SideLLM
@@ -135,7 +135,7 @@ async def reflect(review: dict) -> str:
     store's `unchanged`) or failed. Never raises."""
     from classes.content_guard import check_web_request
     from classes.skill_store import SkillError, SkillStore
-    from classes.skill_tools import announce, saved_embed
+    from classes.skill_tools import announce, saved_card
     try:
         text = await _llm.complete(review_messages(review), temperature=0.2, max_tokens=MAX_TOKENS)
         decision = parse_decision(text)
@@ -164,8 +164,10 @@ async def reflect(review: dict) -> str:
             metrics.inc_skill_reflection("none")
             return "none"
         skill = await store.get(guild, name)
-        title, detail = saved_embed(result, name, skill["version"], skill["description"], decision["note"])
-        await announce(review.get("channel"), title, name, detail, tool_embeds.SKILL_FOOTER_REFLECTION)
+        label, detail, version = saved_card(result, name, skill["version"], skill["description"],
+                                             decision["note"])
+        await announce(review.get("channel"), label, name, detail,
+                       tool_cards.SKILL_FOOTER_REFLECTION, version=version)
         metrics.inc_skill_reflection(decision["action"])
         return decision["action"]
     except SkillError as e:

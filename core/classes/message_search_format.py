@@ -168,10 +168,39 @@ def _card_text(message: dict) -> str:
     return "\n".join(lines)
 
 
+def _url_name(url) -> str:
+    from urllib.parse import unquote, urlsplit
+    return unquote(urlsplit(str(url or "")).path.rsplit("/", 1)[-1])
+
+
+def _file_names(message: dict) -> list[str]:
+    """The names of a message's files: its attachments, and those inside a
+    card, which Discord lists in no attachments (a File component has its
+    name, a gallery picture only its URL). The raw API's form of
+    card.files_of."""
+    names = [str(a["filename"]) for a in message.get("attachments") or []
+             if isinstance(a, dict) and a.get("filename")]
+
+    def walk(items) -> None:
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            file = item.get("file") or {}
+            if item.get("type") == 13 and file.get("attachment_id"):
+                names.append(str(item.get("name") or _url_name(file.get("url"))))
+            for entry in item.get("items") or []:
+                media = (entry.get("media") or {}) if isinstance(entry, dict) else {}
+                if media.get("attachment_id"):
+                    names.append(_url_name(media.get("url")))
+            walk(item.get("components"))
+
+    walk(message.get("components"))
+    return [name for name in names if name]
+
+
 def _content(message: dict) -> str:
     text = _cut(message.get("content") or _card_text(message), CONTENT_CHARS)
-    extras = [f"[attached: {a.get('filename')}]" for a in message.get("attachments") or []
-              if a.get("filename")]
+    extras = [f"[attached: {name}]" for name in _file_names(message)]
     extras += [e for e in (_embed(e) for e in message.get("embeds") or [] if isinstance(e, dict))
                if e]
     poll = (message.get("poll") or {}).get("question") or {}
@@ -325,8 +354,7 @@ def export_record(message: dict, guild_id, channel_names: dict) -> dict:
         "timestamp": str(message.get("timestamp") or ""),
         "content": str(message.get("content") or _card_text(message)),
         "embeds": embeds,
-        "attachments": [a.get("filename") for a in message.get("attachments") or []
-                        if a.get("filename")],
+        "attachments": _file_names(message),
     }
 
 

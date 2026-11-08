@@ -182,6 +182,7 @@ MAX_DELIVERABLE_CHARS = 200
 MAX_DELIVERABLES = 10
 MAX_NOTES_CHARS = 1000
 MAX_QUESTION_CHARS = 300
+MAX_TITLE_CHARS = 80  # a plan's or a step's title: a few words
 
 
 @dataclass
@@ -190,6 +191,9 @@ class Step:
     role: str
     brief: str
     depends_on: list[str] = field(default_factory=list)
+    # A few words naming the step on its cards ("Find 2026 reviews"); the
+    # brief is the whole job. Empty in plans stored before titles existed.
+    title: str = ""
 
 
 @dataclass
@@ -198,10 +202,12 @@ class Plan:
     steps: list[Step]
     deliverables: list[str] = field(default_factory=list)
     notes: str = ""
+    title: str = ""  # a few words naming the whole job
 
     def to_dict(self) -> dict:
         return {"goal": self.goal, "notes": self.notes, "deliverables": list(self.deliverables),
-                "steps": [{"id": s.id, "role": s.role, "brief": s.brief,
+                "title": self.title,
+                "steps": [{"id": s.id, "role": s.role, "brief": s.brief, "title": s.title,
                            "depends_on": list(s.depends_on)} for s in self.steps]}
 
 
@@ -278,7 +284,8 @@ def validate_plan(raw, *, max_steps: int, request: str = "") -> tuple["Plan | No
             elif str(dep or "").strip():  # a blank entry is no dependency at all
                 problems.append(f"Step {step_id} depends on {str(dep)[:40]!r}, which is not a "
                                 "usable step id.")
-        steps.append(Step(id=step_id, role=role, brief=brief, depends_on=depends))
+        steps.append(Step(id=step_id, role=role, brief=brief, depends_on=depends,
+                          title=_text(item.get("title"), MAX_TITLE_CHARS)))
     ids = {s.id for s in steps}
     for step in steps:
         for dep in step.depends_on:
@@ -290,7 +297,8 @@ def validate_plan(raw, *, max_steps: int, request: str = "") -> tuple["Plan | No
         problems.append("The steps depend on each other in a circle.")
     deliverables = [_text(d, MAX_DELIVERABLE_CHARS) for d in _list(raw.get("deliverables"))]
     plan = Plan(goal=goal, steps=steps, deliverables=[d for d in deliverables if d][:MAX_DELIVERABLES],
-                notes=_text(raw.get("notes"), MAX_NOTES_CHARS))
+                notes=_text(raw.get("notes"), MAX_NOTES_CHARS),
+                title=_text(raw.get("title"), MAX_TITLE_CHARS))
     return (None, problems) if problems else (plan, [])
 
 
@@ -524,36 +532,54 @@ def plan_text(plan: Plan) -> str:
     return "\n".join(lines)
 
 
-# Discord embed limits (a field value is 1024 characters, a description 4096).
-_FIELD_CHARS = 1000
-_DESCRIPTION_CHARS = 1500
-# Under Discord's 6000 for a whole embed, leaving room for the title.
-_PLAN_CHARS = 3400
 STEP_ICONS = {"pending": "⏳", "running": "▶️", "done": "✅", "partial": "🟡",
               "failed": "❌", "cancelled": "⏹️", "skipped": "⏭️"}
+ROLE_LABELS = {RESEARCHER: "🔬 Research", IMPLEMENTER: "🛠️ Build"}
 
 
-def render_plan(plan: Plan, step_states: dict | None = None) -> dict:
-    """The plan as card data: {title, description, fields: [(name, value)]}.
-    With step_states, each step shows its state's icon."""
+def step_number(plan: Plan, step_id: str) -> int:
+    return next((i for i, s in enumerate(plan.steps, 1) if s.id == step_id), 0)
+
+
+def step_label(plan: Plan, step: Step) -> str:
+    """A step's card label, in plain words: "🔬 Research · step 1 of 3"."""
+    number = step_number(plan, step.id)
+    where = f" · step {number} of {len(plan.steps)}" if number else ""
+    return ROLE_LABELS.get(step.role, step.role) + where
+
+
+def step_title(step: Step) -> str:
+    """The few words naming a step (the role's when the plan gave none)."""
+    return step.title or ROLE_LABELS.get(step.role, step.role).split(" ", 1)[-1]
+
+
+def plan_blocks(plan: Plan, step_states: dict | None = None) -> list:
+    """The plan as card blocks (classes/card_kit.py): the goal and what the
+    user gets, then each step with its state, in full. A long plan goes over
+    several cards; nothing is cut."""
+    from classes import card_kit as K
     states = step_states or {}
-    description = plan.goal
+    goal = K.safe(plan.goal)
     if plan.deliverables:
-        description += "\n\n**You get:** " + "; ".join(plan.deliverables)
-    description = description[:_DESCRIPTION_CHARS]
-    # A card holds 4000 characters in all (classes/card.py), so the steps
-    # share what the description leaves.
-    budget = _PLAN_CHARS - len(description)
-    steps = plan.steps[:25]
-    fields = []
-    for index, step in enumerate(steps):
-        icon = STEP_ICONS.get(states.get(step.id, ""), "")
-        name = f"{icon} {step.id} · {step.role}".strip()[:256]
-        share = max(40, min(_FIELD_CHARS, budget // (len(steps) - index) - len(name)))
-        value = step.brief if len(step.brief) <= share else step.brief[: share - 1] + "…"
-        budget -= len(name) + len(value)
-        fields.append((name, value))
-    return {"title": "🧵 Plan", "description": description, "fields": fields}
+        goal += "\n\n**You'll get**\n" + "\n".join(f"- {K.safe(d)}" for d in plan.deliverables)
+    items = []
+    for number, step in enumerate(plan.steps, 1):
+        icon = STEP_ICONS.get(states.get(step.id, ""), STEP_ICONS["pending"])
+        after = [step_number(plan, d) for d in step.depends_on if step_number(plan, d)]
+        meta = ROLE_LABELS.get(step.role, step.role)
+        if after:
+            meta += f" · after step{'s' if len(after) > 1 else ''} " + " and ".join(
+                [", ".join(map(str, after[:-1])), str(after[-1])] if len(after) > 1 else [str(after[0])])
+        items.append(f"{icon} **{number}. {K.safe(step_title(step))}**\n"
+                     f"{K.small(f'{meta} — {step.brief}')}")
+    return [K.Text(goal), K.Divider(), *K.listing(items)]
+
+
+def steps_done(plan: Plan, step_states: dict | None) -> int:
+    """The plan's steps that are over. Only the plan's own: a step a revision
+    took out stays in step_states as "skipped" ("4 of 3 steps done")."""
+    states = step_states or {}
+    return sum(1 for step in plan.steps if states.get(step.id) in ("done", "partial", "skipped"))
 
 
 # --- states ------------------------------------------------------------------

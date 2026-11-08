@@ -6,7 +6,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from classes import skill_curator as sc
-from classes import tool_embeds
+from classes import tool_cards
+from card_checks import label_of, sent_views, view_text
 from classes.skill_store import SkillError, SkillStore, VersionError
 from skill_store_tests import FakeRedis
 
@@ -163,7 +164,8 @@ def allowed():
 
 
 def embeds(channel):
-    return [(c.kwargs["embed"].title, c.kwargs["embed"].footer.text) for c in channel.send.call_args_list]
+    """(label, whether it says it was the tidy-up) of each card posted."""
+    return [(label_of(v), tool_cards.SKILL_FOOTER_CURATOR in view_text(v)) for v in sent_views(channel.send)]
 
 
 async def _seed(store, clock, *, old=("old-poll",), channel=77):
@@ -208,8 +210,7 @@ async def test_merge_keeps_one_with_both_files_and_retires_the_other(store, chan
     assert kept["updated_by"] == BOT
     assert await store.get(GUILD, "week-chart") is None
     assert (await store.get_any(GUILD, "week-chart"))["deleted"]
-    assert embeds(channels[0][77]) == [(tool_embeds.SKILL_UPDATED, tool_embeds.SKILL_FOOTER_CURATOR),
-                                       (tool_embeds.SKILL_RETIRED, tool_embeds.SKILL_FOOTER_CURATOR)]
+    assert embeds(channels[0][77]) == [(tool_cards.SKILL_UPDATED, True), (tool_cards.SKILL_RETIRED, True)]
     # What the model read: every skill, the old one marked.
     assert "## old-poll [unused]" in llm.messages[1]["content"]
 
@@ -236,9 +237,11 @@ async def test_retire_and_describe(store, channels, clock):
     pie = await store.get(GUILD, "pie-chart")
     assert pie["description"] == "Pie chart of shares" and pie["body"] == "steps for pie-chart"
     assert pie["files"] == {"scripts/pie-chart.py": "x"}
-    lines = [c.kwargs["embed"].description for c in channels[0][77].send.call_args_list]
-    assert "not used in 60 days" in lines[0] and "/skills restore" in lines[0]
-    assert "v2: clearer" in lines[1]
+    views = sent_views(channels[0][77].send)
+    lines = [view_text(v) for v in views]
+    assert "Not used in 60 days" in lines[0]
+    assert [b.item.label for b in views[0].buttons] == ["Restore"]  # undo, right there
+    assert "v2" in lines[1] and "Clearer" in lines[1]
 
 
 @pytest.mark.asyncio
@@ -266,7 +269,7 @@ async def test_a_merge_whose_drop_changed_keeps_both(store, channels, clock):
     assert await _curator(store, channels, llm, clock).curate(GUILD) == "1"  # the kept one changed
     assert (await store.get(GUILD, "week-chart"))["body"] == "a person's steps"
     assert (await store.get(GUILD, "weekly-chart"))["body"] == "b"  # updated first: nothing lost
-    assert [t for t, _ in embeds(channels[0][77])] == [tool_embeds.SKILL_UPDATED]
+    assert [t for t, _ in embeds(channels[0][77])] == [tool_cards.SKILL_UPDATED]
 
 
 @pytest.mark.asyncio
@@ -284,8 +287,8 @@ async def test_a_retire_shows_fixed_words_and_notes_are_capped(store, channels, 
                           {"action": "describe", "name": "pie-chart", "description": "Pie chart",
                            "note": "y" * 500}))
     assert await _curator(store, channels, llm, clock).curate(GUILD) == "2"
-    lines = [c.kwargs["embed"].description for c in channels[0][77].send.call_args_list]
-    assert "everyone" not in lines[0] and "not used in 60 days" in lines[0]
+    lines = [view_text(v) for v in sent_views(channels[0][77].send)]
+    assert "everyone" not in lines[0] and "Not used in 60 days" in lines[0]
     assert "y" * 201 not in lines[1]
 
 

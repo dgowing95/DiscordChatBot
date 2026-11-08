@@ -11,9 +11,9 @@ workspace copy is a read-only convenience). It is written beside the final
 folder and then moved into place, under a lock per skill, so two calls using
 the same skill at once never see a half-written copy.
 
-Every event posts its own embed in the channel (tool_embeds), like any tool.
-The embed helpers here (announce) are also used by the /skills commands, the
-reflection and the curator.
+Every event posts its own notice card in the channel (tool_cards), like any
+tool. The card helpers here (announce, RestoreButton) are also used by the
+/skills commands, the reflection and the curator.
 """
 import asyncio
 import logging
@@ -22,10 +22,10 @@ import secrets
 from pathlib import PurePosixPath
 import io
 
+import discord
 from agents import function_tool, RunContextWrapper
 
-from classes import metrics, skill_format, tool_embeds
-from classes.common import Common
+from classes import card, card_kit, metrics, skill_format, tool_cards
 from classes.content_guard import check_web_request
 from classes.skill_store import QuotaError, SkillError, SkillStore, CREATED, UNCHANGED
 from classes.workspace_lifecycle import SKILLS_DIR
@@ -40,25 +40,72 @@ def _lock(guild, name) -> asyncio.Lock:
     return _locks.setdefault((guild, name), asyncio.Lock())
 
 
-async def announce(channel, title: str, name: str, detail: str = "", footer: str | None = None) -> None:
-    """Posts a skill event's embed. Never raises: the embed is a note, and a
-    channel the bot cannot write to must not cost the skill change."""
+RESTORE_TEMPLATE = r"skill:restore:(?P<name>[a-z0-9-]{3,48})"
+
+
+class RestoreButton(discord.ui.DynamicItem[discord.ui.Button], template=RESTORE_TEMPLATE):
+    """Restore, on a deleted or retired skill's card: what /skills restore
+    does, for anyone in the server (no permission check, by decision: every
+    change is a version and a delete is undoable). A DynamicItem registered
+    once (main.on_ready), so it works on a card posted before a restart."""
+
+    def __init__(self, name: str):
+        super().__init__(discord.ui.Button(label="Restore", emoji="♻️",
+                                           style=discord.ButtonStyle.success,
+                                           custom_id=f"skill:restore:{name}"))
+        self.name = name
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(match["name"])
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        # Registered whatever the setting, so an old card's button answers;
+        # with skills off it restores nothing, like the hidden /skills.
+        if not skill_format.enabled():
+            await card.reply(interaction, card_kit.error("Skills are switched off.", "❌ Not restored"))
+            return
+        try:
+            await SkillStore().restore(interaction.guild_id, self.name, interaction.user.id)
+        except SkillError as e:
+            await card.reply(interaction, card_kit.error(str(e), "❌ Not restored"))
+            return
+        except Exception as e:
+            logger.warning(f"Skills: restore of {self.name} failed: {e!r}")
+            await card.reply(interaction, card_kit.error(
+                "Something went wrong. Try /skills restore in a moment.", "❌ Not restored"))
+            return
+        # The card it was on loses its button, and says who restored it.
+        texts = card.texts_of(interaction.message)
+        done = card.KitView([card_kit.Text(t) for t in texts]
+                            + [card_kit.Text(card_kit.small(f"♻️ Restored by {interaction.user.mention}"))],
+                            colour=card_kit.CLOSED)
+        try:
+            await interaction.response.edit_message(view=done, allowed_mentions=card.NO_MENTIONS)
+        except Exception as e:
+            logger.info(f"Skills: could not update the card after a restore: {e}")
+        await announce(interaction.channel, tool_cards.SKILL_RESTORED, self.name)
+
+
+async def announce(channel, label: str, name: str, detail: str = "", footer: str | None = None,
+                   version: int | None = None) -> None:
+    """Posts a skill event's card. Never raises: the card is a note, and a
+    channel the bot cannot write to must not cost the skill change. A deleted
+    or retired skill's card has a Restore button."""
     if channel is None:
         return
-    try:
-        await Common.send_tool_discord_embed(
-            channel, tool_embeds.skill_line(name, detail), tool_embeds.COLOR_SKILL, title, footer)
-    except Exception as e:
-        logger.warning(f"Skills: could not post the {title!r} embed: {e}")
+    spec = tool_cards.skill_card(label, name, detail, footer, version)
+    if label in (tool_cards.SKILL_DELETED, tool_cards.SKILL_RETIRED):
+        spec.body.append(card_kit.Buttons((RestoreButton(name),)))
+    await card.notice(channel, spec)
 
 
-def saved_embed(result: str, name: str, version: int, description: str, note: str):
-    """(title, detail) for a save's embed: new skills show their description,
-    updates show 'v3: note'."""
+def saved_card(result: str, name: str, version: int, description: str, note: str):
+    """(label, detail, version) for a save's card: a new skill shows its
+    description, an update its version and note."""
     if result == CREATED:
-        return tool_embeds.SKILL_SAVED, description
-    detail = f"v{version}: {note}" if note else f"v{version}"
-    return tool_embeds.SKILL_UPDATED, detail
+        return tool_cards.SKILL_SAVED, description, None
+    return tool_cards.SKILL_UPDATED, note, version
 
 
 def _ctx(wrapper) -> dict:
@@ -147,7 +194,7 @@ async def use_skill(wrapper: RunContextWrapper[dict], name: str) -> str:
         if wanted not in ctx["skills_used"]:
             ctx["skills_used"].append(wanted)
         metrics.inc_skill_used()
-        await announce(channel, tool_embeds.SKILL_USED, wanted)
+        await announce(channel, tool_cards.SKILL_USED, wanted, skill["description"])
         out = [f"Skill {wanted} (v{skill['version']}): {skill['description']}", "", skill["body"]]
         if problem:
             out += ["", f"Its files could not be copied ({problem}); follow the steps above."]
@@ -232,9 +279,9 @@ async def save_skill(wrapper: RunContextWrapper[dict], name: str, description: s
     if result == UNCHANGED:
         return f"{clean} is already saved exactly like this."
     skill = await store.get(guild, clean)
-    title, detail = saved_embed(result, clean, skill["version"], skill["description"],
-                                skill_format.one_line(note, skill_format.NOTE_CHARS))
-    await announce(ctx.get("channel"), title, clean, detail)
+    label, detail, version = saved_card(result, clean, skill["version"], skill["description"],
+                                         skill_format.one_line(note, skill_format.NOTE_CHARS))
+    await announce(ctx.get("channel"), label, clean, detail, version=version)
     return f"Skill {clean} {result} (v{skill['version']})."
 
 

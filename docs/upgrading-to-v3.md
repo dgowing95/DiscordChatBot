@@ -170,8 +170,8 @@ itself and hands anything else to the brain, which does the work and reports fac
 persona to put in its own words. What users notice:
 
 - **No more sandbox threads.** Code and file work happens inline, in the channel it was asked in:
-  files arrive there, and a "🧠 Working on it" embed appears only while the brain uses the
-  workspace (a search or a poll shows just its own embed, as before). Messages in an old sandbox
+  files arrive there, and a "🧠 Working on it" card appears only while the brain uses the
+  workspace (a search or a poll shows just its own card, as before). Messages in an old sandbox
   thread are answered like any other.
 - **The bot remembers what it saved about you.** Saved memories never reached the model in v2 (since
   August 2025); now the asker's newest 20 are shown to the persona with every message, so "what
@@ -188,11 +188,11 @@ persona to put in its own words. What users notice:
   `QUEUE_WORKERS` stay free for new messages.
 - **The bot learns skills.** When a job takes several steps worth repeating (say, turning a tracker
   bot's embeds into a weekly chart), the brain saves how it did it as a skill, per server, and uses
-  it next time (📘 / 📖 embeds say so). Anyone can see and manage them with `/skills` (list, show,
+  it next time (📘 / 📖 cards say so). Anyone can see and manage them with `/skills` (list, show,
   history, edit, delete, restore, revert, export); every change is a new version and a delete can
   be undone. Skills live in Redis, so a `/workspace reset` or a restart never loses one. Once a
   day the bot tidies them: it merges two that do the same job, retires ones unused for 60 days and
-  sharpens unclear descriptions (🗑️ / 📗 embeds with "tidy-up"; each can be undone).
+  sharpens unclear descriptions (🗑️ / 📗 cards marked "daily tidy-up"; each can be undone).
 - `/help` describes the brain's tools; the "Run code" entry is now "Code, files and charts".
 - **Big jobs run as workflows** in a thread of their own (`docs/workflows.md`). The brain hands
   one over when a job has many parts (a report from many sources, a small program), or anyone can

@@ -45,8 +45,9 @@ import logging
 from classes import brain_question, brain_result, llm_lanes, workflows
 from classes import workflow_policy as wp
 from classes.brain_result import BrainReport
-from classes.tool_embeds import trim
+from classes.tool_cards import trim
 
+SCOUT_LABEL = "🧭 Looking around before planning"
 logger = logging.getLogger(__name__)
 
 DISCOVER = "discover"
@@ -219,7 +220,7 @@ async def _scout(wf, number: int, subject: str) -> None:
     ctx = workflows._helper_ctx(wf, session=wf.lease.session, workspace_root=wf.lease.root,
                                 job_dir=job_dir, out_dir=out_dir,
                                 channel=QuietChannel(wf.thread))
-    progress = HelperProgress(wf.thread, f"🔎 {subject}", max_turns=wp.SCOUT_MAX_TURNS)
+    progress = HelperProgress(wf.thread, SCOUT_LABEL, title=subject, max_turns=wp.SCOUT_MAX_TURNS)
     await progress.start()
     try:
         await _scout_work(wf, subject, ctx, job_dir, progress)

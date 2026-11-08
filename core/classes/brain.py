@@ -7,8 +7,8 @@ fixes its old habit of trying jobs it could not do itself. Every other tool
 voice, the server's workspace) belongs to the brain (classes/brain_tools.py).
 
 A brain call is Tier 2: it works INLINE in the channel. There is no thread
-and no steering; the tools post their own embeds as before, and a status
-embed ("🧠 Working on it") appears only once it uses the workspace
+and no steering; the tools post their own cards as before, and a status
+card ("🧠 Working on it") appears only once it uses the workspace
 (classes/brain_progress.py). It finishes by calling `report` with short
 facts, which the persona puts in its own voice
 (classes/brain_result.tool_result_for_persona). When a guess would waste
@@ -535,7 +535,7 @@ def response_tokens(response) -> int:
 class BrainHooks(RunHooks):
     """The brain run's hooks, in one object (Runner.run takes one): per-tool
     metrics (ToolMetricsHooks, so the moved tools are still counted), the
-    status embed (BrainProgressHooks) and the loop guard. Each part is
+    status card (BrainProgressHooks) and the loop guard. Each part is
     exception-safe on its own, except the loop guard's stop, which is the
     point."""
 
@@ -1039,8 +1039,11 @@ async def _run_and_deliver(ctx, lease, agent, task, run_config, hooks, progress,
         notes.append("The server's saved workspace could not be restored, so it started "
                      "empty: files kept from earlier requests were lost. Tell the user.")
         try:
-            await channel.send("⚠️ This server's saved workspace couldn't be restored, so it "
-                               "started empty. Files kept from earlier requests are gone.")
+            from classes import card, card_kit as K
+            await card.send_card(channel, K.heads_up(
+                "⚠️ Workspace started empty", "This server's saved workspace couldn't be restored, "
+                                             "so it started empty. Files kept from earlier requests "
+                                             "are gone."))
         except Exception as e:
             logger.warning(f"Brain: failed to post the lost-workspace notice: {e}")
     note = tool_note(given, problems).strip()
@@ -1122,9 +1125,26 @@ async def _record_skill_successes(ctx: dict) -> None:
         logger.warning(f"Brain: could not record a skill's success: {e}")
 
 
+_PICTURES = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+
+
+def file_card(name: str, caption: str = ""):
+    """A file the brain made, in its card: the caption it wrote, then the
+    file (a picture shown, anything else as a download). Later calls find
+    it by name with card.files_of (it is in no message.attachments)."""
+    from classes import card_kit as K
+    shown = (K.Gallery((f"attachment://{name}",)) if name.lower().endswith(_PICTURES)
+             else K.FileRef(name))
+    caption = (caption or "").strip()
+    return K.CardSpec(label=f"📎 {name}", body=([K.Text(K.safe(caption))] if caption else []) + [shown],
+                      colour=K.OK)
+
+
 async def _post_files(channel, artifacts) -> list[str]:
     """Sends each file to the channel (its caption beside it) and returns
-    the names actually sent. Under the channel's lock, like a reply's
+    the names of those sent, as the brain named them: it is uploaded under
+    card.safe_filename's, and a later lookup matches either
+    (workspace_inputs._matches). Under the channel's lock, like a reply's
     chunks: since v3 they land in the asking channel, not a thread, so
     without it a file could land between another reply's chunks. Safe to
     take here: no holder of that lock waits on a model run."""
@@ -1132,12 +1152,15 @@ async def _post_files(channel, artifacts) -> list[str]:
     sent = []
     if not artifacts:
         return sent
+    from classes import card
     async with get_channel_lock(channel.id):
         for artifact in artifacts:
             try:
-                await channel.send(content=(artifact.caption or "").strip()[:1900] or None,
-                                   file=discord.File(io.BytesIO(artifact.data),
-                                                     filename=artifact.name))
+                # Uploaded under a name Discord keeps as it is, which the
+                # card's attachment:// link must match exactly.
+                name = card.safe_filename(artifact.name)
+                await card.send_card(channel, file_card(name, artifact.caption),
+                                     files={name: artifact.data})
                 sent.append(artifact.name)
             except Exception as e:
                 logger.warning(f"Brain: file {artifact.name} was made but could not be sent: {e}")
@@ -1171,10 +1194,11 @@ async def _replied_to(message, channel):
 async def chat_input_files(ctx: dict, requested) -> tuple[list, list, list]:
     """(inputs, problems, names) for a brain call: the chat files it is
     given (see classes/workspace_inputs.py for which, and why), downloaded."""
-    from classes import workspace_inputs as wi
+    from classes import card, workspace_inputs as wi
 
     def _candidates(message):
-        return [wi.Candidate(a.filename, a.size, a) for a in getattr(message, "attachments", None) or []]
+        # card.files_of: a file the bot posted is inside its card, in no attachments.
+        return [wi.Candidate(a.filename, a.size, a) for a in card.files_of(message)]
 
     channel = ctx.get("channel")
     message = ctx.get("original_message")

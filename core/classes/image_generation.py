@@ -262,7 +262,8 @@ def generated_attachment(message, bot_id):
         return None
     if getattr(getattr(message, "author", None), "id", None) != bot_id:
         return None
-    for attachment in getattr(message, "attachments", None) or []:
+    from classes.card import files_of  # the picture is inside its card, in no attachments
+    for attachment in files_of(message):
         if getattr(attachment, "filename", None) == GENERATED_IMAGE_FILENAME:
             return attachment
     return None

@@ -12,7 +12,8 @@ from PIL import Image
 pillow_heif.register_heif_opener()
 from classes.text_llm_handler import TextLLMHandler, slot_context_tokens
 from classes import attachment_cache, history_policy, reply_policy
-from classes.card import text_of
+from classes.card import files_of, kind_of, text_of, texts_of
+from classes import card_kit
 from classes.workspace_inputs import attachment_note
 from classes.history_policy import (
     ANCHORED,
@@ -197,9 +198,10 @@ def is_reset(message) -> bool:
 
 
 def is_announcement(embed, message, client) -> bool:
-    """The bot's own What's New embed (marked by its footer). Kept out of the
-    prompt: a release announcement is not part of the conversation, and it
-    would shift anchored-mode prompt prefixes."""
+    """The bot's own What's New embed from before the cards (marked by its
+    footer). Kept out of the prompt: a release announcement is not part of the
+    conversation, and it would shift anchored-mode prompt prefixes. Today's
+    is a card marked card_kit.ANNOUNCE (see _format_group)."""
     footer = getattr(getattr(embed, "footer", None), "text", None)
     return footer == ANNOUNCEMENT_FOOTER and message.author.id == client.user.id
 
@@ -276,7 +278,7 @@ class MessageHandler:
         delete event reached the attachment cache in between) is left out.
         """
         history = self._history
-        wanted = [m for m in [*history, self.message] if image_targets(m.attachments)]
+        wanted = [m for m in [*history, self.message] if image_targets(files_of(m))]
         polls = [m for m in [*history, self.message] if message_poll(m)]
         started = time.monotonic()
 
@@ -303,7 +305,7 @@ class MessageHandler:
         self.messages = messages
 
     def _estimate(self, message, always=False):
-        placeholders = [_PLACEHOLDER_IMAGE] * len(image_targets(message.attachments))
+        placeholders = [_PLACEHOLDER_IMAGE] * len(image_targets(files_of(message)))
         return estimate_tokens(self._format_group(
             message, placeholders, always=always, voters=placeholder_voters(message)))
 
@@ -389,7 +391,19 @@ class MessageHandler:
         # would start writing the tag itself.
         files = ""
         if role == "user":
-            files = attachment_note([(a.filename, a.size) for a in message.attachments or []])
+            files = attachment_note([(a.filename, a.size) for a in files_of(message)])
+        # The bot's own cards (classes/card_kit.py): a status card reads as one,
+        # not as something it said (the model copies its earlier replies'
+        # shape); its What's New announcement is left out.
+        kind = kind_of(message) if message.author.id == self.client.user.id else None
+        if kind == card_kit.ANNOUNCE:
+            return entries
+        if kind == card_kit.NOTICE:
+            text = card_kit.notice_for_history(message.author.name, texts_of(message))
+            if text or image_parts:
+                entries.append({'role': role, 'content': [*image_parts, {"type": "text", "text": text}]
+                                if image_parts else text})
+            return entries
         if message.content or text_of(message) or image_parts or always or files:
             text = f"Message from '{message.author.name}': {self.clean_message_content(message)}{files}"
             # With images the content becomes a list of parts (base64 images + text);
@@ -425,7 +439,7 @@ class MessageHandler:
         are downloaded (at most DOWNLOAD_CONCURRENCY at once, process-wide).
         Non-image attachments and failed downloads are skipped, and a failure
         is not cached, so the next build retries it."""
-        targets = image_targets(message.attachments)
+        targets = image_targets(files_of(message))
         if not targets:
             return []
         cache = attachment_cache.cache()

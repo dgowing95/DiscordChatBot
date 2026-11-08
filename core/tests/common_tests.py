@@ -1,63 +1,78 @@
-import os
-import sys
-
-
-import pytest
+"""classes/common.py: the quiet channel a workflow's helpers run with, and
+classes/card.py's notice sender that every tool posts through."""
 from unittest.mock import AsyncMock, MagicMock
 
-from classes import common
+import pytest
 
-# To run this pytest file from the command line, use:
-# PYTHONPATH=$(pwd) pytest core/tests/common_tests.py
+from classes import card, card_kit as K
+from classes.common import QuietChannel
+
+
+def _channel():
+    channel = MagicMock()
+    channel.send = AsyncMock(return_value=MagicMock(edit=AsyncMock()))
+    return channel
+
+
+def _texts(view):
+    return "".join(b.content for b in view.blocks if isinstance(b, K.Text))
 
 
 @pytest.mark.asyncio
-async def test_send_tool_discord_embed_sends_description_unchanged_under_cap():
-    channel = MagicMock()
-    channel.send = AsyncMock()
-    await common.Common.send_tool_discord_embed(channel, "short description",
-                                                title="🔎 Web search")
-
-    channel.send.assert_awaited_once()
-    embed = channel.send.await_args.kwargs["embed"]
-    assert embed.description == "short description"
-    assert embed.title == "🔎 Web search"
-    assert embed.footer.text is None
+async def test_a_notice_is_one_card_with_no_pings():
+    channel = _channel()
+    live = await card.notice(channel, K.info("🔎 Searching the web", "**keyboards**"))
+    kwargs = channel.send.await_args.kwargs
+    assert isinstance(kwargs["view"], card.KitView) and kwargs["view"].kind == K.NOTICE
+    assert kwargs["allowed_mentions"] == card.NO_MENTIONS
+    assert "content" not in kwargs and "embed" not in kwargs
+    assert live.message is channel.send.return_value
 
 
 @pytest.mark.asyncio
-async def test_send_tool_discord_embed_has_no_generic_title_and_takes_a_footer():
-    # the old default "Tool Usage" said nothing about which tool ran
-    channel = MagicMock()
-    channel.send = AsyncMock()
-    await common.Common.send_tool_discord_embed(channel, "x", footer="a hint")
-
-    embed = channel.send.await_args.kwargs["embed"]
-    assert embed.title is None
-    assert embed.footer.text == "a hint"
+async def test_a_notice_with_no_channel_is_skipped():
+    assert await card.notice(None, K.info("x")) is None
 
 
 @pytest.mark.asyncio
-async def test_send_tool_discord_embed_truncates_over_discord_cap():
-    # Regression: a task description that pushes the embed description over
-    # Discord's 4096-char hard cap raises discord.HTTPException from
-    # channel.send() with no guard anywhere in the tool-calling path.
-    channel = MagicMock()
-    channel.send = AsyncMock()
-    long_description = "x" * 5000
-    await common.Common.send_tool_discord_embed(channel, long_description)
-
-    embed = channel.send.await_args.kwargs["embed"]
-    assert len(embed.description) <= common.EMBED_DESCRIPTION_MAX_CHARS
-    assert embed.description.endswith("… ")
+async def test_a_long_notice_goes_over_several_messages_and_nothing_is_cut():
+    channel = _channel()
+    text = "\n\n".join(f"paragraph {i} " + "word " * 150 for i in range(12))
+    await card.notice(channel, K.info("📜 Reading messages", text))
+    views = [c.kwargs["view"] for c in channel.send.await_args_list]
+    assert len(views) > 1 and all(v.content_length() <= K.MAX_TEXT for v in views)
+    shown = "".join(_texts(v) for v in views)
+    assert all(f"paragraph {i} " in shown for i in range(12))
+    # the label is on the first only
+    assert sum("Reading messages" in _texts(v) for v in views) == 1
 
 
 @pytest.mark.asyncio
-async def test_send_tool_discord_embed_exactly_at_cap_is_unchanged():
-    channel = MagicMock()
-    channel.send = AsyncMock()
-    description = "x" * common.EMBED_DESCRIPTION_MAX_CHARS
-    await common.Common.send_tool_discord_embed(channel, description)
+async def test_a_quiet_channel_drops_notices_only():
+    real = _channel()
+    quiet = QuietChannel(real)
+    notice = card.views(K.info("🔎 Searching the web", "x"))[0]
+    dropped = await quiet.send(view=notice)
+    assert getattr(dropped, "dropped", False) and real.send.await_count == 0
+    await dropped.edit(view=notice)  # editing what was dropped does nothing
 
-    embed = channel.send.await_args.kwargs["embed"]
-    assert embed.description == description
+    await quiet.send(view=card.Card("Which one?"))
+    await quiet.send(view=notice, files=["a file"])
+    await quiet.send("plain text")
+    assert real.send.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_a_live_card_edits_only_what_changed_and_knows_a_dropped_one():
+    channel = _channel()
+    live = card.LiveCard(channel)
+    spec = K.info("🔎 Searching the web", "x")
+    await live.show(spec)
+    await live.show(spec)
+    assert live.message.edit.await_count == 0
+    await live.show(K.info("🔎 Searched the web", "x"))
+    assert live.message.edit.await_count == 1 and not live.dropped
+
+    quiet_live = card.LiveCard(QuietChannel(_channel()))
+    await quiet_live.show(spec)
+    assert quiet_live.dropped

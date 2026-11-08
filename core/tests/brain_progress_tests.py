@@ -1,32 +1,18 @@
+"""classes/brain_progress.py: the brain's live status card. The pure
+transcript is rendered to a card spec; the hooks post and edit it."""
 import json
-import os
-import sys
-
-# brain_progress is imported as classes.* here and in production (the app
-# runs with cwd=core/).
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
+from classes import card_kit as K
 from classes.brain_progress import (
-    COLOR_FAIL,
-    COLOR_RUNNING,
-    COLOR_TOOL,
-    DESCRIPTION_CHARS,
-    EMBED_CHAR_BUDGET,
-    FIELD_VALUE_CHARS,
-    MAX_FIELDS,
+    PROGRESS_HINT,
     BrainProgressHooks,
     WorkTranscript,
     parse_exec_result,
 )
-from classes.tool_embeds import (
-    BRAIN_DONE, BRAIN_NOT_FINISHED, BRAIN_STOPPED, BRAIN_WORKING, COLOR_BRAIN, COLOR_DONE,
-    COLOR_STOPPED, work_task_text,
-)
-
-# To run this pytest file from the command line, use:
-# pytest core/tests/brain_progress_tests.py
+from classes.tool_cards import BRAIN_DONE, BRAIN_NOT_FINISHED, BRAIN_STOPPED, BRAIN_WORKING
 
 
 # ---------------------- parse_exec_result ----------------------
@@ -95,177 +81,92 @@ def test_parse_exec_result_non_string():
 
 
 
-
-
 # ---------------------- WorkTranscript ----------------------
 
-def _render(t):
-    return t.render_message()
+def _texts(spec):
+    return [b.content for c in K.split(spec) for b in c if isinstance(b, K.Text)]
 
 
-def _embed_chars(spec) -> int:
-    total = len(spec.title) + len(spec.description or "") + len(spec.footer or "")
-    total += sum(len(f.name) + len(f.value) for f in spec.fields)
-    return total
+def _all(spec) -> str:
+    return "\n".join(_texts(spec))
 
 
-def test_transcript_initial_embed_mirrors_tool_embed():
-    # no commands yet: just what the static run embed shows, nothing in the
-    # message body
-    body, spec = _render(WorkTranscript("compute 6*7"))
-    assert body == ""
-    assert spec.title == BRAIN_WORKING
-    assert spec.description == "compute 6*7"
-    assert spec.color == COLOR_TOOL == COLOR_BRAIN
-    assert spec.fields == []
-    assert spec.footer is None
+def test_the_card_starts_with_the_label_and_the_quoted_request():
+    spec = WorkTranscript("print 42", files=["a.csv"], started=1000).render()
+    assert spec.label == f"{BRAIN_WORKING} · started <t:1000:R>"
+    assert spec.colour == K.WORKING
+    assert _texts(spec)[:2] == [f"-# {BRAIN_WORKING} · started <t:1000:R>",
+                                "> print 42\n-# 📎 a.csv"]
 
 
-def test_transcript_one_field_per_command():
+def test_each_command_shows_its_text_output_and_how_it_went():
     t = WorkTranscript("t")
-    t.add_command("pip install matplotlib")
-    t.add_output("Successfully installed", exit_code=0)
-    t.add_command("python goat.py")
-    t.add_output("done", exit_code=0)
-    _, spec = _render(t)
-    assert [f.name for f in spec.fields] == [
-        "$ pip install matplotlib", "$ python goat.py",
-    ]
-    assert "Successfully installed" in spec.fields[0].value
-    assert "exit 0" in spec.fields[0].value
-    assert "done" in spec.fields[1].value
-    assert "```" in spec.fields[0].value  # output in a code fence
+    t.add_output("hi", exit_code=0, block=t.add_command("echo hi"))
+    t.add_output("boom", exit_code=2, block=t.add_command("false"))
+    t.add_output("half", process_id=7, block=t.add_command("sleep 9"))
+    text = _all(t.render())
+    assert "```sh\necho hi\n```\n```\nhi\n```\n-# ✅ Finished" in text
+    assert "-# ❌ Failed · exit 2" in text
+    assert "```sh\nsleep 9\n```\n```\nhalf\n```\n-# ⏳ Running…" in text
+    assert text.index("echo hi") < text.index("false") < text.index("sleep 9")
 
 
-def test_transcript_heredoc_field():
+def test_a_heredoc_and_typed_input_are_shown_whole():
     t = WorkTranscript("t")
-    t.add_command("cat > x.py << 'EOF'\nprint(1)\nEOF")
-    t.add_output("1", exit_code=0)
-    _, spec = _render(t)
-    f = spec.fields[0]
-    assert f.name == "⌨ Command"
-    assert "```sh" in f.value
-    assert "cat > x.py" in f.value
-    assert "print(1)" in f.value
-    assert "1" in f.value
-    assert "exit 0" in f.value
+    t.add_command("cat > a.py <<'EOF'\nprint(1)\nEOF")
+    t.add_input("y")
+    text = _all(t.render())
+    assert "```sh\ncat > a.py <<'EOF'\nprint(1)\nEOF\n```" in text
+    assert "-# ⌨ typed in\n```sh\ny\n```" in text
 
 
-def test_transcript_state_colors():
+def test_a_fence_in_the_output_never_ends_the_block_early():
     t = WorkTranscript("t")
-    t.add_command("sleep 30")
-    _, spec = _render(t)
-    assert spec.color == COLOR_RUNNING
-    t.add_output("partial", process_id=4)
-    _, spec = _render(t)
-    assert spec.color == COLOR_RUNNING
-    t.add_output("ok", exit_code=0)
-    _, spec = _render(t)
-    assert spec.color == COLOR_TOOL
-    t.add_command("false")
-    t.add_output("boom", exit_code=2)
-    _, spec = _render(t)
-    assert spec.color == COLOR_FAIL
-    # a later successful command clears the failure colour
-    t.add_command("true")
-    t.add_output("", exit_code=0)
-    _, spec = _render(t)
-    assert spec.color == COLOR_TOOL
+    t.add_output("```\nnot code\n```", exit_code=0, block=t.add_command("cat README.md"))
+    for text in _texts(t.render()):
+        assert text.count("```") % 2 == 0
 
 
-def test_transcript_field_value_capped():
+def test_output_shows_its_newest_part():
     t = WorkTranscript("t")
-    t.add_command("echo hi")
-    t.add_output("x\n" * 5000, exit_code=0)
-    _, spec = _render(t)
-    f = spec.fields[0]
-    assert len(f.value) <= FIELD_VALUE_CHARS
-    assert "… " in f.value
-    assert "exit 0" in f.value  # the status line survives the cap
+    t.add_output("old " * 1000 + "NEWEST", exit_code=0, block=t.add_command("noisy"))
+    text = _all(t.render())
+    assert "NEWEST" in text and text.count("old ") < 1000
 
 
-def test_transcript_huge_heredoc_capped():
-    t = WorkTranscript("t")
-    t.add_command("cat > big.py << 'EOF'\n" + "line\n" * 3000 + "EOF")
-    _, spec = _render(t)
-    f = spec.fields[0]
-    assert len(f.value) <= FIELD_VALUE_CHARS
-    assert "… " in f.value
-
-
-def test_transcript_stdin_shown_in_field():
-    t = WorkTranscript("t")
-    t.add_command("read x")
-    t.add_input("y\n")
-    t.add_output("got it", exit_code=0)
-    _, spec = _render(t)
-    f = spec.fields[0]
-    assert f.name == "⌨ Command"
-    assert "read x" in f.value
-    assert "y" in f.value
-    assert "got it" in f.value
-
-
-def test_transcript_stdin_without_command():
-    t = WorkTranscript("t")
-    t.add_input("y\n")
-    t.add_output("ok", exit_code=0)
-    _, spec = _render(t)
-    assert spec.fields[0].name == "⌨ stdin"
-    assert "y" in spec.fields[0].value
-
-
-def test_transcript_note_and_thinking_in_body():
-    t = WorkTranscript("t")
-    t.add_note("starting container…")
+def test_notes_and_thinking_and_the_hint():
+    t = WorkTranscript("t", hint=PROGRESS_HINT)
+    t.add_note("⚠️ Something went wrong.")
     t.set_thinking(True)
-    body, _ = _render(t)
-    assert "starting container…" in body
-    assert "model thinking" in body
-    t.set_thinking(False)
-    body, _ = _render(t)
-    assert "model thinking" not in body
+    spec = t.render()
+    assert "⚠️ Something went wrong." in _all(spec)
+    assert spec.footer == f"💭 Thinking… · {PROGRESS_HINT}"
 
 
-def test_transcript_skips_empty_output():
-    t = WorkTranscript("t")
-    t.add_output("")
-    _, spec = _render(t)
-    assert spec.fields == []
+def test_nothing_is_dropped_when_the_commands_outgrow_a_message():
+    t = WorkTranscript("task " * 100)
+    for i in range(30):
+        t.add_output("out " * 200, exit_code=0, block=t.add_command(f"echo line-{i}"))
+    cards = K.split(t.render())
+    assert len(cards) > 1
+    text = "\n".join(b.content for c in cards for b in c if isinstance(b, K.Text))
+    assert all(f"echo line-{i}" in text for i in range(30))
+    for c in cards:
+        assert sum(len(b.content) for b in c if isinstance(b, K.Text)) <= K.MAX_TEXT
 
 
-def test_transcript_fields_fit_embed_budget():
-    t = WorkTranscript("t")
-    for i in range(50):
-        t.add_command(f"echo {i}")
-        t.add_output("o" * 3000, exit_code=0)
-    _, spec = _render(t)
-    assert len(spec.fields) <= MAX_FIELDS
-    assert _embed_chars(spec) <= EMBED_CHAR_BUDGET
-    names = [f.name for f in spec.fields]
-    assert "$ echo 49" in names
-    assert "$ echo 0" not in names  # old fields are evicted
-    assert all(len(f.value) <= FIELD_VALUE_CHARS for f in spec.fields)
+def test_the_end_says_how_it_went_and_how_long_it_took():
+    t = WorkTranscript("t", started=1000)
+    t.set_thinking(True)
+    t.set_final(BRAIN_DONE, K.OK, 130)
+    spec = t.render()
+    assert spec.label == f"{BRAIN_DONE} · took 2 min" and spec.colour == K.OK
+    assert spec.footer == ""
 
 
-def test_transcript_fields_chronological():
-    t = WorkTranscript("t")
-    t.add_command("first")
-    t.add_output("one", exit_code=0)
-    t.add_command("second")
-    t.add_output("two", exit_code=0)
-    _, spec = _render(t)
-    assert [f.name for f in spec.fields] == ["$ first", "$ second"]
-    assert "one" in spec.fields[0].value
-    assert "two" in spec.fields[1].value
-
-
-def test_transcript_long_task_truncated_in_description():
-    _, spec = _render(WorkTranscript("word " * 1000))
-    assert len(spec.description) <= DESCRIPTION_CHARS
-    # the start of the task is kept, cut at a word; the ellipsis marks the cut
-    assert spec.description.startswith("word word")
-    assert spec.description.endswith("word…")
+def test_the_request_is_shown_in_full():
+    task = "word " * 600
+    assert "word " * 599 in _all(WorkTranscript(task).render()).replace("\n> ", " ")
 
 
 # ---------------------- BrainProgressHooks ----------------------
@@ -283,7 +184,7 @@ def _ctx(tool_arguments: str):
 
 
 async def _begin(hooks):
-    """The first workspace action, which is what posts the status embed."""
+    """The first workspace action, which is what posts the status card."""
     await hooks.on_tool_start(_ctx("{}"), None, _tool("attach_file"))
 
 
@@ -295,18 +196,19 @@ def _channel_with_message():
     return channel, message
 
 
-def _last_flush(message):
-    """(content, single discord.Embed) of the most recent edit."""
-    last = message.edit.await_args_list[-1]
-    content = last.kwargs.get("content", last.args[0] if last.args else "")
-    embeds = last.kwargs.get("embeds") or []
-    return content, (embeds[0] if embeds else None)
+def _view_text(view) -> str:
+    return "\n".join(b.content for b in view.blocks if isinstance(b, K.Text))
+
+
+def _last(message):
+    """The view of the most recent edit."""
+    return message.edit.await_args_list[-1].kwargs["view"]
 
 
 @pytest.mark.asyncio
 async def test_nothing_is_posted_until_the_workspace_is_used():
     # D18: a call that only searches or posts a poll shows only that tool's
-    # own embed.
+    # own card.
     channel, message = _channel_with_message()
     hooks = BrainProgressHooks(channel, "find the weather", stream=True, edit_interval=0)
     await hooks.on_llm_start(None, None, "sys", [])
@@ -320,53 +222,54 @@ async def test_nothing_is_posted_until_the_workspace_is_used():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tool", ["exec_command", "attach_file", "save_messages_to_file"])
-async def test_the_first_workspace_action_posts_the_embed(tool):
+async def test_the_first_workspace_action_posts_the_card(tool):
     channel, message = _channel_with_message()
-    hooks = BrainProgressHooks(channel, "print 42", edit_interval=0)
+    hooks = BrainProgressHooks(channel, "print 42", edit_interval=0, clock=lambda: 1000)
     await hooks.on_tool_start(_ctx(json.dumps({"cmd": "ls"})), None, _tool(tool))
     channel.send.assert_awaited_once()
-    embeds = channel.send.await_args.kwargs.get("embeds") or []
-    assert len(embeds) == 1
-    assert embeds[0].title == BRAIN_WORKING
-    assert embeds[0].description == "print 42"
-    assert embeds[0].color.value == COLOR_TOOL
+    kwargs = channel.send.await_args.kwargs
+    assert "content" not in kwargs and "embeds" not in kwargs
+    view = kwargs["view"]
+    assert view.kind == K.NOTICE and view.colour == K.WORKING
+    assert _view_text(view).startswith(f"-# {BRAIN_WORKING} · started <t:1000:R>\n> print 42")
     assert hooks.started is True
 
 
 @pytest.mark.asyncio
-async def test_without_streaming_the_embed_shows_no_commands_and_is_retitled_at_the_end():
+async def test_without_streaming_the_card_shows_no_commands_and_is_relabelled_at_the_end():
     channel, message = _channel_with_message()
-    hooks = BrainProgressHooks(channel, "chart it", stream=False, edit_interval=0)
+    times = iter([1000, 1100])
+    hooks = BrainProgressHooks(channel, "chart it", stream=False, edit_interval=0,
+                               clock=lambda: next(times))
     args = _ctx(json.dumps({"cmd": "python plot.py"}))
     await hooks.on_tool_start(args, None, _tool("exec_command"))
-    await hooks.on_tool_end(args, None, _tool("exec_command"),
-                            "Chunk ID: x\nProcess exited with code 0\nOutput:\nok")
-    assert len(channel.send.await_args.kwargs["embeds"][0].fields) == 0
+    await hooks.on_tool_end(args, None, _tool("exec_command"), "Output:\nok")
     await hooks.finalize(ok=True)
-    _, embed = _last_flush(message)
-    assert embed.title == BRAIN_DONE and embed.color.value == COLOR_DONE
-    assert len(embed.fields) == 0
+    view = _last(message)
+    assert "plot.py" not in _view_text(view)
+    assert _view_text(view).startswith(f"-# {BRAIN_DONE} · took 2 min")
+    assert view.colour == K.OK
 
 
 @pytest.mark.asyncio
-async def test_a_stopped_call_is_titled_and_coloured_as_stopped():
+async def test_a_stopped_call_is_labelled_and_coloured_as_stopped():
     channel, message = _channel_with_message()
-    hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
+    hooks = BrainProgressHooks(channel, "t", edit_interval=0)
     await _begin(hooks)
-    await hooks.finalize(ok=False, note="⚠️ It ran out of time.")
-    content, embed = _last_flush(message)
-    assert embed.title == BRAIN_STOPPED and embed.color.value == COLOR_STOPPED
-    assert "ran out of time" in content
+    await hooks.finalize(ok=False, note="⚠️ It kept repeating itself.")
+    view = _last(message)
+    assert BRAIN_STOPPED in _view_text(view) and view.colour == K.FAIL
+    assert "It kept repeating itself." in _view_text(view)
 
 
 @pytest.mark.asyncio
 async def test_a_helper_nothing_stopped_is_not_called_stopped():
     channel, message = _channel_with_message()
-    hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
+    hooks = BrainProgressHooks(channel, "t", edit_interval=0)
     await _begin(hooks)
     await hooks.finalize(ok=False, stopped=False)
-    _, embed = _last_flush(message)
-    assert embed.title == BRAIN_NOT_FINISHED
+    view = _last(message)
+    assert BRAIN_NOT_FINISHED in _view_text(view) and view.colour == K.WARN
 
 
 @pytest.mark.asyncio
@@ -374,84 +277,49 @@ async def test_tool_start_end_stream_command_and_output():
     channel, message = _channel_with_message()
     hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
     await _begin(hooks)
-    message.edit.reset_mock()
-
-    await hooks.on_tool_start(
-        _ctx(json.dumps({"cmd": "echo hi"})), None, _tool("exec_command"))
-    await hooks.on_tool_end(
-        _ctx(json.dumps({"cmd": "echo hi"})), None, _tool("exec_command"),
-        "Chunk ID: x\nWall time: 0.1 s\nProcess exited with code 0\nOutput:\nhi")
-
-    assert message.edit.await_count >= 1
-    content, embed = _last_flush(message)
-    assert len(embed.fields) == 1
-    assert embed.fields[0].name == "$ echo hi"
-    assert "hi" in embed.fields[0].value
-    assert "exit 0" in embed.fields[0].value
-    assert embed.color.value == COLOR_TOOL
+    args = _ctx(json.dumps({"cmd": "echo hi"}))
+    await hooks.on_tool_start(args, None, _tool("exec_command"))
+    await hooks.on_tool_end(args, None, _tool("exec_command"),
+                            "Process exited with code 0\nOutput:\nhi")
+    text = _view_text(_last(message))
+    assert "```sh\necho hi\n```\n```\nhi\n```\n-# ✅ Finished" in text
+    assert PROGRESS_HINT in text
 
 
 @pytest.mark.asyncio
 async def test_throttle_delays_edits_until_finalize():
     channel, message = _channel_with_message()
-    hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=3600)  # never due
+    hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=3600)
     await _begin(hooks)
-    message.edit.reset_mock()
-
-    await hooks.on_tool_start(
-        _ctx(json.dumps({"cmd": "echo a"})), None, _tool("exec_command"))
-    message.edit.assert_not_awaited()  # still throttled
-
-    await hooks.finalize(note="done")  # the final flush bypasses the throttle
-    content, embed = _last_flush(message)
-    assert embed.fields[0].name == "$ echo a"
-    assert "done" in content
+    for cmd in ("echo a", "echo b"):
+        await hooks.on_tool_start(_ctx(json.dumps({"cmd": cmd})), None, _tool("exec_command"))
+    message.edit.assert_not_awaited()
+    await hooks.finalize()
+    message.edit.assert_awaited_once()
+    assert "echo b" in _view_text(_last(message))
 
 
 @pytest.mark.asyncio
 async def test_finalize_is_idempotent():
     channel, message = _channel_with_message()
-    hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
+    hooks = BrainProgressHooks(channel, "t", edit_interval=0)
     await _begin(hooks)
-    message.edit.reset_mock()
-    await hooks.finalize(note="done")
-    count_after_first = message.edit.await_count
-    await hooks.finalize(note="again")
-    assert message.edit.await_count == count_after_first
+    await hooks.finalize()
+    await hooks.finalize(ok=False)
+    assert message.edit.await_count == 1
 
 
 @pytest.mark.asyncio
-async def test_write_stdin_poll_without_output_is_skipped():
+async def test_write_stdin_poll_without_output_is_skipped_and_with_output_is_shown():
     channel, message = _channel_with_message()
     hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
     await _begin(hooks)
-    message.edit.reset_mock()
-
-    await hooks.on_tool_end(
-        _ctx(json.dumps({"session_id": 3, "chars": ""})), None,
-        _tool("write_stdin"),
-        "Chunk ID: x\nWall time: 0.3 s\nOutput:\n")
-    message.edit.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_write_stdin_with_output_is_appended():
-    channel, message = _channel_with_message()
-    hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
-    await _begin(hooks)
-
-    await hooks.on_tool_end(
-        _ctx(json.dumps({"session_id": 3, "chars": ""})), None,
-        _tool("write_stdin"),
-        "Chunk ID: x\nWall time: 0.3 s\nProcess exited with code 1\nOutput:\nerr")
-
-    content, embed = _last_flush(message)
-    assert len(embed.fields) == 1
-    assert "err" in embed.fields[0].value
-    assert "**exit 1**" in embed.fields[0].value
-    assert embed.color.value == COLOR_FAIL
-    # write_stdin never adds a new "$" command field
-    assert not any(f.name.startswith("$ ") for f in embed.fields)
+    await hooks.on_tool_start(_ctx(json.dumps({"cmd": "sleep 5"})), None, _tool("exec_command"))
+    edits = message.edit.await_count
+    await hooks.on_tool_end(_ctx("{}"), None, _tool("write_stdin"), "Process running with session ID 3\nOutput:\n")
+    assert message.edit.await_count == edits
+    await hooks.on_tool_end(_ctx("{}"), None, _tool("write_stdin"), "Process exited with code 0\nOutput:\ndone")
+    assert "done" in _view_text(_last(message))
 
 
 @pytest.mark.asyncio
@@ -459,25 +327,9 @@ async def test_write_stdin_chars_shown_as_input():
     channel, message = _channel_with_message()
     hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
     await _begin(hooks)
-
-    await hooks.on_tool_start(
-        _ctx(json.dumps({"session_id": 3, "chars": "y\n"})), None,
-        _tool("write_stdin"))
-    _, embed = _last_flush(message)
-    assert embed.fields[0].name == "⌨ stdin"
-    assert "y" in embed.fields[0].value
-
-
-@pytest.mark.asyncio
-async def test_unrelated_tools_are_ignored():
-    channel, message = _channel_with_message()
-    hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
-    await _begin(hooks)
-    message.edit.reset_mock()
-
-    await hooks.on_tool_start(_ctx("{}"), None, _tool("web_search"))
-    await hooks.on_tool_end(_ctx("{}"), None, _tool("web_search"), "results")
-    message.edit.assert_not_awaited()
+    await hooks.on_tool_start(_ctx(json.dumps({"cmd": "python"})), None, _tool("exec_command"))
+    await hooks.on_tool_start(_ctx(json.dumps({"chars": "print(1)\n"})), None, _tool("write_stdin"))
+    assert "-# ⌨ typed in\n```sh\nprint(1)\n```" in _view_text(_last(message))
 
 
 @pytest.mark.asyncio
@@ -486,10 +338,8 @@ async def test_failed_edit_backs_off_and_run_continues():
     message.edit = AsyncMock(side_effect=Exception("rate limited"))
     hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
     await _begin(hooks)
-
-    # must not raise, even though every edit fails
-    await hooks.on_tool_start(
-        _ctx(json.dumps({"cmd": "echo a"})), None, _tool("exec_command"))
+    await hooks.on_tool_start(_ctx(json.dumps({"cmd": "echo a"})), None, _tool("exec_command"))
+    assert hooks._backoff_until > 0
     await hooks.finalize(note="done")  # force-flush still attempted, still safe
 
 
@@ -497,21 +347,14 @@ async def test_failed_edit_backs_off_and_run_continues():
 async def test_deleted_message_falls_back_to_send():
     import discord
     channel, message = _channel_with_message()
-    not_found = discord.NotFound(MagicMock(status=404), "deleted")
-    message.edit = AsyncMock(side_effect=not_found)
+    message.edit = AsyncMock(side_effect=discord.NotFound(MagicMock(status=404), "deleted"))
     hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
     await _begin(hooks)
-
-    await hooks.on_tool_start(
-        _ctx(json.dumps({"cmd": "echo a"})), None, _tool("exec_command"))
+    await hooks.on_tool_start(_ctx(json.dumps({"cmd": "echo a"})), None, _tool("exec_command"))
     await hooks.finalize(note="done")
-
-    assert channel.send.await_count == 2  # initial + resend after deletion
-    last = channel.send.await_args
-    content = last.args[0]
-    embeds = last.kwargs.get("embeds") or []
-    assert embeds[0].fields[0].name == "$ echo a"
-    assert "done" in content
+    assert channel.send.await_count == 2  # the first, and again after the deletion
+    text = _view_text(channel.send.await_args.kwargs["view"])
+    assert "echo a" in text and "done" in text
 
 
 @pytest.mark.asyncio
@@ -520,9 +363,7 @@ async def test_send_failure_on_start_does_not_break_hooks():
     channel.send = AsyncMock(side_effect=Exception("no permissions"))
     hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
     await _begin(hooks)  # must not raise
-
-    await hooks.on_tool_start(
-        _ctx(json.dumps({"cmd": "echo a"})), None, _tool("exec_command"))
+    await hooks.on_tool_start(_ctx(json.dumps({"cmd": "echo a"})), None, _tool("exec_command"))
     await hooks.finalize(note="done")  # must not raise
 
 
@@ -540,64 +381,60 @@ async def test_hooks_never_raise_on_garbage():
 
 
 @pytest.mark.asyncio
-async def test_message_stays_under_discord_limits():
-    channel, message = _channel_with_message()
-    hooks = BrainProgressHooks(channel, "task " * 100, stream=True, edit_interval=0)
+async def test_a_long_run_spills_into_more_messages_and_edits_only_the_newest_while_working():
+    sent = []
+
+    async def send(**kwargs):
+        message = MagicMock()
+        message.edit = AsyncMock()
+        sent.append(message)
+        return message
+
+    channel = MagicMock()
+    channel.send = AsyncMock(side_effect=send)
+    hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
     await _begin(hooks)
     for i in range(30):
-        await hooks.on_tool_start(
-            _ctx(json.dumps({"cmd": f"echo line-{i} " + "x" * 50})), None,
-            _tool("exec_command"))
-        await hooks.on_tool_end(
-            _ctx(json.dumps({})), None, _tool("exec_command"),
-            f"Chunk ID: {i}\nWall time: 0.1 s\nOutput:\n" + "out " * 100)
-    content, embed = _last_flush(message)
-    assert len(content) <= 2000
-    assert len(embed.fields) <= MAX_FIELDS
-    total = len(embed.title) + len(embed.description or "")
-    total += sum(len(f.name) + len(f.value) for f in embed.fields)
-    assert total <= EMBED_CHAR_BUDGET
-    assert all(len(f.value) <= FIELD_VALUE_CHARS for f in embed.fields)
-    # the newest command is still visible after eviction
-    assert any("line-29" in f.name for f in embed.fields)
+        args = _ctx(json.dumps({"cmd": f"echo line-{i}"}))
+        await hooks.on_tool_start(args, None, _tool("exec_command"))
+        await hooks.on_tool_end(args, None, _tool("exec_command"),
+                                "Process exited with code 0\nOutput:\n" + "out " * 150)
+    assert len(sent) > 1
+    # once a message is full it is left alone while the run goes on
+    before = sent[0].edit.await_count
+    for i in range(30, 33):
+        args = _ctx(json.dumps({"cmd": f"echo line-{i}"}))
+        await hooks.on_tool_start(args, None, _tool("exec_command"))
+    assert sent[0].edit.await_count == before
+    await hooks.finalize(ok=True)
+    # the finish recolours them all
+    assert sent[0].edit.await_count == before + 1
+    views = [m.edit.await_args.kwargs["view"] for m in sent if m.edit.await_args]
+    assert all(v.colour == K.OK for v in views)
+    shown = "\n".join(_view_text(m.edit.await_args.kwargs["view"]) if m.edit.await_args
+                      else "" for m in sent) + "\n".join(
+        _view_text(c.kwargs["view"]) for c in channel.send.await_args_list)
+    assert all(f"echo line-{i}" in shown for i in range(33))
 
 
-# ---------------------- title, files and reply hint ----------------------
-
-def test_transcript_shows_the_title_files_and_footer_it_is_given():
-    _, spec = _render(WorkTranscript("do a thing", title=BRAIN_WORKING,
-                                        files=["a.csv", "b.png"], footer="reply here"))
-    assert spec.title == BRAIN_WORKING
-    assert spec.description == "do a thing\n📎 a.csv, b.png"
-    assert spec.footer == "reply here"
-
-
-def test_transcript_matches_the_static_embed_text():
-    _, spec = _render(WorkTranscript("do a thing", files=["a.csv"]))
-    assert spec.description == work_task_text("do a thing", ["a.csv"], DESCRIPTION_CHARS)
-
-
-def test_hooks_pass_the_files_into_the_embed():
+def test_hooks_pass_the_files_and_label_into_the_card():
     channel, _ = _channel_with_message()
-    hooks = BrainProgressHooks(channel, "do a thing", files=["a.csv"])
-    _, spec = hooks.transcript.render_message()
-    embed = hooks._build_embed(spec)
-    assert embed.title == BRAIN_WORKING
-    assert embed.description.endswith("a.csv")
+    hooks = BrainProgressHooks(channel, "do a thing", files=["a.csv"],
+                               label="🛠️ Build · step 2 of 3", title="Write it up")
+    spec = hooks.transcript.render()
+    assert spec.label == "🛠️ Build · step 2 of 3" and spec.title == "Write it up"
+    assert _texts(spec)[2] == "> do a thing\n-# 📎 a.csv"
 
 
-def test_the_footer_counts_against_the_embed_budget():
-    big_footer = "f" * 2000
-    t = WorkTranscript("t", footer=big_footer)
-    for i in range(20):
-        t.add_command(f"cmd{i}")
-        t.add_output("x" * 900, exit_code=0)
-    _, spec = _render(t)
-    assert _embed_chars(spec) <= 6000
-
-
-def _call_ctx(call_id: str, cmd: str):
-    ctx = _ctx(json.dumps({"cmd": cmd}))
-    ctx.tool_call_id = call_id
-    return ctx
-
+@pytest.mark.asyncio
+async def test_two_commands_at_once_get_their_own_output():
+    channel, message = _channel_with_message()
+    hooks = BrainProgressHooks(channel, "t", stream=True, edit_interval=0)
+    await _begin(hooks)
+    first, second = _ctx(json.dumps({"cmd": "echo one"})), _ctx(json.dumps({"cmd": "echo two"}))
+    first.tool_call_id, second.tool_call_id = "a", "b"
+    await hooks.on_tool_start(first, None, _tool("exec_command"))
+    await hooks.on_tool_start(second, None, _tool("exec_command"))
+    await hooks.on_tool_end(first, None, _tool("exec_command"), "Process exited with code 0\nOutput:\nONE")
+    text = _view_text(_last(message))
+    assert text.index("echo one") < text.index("ONE") < text.index("echo two")

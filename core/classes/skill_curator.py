@@ -30,8 +30,8 @@ pass is skipped without a model call; the signature includes the stale set,
 so a skill going stale with time makes a pass due again. The signature is
 taken AFTER the pass's own changes, so they never make the next pass due.
 
-Each change posts its embed (footer "tidy-up") in the channel where the skill
-was last used, or saved; when that channel is gone the embed is skipped.
+Each change posts its card (labelled "daily tidy-up") in the channel where the skill
+was last used, or saved; when that channel is gone the card is skipped.
 """
 import asyncio
 import hashlib
@@ -42,7 +42,7 @@ import re
 import secrets
 import time
 
-from classes import llm_lanes, metrics, skill_format, tool_embeds
+from classes import llm_lanes, metrics, skill_format, tool_cards
 from classes.llm_roles import BRAIN, role_config
 from classes.response_filter import strip_thinking
 from classes.side_llm import SideLLM
@@ -224,7 +224,7 @@ _RELEASE = "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL
 
 class Curator:
     """One server's pass (`curate`) and the loop over every server
-    (`run_forever`). `channel_of(id)` finds a channel for the embeds (the
+    (`run_forever`). `channel_of(id)` finds a channel for the cards (the
     Discord client's get_channel); `actor_id` is the bot's own user id, so
     /skills history shows the bot made the change."""
 
@@ -329,8 +329,8 @@ class Curator:
                 skill = by_name[change["name"]]
                 await self.store.delete(guild, skill["name"], self.actor_id, expect_version=skill["version"])
                 # Fixed wording: the model's note is not shown for a retire.
-                await self._announce(skill, tool_embeds.SKILL_RETIRED,
-                                     f"not used in {cfg['retire_days']} days (restore with /skills restore)")
+                await self._announce(skill, tool_cards.SKILL_RETIRED,
+                                     f"Not used in {cfg['retire_days']} days.")
             else:
                 skill = by_name[change["name"]]
                 await self._save(guild, skill, change["description"], skill["body"], skill["files"],
@@ -350,7 +350,7 @@ class Curator:
         if result == UNCHANGED:
             raise SkillError("the proposed text is what it already says")
         fresh = await self.store.get(guild, skill["name"])
-        await self._announce(skill, tool_embeds.SKILL_UPDATED, f"v{fresh['version']}: {note}")
+        await self._announce(skill, tool_cards.SKILL_UPDATED, note, fresh["version"])
 
     async def _merge(self, guild, keep, drop, change) -> None:
         """The kept skill first, then the other's delete: if the delete is
@@ -374,17 +374,17 @@ class Curator:
             logger.info(f"Skills: tidy-up merged into {keep['name']} but kept {drop['name']}: "
                         "it changed meanwhile")
             return
-        await self._announce(drop, tool_embeds.SKILL_RETIRED,
-                             f"merged into {keep['name']} (restore with /skills restore)")
+        await self._announce(drop, tool_cards.SKILL_RETIRED, f"Merged into {keep['name']}.")
 
-    async def _announce(self, skill, title, detail) -> None:
+    async def _announce(self, skill, title, detail, version=None) -> None:
         from classes.skill_tools import announce
         channel_id = skill.get("last_channel_id")
         channel = self.channel_of(channel_id) if channel_id else None
         if channel is None:
-            logger.info(f"Skills: no channel for the tidy-up embed of {skill['name']}")
+            logger.info(f"Skills: no channel for the tidy-up card of {skill['name']}")
             return
-        await announce(channel, title, skill["name"], detail, tool_embeds.SKILL_FOOTER_CURATOR)
+        await announce(channel, title, skill["name"], detail, tool_cards.SKILL_FOOTER_CURATOR,
+                       version=version)
 
     async def tick(self, guild_ids) -> None:
         """One round: the live-skill gauge, and a pass for each due server."""

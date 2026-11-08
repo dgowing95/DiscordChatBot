@@ -18,11 +18,12 @@ It is a card (classes/card.py), with the choices on one row and "Answer…" and
 import asyncio
 import logging
 from dataclasses import dataclass
+import time
 
 import discord
 
-from classes import brain_inbox
-from classes.card import Card, button
+from classes import brain_inbox, card_kit as K
+from classes.card import Card, button, reply
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,7 @@ YOU_DECIDE = "You decide"
 YOU_DECIDE_ANSWER = "(you decide)"
 
 
-ANSWERED = "✅ {answer}"
+ANSWERED = "✅ **{answer}**"
 TIMED_OUT = "⌛ No answer in time, so I went with my best guess."
 CLOSED = "Closed."
 
@@ -56,11 +57,15 @@ def clean_options(options) -> list[str]:
     return labels[:MAX_OPTIONS]
 
 
-def question_text(text: str, label: str = "") -> str:
-    """The question as the card shows it: under its label, and in large type
-    when it is short."""
-    shown = f"### {text}" if len(text) <= HEADING_CHARS and "\n" not in text else text
-    return f"-# {label}\n{shown}" if label else shown
+def question_text(text: str) -> str:
+    """The question as the card shows it: in large type when it is short."""
+    text = K.safe(text)
+    return f"### {text}" if len(text) <= HEADING_CHARS and "\n" not in text else text
+
+
+def question_label(label: str, user_id: int) -> str:
+    """The small line on top: why it was asked, and who is asked."""
+    return f"❓ {label or HEADING_CHAT} · for <@{user_id}>"
 
 
 class AnswerModal(discord.ui.Modal, title="Your answer"):
@@ -80,7 +85,12 @@ class QuestionView(Card):
 
     def __init__(self, user_id: int, options, timeout: float, text: str = "", note: str = "",
                  label: str = ""):
-        super().__init__(question_text(text, label), note=note, timeout=timeout)
+        # The note under the buttons: who can answer, and when it closes (a
+        # countdown Discord keeps up to date). `note` adds to it.
+        closes = f"closes <t:{int(time.time() + timeout)}:R>" if timeout else ""
+        footer = " · ".join(x for x in ("Only the person asked can answer", closes, note) if x)
+        super().__init__(question_text(text), label=question_label(label, user_id), note=footer,
+                         timeout=timeout)
         self.user_id = int(user_id)
         self.question_id = None
         self.closed = False
@@ -106,8 +116,8 @@ class QuestionView(Card):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.user_id:
             return True
-        await interaction.response.send_message("Only the person who asked can answer this.",
-                                                ephemeral=True)
+        await reply(interaction, K.error("Only the person who asked can answer this.",
+                                         "🔒 Not your question"))
         return False
 
     async def answer(self, interaction: discord.Interaction, answer: str, shown: str) -> None:
@@ -130,10 +140,9 @@ class QuestionView(Card):
             # still takes the dead buttons off.
             self.closed = True
         elif outcome == brain_inbox.EMPTY:
-            await interaction.response.send_message("I need an answer in words, please.",
-                                                    ephemeral=True)
+            await reply(interaction, K.heads_up("✏️ Answer in words", "I need an answer in words, please."))
         else:
-            await interaction.response.send_message("This question is closed.", ephemeral=True)
+            await reply(interaction, K.info("❓ This question is closed"))
 
 
 async def post(ctx: dict, text: str, options, timeout: float, label: str = HEADING_CHAT):

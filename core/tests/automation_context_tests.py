@@ -130,8 +130,12 @@ async def test_create_on_a_full_server_explains_instead_of_opening_a_form(monkey
     channel = SimpleNamespace(guild=guild, permissions_for=lambda member: perms)
     for group in groups:
         ctx = SimpleNamespace(guild=guild, channel=channel, user=object(),
-                              response=SimpleNamespace(send_message=AsyncMock(), send_modal=AsyncMock()))
+                              response=SimpleNamespace(send_message=AsyncMock(), send_modal=AsyncMock(),
+                                                       is_done=lambda: False),
+                              original_response=AsyncMock())
         await _commands(group)["create"].callback(ctx)
         ctx.response.send_modal.assert_not_called()
-        args, kwargs = ctx.response.send_message.call_args
-        assert "1 of 1 allowed" in args[0] and kwargs.get("ephemeral") and "view" not in kwargs
+        from card_checks import view_text
+        kwargs = ctx.response.send_message.call_args.kwargs
+        assert "1 of 1 allowed" in view_text(kwargs["view"]) and kwargs.get("ephemeral")
+        assert kwargs["view"].buttons == []  # an error, not the type picker

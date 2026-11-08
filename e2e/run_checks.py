@@ -41,6 +41,7 @@ import re
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import aiohttp
 import redis.asyncio as redis
@@ -66,6 +67,21 @@ METRICS_URL = os.environ.get("E2E_METRICS_URL", "http://127.0.0.1:9464/metrics")
 SPEECH_URL = os.environ.get("E2E_SPEECH_URL", "http://127.0.0.1:8002").rstrip("/")
 
 
+# What a card is, from its container's id (core/classes/card_kit.py KIND_IDS).
+CARD_KINDS = {0x0DCB0001: "notice", 0x0DCB0002: "announce", 0x0DCB0003: "card"}
+
+
+def card_kind(message: dict) -> str:
+    return next((CARD_KINDS[c["id"]] for c in message.get("components") or []
+                 if c.get("id") in CARD_KINDS), "")
+
+
+def card_label(message: dict) -> str:
+    """A card's small first line ("🧵 Big job · finished"), without its "-# "."""
+    return next((line.removeprefix("-# ") for line in card_text(message).splitlines()
+                 if line.strip()), "")
+
+
 def card_text(message: dict) -> str:
     """The text of a card (core/classes/card.py), which has no content or embeds."""
     lines = []
@@ -77,6 +93,32 @@ def card_text(message: dict) -> str:
 
     walk(message.get("components") or [])
     return "\n".join(lines)
+
+
+def message_files(message: dict) -> list[dict]:
+    """A message's files as {filename, content_type, size}: its attachments,
+    and those inside a card, which Discord lists in no attachments (a File
+    component has its name and size, a gallery picture its URL and width)."""
+    found = [{"filename": a["filename"], "content_type": a.get("content_type", ""),
+              "size": a.get("size", 0)} for a in message.get("attachments", [])]
+
+    def walk(items) -> None:
+        for item in items:
+            file = item.get("file") or {}
+            if item.get("type") == 13 and file.get("attachment_id"):
+                found.append({"filename": item.get("name", ""),
+                              "content_type": file.get("content_type", ""),
+                              "size": item.get("size", 0)})
+            for entry in item.get("items") or []:
+                media = entry.get("media") or {}
+                if media.get("attachment_id"):
+                    found.append({"filename": urlsplit(media.get("url", "")).path.rsplit("/", 1)[-1],
+                                  "content_type": media.get("content_type", ""),
+                                  "size": media.get("width", 0)})  # a picture with pixels
+            walk(item.get("components") or [])
+
+    walk(message.get("components") or [])
+    return found
 
 
 class CheckFailed(Exception):
@@ -304,11 +346,10 @@ class Run:
     async def image(self):
         messages = await self.ask("Generate an image of a red apple on a wooden table.", IMAGE_TIMEOUT)
         for message in messages:
-            for attachment in message.get("attachments", []):
-                if (attachment["filename"] == "generated-image.png"
-                        and attachment.get("content_type", "").startswith("image/png")
-                        and attachment.get("size", 0) > 0):
-                    return f"{attachment['size']} bytes"
+            for file in message_files(message):
+                if (file["filename"] == "generated-image.png"
+                        and file["content_type"].startswith("image/png") and file["size"] > 0):
+                    return "generated-image.png in its card"
         raise CheckFailed("no generated-image.png attachment in the reply")
 
     async def poll(self):
@@ -332,9 +373,9 @@ class Run:
         if await calls() <= before:
             raise CheckFailed("the brain was never asked (no ask_brain call)")
         for message in messages:
-            for attachment in message.get("attachments", []):
-                if attachment["filename"].endswith(".csv") and attachment.get("size", 0) > 0:
-                    return f"{attachment['filename']}, {attachment['size']} bytes"
+            for file in message_files(message):
+                if file["filename"].endswith(".csv") and file["size"] > 0:
+                    return f"{file['filename']}, {file['size']} bytes"
         raise CheckFailed("no .csv attachment in the reply")
 
     async def workflow(self):
@@ -358,20 +399,20 @@ class Run:
         # `after` is exclusive.
         posted = await self.messages_after(self.last_trigger_id)
         mine = [m for m in posted if m["author"]["id"] == self.bot_id]
-        titles = [e.get("title", "") for m in mine for e in m.get("embeds", [])]
-        if not any("🧵 Plan" in card_text(m) for m in mine):
-            raise CheckFailed(f"no plan card was posted (embeds: {titles})")
-        closing = [m for m in mine for e in m.get("embeds", [])
-                   if e.get("title", "").startswith("🧵 Workflow")]
+        labels = [card_label(m) for m in mine if card_kind(m)]
+        if not any(card_kind(m) == "card" and card_label(m).startswith("🧵 Plan") for m in mine):
+            raise CheckFailed(f"no plan card was posted (cards: {labels})")
+        closing = [m for m in mine
+                   if card_kind(m) == "notice" and card_label(m).startswith("🧵 Big job")]
         if not closing:
-            raise CheckFailed(f"no closing embed was posted (embeds: {titles})")
+            raise CheckFailed(f"no closing card was posted (cards: {labels})")
 
         async def _reply():
             later = [m for m in await self.messages_after(closing[-1]["id"])
                      if m["author"]["id"] == self.bot_id and m["content"]]
             return later[-1]["content"] if later else ""
-        reply = await wait_until(_reply, REPLY_TIMEOUT, "the reply after the closing embed")
-        return f"{closing[-1]['embeds'][0]['title']}; reply: {_quote(reply, 80)}"
+        reply = await wait_until(_reply, REPLY_TIMEOUT, "the reply after the closing card")
+        return f"{card_label(closing[-1])}; reply: {_quote(reply, 80)}"
 
     async def slash_commands(self):
         # From this run's log, not GET /applications/.../commands: the

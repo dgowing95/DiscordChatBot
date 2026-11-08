@@ -18,7 +18,7 @@ You never pick one: ask in plain words and the bot decides. `/task` starts a wor
 ## What a task looks like
 
 - **Each tool says what it did.** A search, a page it read, a poll or an event each post a small
-  embed in the channel, so you can see where an answer came from.
+  card in the channel, so you can see where an answer came from.
 - **"🧠 Working on it"** appears when the bot runs code or works with files. With
   `/workspace progress on` it also shows the commands and their output live.
 - **Files arrive in the channel** before the answer: a chart, a CSV, a script.

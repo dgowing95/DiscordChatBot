@@ -155,14 +155,36 @@ def test_a_step_never_takes_a_scouts_or_a_checks_folder():
     assert wp.plan_step_id("s1") == "s1" and wp.plan_step_id("data2") == "data2"
 
 
-def test_the_plan_reads_as_text_and_as_an_embed_with_step_states():
-    plan, _ = wp.validate_plan(_plan(_step("s1"), _step("s2", "implementer", "Write", ["s1"]),
-                                     deliverables=["a.md"]), max_steps=8)
+def _block_texts(blocks):
+    from classes import card_kit as K
+    return [b.content for b in blocks if isinstance(b, K.Text)]
+
+
+def test_the_plan_reads_as_text_and_as_a_card_with_step_states():
+    raw = _plan(_step("s1"), _step("s2", "implementer", "Write", ["s1"]), deliverables=["a.md"])
+    raw["steps"][1]["title"] = "Write it up"
+    plan, _ = wp.validate_plan(raw, max_steps=8)
     text = wp.plan_text(plan)
     assert "- s2 [implementer] (after s1): Write" in text and "Deliverables: a.md" in text
-    embed = wp.render_plan(plan, {"s1": "done", "s2": "running"})
-    assert embed["fields"][0][0].startswith("✅ s1") and embed["fields"][1][0].startswith("▶️ s2")
-    assert "**You get:** a.md" in embed["description"]
+    goal, first, second = _block_texts(wp.plan_blocks(plan, {"s1": "done", "s2": "running"}))
+    assert "**You'll get**\n- a.md" in goal
+    # a step with no title is named by its role; ids never show
+    assert first.startswith("✅ **1. Research**\n-# 🔬 Research — ")
+    assert second.startswith("▶️ **2. Write it up**\n-# 🛠️ Build · after step 1 — Write")
+    assert wp.step_label(plan, plan.steps[1]) == "🛠️ Build · step 2 of 2"
+    assert wp.step_title(plan.steps[0]) == "Research"
+
+
+def test_titles_are_kept_in_the_record_and_may_be_left_out():
+    raw = _plan(_step("s1"))
+    raw["title"] = "Compare printers"
+    raw["steps"][0]["title"] = "Find prices"
+    plan, _ = wp.validate_plan(raw, max_steps=8)
+    assert plan.title == "Compare printers" and plan.steps[0].title == "Find prices"
+    stored = plan.to_dict()
+    assert stored["title"] == "Compare printers" and stored["steps"][0]["title"] == "Find prices"
+    plain, _ = wp.validate_plan(_plan(_step("s1")), max_steps=8)
+    assert plain.title == "" and plain.steps[0].title == ""
 
 
 # --------------------------- states ---------------------------
@@ -358,11 +380,13 @@ def test_only_a_bare_stop_stops(text, stop):
     assert wp.is_stop_word(text) is stop
 
 
-def test_a_long_plan_still_fits_one_discord_embed():
-    plan, _ = wp.validate_plan(_plan(*[_step(f"s{i}", brief="x" * 1500) for i in range(1, 9)],
+def test_a_long_plan_keeps_every_brief_whole():
+    from classes import card_kit as K
+    plan, _ = wp.validate_plan(_plan(*[_step(f"s{i}", brief=f"{i}" + "x" * 1400) for i in range(1, 9)],
                                      goal="g" * 500, deliverables=["d" * 200] * 10), max_steps=8)
-    embed = wp.render_plan(plan)
-    total = len(embed["title"]) + len(embed["description"]) + sum(
-        len(name) + len(value) for name, value in embed["fields"])
-    assert total <= 6000 and len(embed["fields"]) == 8
-    assert all(len(value) <= 1024 for _, value in embed["fields"])
+    blocks = wp.plan_blocks(plan)
+    texts = _block_texts(blocks)
+    assert len(texts) == 9  # the goal and 8 steps
+    assert all(f"{i}" + "x" * 1400 in "\n".join(texts) for i in range(1, 9))
+    cards = K.split(K.CardSpec(body=blocks))
+    assert len(cards) > 1  # too long for one message: it goes on in the next

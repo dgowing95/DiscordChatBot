@@ -6,6 +6,8 @@ import aiohttp
 import discord
 from discord import app_commands
 
+from classes import card, card_kit as K
+
 from classes import voice_gate, voice_session
 from classes.config_manager import configManager
 from classes.voice_policy import settings, validate_wake_phrase, voice_names
@@ -54,6 +56,39 @@ async def _voice_autocomplete(ctx: discord.Interaction, current: str):
             for v in await available_voices() if tail.strip().lower() in v][:25]
 
 
+VOICE_LABEL = "🎙️ Voice call"
+VOICE_SETTINGS = "🎙️ Voice settings"
+
+
+class LeaveButton(discord.ui.DynamicItem[discord.ui.Button], template=r"voice:leave"):
+    """Leave, on a call's card: what /voice leave does. A DynamicItem
+    registered once (main.on_ready), so it answers on a card from before a
+    restart too (by then there is no call)."""
+
+    def __init__(self):
+        super().__init__(discord.ui.Button(label="Leave", emoji="👋", custom_id="voice:leave",
+                                           style=discord.ButtonStyle.secondary))
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls()
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        session = voice_gate.session(interaction.guild_id)
+        if session is None:
+            await card.reply(interaction, K.info(VOICE_LABEL, "I'm not in a voice call."))
+            return
+        await card.reply(interaction, K.info(VOICE_LABEL, "👋 Leaving the call."), ephemeral=False)
+        await session.end()
+
+
+def call_card(channel_mention: str, wake_phrase: str, where: str = "") -> K.CardSpec:
+    """The call's card: where the bot is, how to talk to it, and Leave."""
+    text = f'Say **"{K.safe(wake_phrase)}"** and then what you\'d like.{where}'
+    return K.CardSpec(body=[K.Section((K.small(VOICE_LABEL), f"### I'm in {channel_mention}", text),
+                                      LeaveButton())])
+
+
 def register_voice_commands(tree, client) -> None:
     group = app_commands.Group(name="voice", description="Talk with me in a voice channel",
                                guild_only=True)
@@ -63,26 +98,25 @@ def register_voice_commands(tree, client) -> None:
     async def join(ctx: discord.Interaction, channel: discord.VoiceChannel | None = None):
         target = channel or getattr(getattr(ctx.user, "voice", None), "channel", None)
         if target is None:
-            await ctx.response.send_message("Join a voice channel first, or pick one.", ephemeral=True)
+            await card.reply(ctx, K.heads_up(VOICE_LABEL, "Join a voice channel first, or pick one."))
             return
         await ctx.response.defer()
         try:
             session = await voice_session.start(client, target, ctx.channel, ctx.user)
         except voice_session.VoiceError as e:
-            await ctx.followup.send(f"❌ {e}")
+            await card.reply(ctx, K.error(str(e), "❌ Couldn't join the call"), ephemeral=False)
             return
         where = (f" Pictures and code results go in {session.text_channel.mention}."
                  if session.text_channel is not None and session.text_channel.id != ctx.channel_id else "")
-        await ctx.followup.send(
-            f"🎙️ Joined {target.mention}. Say **\"{session.wake_phrase}\"** to talk to me.{where}")
+        await card.reply(ctx, call_card(target.mention, session.wake_phrase, where), ephemeral=False)
 
     @group.command(name="leave", description="Leave the voice call")
     async def leave(ctx: discord.Interaction):
         session = voice_gate.session(ctx.guild_id)
         if session is None:
-            await ctx.response.send_message("I'm not in a voice call.", ephemeral=True)
+            await card.reply(ctx, K.info(VOICE_LABEL, "I'm not in a voice call."))
             return
-        await ctx.response.send_message("👋 Leaving the call.")
+        await card.reply(ctx, K.info(VOICE_LABEL, "👋 Leaving the call."), ephemeral=False)
         await session.end()
 
     @group.command(name="wake_word", description="Change the phrase that gets my attention in voice (default: \"hey <my name>\")")
@@ -95,18 +129,20 @@ def register_voice_commands(tree, client) -> None:
             session = voice_gate.session(ctx.guild_id)
             if session is not None:
                 await session.refresh_settings()
-            await ctx.response.send_message(f"Wake phrase is back to the default: \"{phrase}\"")
+            await card.reply(ctx, K.done(VOICE_SETTINGS, f'**Wake phrase** is back to "{K.safe(phrase)}"',
+                                         footer="the default"), ephemeral=False)
             return
         try:
             phrase = validate_wake_phrase(phrase)
         except ValueError as e:
-            await ctx.response.send_message(f"❌ {e}", ephemeral=True)
+            await card.reply(ctx, K.error(str(e), "❌ Not changed"))
             return
         await configManager().update_setting("voice_wake_word", phrase, ctx.guild_id)
         session = voice_gate.session(ctx.guild_id)
         if session is not None:
             await session.refresh_settings()
-        await ctx.response.send_message(f"Wake phrase is now: \"{phrase}\"")
+        await card.reply(ctx, K.done(VOICE_SETTINGS, f'**Wake phrase** is now "{K.safe(phrase)}"'),
+                         ephemeral=False)
 
     @group.command(name="voice", description="Change my speaking voice (blend voices like af_bella:0.6,am_adam:0.4)")
     @app_commands.describe(name="A voice, or a blend of up to four")
@@ -118,11 +154,11 @@ def register_voice_commands(tree, client) -> None:
         if not names or unknown or len(names) > 4:
             reason = ("A blend can mix at most four voices." if len(names) > 4
                       else f"Unknown voice: {', '.join(unknown) or name}.")
-            await ctx.response.send_message(f"❌ {reason} Start typing to pick from the list.",
-                                            ephemeral=True)
+            await card.reply(ctx, K.error(f"{reason} Start typing to pick from the list.", "❌ Not changed"))
             return
         await configManager().update_setting("voice_name", name.strip().lower(), ctx.guild_id)
-        await ctx.response.send_message(f"Voice is now: `{name.strip().lower()}`")
+        await card.reply(ctx, K.done(VOICE_SETTINGS, f"**Voice** is now `{name.strip().lower()}`"),
+                         ephemeral=False)
         session = voice_gate.session(ctx.guild_id)
         if session is not None:
             await session.refresh_settings()
@@ -134,7 +170,8 @@ def register_voice_commands(tree, client) -> None:
         session = voice_gate.session(ctx.guild_id)
         if session is not None:
             await session.refresh_settings()
-        await ctx.response.send_message(f"Speaking speed is now: {speed}")
+        await card.reply(ctx, K.done(VOICE_SETTINGS, f"**Speaking speed** is now **{speed}**",
+                                     footer="0.5 is slow, 2 is fast"), ephemeral=False)
 
     @group.command(name="settings", description="Show my voice settings for this server")
     async def show_settings(ctx: discord.Interaction):
@@ -144,8 +181,8 @@ def register_voice_commands(tree, client) -> None:
         speed_value = await config.get_setting("voice_speed", ctx.guild_id) or "1.0"
         session = voice_gate.session(ctx.guild_id)
         status = f"in {session.voice_channel.mention}" if session is not None else "not in a call"
-        await ctx.response.send_message(
-            f"Wake phrase: \"{phrase}\"\nVoice: `{name}`\nSpeed: {speed_value}\nRight now: {status}",
-            ephemeral=True)
+        await card.reply(ctx, K.info(VOICE_SETTINGS, K.details([
+            ("Wake phrase", f'"{K.safe(phrase)}"'), ("Voice", f"`{name}`"), ("Speed", speed_value),
+            ("Right now", status)])))
 
     tree.add_command(group)
