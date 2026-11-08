@@ -49,9 +49,11 @@ class SearchWorker:
         self.proc = None
         self.loop = asyncio.get_running_loop()
         self._reaping: set = set()
+        self._next_id = 0
 
     async def _process(self):
         if self.proc is None or self.proc.returncode is not None:
+            self._drop()  # a worker that ended meanwhile is released, not just replaced
             self.proc = await asyncio.create_subprocess_exec(
                 *self.command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                 cwd=str(_CORE_DIR), limit=_REPLY_LIMIT)
@@ -91,11 +93,16 @@ class SearchWorker:
 
     async def search(self, query: str, max_results: int) -> list:
         """The engines' results. Raises RuntimeError when the search failed,
-        took too long, or the worker ended (a crash): the caller fails soft."""
+        took too long, the worker ended (a crash) or answered out of turn: the
+        caller fails soft. Every reply carries its request's id, so a stray
+        line on the pipe can never pass as the answer to another search."""
         async with self.lock:
-            proc = await self._process()
+            self._next_id += 1
+            request_id = self._next_id
             try:
-                request = json.dumps({"query": query, "max_results": max_results})
+                proc = await self._process()
+                request = json.dumps({"id": request_id, "query": query,
+                                      "max_results": max_results})
                 proc.stdin.write((request + "\n").encode())
                 await proc.stdin.drain()
                 line = await asyncio.wait_for(proc.stdout.readline(), SEARCH_TIMEOUT_SECONDS)
@@ -108,12 +115,21 @@ class SearchWorker:
             except (OSError, ValueError) as e:  # a pipe to a worker that ended
                 self._drop()
                 raise RuntimeError(f"the search worker stopped ({e})")
-            if not line:
+            if not line.endswith(b"\n"):  # nothing, or cut off mid-line: it ended
                 code = proc.returncode if proc.returncode is not None else "unknown"
                 logger.warning(f"Search worker ended (exit {code}); the next search starts a new one")
                 self._drop()
                 raise RuntimeError("the search worker stopped")
-            reply = json.loads(line)
+            try:
+                reply = json.loads(line)
+            except ValueError:
+                reply = None
+            if not isinstance(reply, dict) or reply.get("id") != request_id:
+                # A line the worker did not mean as this reply: the pipe is out
+                # of step, so a new worker answers the next search.
+                logger.warning(f"Search worker answered out of turn: {line[:200]!r}")
+                self._drop()
+                raise RuntimeError("the search worker sent an unreadable reply")
             if not reply.get("ok"):
                 raise RuntimeError(reply.get("error") or "the search failed")
             return reply.get("results") or []

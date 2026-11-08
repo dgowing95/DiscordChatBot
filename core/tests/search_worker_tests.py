@@ -13,15 +13,20 @@ from classes import search_worker, web_research
 FAKE = r"""
 import json, os, sys, time
 for line in sys.stdin:
-    q = json.loads(line)["query"]
+    request = json.loads(line)
+    q, i = request["query"], request["id"]
     if q == "crash":
         os._exit(134)  # as a native crash would: no reply, the process gone
     if q == "slow":
         time.sleep(60)
+    if q == "stray":  # a line the worker did not mean as a reply, then the reply
+        print("primp: something printed", flush=True)
+    if q == "half":  # cut off mid-line
+        sys.stdout.write('{"id": ' + str(i) + ', "ok": tr'); sys.stdout.flush(); os._exit(1)
     if q == "fail":
-        print(json.dumps({"ok": False, "error": "DDGSException: No results found."}), flush=True)
+        print(json.dumps({"id": i, "ok": False, "error": "DDGSException: No results found."}), flush=True)
         continue
-    print(json.dumps({"ok": True, "results": [{"title": q, "pid": os.getpid()}]}), flush=True)
+    print(json.dumps({"id": i, "ok": True, "results": [{"title": q, "pid": os.getpid()}]}), flush=True)
 """
 
 
@@ -38,9 +43,10 @@ def test_a_request_line_gets_the_results():
         calls.append((query, max_results))
         return [{"title": "Io", "href": "https://example.com/io", "body": "3,643 km"}]
 
-    reply = search_worker.handle(json.dumps({"query": "io", "max_results": 5}), text)
-    assert reply == {"ok": True, "results": [{"title": "Io", "href": "https://example.com/io",
-                                              "body": "3,643 km"}]}
+    reply = search_worker.handle(json.dumps({"id": 7, "query": "io", "max_results": 5}), text)
+    assert reply == {"id": 7, "ok": True,
+                     "results": [{"title": "Io", "href": "https://example.com/io",
+                                  "body": "3,643 km"}]}
     assert calls == [("io", 5)]
 
 
@@ -53,8 +59,8 @@ def test_a_bad_request_is_an_error_reply_not_a_crash(line):
 def test_a_failed_search_is_an_error_reply():
     def text(query, max_results):
         raise RuntimeError("No results found.")
-    assert search_worker.handle(json.dumps({"query": "x", "max_results": 5}), text) == \
-        {"ok": False, "error": "RuntimeError: No results found."}
+    assert search_worker.handle(json.dumps({"id": 3, "query": "x", "max_results": 5}), text) == \
+        {"id": 3, "ok": False, "error": "RuntimeError: No results found."}
 
 
 @pytest.mark.asyncio
@@ -129,6 +135,50 @@ async def test_a_cancelled_search_never_answers_the_next_one(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await slow
     assert (await worker.search("io", 5))[0]["title"] == "io"
+    await worker.close()
+
+
+@pytest.mark.asyncio
+async def test_a_stray_line_never_passes_as_another_searchs_answer():
+    worker = _fake()
+    with pytest.raises(RuntimeError, match="unreadable reply"):
+        await worker.search("stray", 5)
+    # The real reply to "stray" is still in the old pipe: a new worker answers.
+    assert (await worker.search("io", 5))[0]["title"] == "io"
+    await worker.close()
+
+
+@pytest.mark.asyncio
+async def test_a_reply_cut_off_mid_line_is_a_stopped_worker():
+    worker = _fake()
+    with pytest.raises(RuntimeError, match="worker stopped"):
+        await worker.search("half", 5)
+    assert (await worker.search("io", 5))[0]["title"] == "io"
+    await worker.close()
+
+
+@pytest.mark.asyncio
+async def test_a_worker_that_cannot_start_is_a_failed_search(monkeypatch):
+    worker = web_research.SearchWorker(command=["no-such-program-dcb"])
+    with pytest.raises(RuntimeError, match="worker stopped"):
+        await worker.search("io", 5)
+    await worker.close()
+
+
+@pytest.mark.asyncio
+async def test_the_real_worker_keeps_native_output_off_the_replies():
+    # Output written straight to fd 1 (as native code would) must not reach
+    # the bot's pipe: the next line read is the reply.
+    worker = web_research.SearchWorker(command=[sys.executable, "-c", (
+        "import os, sys\n"
+        "from classes import search_worker\n"
+        "orig = search_worker.handle\n"
+        "def handle(line, text=None):\n"
+        "    os.write(1, b'native noise\\n')\n"
+        "    return orig(line, lambda q, max_results: [{'title': q}])\n"
+        "search_worker.handle = handle\n"
+        "search_worker.main()\n")])
+    assert await worker.search("io", 5) == [{"title": "io"}]
     await worker.close()
 
 
