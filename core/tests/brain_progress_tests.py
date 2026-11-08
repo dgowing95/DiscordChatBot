@@ -586,7 +586,8 @@ def test_the_status_prompt_stays_small_and_shows_the_shape():
     ("", None),
     ("I am now going to carefully install every single library this job needs", None),
     ("**Pinging <@123> about it**", "Pinging 123 about it"),
-    ("Writing `make_gif.py`", "Writing make gif.py"),
+    ("Writing `make_gif.py`", "Writing make_gif.py"),
+    ("__Rendering__ frames", "Rendering frames"),
 ])
 def test_only_a_short_line_is_a_status(raw, line):
     assert brain_status.clean_status(raw) == line

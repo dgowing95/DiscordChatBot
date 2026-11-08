@@ -62,7 +62,7 @@ from dataclasses import dataclass
 from agents import RunHooks
 
 from classes import card_kit as K
-from classes.brain_status import plain_line
+from classes.brain_status import plain_words
 from classes.card import LiveCard
 from classes.card_kit import CardSpec, Divider, Text
 from classes.tool_cards import (
@@ -231,7 +231,7 @@ class WorkTranscript:
     def set_status(self, text: str | None) -> None:
         """The one line on what the call is doing now, as plain words (it
         is model or search text); None clears it."""
-        self._status = plain_line(text)[:NOTE_CHARS]
+        self._status = plain_words(text)[:NOTE_CHARS]
 
     @property
     def status(self) -> str:
