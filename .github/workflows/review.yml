@@ -15,7 +15,10 @@ jobs:
     # auto-merge ("Protect main" requires every thread resolved).
     if: github.event.pull_request.draft == false && github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: [ ubuntu-latest ]
-    timeout-minutes: 45
+    # A cut-off review posts nothing and records no checkpoint, so the next run starts over.
+    # 45 was too short for a full review of a large PR (#212: 36 files, about 10 of 14 groups
+    # done at 45 minutes).
+    timeout-minutes: 90
     env:
       # The npm launcher self-updates in the background and can remove ocr during this job.
       OCR_NO_UPDATE: '1'
