@@ -19,6 +19,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import re
 
 from classes import llm_lanes
 from classes.llm_roles import BRAIN, role_config
@@ -38,6 +39,16 @@ MAX_STATUS_WORDS = 8
 PROMPT = ("You write the one status line shown while a bot works on a job. In 2 to 6 words, "
           "say what it is doing now, starting with a word ending in -ing, e.g. \"Installing "
           "python libraries\" or \"Creating the script\". Write only the line.")
+
+
+# Anything but words and plain punctuation: markdown, mention and emoji syntax.
+_NOT_PLAIN = re.compile(r"[^\w\s\-'.,/&()+:?!]|_")
+
+
+def plain_line(text: str) -> str:
+    """The line as plain words: a model's or a search query's markdown,
+    <@mention> or <t:...> syntax never reaches the card."""
+    return " ".join(_NOT_PLAIN.sub(" ", str(text or "")).split())
 
 
 def _config():
@@ -78,7 +89,7 @@ def clean_status(text: str) -> str | None:
     """The model's answer as a status line, or None when it is not one (too
     long, empty, more than a line's worth of words)."""
     for line in strip_thinking(text or "").splitlines():
-        line = line.strip().strip("-*•\"'`").strip().rstrip(".!").strip()
+        line = plain_line(line).strip("-'.,!: ")
         if not line:
             continue
         if len(line) > MAX_STATUS_CHARS or len(line.split()) > MAX_STATUS_WORDS:

@@ -62,6 +62,7 @@ from dataclasses import dataclass
 from agents import RunHooks
 
 from classes import card_kit as K
+from classes.brain_status import plain_line
 from classes.card import LiveCard
 from classes.card_kit import CardSpec, Divider, Text
 from classes.tool_cards import (
@@ -228,8 +229,17 @@ class WorkTranscript:
         self._thinking = bool(thinking)
 
     def set_status(self, text: str | None) -> None:
-        """The one line on what the call is doing now; None clears it."""
-        self._status = " ".join((text or "").split())[:NOTE_CHARS]
+        """The one line on what the call is doing now, as plain words (it
+        is model or search text); None clears it."""
+        self._status = plain_line(text)[:NOTE_CHARS]
+
+    @property
+    def status(self) -> str:
+        return self._status
+
+    @property
+    def task(self) -> str:
+        return self._task
 
     def set_final(self, label: str, colour: int, seconds: float | None = None) -> None:
         """The call is over: its closing label and colour."""
@@ -278,7 +288,7 @@ class WorkTranscript:
             body += [Divider(), Text(K.safe("\n".join(self._notes)))]
         footer = []
         if self._final is None and self._status:
-            footer.append(f"⏳ {self._status}")
+            footer.append(f"⏳ {K.safe(self._status)}")
         if self._final is None and self._thinking:
             footer.append("💭 Thinking…")
         if self._final is None and self._hint:
@@ -396,7 +406,11 @@ class BrainProgressHooks(RunHooks):
         self._steps: list[str] = []
         self._status_wanted = False
         self._status_task: asyncio.Task | None = None
-        self._last_status = 0.0
+        self._last_status = float("-inf")  # no line yet: the first comes at once
+        # Whether the line is the side call's: until then each tool call
+        # brings a fresh rule-written one, so a failing side call never
+        # leaves an old step on the card.
+        self._model_line = False
 
     @property
     def started(self) -> bool:
@@ -492,9 +506,9 @@ class BrainProgressHooks(RunHooks):
     # -- the status line (off form) ---------------------------------------------
 
     def _record_step(self, name, context) -> None:
-        """Keeps the newest tool calls for the status line. Before the card
-        is out, the newest one also sets the rule-written line, so the card's
-        first post already says what it is doing."""
+        """Keeps the newest tool calls for the status line. Until the side
+        call has written one, the newest also sets the rule-written line, so
+        the card's first post already says what it is doing."""
         try:
             from classes.brain_status import step_text
             from classes.tool_cards import helper_line
@@ -506,7 +520,7 @@ class BrainProgressHooks(RunHooks):
                 return
             self._steps = (self._steps + [step])[-STATUS_STEPS:]
             self._status_wanted = True
-            if not self._started or not self.transcript._status:
+            if not self._model_line:
                 line = helper_line(name, args)
                 if line:
                     # helper_line starts with an emoji: the card adds its own ⏳.
@@ -536,9 +550,11 @@ class BrainProgressHooks(RunHooks):
                     await asyncio.sleep(wait)
                 self._status_wanted = False
                 self._last_status = time.monotonic()
-                line = await brain_status.describe(self.transcript._task, list(self._steps))
-                if line and not self._finalized and line != self.transcript._status:
-                    self._note(self.transcript.set_status, line)
+                line = await brain_status.describe(self.transcript.task, list(self._steps))
+                if line and not self._finalized:
+                    self._model_line = True
+                    if line != self.transcript.status:
+                        self._note(self.transcript.set_status, line)
                 await self._show_status()
         except asyncio.CancelledError:
             raise

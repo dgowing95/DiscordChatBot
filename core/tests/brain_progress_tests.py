@@ -507,17 +507,47 @@ async def test_a_line_held_by_the_edit_throttle_still_reaches_the_card():
 
 
 @pytest.mark.asyncio
-async def test_a_rule_written_line_on_a_card_already_out_is_shown():
-    # The side call keeps failing (conftest): the card still gets a line.
+async def test_while_the_side_call_fails_the_rule_written_line_follows_each_step():
+    # The side call keeps failing (conftest): the card never keeps an old step.
     channel, message = _channel_with_message()
     hooks = BrainProgressHooks(channel, "t", edit_interval=0)
     hooks.status_interval = 0
-    await hooks.on_tool_start(_ctx(json.dumps({"path": "in/a.csv"})), None, _tool("save_messages_to_file"))
+    await hooks.on_tool_start(_ctx(json.dumps({"path": "in/a.csv"})), None,
+                              _tool("save_messages_to_file"))
     await hooks._status_task
-    hooks.transcript.set_status(None)  # as if the card went out with no line
+    assert "⏳ Saving messages" in _view_text(channel.send.await_args.kwargs["view"])
     await hooks.on_tool_start(_cmd("python a.py"), None, _tool("exec_command"))
     await hooks._status_task
     assert "⏳ Running a Python script" in _view_text(_last(message))
+    await hooks.finalize(ok=True)
+
+
+@pytest.mark.asyncio
+async def test_once_the_side_call_wrote_a_line_a_rule_written_one_never_replaces_it():
+    channel, message = _channel_with_message()
+    hooks = BrainProgressHooks(channel, "t", edit_interval=0)
+    hooks.status_interval = 0
+    with patch.object(brain_status._llm, "complete", AsyncMock(return_value="Creating the script")):
+        await hooks.on_tool_start(_cmd("cat > a.py"), None, _tool("exec_command"))
+        await hooks._status_task
+    await hooks.on_tool_start(_cmd("python a.py"), None, _tool("exec_command"))
+    await hooks._status_task  # this one fails (conftest)
+    assert hooks.transcript.status == "Creating the script"
+    await hooks.finalize(ok=True)
+
+
+@pytest.mark.asyncio
+async def test_the_first_line_comes_at_once_on_a_freshly_started_host(monkeypatch):
+    # time.monotonic() may be under the interval just after a boot.
+    from classes import brain_progress
+    monkeypatch.setattr(brain_progress.time, "monotonic", lambda: 5.0)
+    channel, message = _channel_with_message()
+    hooks = BrainProgressHooks(channel, "t", edit_interval=0)
+    complete = AsyncMock(return_value="Creating the script")
+    with patch.object(brain_status._llm, "complete", complete):
+        await hooks.on_tool_start(_cmd("cat > a.py"), None, _tool("exec_command"))
+        await hooks._status_task
+    complete.assert_awaited_once()
     await hooks.finalize(ok=True)
 
 
@@ -528,7 +558,7 @@ async def test_a_failed_line_keeps_the_one_there_was():
     hooks.status_interval = 0
     await hooks.on_tool_start(_cmd("python a.py"), None, _tool("exec_command"))
     await hooks._status_task  # the side call fails (conftest)
-    assert hooks.transcript._status == "Running a Python script"
+    assert hooks.transcript.status == "Running a Python script"
     await hooks.finalize(ok=True)
 
 
@@ -555,6 +585,8 @@ def test_the_status_prompt_stays_small_and_shows_the_shape():
     ("<think>hmm</think>\n- Building the GIF\n", "Building the GIF"),
     ("", None),
     ("I am now going to carefully install every single library this job needs", None),
+    ("**Pinging <@123> about it**", "Pinging 123 about it"),
+    ("Writing `make_gif.py`", "Writing make gif.py"),
 ])
 def test_only_a_short_line_is_a_status(raw, line):
     assert brain_status.clean_status(raw) == line
