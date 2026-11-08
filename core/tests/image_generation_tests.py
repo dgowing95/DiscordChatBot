@@ -201,6 +201,36 @@ async def test_an_unreachable_service_falls_back():
 
 # ---------------------- create_image ----------------------
 
+@pytest.fixture(autouse=True)
+def _guard_allows():
+    with patch("classes.content_guard.check_web_request", AsyncMock(return_value=(True, ""))):
+        yield
+
+
+@pytest.mark.asyncio
+async def test_a_description_the_guard_blocks_makes_nothing(monkeypatch):
+    patches, api, _, rewrite = _patched(KLEIN, [b"ONE"], [MATCH], monkeypatch)
+    guard = AsyncMock(return_value=(False, "flagged"))
+    with patch("classes.content_guard.check_web_request", guard), \
+         pytest.raises(image_generation.ImageBlocked):
+        await _run(patches, "something bad")
+    guard.assert_awaited_once_with("something bad")
+    api.assert_not_awaited()
+    rewrite.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_the_tool_says_a_blocked_picture_plainly_and_it_costs_no_picture():
+    from agents.tool_context import ToolContext
+    from classes import tool_functions
+    context = {"image_calls": 0, "channel": None}
+    with patch("classes.content_guard.check_web_request", AsyncMock(return_value=(False, "flagged"))):
+        text = await tool_functions.generate_image.on_invoke_tool(
+            ToolContext(context=context, tool_name="generate_image", tool_call_id="i",
+                        tool_arguments='{"prompt": "x"}'), '{"prompt": "x"}')
+    assert "blocked by the safety guard" in text and "do not try again" in text
+    assert context["image_calls"] == 0
+
 MISSING_ARMS = ImageReview(shows="An obese woman with ordinary arms.", missing=("very thin arms",))
 STILL_MISSING_TWO = ImageReview(shows="A woman.", missing=("very thin arms", "pizza slice"))
 MATCH = ImageReview(shows="An obese woman with stick-thin arms.", missing=())

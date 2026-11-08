@@ -84,11 +84,6 @@ async def _run_with_handler(monkeypatch, reply, workflow_url):
     return sent
 
 
-@pytest.mark.asyncio
-async def test_a_workflow_an_automatic_run_started_is_always_linked(monkeypatch):
-    sent = await _run_with_handler(monkeypatch, "On it.", "https://example.com/thread")
-    assert sent == ["On it.\nWorkflow: https://example.com/thread"]
-
 
 @pytest.mark.asyncio
 async def test_a_link_the_reply_already_has_is_not_repeated(monkeypatch):

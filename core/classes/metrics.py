@@ -130,7 +130,8 @@ Metrics (scraped by Prometheus from the /metrics HTTP endpoint):
 
   Tier 3 workflows (classes/workflows.py):
   Counter  discord_bot_workflows_total{trigger,end_state}
-           Workflows ended, by how they started (brain / slash / automation)
+           Workflows ended, by how they started (brain / slash / dev, the
+           test command)
            and how they ended (done / partial / failed / cancelled).
   Histogram discord_bot_workflow_seconds{end_state}
            A workflow's wall-clock time.
@@ -139,8 +140,8 @@ Metrics (scraped by Prometheus from the /metrics HTTP endpoint):
   Histogram discord_bot_workflow_turns
            Model turns per workflow, every agent together.
   Counter  discord_bot_workflow_plan_approval_total{outcome}
-           How plans were approved (approved / edited / cancelled / timeout /
-           auto).
+           How plans were answered (approved / edited / cancelled / timeout,
+           which now cancels, and dev for the test command).
   Counter  discord_bot_workflow_scouts_total{outcome}
            How scouts ended (done / reported_at_limit / stopped).
   Counter  discord_bot_workflow_plan_questions_total{outcome}

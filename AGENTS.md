@@ -31,7 +31,7 @@ core/                    # the bot (what runs in production)
     reply_policy.py        # P occasional double replies
     text_llm_handler.py    # the persona: an agents-SDK Agent with one tool, ask_brain
     response_filter.py     # P answer cleaning, reasoning extraction, Discord chunking
-    content_guard.py       # moderation check for web_search / fetch_url / the brain's workspace
+    content_guard.py       # moderation check for web_search / fetch_url / image generation
     user_memory.py         # saved memories: JSON lists in Redis per (guild, user)
     config_manager.py      # per-guild settings in Redis (system prompt, temperature, ...)
     redis_client.py        # the two shared, lazily built Redis clients (str + binary)
@@ -56,7 +56,7 @@ core/                    # the bot (what runs in production)
     brain_policy.py        # P BRAIN_* limits (unprompted replies, questions, slots)
     brain_inbox.py         # P questions the brain is waiting on, one per question message
     brain_question.py      # the question in Discord (buttons) and ask(): the one flow of ask_user and ask_requester
-    persona_voice.py       # the brain's question reworded in the persona's voice
+    persona_voice.py       # the brain's questions and a manager's thread replies, in the persona's voice
     skill_format.py        # P skills: SKILLS_* settings, name/limit checks, SKILL.md, the index and its ranking
     skill_store.py         # skills in Redis: every version kept, soft delete, revert, export
     skill_tools.py         # the brain's use_skill / save_skill / search_skills, every skill card, Restore
@@ -232,7 +232,7 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
    | `join_voice_channel` / `leave_voice_channel` (`VOICE_ENABLED`) | join | no | leave |
    | `generate_image` (`IMAGE_GEN_ENABLED`) | yes | yes | yes |
    | `use_skill`, `save_skill`, `search_skills` (`SKILLS_ENABLED`) | yes | yes | yes |
-   | `start_workflow` (`WORKFLOW_ENABLED`; never in a reply nobody asked for) | yes | with `WORKFLOW_FROM_AUTOMATIONS` | no |
+   | `start_workflow` (`WORKFLOW_ENABLED`; never in a reply nobody asked for) | yes | no | no |
    | `attach_file`, `save_messages_to_file`, `ask_user`, `report`, the Shell tools | yes | yes | yes |
 
    - **It works inline, in the channel**, not in a thread: each tool posts its own card, attached files
@@ -260,7 +260,9 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
      finish past 90%. A remote API reports no limit, so its runs are never squeezed.
    - **Every call needs the workspace**: `SandboxAgent` binds its session before the first model call,
      so a lazy start is not possible. `WORKSPACE_PREWARM` starts a cold one while the persona thinks.
-   - **The content guard runs at the first workspace action**, once per call, not on every `ask_brain`.
+   - **The content guard checks only `web_search`, `fetch_url` and image generation**
+     (`image_generation.create_image`, so `/generate_image` too). The workspace, workflows and skills
+     are not checked: the brain's own safety rule in its prompts covers them (`brain_policy.SAFETY_RULE`).
    - **One workspace per server, a folder per call** (`jobs/c<channel id>-<time>-<random>/`;
      `_in_job_dir` makes relative paths start there). The task names the channel's newest earlier
      folders, so "make the chart blue" finds the last chart. `shared/` holds what the server asked to
@@ -333,7 +335,9 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
    `schedule_forever` polls due schedules every 15 s and admits only what the queue has room for; an
    admitted rule replaces the ordinary reply. An automatic run has no source message (`automatic=True`,
    `actor_id` = the entry's last editor): no memory or automation tools, no memories, no double replies.
-   A started run is never replayed, since tools may already have posted. A lost channel, a departed
+   A started run is never replayed, since tools may already have posted. It never starts a workflow
+   (`brain_policy.effective_tier`, and `workflows.start_workflow` refuses one): nobody is there to
+   approve the plan. A lost channel, a departed
    editor or a missing permission suspends the entry. **Follow-ups** (`schedule_followup`) are one-off
    schedules with their own quota, at least `SCHEDULE_MIN_INTERVAL_HOURS` apart per person
    (`automation_policy.followup_conflict`); a follow-up cannot set another.
@@ -395,7 +399,7 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
     | Discovery, if asked for | up to 2 scouts (a SandboxAgent, `SCOUT_INSTRUCTIONS`, mode scout) | subagent | `report` |
     | Questions, if asked for | up to 3 in the thread (`ask_requester`), one at a time | - | a button, a thread message, or `WORKFLOW_ASK_TIMEOUT` |
     | Plan | the manager (a plain Agent, `MANAGER_INSTRUCTIONS`, `brain_tools(mode="manager")`), a fresh run after each round above | brain | `discover`, `ask_requester` or `submit_plan` |
-    | Approval | the plan card with Approve / Edit / Cancel (`workflow_views.py`), requester only | - | a button, a thread message (a change), or `WORKFLOW_PLAN_APPROVAL_SECONDS` |
+    | Approval | the plan card with Approve / Edit / Cancel (`workflow_views.py`), requester only | - | a button, a thread message (a change), or `WORKFLOW_PLAN_APPROVAL_SECONDS`, which cancels it |
     | Steps, in waves (`next_wave`): researchers side by side, an implementer alone | a helper per step (a SandboxAgent, `SUBAGENT_INSTRUCTIONS`, mode researcher / implementer) | subagent | `report` |
     | Between steps | the manager answers waiting thread messages, may change the remaining steps | brain | `submit_review` |
     | Before the first implementer after researchers | a verifier checks what every researcher not yet checked found; a wrong one runs again at once | subagent | `submit_verdict` |
@@ -412,7 +416,7 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
       12 turns, 5 minutes, 3 facts, 2700 characters of findings). A scout is told to finish two turns
       before its limit (`FINISH_UP`), and one that reaches a limit gets one last call that can only be
       `report` (`_last_report`), so what it found is kept. Findings and answers go to every later run
-      by code (`planning_text`). Automatic runs may look but not ask.
+      by code (`planning_text`).
     - **One card per scout and researcher** (`brain_progress.HelperProgress`): their last tool call
       and turn, trimmed, edited at most every 30 s since two share a thread's edits. Their tools post
       nothing (`common.QuietChannel` drops notice cards), which replaced dozens of them a run. An
@@ -439,10 +443,9 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
       it is about (`workflow_steering.py`: one call picks them from the steps not finished, all of them
       if it fails), at a helper's next model call (the SDK drops what a filter adds, so each run puts it
       back where it was first shown, after the trim). Every message waits for the review between
-      steps (and once more after the last step), which answers it and records an outcome. The thread
+      steps (and once more after the last step), which answers it (in the persona's voice, `persona_voice.voice_replies`) and records an outcome. The thread
       is open to the server: only the requester can change the steps, and only their words reach
-      helpers. Plan edits, thread messages and answers pass the content guard first (the run context's
-      guard only ever saw the request).
+      helpers.
     - **The check** (`workflow_verify.py`): every job that finished, unless a limit or a cancel stopped
       it or it made nothing. The verifier has the shell, `fetch_url` and `view_image`, and nothing that
       posts. Code runs the step it names once more, then every step that depends on it and every
@@ -538,7 +541,7 @@ are the ones that actually change behaviour). The persona's *system* prompt is n
 `change_personality`. The one exception is a voice turn, which appends
 `voice_policy.VOICE_INSTRUCTIONS`; `voice_policy` is also the one home of `GREETING_PROMPT` and
 `HOLD_ON_PROMPT`. Each side job has one prompt of its own: `persona_voice.PROMPT` (~130 characters, a
-question in the persona's voice), `image_prompt.SYSTEM_PROMPT` (~2050, the SDXL rewrite),
+question in the persona's voice) and `REPLY_PROMPT` (~140, a workflow manager's thread reply), `image_prompt.SYSTEM_PROMPT` (~2050, the SDXL rewrite),
 `image_review.SYSTEM_PROMPT` / `VIEW_PROMPT` (~1080 / ~150, the picture check) and
 `research_format.SYSTEM_PROMPT` (~780, the research brief); `brain_status.PROMPT` (~225, ceiling 300,
 the status line on the brain's card).
@@ -548,6 +551,10 @@ the status line on the brain's card).
 - **Prefer a positive example over a list of prohibitions.** A model given a list of things not to
   choose went on to choose items straight off the list. The prompts show the shape instead
   (`ask_brain`'s examples, the `report(...)` call in `BRAIN_INSTRUCTIONS`).
+- **One safety rule** (`brain_policy.SAFETY_RULE`, ~220 characters, ceiling 250, pinned by
+  `brain_tests.py`) ends the prompt of every agent that works: the brain, and a workflow's manager,
+  helpers, scouts and verifier. Each builder appends it, so the sizes below leave it out. The
+  content guard checks only search, links and pictures; this is what covers the rest.
 - Sizes are pinned by `brain_tests.py`: `BRAIN_INSTRUCTIONS` ~2240 characters (ceiling 2300; 2500 with `WORKFLOW_INSTRUCTIONS`, ~245, put first and only in calls offered `start_workflow`),
   `ask_brain` ~1750 including its JSON schema (ceiling 1760). Re-measure before adding. Skills have
   their own homes, pinned by `skill_tools_tests.py`: `SKILLS_INSTRUCTIONS` ~270 characters (ceiling
@@ -670,14 +677,13 @@ reads has a row here and a line in `.env.example`, that every row is read by som
 | `BRAIN_LLM_API_KEY` | the brain's key; empty = `LLM_API_KEY`, but only when the brain's host is `LLM_HOST` (else none; startup warns). Chart: `brain.apiKey` |
 | `BRAIN_REASONING_EFFORT` | the brain's `reasoning_effort` [medium]. Chart: `brain.reasoningEffort` |
 | `WORKFLOW_ENABLED` | `0`/`false` removes `/task` and `start_workflow` [on]. Chart: `workflows.enabled` |
-| `WORKFLOW_FROM_AUTOMATIONS` | schedules, rules and follow-ups may start a workflow, approved at once [on]. Chart: `workflows.fromAutomations` |
 | `WORKFLOW_ASK_TIMEOUT` | seconds a workflow step's question in the thread waits for the requester [300]. Chart: `workflows.askTimeout` |
-| `WORKFLOW_PLAN_APPROVAL_SECONDS` | seconds a plan waits for Approve before it starts anyway [900]. Chart: `workflows.planApprovalSeconds` |
+| `WORKFLOW_PLAN_APPROVAL_SECONDS` | seconds a plan waits for Approve before it is cancelled [900]. Chart: `workflows.planApprovalSeconds` |
 | `WORKFLOW_PLAN_REVISIONS` | changes a plan may get before it must be approved or cancelled [3]. Chart: `workflows.planRevisions` |
 | `WORKFLOW_MAX_STEPS` | steps in one plan [8]. Chart: `workflows.maxSteps` |
 | `WORKFLOW_TIMEOUT` / `WORKFLOW_MAX_TURNS` / `WORKFLOW_MAX_TOKENS` | backstops on one workflow: wall-clock seconds [3600], model turns [300] and tokens in and out [4000000; 0 = off] across all its agents; out of any stops it with what exists. Chart: `workflows.timeout` / `maxTurns` / `maxTokens` |
 | `WORKFLOW_MAX_PER_GUILD` | workflows running at once per server [1]. Chart: `workflows.maxPerGuild` |
-| `WORKFLOW_DEV_INJECT` | local testing and E2E only, never in the chart: `!workflow <request>` starts a workflow directly, since a webhook cannot use `/task` |
+| `WORKFLOW_DEV_INJECT` | local testing and E2E only, never in the chart: `!workflow <request>` starts a workflow with its plan approved at once, since a webhook cannot use `/task` or press Approve |
 | `SUBAGENT_MODEL` / `SUBAGENT_LLM_HOST` / `SUBAGENT_LLM_API_KEY` | a workflow helper's connection; empty = the brain's, then `LLM_*` (the key only for the same host). Chart: `subagents.model` / `llmHost` / `apiKey` |
 | `SUBAGENT_REASONING_EFFORT` / `SUBAGENT_CALL_TIMEOUT_SECONDS` | a helper's; empty = the brain's. Chart: `subagents.reasoningEffort` / `callTimeout` |
 | `SUBAGENT_MAX_TURNS` | backstop on one helper's model turns [100]. Chart: `subagents.maxTurns` |

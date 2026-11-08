@@ -27,8 +27,7 @@ within a minute. Before writing it the bot may:
   **Answer…** box and **You decide**. Writing in the thread answers too. With no answer in 5 minutes
   it stops asking, decides for itself and says so in the plan.
 
-Anything else you write in the thread meanwhile goes into the plan. Automatic runs (schedules, rules)
-can look but never ask.
+Anything else you write in the thread meanwhile goes into the plan.
 
 ## The plan
 
@@ -41,8 +40,9 @@ the person who asked can answer it:
 | **Edit**, or just write in the thread | Say what to change. The bot writes a new plan (up to 3 times) |
 | **Cancel** | Stops it before anything runs |
 
-With no answer in 15 minutes it starts anyway, and says so. A workflow started by a schedule or a
-rule starts at once.
+With no answer in 15 minutes the plan is cancelled: nothing runs that nobody approved. Schedules,
+rules and follow-ups cannot start a workflow, since nobody is there to approve its plan; they do what
+one brain call can.
 
 ## While it works
 
@@ -87,8 +87,7 @@ A restart of the bot stops a running workflow; its thread says so. Ask again to 
 | Setting | Default | What it does |
 |---|---|---|
 | `WORKFLOW_ENABLED` | on | Off removes `/task`, and the bot never starts a workflow |
-| `WORKFLOW_FROM_AUTOMATIONS` | on | Schedules, rules and follow-ups may start one |
-| `WORKFLOW_PLAN_APPROVAL_SECONDS` | 900 | How long the plan waits for an answer |
+| `WORKFLOW_PLAN_APPROVAL_SECONDS` | 900 | How long the plan waits for an answer before it is cancelled |
 | `WORKFLOW_TIMEOUT` / `WORKFLOW_MAX_TURNS` | 1 h / 300 | Caps one workflow (the biggest job tried took 62 min) |
 | `WORKFLOW_MAX_TOKENS` | 4000000 (0 = off) | Caps the tokens one workflow uses, in and out, across all its helpers |
 | `WORKFLOW_ASK_TIMEOUT` | 300 | How long a question waits for an answer, in seconds |

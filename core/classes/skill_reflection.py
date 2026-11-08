@@ -133,7 +133,6 @@ _llm = SideLLM("skill_reflection", _config, lane=llm_lanes.BACKGROUND)
 async def reflect(review: dict) -> str:
     """Runs one review. Returns what it did: none, create, update (or the
     store's `unchanged`) or failed. Never raises."""
-    from classes.content_guard import check_web_request
     from classes.skill_store import SkillError, SkillStore
     from classes.skill_tools import announce, saved_card
     try:
@@ -150,10 +149,6 @@ async def reflect(review: dict) -> str:
             decision["action"] = "create"
         if decision["action"] == "create" and exists is not None:
             decision["action"] = "update"
-        allowed, _ = await check_web_request(f"{decision['description']}\n{decision['body']}")
-        if not allowed:
-            metrics.inc_skill_reflection("failed")
-            return "failed"
         result = await store.save(guild, name, decision["description"], decision["body"],
                                   # an update keeps the skill's files: the review reads no files
                                   (exists or {}).get("files"),

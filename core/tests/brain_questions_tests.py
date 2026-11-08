@@ -443,6 +443,25 @@ async def test_a_failed_rewording_asks_the_question_as_written(outcome):
         assert await persona_voice.voice_question(1, "Bar or line?") == "Bar or line?"
 
 
+@pytest.mark.asyncio
+async def test_a_managers_replies_are_reworded_side_by_side_and_a_failed_one_kept():
+    config = MagicMock()
+    config.get_setting = AsyncMock(return_value="a grumpy pirate")
+
+    async def _complete(messages, **kwargs):
+        if "fail" in messages[1]["content"]:
+            raise RuntimeError("down")
+        return "Arr, " + messages[1]["content"].rsplit("\n", 1)[-1]
+
+    with patch("classes.config_manager.configManager", return_value=config), \
+         patch.object(persona_voice._llm, "complete", AsyncMock(side_effect=_complete)) as complete:
+        texts = await persona_voice.voice_replies(1, ["Noted: euros.", "", "fail this"])
+    assert texts == ["Arr, Noted: euros.", "", "fail this"]
+    assert complete.await_count == 2  # an empty reply costs no call
+    assert "a grumpy pirate" in complete.await_args_list[0].args[0][0]["content"]
+    assert "Keep every fact" in complete.await_args_list[0].args[0][1]["content"]
+
+
 def test_the_question_uses_the_personas_connection_not_the_brains(monkeypatch):
     monkeypatch.setenv("LLM_HOST", "http://persona:8080")
     monkeypatch.setenv("BRAIN_LLM_HOST", "https://brain.example")

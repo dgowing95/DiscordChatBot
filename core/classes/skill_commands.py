@@ -11,7 +11,6 @@ import discord
 from discord import app_commands
 
 from classes import card, card_kit as K, skill_format, tool_cards
-from classes.content_guard import check_web_request
 from classes.skill_store import SkillError, SkillStore
 from classes.skill_tools import announce, saved_card
 
@@ -108,9 +107,6 @@ class EditModal(discord.ui.Modal, title="Edit skill"):
         name = self.skill["name"]
         store = SkillStore()
         try:
-            allowed, reason = await check_web_request(f"{self.description.value}\n{self.steps.value}")
-            if not allowed:
-                raise SkillError(f"Not saved: the safety guard blocked this ({reason or 'content refused'}).")
             result = await store.save(ctx.guild_id, name, str(self.description.value), str(self.steps.value),
                                       self.skill.get("files") or {}, author_id=ctx.user.id,
                                       source="command", note=str(self.note.value or ""),

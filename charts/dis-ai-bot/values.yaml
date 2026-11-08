@@ -306,11 +306,9 @@ workflows:
   # false removes /task and start_workflow. Workflows are the heaviest load
   # on a one-slot LLM server.
   enabled: true
-  # Schedules, rules and follow-ups may start one, approved at once.
-  fromAutomations: true
   # Seconds a helper's question in the thread waits for the requester.
   askTimeout: 300
-  # Seconds the plan waits for Approve before it starts anyway.
+  # Seconds the plan waits for Approve before it is cancelled.
   planApprovalSeconds: 900
   # Changes a plan may get before it must be approved or cancelled.
   planRevisions: 3

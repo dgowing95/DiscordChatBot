@@ -96,7 +96,7 @@ MEMORY_CHARS = 1500
 # it is done: a second ask_brain in the same reply starts clean, and nothing
 # the persona's own run keeps holds a released workspace.
 _BRAIN_KEYS = ("session", "out_dir", "job_dir", "workspace_root", "deliverables",
-               "delivery_chosen", "brain_request", "brain_report_args", "brain_guard", "requester",
+               "delivery_chosen", "brain_request", "brain_report_args", "requester",
                "brain_deadline", "brain_questions", "skills_used", "skill_saved",
                "brain_workflow", "brain_inputs")
 
@@ -188,12 +188,14 @@ def plain_request(request: str, workflows: bool) -> str:
 
 def instructions(*, workflows: bool = False) -> str:
     """The brain's system prompt: BRAIN_INSTRUCTIONS, with the workflow bullet
-    first when this kind of call may start one, and the skills bullet last."""
+    first when this kind of call may start one, the skills bullet, and the
+    safety rule last (brain_policy.SAFETY_RULE)."""
     from classes import skill_format
     text = BRAIN_INSTRUCTIONS
     if workflows:
         text = text.replace(FIRST_RULE, WORKFLOW_INSTRUCTIONS + FIRST_RULE, 1)
-    return text + (SKILLS_INSTRUCTIONS if skill_format.enabled() else "")
+    return (text + (SKILLS_INSTRUCTIONS if skill_format.enabled() else "")
+            + brain_policy.SAFETY_RULE)
 
 
 def build_brain_model() -> LanedModel:
@@ -395,67 +397,11 @@ async def ask_user(wrapper: RunContextWrapper[dict], question: str,
     return f"They answered: {answer[:ANSWER_MAX_CHARS]}"
 
 
-# --- content guard on the workspace -------------------------------------------
-
-GUARD_REFUSAL = ("The safety guard blocked this request, so the workspace cannot be used "
-                 "for it. Call `report` with status \"failed\" and say it was blocked.")
-
-
-async def _workspace_allowed(context: dict) -> bool:
-    """Whether this call's request passed the content guard. Checked once
-    per call, at its first workspace action (a command, a file), like the
-    v2 code tool's check on its task. A search, a poll or a memory save never
-    pays for the moderation call; web_search and fetch_url check their own
-    input. Concurrent first actions share the one check. A workflow helper's
-    context is a copy, so its check is kept on the workflow's
-    (`brain_guard_home`), where every helper finds it."""
-    request = context.get("brain_request")
-    if not request:
-        return True
-    home = context.get("brain_guard_home") or context
-    task = home.get("brain_guard")
-    if task is None:
-        from classes.content_guard import check_web_request
-        task = asyncio.ensure_future(check_web_request(request))
-        home["brain_guard"] = task
-    # Shielded: others share this task, and awaiting one directly would cancel
-    # it with the caller. Cancelled, it then fails the next helper to read it.
-    allowed, reason = await asyncio.shield(task)
-    if not allowed:
-        logger.warning(f"Brain: workspace use blocked by content guard: {reason}")
-    return allowed
-
-
-def _guarded(original_invoke):
-    """Wraps a workspace tool so it runs only when the request passed the
-    content guard (_workspace_allowed)."""
-    async def _invoke(ctx, raw_input):
-        if not await _workspace_allowed(_ctx(ctx)):
-            return GUARD_REFUSAL
-        return await original_invoke(ctx, raw_input)
-    return _invoke
-
-
 def _configure_brain_shell(toolset) -> None:
     """The Shell capability's configure_tools callback: the workspace
-    wrappers (workspace_tools._configure_shell_tools), then the content
-    guard outermost on exec_command. write_stdin needs a command already
-    started, so it needs no guard of its own."""
+    wrappers (workspace_tools._configure_shell_tools)."""
     from classes.workspace_tools import _configure_shell_tools
     _configure_shell_tools(toolset)
-    toolset.exec_command.on_invoke_tool = _guarded(toolset.exec_command.on_invoke_tool)
-
-
-def _guard_workspace_tools() -> None:
-    """attach_file, save_messages_to_file and view_image are brain-only
-    tools, so they are guarded in place, once. view_image reads the
-    workspace too: a blocked request must not see its files that way."""
-    from classes.message_search_tools import save_messages_to_file
-    from classes.workspace_tools import attach_file, view_image
-    for tool in (attach_file, save_messages_to_file, view_image):
-        if not getattr(tool, "_brain_guarded", False):
-            tool.on_invoke_tool = _guarded(tool.on_invoke_tool)
-            tool._brain_guarded = True
 
 
 # --- the agent -----------------------------------------------------------------
@@ -488,7 +434,6 @@ def build_brain_agent(*, automatic: bool = False, voice: bool = False, workflows
     from agents.sandbox.capabilities import Shell
     from classes.brain_tools import brain_tools
 
-    _guard_workspace_tools()
     return SandboxAgent(
         name="Brain",
         model=build_brain_model(),
@@ -920,7 +865,6 @@ async def _run_in_workspace(ctx, lease, request, inputs, problems, hooks_box) ->
         "brain_inputs": given,
         "brain_request": request,
         "brain_report_args": None,
-        "brain_guard": None,
         "requester": requester,
         "skills_used": [],
         "skill_saved": False,
@@ -998,7 +942,6 @@ async def _run_and_deliver(ctx, lease, agent, task, run_config, hooks, progress,
         if workflow.get("thread_url"):
             out.status = brain_result.STARTED_WORKFLOW
             out.thread_url = workflow["thread_url"]
-            out.plan_to_approve = not ctx.get("automatic")
             out.must_keep = [workflow["thread_url"]]
     elif stopped is None:
         args = ctx.get("brain_report_args")

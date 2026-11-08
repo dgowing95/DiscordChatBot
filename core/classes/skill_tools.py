@@ -26,7 +26,6 @@ import discord
 from agents import function_tool, RunContextWrapper
 
 from classes import card, card_kit, metrics, skill_format, tool_cards
-from classes.content_guard import check_web_request
 from classes.skill_store import QuotaError, SkillError, SkillStore, CREATED, UNCHANGED
 from classes.workspace_lifecycle import SKILLS_DIR
 
@@ -117,14 +116,6 @@ def _scope(ctx: dict):
     if not guild:
         raise SkillError("Skills belong to a server; there is none here.")
     return guild
-
-
-async def _guarded(description: str, body: str) -> str | None:
-    """A refusal text when the content guard blocks the text, else None."""
-    allowed, reason = await check_web_request(f"{description}\n{body}")
-    if allowed:
-        return None
-    return f"Not saved: the safety guard blocked this skill ({reason or 'content refused'})."
 
 
 async def write_to_workspace(ctx: dict, skill: dict) -> str | None:
@@ -263,9 +254,6 @@ async def save_skill(wrapper: RunContextWrapper[dict], name: str, description: s
             stored, problems = await _read_files(ctx, files)
         if problems:
             return "Not saved: " + "; ".join(problems)
-        refusal = await _guarded(description, steps)
-        if refusal:
-            return refusal
         author = ctx.get("user_id") or 0
         job_id = posixpath.basename(ctx.get("job_dir") or "")
         result = await store.save(guild, clean, description, steps, stored, author_id=author,

@@ -1,7 +1,11 @@
-"""Safety guard for the web_search and fetch_url tools and the brain's workspace.
+"""Safety guard for the web_search and fetch_url tools and image generation.
 
 Blocks requests that are classified as unsafe *before* the bot touches the
-internet. Uses the free OpenAI Moderations endpoint
+internet or draws anything. Only those: the brain's own work (its workspace,
+workflows, skills) is not checked here, and its prompts tell it to refuse
+harmful jobs instead (brain_policy.SAFETY_RULE).
+
+Uses the free OpenAI Moderations endpoint
 (https://developers.openai.com/api/reference/resources/moderations); the
 response contains a ``categories`` object of detected unsafe categories and
 a URL/query is considered unsafe if *any* of them is ``true``.
@@ -247,7 +251,8 @@ def guard_disabled() -> bool:
 
 
 async def check_web_request(text: str) -> tuple[bool, str]:
-    """Run the guard on a web_search query or fetch_url target.
+    """Run the guard on a web_search query, a fetch_url target or an image
+    description.
 
     Returns (allowed, reason). If blocked, reason explains why (safe to
     show to the user); if allowed, reason is "".

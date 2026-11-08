@@ -159,8 +159,12 @@ def channels():
 
 @pytest.fixture(autouse=True)
 def allowed():
-    with patch("classes.content_guard.check_web_request", AsyncMock(return_value=(True, ""))):
+    """A tidy-up is never sent to the content guard (it checks only search,
+    links and images)."""
+    guard = AsyncMock(return_value=(True, ""))
+    with patch("classes.content_guard.check_web_request", guard):
         yield
+    guard.assert_not_awaited()
 
 
 def embeds(channel):
@@ -292,23 +296,6 @@ async def test_a_retire_shows_fixed_words_and_notes_are_capped(store, channels, 
     assert "y" * 201 not in lines[1]
 
 
-@pytest.mark.asyncio
-async def test_the_guard_reads_the_note_too(store, channels, clock):
-    await _seed(store, clock)
-    guard = AsyncMock(return_value=(True, ""))
-    llm = FakeLLM(_answer({"action": "describe", "name": "pie-chart", "description": "Pie", "note": "why"}))
-    with patch("classes.content_guard.check_web_request", guard):
-        await _curator(store, channels, llm, clock).curate(GUILD)
-    assert "why" in guard.call_args.args[0]
-
-
-@pytest.mark.asyncio
-async def test_the_guard_can_refuse_new_text(store, channels, clock):
-    await _seed(store, clock)
-    llm = FakeLLM(_answer({"action": "describe", "name": "pie-chart", "description": "bad words"}))
-    with patch("classes.content_guard.check_web_request", AsyncMock(return_value=(False, "flagged"))):
-        assert await _curator(store, channels, llm, clock).curate(GUILD) == "0"
-    assert (await store.get(GUILD, "pie-chart"))["version"] == 1
 
 
 @pytest.mark.asyncio
