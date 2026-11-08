@@ -748,7 +748,7 @@ reads has a row here and a line in `.env.example`, that every row is read by som
 
 - **Framework:** `pytest`, configured in `pyproject.toml` at the repo root (`python_files = *_tests.py`,
   plus `testpaths` and `pythonpath`).
-- **Prereq:** a Python 3.13+ venv with `pip install -r core/requirements-dev.txt`.
+- **Prereq:** a Python 3.14 venv (what CI, the release gate and the core image use) with `pip install -r core/requirements-dev.txt`.
 - **Run** from the repo root, no arguments and no `PYTHONPATH`: `pytest`. This is exactly what CI runs
   (`tests.yaml`, and again as `release.yaml`'s gate), so a new test file is picked up with no list to
   update. ~1500 tests, roughly 25 seconds. A new setting fails it until it has an env-table row and an
