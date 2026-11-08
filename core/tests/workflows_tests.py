@@ -160,6 +160,8 @@ def env(monkeypatch):
     monkeypatch.setattr(workflow_steering, "route", AsyncMock(return_value=None))
     monkeypatch.setattr("classes.persona_voice.voice_question",
                         AsyncMock(side_effect=lambda guild, text: f"(voiced) {text}"))
+    monkeypatch.setattr("classes.persona_voice.voice_replies",
+                        AsyncMock(side_effect=lambda guild, texts: [f"(voiced) {t}" for t in texts]))
     monkeypatch.setattr("classes.workspace_commands.progress_enabled",
                         AsyncMock(return_value=False))
     workflows.configure(queue=ns.queue)
@@ -547,8 +549,12 @@ async def test_a_thread_message_reaches_the_manager_between_steps_with_an_outcom
     await _finish(wf)
     review = json.dumps(env.model.calls[3].input)
     assert "[1] Bo: please use euros" in review
-    assert any("Will do, prices in euros." in text for text in env.thread.texts())
+    # Said in the persona's voice, under the quoted message; the record keeps
+    # the manager's own words.
+    assert any("> please use euros\n(voiced) Will do, prices in euros." in text
+               for text in env.thread.texts())
     assert wf.ledger.events[0].outcome == "answered"
+    assert wf.ledger.events[0].reply == "Will do, prices in euros."
     assert wf.record["state"] == wp.DONE
 
 

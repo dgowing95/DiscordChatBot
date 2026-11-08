@@ -1610,7 +1610,7 @@ async def _review(wf: Workflow, queue: list) -> list:
     if args.get("steps") and queue and not stop:
         # The thread is open to the server: only the requester changes their job.
         new_plan, unusable = _revised_steps(wf, args["steps"]) if by_requester else (None, True)
-    posted = []
+    posted, answered = [], []
     for event in pending:
         reply = replies.get(event.seq, "")
         ledger.record_decision([event.seq], "answered" if reply else "noted", reply)
@@ -1618,7 +1618,13 @@ async def _review(wf: Workflow, queue: list) -> list:
             wf.said.append((event.seq, f"{event.author_name}: {event.text[:300]}"
                             + (f" (reply: {reply[:200]})" if reply else "")))
         if reply:
-            posted.append(f"> {event.text[:150]}\n{reply[:400]}")
+            answered.append((event, reply[:400]))
+    if answered:
+        # Said to people, so in the persona's voice (the record keeps the
+        # manager's own words, which is what later runs read).
+        from classes.persona_voice import voice_replies
+        voiced = await voice_replies(wf.guild_id, [reply for _, reply in answered])
+        posted = [f"> {event.text[:150]}\n{text}" for (event, _), text in zip(answered, voiced)]
     if posted and unusable:
         # The reply may promise a change that was not made: say so.
         posted.append("-# I couldn't change the remaining steps, so they stay as planned.")

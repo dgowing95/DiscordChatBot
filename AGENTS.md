@@ -56,7 +56,7 @@ core/                    # the bot (what runs in production)
     brain_policy.py        # P BRAIN_* limits (unprompted replies, questions, slots)
     brain_inbox.py         # P questions the brain is waiting on, one per question message
     brain_question.py      # the question in Discord (buttons) and ask(): the one flow of ask_user and ask_requester
-    persona_voice.py       # the brain's question reworded in the persona's voice
+    persona_voice.py       # the brain's questions and a manager's thread replies, in the persona's voice
     skill_format.py        # P skills: SKILLS_* settings, name/limit checks, SKILL.md, the index and its ranking
     skill_store.py         # skills in Redis: every version kept, soft delete, revert, export
     skill_tools.py         # the brain's use_skill / save_skill / search_skills, every skill card, Restore
@@ -437,7 +437,7 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
       it is about (`workflow_steering.py`: one call picks them from the steps not finished, all of them
       if it fails), at a helper's next model call (the SDK drops what a filter adds, so each run puts it
       back where it was first shown, after the trim). Every message waits for the review between
-      steps (and once more after the last step), which answers it and records an outcome. The thread
+      steps (and once more after the last step), which answers it (in the persona's voice, `persona_voice.voice_replies`) and records an outcome. The thread
       is open to the server: only the requester can change the steps, and only their words reach
       helpers.
     - **The check** (`workflow_verify.py`): every job that finished, unless a limit or a cancel stopped
@@ -535,7 +535,7 @@ are the ones that actually change behaviour). The persona's *system* prompt is n
 `change_personality`. The one exception is a voice turn, which appends
 `voice_policy.VOICE_INSTRUCTIONS`; `voice_policy` is also the one home of `GREETING_PROMPT` and
 `HOLD_ON_PROMPT`. Each side job has one prompt of its own: `persona_voice.PROMPT` (~130 characters, a
-question in the persona's voice), `image_prompt.SYSTEM_PROMPT` (~2050, the SDXL rewrite),
+question in the persona's voice) and `REPLY_PROMPT` (~140, a workflow manager's thread reply), `image_prompt.SYSTEM_PROMPT` (~2050, the SDXL rewrite),
 `image_review.SYSTEM_PROMPT` / `VIEW_PROMPT` (~1080 / ~150, the picture check) and
 `research_format.SYSTEM_PROMPT` (~780, the research brief).
 
