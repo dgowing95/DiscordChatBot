@@ -493,6 +493,35 @@ async def test_the_line_waits_out_its_interval_and_a_finished_call_writes_no_mor
 
 
 @pytest.mark.asyncio
+async def test_a_line_held_by_the_edit_throttle_still_reaches_the_card():
+    # The card's first post has just used the edit budget; the written line
+    # must wait for it, not be dropped (one long command brings no other edit).
+    channel, message = _channel_with_message()
+    hooks = BrainProgressHooks(channel, "make a gif", edit_interval=0.3)
+    hooks.status_interval = 0
+    with patch.object(brain_status._llm, "complete", AsyncMock(return_value="Rendering the frames")):
+        await hooks.on_tool_start(_cmd("python render.py"), None, _tool("exec_command"))
+        await hooks._status_task
+    assert "⏳ Rendering the frames" in _view_text(_last(message))
+    await hooks.finalize(ok=True)
+
+
+@pytest.mark.asyncio
+async def test_a_rule_written_line_on_a_card_already_out_is_shown():
+    # The side call keeps failing (conftest): the card still gets a line.
+    channel, message = _channel_with_message()
+    hooks = BrainProgressHooks(channel, "t", edit_interval=0)
+    hooks.status_interval = 0
+    await hooks.on_tool_start(_ctx(json.dumps({"path": "in/a.csv"})), None, _tool("save_messages_to_file"))
+    await hooks._status_task
+    hooks.transcript.set_status(None)  # as if the card went out with no line
+    await hooks.on_tool_start(_cmd("python a.py"), None, _tool("exec_command"))
+    await hooks._status_task
+    assert "⏳ Running a Python script" in _view_text(_last(message))
+    await hooks.finalize(ok=True)
+
+
+@pytest.mark.asyncio
 async def test_a_failed_line_keeps_the_one_there_was():
     channel, message = _channel_with_message()
     hooks = BrainProgressHooks(channel, "t", edit_interval=0)

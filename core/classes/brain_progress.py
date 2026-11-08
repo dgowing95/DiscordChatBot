@@ -510,7 +510,8 @@ class BrainProgressHooks(RunHooks):
                 line = helper_line(name, args)
                 if line:
                     # helper_line starts with an emoji: the card adds its own ⏳.
-                    self.transcript.set_status(line.split(" ", 1)[-1])
+                    # Marked dirty: on a card already out, the status task shows it.
+                    self._note(self.transcript.set_status, line.split(" ", 1)[-1])
         except Exception as e:  # a progress error must never kill the run
             logger.warning(f"Brain progress: ignoring status error: {e}")
 
@@ -526,9 +527,9 @@ class BrainProgressHooks(RunHooks):
 
     async def _status_loop(self) -> None:
         """While new tool calls come: wait out the interval, write a line
-        from the newest ones, show it. Never raises."""
-        from classes import brain_status
+        from the newest ones, show it. Never raises (but is cancellable)."""
         try:
+            from classes import brain_status
             while self._status_wanted and not self._finalized:
                 wait = self._last_status + self.status_interval - time.monotonic()
                 if wait > 0:
@@ -537,24 +538,35 @@ class BrainProgressHooks(RunHooks):
                 self._last_status = time.monotonic()
                 line = await brain_status.describe(self.transcript._task, list(self._steps))
                 if line and not self._finalized and line != self.transcript._status:
-                    self.transcript.set_status(line)
-                    self._dirty = True
-                    await self._maybe_flush()
+                    self._note(self.transcript.set_status, line)
+                await self._show_status()
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.warning(f"Brain progress: status line failed: {e}")
 
+    async def _show_status(self) -> None:
+        """Puts a changed line on the card, waiting out the edit throttle
+        (or a backoff) rather than dropping it: during one long command no
+        other edit comes before the end, which clears the line."""
+        for _ in range(3):
+            if not self._dirty or self._finalized:
+                return
+            wait = (max(self._last_flush + self.edit_interval, self._backoff_until)
+                    - time.monotonic())
+            if wait > 0:
+                await asyncio.sleep(wait)
+            await self._maybe_flush()
+
     async def _stop_status(self) -> None:
         """Ends the status task, so its edit never lands on the final card."""
         task, self._status_task = self._status_task, None
-        if task is None or task.done():
+        if task is None:
             return
-        task.cancel()
-        try:
-            await task
-        except BaseException:
-            pass
+        if not task.done():
+            task.cancel()
+        # Its own end only: a cancel of finalize itself still propagates.
+        await asyncio.gather(task, return_exceptions=True)
 
     # -- internals ------------------------------------------------------------
 
