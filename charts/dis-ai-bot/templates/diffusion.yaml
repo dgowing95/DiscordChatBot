@@ -1,4 +1,4 @@
-{{- if .Values.diffusion.enabled }}
+{{- if include "dcb.diffusionPod" . }}
 # Image generation service (diffusionservice/): separate pod, requests queued
 # (one image at a time), minimal VRAM (small model + CPU offload).
 apiVersion: apps/v1

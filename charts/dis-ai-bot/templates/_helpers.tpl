@@ -51,19 +51,16 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
-The local LLM server this release runs (llm.engine): llamacpp or strata.
-Anything else fails the render rather than quietly running neither.
-*/}}
-{{/*
-LLM_SLOTS: llm.slots, else the running engine's parallel. core uses it only
-when the server's /props has no total_slots.
+LLM_SLOTS: llm.slots, else the running engine's parallel (empty with
+engine none: core then uses 1). core uses it only when the server's /props
+has no total_slots.
 */}}
 {{- define "dcb.llmSlots" -}}
 {{- if .Values.llm.slots }}
 {{- .Values.llm.slots | toString }}
 {{- else if eq (include "dcb.llmEngine" .) "strata" }}
 {{- .Values.strata.parallel | toString }}
-{{- else }}
+{{- else if eq (include "dcb.llmEngine" .) "llamacpp" }}
 {{- .Values.llamacpp.parallel | toString }}
 {{- end }}
 {{- end }}
@@ -121,12 +118,29 @@ outside the chart named by llm.host, but there the operator chose the key.
 {{- end }}
 {{- end }}
 
+{{/*
+The local LLM server this release runs (llm.engine): llamacpp, strata, or
+none (no local server; core uses llm.host, which must then be set). Anything
+else fails the render rather than quietly running neither.
+*/}}
 {{- define "dcb.llmEngine" -}}
 {{- $engine := .Values.llm.engine | default "llamacpp" }}
-{{- if not (has $engine (list "llamacpp" "strata")) }}
-{{- fail (printf "llm.engine must be llamacpp or strata, not %q" $engine) }}
+{{- if not (has $engine (list "llamacpp" "strata" "none")) }}
+{{- fail (printf "llm.engine must be llamacpp, strata or none, not %q" $engine) }}
+{{- end }}
+{{- if and (eq $engine "none") (not .Values.llm.host) }}
+{{- fail "llm.engine none runs no LLM server, so llm.host must name the one core uses" }}
 {{- end }}
 {{- $engine }}
+{{- end }}
+
+{{/*
+"true" when this release runs its own diffusion pod: diffusion.enabled and no
+diffusion.url. With a url, core uses that service (IMAGE_GEN_ENABLED still
+follows diffusion.enabled) and the chart renders no pod, Service or volume.
+*/}}
+{{- define "dcb.diffusionPod" -}}
+{{- if and .Values.diffusion.enabled (not .Values.diffusion.url) }}true{{ end }}
 {{- end }}
 
 {{/*

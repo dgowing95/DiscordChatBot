@@ -34,6 +34,8 @@ llm:
   #             models on consumer GPUs: every expert sits in system RAM, the
   #             most used ones are cached in VRAM, the rest run on the CPU. It
   #             only helps MoE models; a dense model stays on llama.cpp.
+  #   none:     no local server: core uses llm.host (required then) with
+  #             llm.apiKey, e.g. a hosted API like OpenRouter. No GPU is used.
   # Switching back is this one value. The llama.cpp volume is kept either way,
   # so its downloaded model is still there on the way back.
   engine: llamacpp
@@ -70,8 +72,11 @@ diffusion:
   # Container image: built by the release workflow (diffusion-<tag> tags)
   image: ghcr.io/dgowing95/discordchatbot
   port: 8000
-  # Optional: point core at a diffusion service outside the cluster
-  # (default: the in-cluster {{ .Release.Name }}-diffusion-service)
+  # Optional: point core at a diffusion service this release does not run,
+  # e.g. another release's in-cluster service. When set, the chart renders no
+  # diffusion pod, Service or volume (so no GPU is used); the image settings
+  # below are then the other service's own. Empty = this release's
+  # {{ .Release.Name }}-diffusion-service.
   url: ""
   # HF repo id of the text-to-image model. sd-turbo is the smallest practical
   # one (~500MB, made for 1-4 step generation). For prompt adherence and
