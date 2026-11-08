@@ -1,0 +1,67 @@
+name: v3 dev images
+# Builds the images for the dev deployment that tracks the v3 branch
+# (dcb-client argocd/dchatbot-dev.yaml). That Application renders the chart
+# straight from this branch and sets image.tag to v3-<commit>, so every push
+# here needs its own <kind>-v3-<full sha> images. Until they are pushed the
+# new pods sit in ImagePullBackOff and the old ones keep running.
+#
+# Not a release: no tag, no chart package, no GitHub release, and the tags
+# never look like vX.Y, so prod's targetRevision "*" cannot pick anything up.
+# Diffusion is not built: dev uses prod's image service (diffusion.url).
+# APP_VERSION is left empty, as in verify-artifacts.yaml, so dev does not
+# post the What's New notes after every push (/whats_new still answers).
+on:
+  push:
+    branches:
+      - v3
+  workflow_dispatch:
+
+permissions: {}
+
+# Only the newest commit matters: ArgoCD deploys the branch head.
+concurrency:
+  group: v3-dev-images
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kind: core
+            context: ./core
+          - kind: speech
+            context: ./speechservice
+          - kind: browser
+            context: ./browserservice
+          - kind: voice
+            context: ./voicesidecar
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      # Own cache ref, so these builds never overwrite the release cache
+      # that main's builds read; they still read it as a fallback.
+      - name: Build and push ${{ matrix.kind }} image
+        uses: docker/build-push-action@v7
+        with:
+          push: true
+          context: ${{ matrix.context }}
+          tags: ghcr.io/dgowing95/discordchatbot:${{ matrix.kind }}-v3-${{ github.sha }},ghcr.io/dgowing95/discordchatbot:${{ matrix.kind }}-v3-latest
+          cache-from: |
+            type=registry,ref=ghcr.io/dgowing95/discordchatbot:${{ matrix.kind }}-buildcache-v3
+            type=registry,ref=ghcr.io/dgowing95/discordchatbot:${{ matrix.kind }}-buildcache
+          cache-to: type=registry,ref=ghcr.io/dgowing95/discordchatbot:${{ matrix.kind }}-buildcache-v3,mode=max
