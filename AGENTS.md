@@ -94,6 +94,7 @@ core/                    # the bot (what runs in production)
     poll_store.py          # each channel's polls, in Redis
     research_format.py     # P web_search's settings, which results are read, the brief prompt
     web_research.py        # web_search: DuckDuckGo, read the results, write the brief
+    search_worker.py       # P the search itself, in a process of its own (one at a time)
     web_policy.py          # P fetch_url's rules: URL routing, cache keys, public-address check
     site_format.py         # P how Reddit / Steam / YouTube read in a prompt
     web_reader.py          # fetch_url's reader: cache, site readers, browser fallback
@@ -384,7 +385,11 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
       handlers never see a redirect's later hops. The chart adds a NetworkPolicy.
     - `web_search` (`web_research.py`): DuckDuckGo, the top `RESEARCH_PAGES` read through the same
       reader, and a side call writes a brief of at most 200 words; the source list is built from the
-      real results. On failure it returns the plain results.
+      real results. On failure it returns the plain results. **The search runs in a worker process**
+      (`search_worker.py`, `python -m classes.search_worker`), one at a time across the bot: the
+      search library's native code once crashed the whole bot with four searches at once. In the
+      worker a crash costs one search, and the next search starts a new worker; one past
+      `SEARCH_TIMEOUT_SECONDS` (30) is killed the same way.
     - `search_messages` / `read_messages_around` (`message_search_tools.py`): Discord's Search Guild
       Messages endpoint (not wrapped by discord.py; a 202 means not indexed yet) and the messages around
       one link. Both read what the bot can see, in this server only. `save_messages_to_file` writes every
