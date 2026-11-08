@@ -108,7 +108,6 @@ def _brain(model, session=None, extra_tools=(), restore_failed=False):
         yield _Lease(session, restore_failed)
 
     def _agent(**kw):
-        brain._guard_workspace_tools()
         return Agent(name="Brain", model=model, instructions=brain.BRAIN_INSTRUCTIONS,
                      tools=[*extra_tools, attach_file, brain.ask_user, brain.report],
                      tool_use_behavior={"stop_at_tool_names": ["report"]})
@@ -120,8 +119,7 @@ def _brain(model, session=None, extra_tools=(), restore_failed=False):
     with patch.object(brain, "_acquire_workspace", _acquire), \
          patch.object(brain, "build_brain_agent", side_effect=_agent) as build, \
          patch.object(brain, "_run_config", _config), \
-         patch("classes.workspace_commands.progress_enabled", AsyncMock(return_value=False)), \
-         patch("classes.content_guard.check_web_request", AsyncMock(return_value=(True, ""))):
+         patch("classes.workspace_commands.progress_enabled", AsyncMock(return_value=False)):
         yield SimpleNamespace(session=session, build=build)
 
 
@@ -347,31 +345,21 @@ async def test_an_unexpected_error_is_a_failed_report_not_an_exception():
 
 
 @pytest.mark.asyncio
-async def test_the_content_guard_runs_once_at_the_first_workspace_action():
+async def test_the_workspace_is_never_sent_to_the_content_guard():
+    # The guard checks search, links and images only; the brain's own work is
+    # bounded by its prompt's safety rule instead.
     session = _Session()
     session.files = _AnyPath(b"x")
     model = ScriptedModel([
-        ModelStep(output=[function_call("attach_file", {"path": "out/a.txt"}, call_id="a1"),
-                          function_call("attach_file", {"path": "out/b.txt"}, call_id="a2")]),
-        ModelStep(output=[_report_call(status="failed", facts=["Blocked."])]),
+        ModelStep(output=[function_call("attach_file", {"path": "out/a.txt"}, call_id="a1")]),
+        ModelStep(output=[_report_call()]),
     ])
     guard = AsyncMock(return_value=(False, "harmful"))
     with _brain(model, session=session), \
          patch("classes.content_guard.check_web_request", guard):
-        report = await brain.run_brain(_ctx(), "something bad")
-    guard.assert_awaited_once_with("something bad")
-    outputs = json.dumps(model.calls[1].input)
-    assert outputs.count("safety guard blocked") == 2
-    assert report.files_posted == []
-
-
-@pytest.mark.asyncio
-async def test_a_search_never_pays_for_the_content_guard():
-    guard = AsyncMock(return_value=(True, ""))
-    model = ScriptedModel([ModelStep(output=[_report_call()])])
-    with _brain(model), patch("classes.content_guard.check_web_request", guard):
-        await brain.run_brain(_ctx(), "look it up")
+        await brain.run_brain(_ctx(), "make a file")
     guard.assert_not_awaited()
+    assert "safety guard" not in json.dumps(model.calls[1].input)
 
 
 @pytest.mark.asyncio
@@ -552,6 +540,22 @@ def test_the_instructions_stay_small_and_keep_their_rules():
     assert "RELATIVE" in text and "absolute path" in text
     # naming apply_patch would invite a model to call it
     assert "apply_patch" not in text
+
+
+def test_every_agent_that_works_gets_the_one_safety_rule(monkeypatch):
+    # The content guard checks only search, links and pictures; this is the
+    # rest. One home (brain_policy), appended by every builder, pinned small.
+    from classes import workflows
+    from classes import workflow_policy as wp
+    from classes.brain_policy import SAFETY_RULE
+    assert len(SAFETY_RULE) <= 250, len(SAFETY_RULE)
+    assert "finish at once" in SAFETY_RULE
+    assert brain.instructions().endswith(SAFETY_RULE)
+    assert brain.instructions(workflows=True).endswith(SAFETY_RULE)
+    assert workflows.manager_instructions().endswith(SAFETY_RULE)
+    monkeypatch.setattr(brain, "build_role_model", lambda role: None)
+    for role in (wp.SCOUT, wp.RESEARCHER, wp.IMPLEMENTER, wp.VERIFIER):
+        assert workflows._subagent(role).instructions.endswith(SAFETY_RULE), role
 
 
 def test_the_ask_brain_tool_stays_small():

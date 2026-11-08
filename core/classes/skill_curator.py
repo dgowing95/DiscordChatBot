@@ -287,7 +287,7 @@ class Curator:
                 try:
                     made += await self._apply(guild, change, by_name, cfg)
                 except Exception as e:
-                    # One change's failure (Redis, the guard) never stops the rest.
+                    # One change's failure (Redis, a limit) never stops the rest.
                     logger.warning(f"Skills: a tidy-up change in guild {guild} failed: {e}")
                     metrics.inc_skill_curator_change("failed")
             # After the changes, so the pass's own new versions never make the
@@ -313,16 +313,10 @@ class Curator:
 
     async def _apply(self, guild, change: dict, by_name: dict, cfg) -> int:
         """Makes one change. Returns 1 when it was made, 0 when refused (a
-        person changed the skill meanwhile, the guard said no, a limit)."""
-        from classes.content_guard import check_web_request
+        person changed the skill meanwhile, a limit)."""
         from classes.skill_store import SkillError
         kind = change["action"]
         try:
-            if kind in ("merge", "describe"):
-                text = "\n".join([change["description"], change.get("body", ""), change["note"]])
-                allowed, _ = await check_web_request(text)
-                if not allowed:
-                    raise SkillError("the safety guard refused the new text")
             if kind == "merge":
                 await self._merge(guild, by_name[change["keep"]], by_name[change["drop"]], change)
             elif kind == "retire":

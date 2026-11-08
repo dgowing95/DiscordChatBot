@@ -17,6 +17,11 @@ on a queue worker gets a spare worker, so chat stays answered while the
 brain works (classes/message_queue.py); the cap bounds how many spares. A
 call that finds every slot busy for BRAIN_QUEUE_WAIT seconds is told the bot
 is busy.
+
+SAFETY_RULE is the one home of the rule every agent that does work is given
+(the brain, and a workflow's manager, helpers, scouts and verifier), since
+the content guard checks only search, links and pictures
+(classes/content_guard.py). Each builder appends it to its prompt.
 """
 import os
 
@@ -32,6 +37,14 @@ DEFAULT_UNPROMPTED_TIMEOUT_SECONDS = 180
 DEFAULT_ASK_TIMEOUT_SECONDS = 120
 DEFAULT_MAX_CONCURRENT = 3
 DEFAULT_QUEUE_WAIT_SECONDS = 120
+
+# Its size is pinned (brain_tests.py). Ends the prompt, after the agent's own
+# "Finish by calling ..." line, which "finish at once" points back to. One
+# sentence of intent and one example of the shape: AGENTS.md, a list of
+# prohibitions is what a small model picks from.
+SAFETY_RULE = ("\n\nTurn down any job meant to harm people or other machines. E.g. asked to "
+               "write a keylogger for a friend's PC, or to scan the network around this "
+               "workspace, do none of it and finish at once, saying you won't help with that.")
 
 
 def _env_int(name: str, default: int, env) -> int:
@@ -49,11 +62,10 @@ def effective_tier(*, unprompted: bool = False, automatic: bool = False, voice: 
     """The highest tier a brain call may use: 3 when it may start a
     workflow (classes/workflows.py), else 2. Never from a reply nobody asked
     for (F11), never in a voice turn (not yet: a call has no thread to
-    follow), and from an automatic run only with WORKFLOW_FROM_AUTOMATIONS."""
+    follow), and never from an automatic run (a schedule, a rule or a
+    follow-up): nobody is there to approve its plan."""
     from classes import workflow_policy
-    if unprompted or voice or not workflow_policy.enabled(env):
-        return TIER_BRAIN
-    if automatic and not workflow_policy.from_automations(env):
+    if unprompted or voice or automatic or not workflow_policy.enabled(env):
         return TIER_BRAIN
     return TIER_WORKFLOW
 

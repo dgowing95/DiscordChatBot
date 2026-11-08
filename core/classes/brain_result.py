@@ -52,10 +52,8 @@ class BrainReport:
     say_to_user: str = ""
     # Why it stopped, inputs left out, the workspace being unavailable...
     note: str = ""
-    # The workflow's thread, when the job went to one (STARTED_WORKFLOW), and
-    # whether its plan waits for the requester (an automatic run's does not).
+    # The workflow's thread, when the job went to one (STARTED_WORKFLOW).
     thread_url: str = ""
-    plan_to_approve: bool = True
 
 
 def _clean(text, limit: int) -> str:
@@ -171,8 +169,7 @@ def tool_result_for_persona(report: BrainReport) -> str:
     lines = [_STATUS_LINE.get(report.status, _STATUS_LINE[DONE])]
     if report.status == STARTED_WORKFLOW:
         plan = ("A plan will appear there for them to approve, and they will be pinged when it "
-                "is ready. Tell them it has started, where, and that a plan is coming."
-                if report.plan_to_approve else "Tell them it has started and where.")
+                "is ready. Tell them it has started, where, and that a plan is coming.")
         lines.append(f"It runs in {report.thread_url}. {plan} It is not done; never say it is. "
                      "You will be told when it ends.")
     posted = list(report.files_posted) + list(report.posted)

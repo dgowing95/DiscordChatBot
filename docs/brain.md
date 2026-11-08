@@ -89,7 +89,7 @@ started from. Workflows are not started from a call. See [voice.md](voice.md).
 
 - **The bot says it stopped.** A task that repeats itself or runs too long is stopped, and the bot
   says what it got done.
-- **"The safety guard blocked this request"**: the request did not pass the moderation check, so the
-  workspace was not used.
+- **"Blocked by the safety guard"**: a web search, a link or a picture did not pass the moderation
+  check, so it was not done. The brain also turns down harmful jobs by itself.
 - **It chats but cannot use its tools**: the workspace is not available (for example Docker is down
   on the bot's machine). Tell whoever runs the bot.

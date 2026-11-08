@@ -223,6 +223,7 @@ async def generate_image(wrapper: RunContextWrapper[dict], prompt: str,
     from classes.image_generation import (
         GENERATED_IMAGE_FILENAME,
         MAX_IMAGE_CALLS,
+        ImageBlocked,
         create_image,
         find_edit_source,
         service_capabilities,
@@ -274,6 +275,11 @@ async def generate_image(wrapper: RunContextWrapper[dict], prompt: str,
                      or "") if message is not None else context.get("request_text") or "")
     try:
         result = await create_image(prompt, user_request, reference=source, on_first_prompt=announce)
+    except ImageBlocked:
+        # Nothing was made, so it does not use up one of the reply's pictures.
+        context["image_calls"] -= 1
+        return ("I can't make that picture: it was blocked by the safety guard. Tell the "
+                "user plainly, and do not try again with a reworded prompt.")
     except Exception as e:
         logger.warning(f"Image generation failed: {e}")
         if live is not None:  # not left saying it is drawing

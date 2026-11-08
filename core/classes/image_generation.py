@@ -9,6 +9,7 @@ FLUX.2 [klein] reads plain sentences) and "edits" (whether it takes a reference
 image). service_capabilities() reads that.
 
 create_image() then:
+  0. runs the content guard on the description (ImageBlocked when it says no);
   1. builds the prompt (the rewrite only for "sdxl");
   2. generates;
   3. looks at the result (image_review.py) -- what it shows, what is missing;
@@ -163,6 +164,10 @@ async def generate_image_from_api(prompt: str, negative_prompt: str = "",
 
 # ---------------------- make, look, maybe once more ----------------------
 
+class ImageBlocked(Exception):
+    """The content guard refused the description: nothing was made."""
+
+
 @dataclass(frozen=True)
 class ImageResult:
     png: bytes
@@ -189,9 +194,15 @@ async def create_image(description: str, user_request: str = "", reference: byte
     is awaited with the first prompt just before generating, so the caller can
     show it while the image is made.
 
-    Raises only when the FIRST generation fails; a failed retry posts the
+    Raises ImageBlocked when the content guard refuses the description, and
+    otherwise only when the FIRST generation fails; a failed retry posts the
     first attempt instead.
     """
+    from classes.content_guard import check_web_request
+    allowed, reason = await check_web_request(description)
+    if not allowed:
+        logger.warning(f"Image generation blocked by content guard: {reason}")
+        raise ImageBlocked(reason)
     capabilities = await service_capabilities()
     is_edit = reference is not None
     best = None

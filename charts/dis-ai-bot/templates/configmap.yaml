@@ -141,7 +141,6 @@ data:
   # Tier 3 workflows and their helpers (subagents). Empty subagent
   # model/host fall back to the brain's; the key lives in secret.yaml.
   WORKFLOW_ENABLED: {{ .Values.workflows.enabled | quote }}
-  WORKFLOW_FROM_AUTOMATIONS: {{ .Values.workflows.fromAutomations | quote }}
   WORKFLOW_ASK_TIMEOUT: {{ .Values.workflows.askTimeout | toString | quote }}
   WORKFLOW_PLAN_APPROVAL_SECONDS: {{ .Values.workflows.planApprovalSeconds | toString | quote }}
   WORKFLOW_PLAN_REVISIONS: {{ .Values.workflows.planRevisions | toString | quote }}

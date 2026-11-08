@@ -175,12 +175,10 @@ async def start_workflow(wrapper: RunContextWrapper[dict], request: str, reason:
     from classes import workflows
 
     ctx = _ctx(wrapper)
-    trigger = workflows.TRIGGER_AUTOMATION if ctx.get("automatic") else workflows.TRIGGER_BRAIN
-    result = await workflows.start_workflow(ctx, request, trigger=trigger, reason=reason,
-                                            draft=draft_steps)
+    result = await workflows.start_workflow(ctx, request, trigger=workflows.TRIGGER_BRAIN,
+                                            reason=reason, draft=draft_steps)
     if result.ok:
         ctx["brain_workflow"] = {"thread_url": result.thread_url}
-        ctx["workflow_url"] = result.thread_url  # outlives the brain call, for automations
         ctx["brain_report_args"] = {"status": "done", "facts": [f"Started a workflow: {request}"]}
     else:
         ctx["brain_workflow"] = {"thread_url": ""}

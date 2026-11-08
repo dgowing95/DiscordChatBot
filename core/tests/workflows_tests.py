@@ -131,7 +131,6 @@ def env(monkeypatch):
     def _subagent(role):
         from classes.workflow_tools import submit_verdict
         from classes.workspace_tools import attach_file
-        brain._guard_workspace_tools()
         if role == wp.VERIFIER:
             return Agent(name="Helper", model=ns.model, instructions="verifier",
                          tools=[*ns.subagent_tools, submit_verdict],
@@ -161,6 +160,8 @@ def env(monkeypatch):
     monkeypatch.setattr(workflow_steering, "route", AsyncMock(return_value=None))
     monkeypatch.setattr("classes.persona_voice.voice_question",
                         AsyncMock(side_effect=lambda guild, text: f"(voiced) {text}"))
+    monkeypatch.setattr("classes.persona_voice.voice_replies",
+                        AsyncMock(side_effect=lambda guild, texts: [f"(voiced) {t}" for t in texts]))
     monkeypatch.setattr("classes.workspace_commands.progress_enabled",
                         AsyncMock(return_value=False))
     workflows.configure(queue=ns.queue)
@@ -175,14 +176,17 @@ def workflows_tools():
     return workflow_tools
 
 
-def _ctx(origin, automatic=False):
+def _ctx(origin):
     return {"guild_id": 1, "user_id": 5, "requester_name": "Ana", "channel": origin,
-            "automatic": automatic, "original_message": None}
+            "original_message": None}
 
 
-async def _start(env, automatic=True, request="Compare the three cheapest 3D printers"):
-    result = await workflows.start_workflow(_ctx(env.origin, automatic), request,
-                                            trigger=workflows.TRIGGER_SLASH)
+async def _start(env, approved=True, request="Compare the three cheapest 3D printers"):
+    """approved: started by the test command (`!workflow`), whose plan is
+    approved at once; else as /task, whose plan waits for the buttons."""
+    result = await workflows.start_workflow(
+        _ctx(env.origin), request,
+        trigger=workflows.TRIGGER_DEV if approved else workflows.TRIGGER_SLASH)
     assert result.ok, result.text
     return workflows.get(next(iter(workflows._RUNNING))), result
 
@@ -194,7 +198,7 @@ async def _finish(wf):
 # --------------------------- the happy path ---------------------------
 
 @pytest.mark.asyncio
-async def test_plan_auto_approve_two_steps_report_and_the_completion_reply_is_queued(env):
+async def test_the_test_command_approves_two_steps_report_and_the_completion_reply_is_queued(env):
     env.model = LaneModel([
         _plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"])),
         _report(facts=["The Core One is $1,199 (https://example.com/core-one)"], call_id="a"),
@@ -214,8 +218,8 @@ async def test_plan_auto_approve_two_steps_report_and_the_completion_reply_is_qu
     # The second helper was told what the first found, and where its files are.
     second_task = json.dumps(env.model.calls[2].input)
     assert "$1,199" in second_task and f"../c500-w{wf.id}-s1/" in second_task
-    # The plan was posted (approved automatically), then the closing embed.
-    assert "Started automatically." in env.thread.texts()[0]
+    # The plan was posted (approved at once by the test command), then the closing embed.
+    assert "Started at once (test command)." in env.thread.texts()[0]
     assert env.thread.closings()[-1] == "🧵 Big job · finished"
     # The completion reply waits on the queue, with the manager's report.
     item = env.queue.get_nowait()
@@ -307,7 +311,7 @@ async def _until(predicate, seconds=5):
 async def test_the_requester_approves_and_nobody_else_can(env):
     env.model = LaneModel([_plan_call(("s1", "researcher", [])), _report(call_id="a"),
                            _report(call_id="f")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await _until(lambda: wf.state == wp.AWAITING_APPROVAL and wf.approval is not None)
     assert "(voiced)" in env.thread.texts()[0] and "<@5>" in env.thread.texts()[0]
     other, call = _press(wf, "approve", user_id=6)
@@ -327,7 +331,7 @@ async def test_a_thread_message_while_the_plan_waits_changes_it(env):
         _plan_call(("s1", "researcher", [])),
         _plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"]), call_id="p2"),
         _report(call_id="a"), _report(call_id="b"), _report(call_id="f")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await _until(lambda: wf.state == wp.AWAITING_APPROVAL and wf.approval is not None)
     assert thread_inbox.deliver(env.thread.id, 9001, 5, "Ana", "also write it up as a table") \
         == thread_inbox.ACCEPTED
@@ -344,20 +348,31 @@ async def test_a_thread_message_while_the_plan_waits_changes_it(env):
 
 
 @pytest.mark.asyncio
-async def test_no_answer_starts_it_anyway(env, monkeypatch):
+async def test_no_answer_cancels_the_plan_and_nothing_runs(env, monkeypatch):
     monkeypatch.setenv("WORKFLOW_PLAN_APPROVAL_SECONDS", "1")
-    env.model = LaneModel([_plan_call(("s1", "researcher", [])), _report(call_id="a"),
-                           _report(call_id="f")])
-    wf, _ = await _start(env, automatic=False)
+    env.model = LaneModel([_plan_call(("s1", "researcher", []))])
+    wf, _ = await _start(env, approved=False)
     await asyncio.wait_for(asyncio.shield(wf.task), 10)
-    assert wf.record["state"] == wp.DONE
-    assert any("so I've started" in text for text in env.thread.texts())
+    assert wf.record["state"] == wp.CANCELLED and wf.results == {}
+    assert len(env.model.calls) == 1  # the plan: no helper ever started
+    assert "no answer to the plan in 1 minute" in wf.record["report"]["note"]
+    assert env.thread.closings()[-1] == "🧵 Big job · cancelled"
+    assert "Cancelled <t:" in view_text(env.thread.plans()[0].kwargs["view"])
+
+
+@pytest.mark.asyncio
+async def test_a_schedule_rule_or_follow_up_cannot_start_one(env):
+    # Nobody is there to approve its plan.
+    result = await workflows.start_workflow(dict(_ctx(env.origin), automatic=True), "a big job",
+                                            trigger=workflows.TRIGGER_BRAIN)
+    assert not result.ok and "cannot start a workflow" in result.text
+    assert workflows._RUNNING == {}
 
 
 @pytest.mark.asyncio
 async def test_stop_in_the_thread_cancels_and_still_replies(env):
     env.model = LaneModel([_plan_call(("s1", "researcher", []))])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await _until(lambda: wf.state == wp.AWAITING_APPROVAL and wf.approval is not None)
     thread_inbox.deliver(env.thread.id, 9002, 5, "Ana", "stop")
     await _finish(wf)
@@ -534,8 +549,12 @@ async def test_a_thread_message_reaches_the_manager_between_steps_with_an_outcom
     await _finish(wf)
     review = json.dumps(env.model.calls[3].input)
     assert "[1] Bo: please use euros" in review
-    assert any("Will do, prices in euros." in text for text in env.thread.texts())
+    # Said in the persona's voice, under the quoted message; the record keeps
+    # the manager's own words.
+    assert any("> please use euros\n(voiced) Will do, prices in euros." in text
+               for text in env.thread.texts())
     assert wf.ledger.events[0].outcome == "answered"
+    assert wf.ledger.events[0].reply == "Will do, prices in euros."
     assert wf.record["state"] == wp.DONE
 
 
@@ -732,7 +751,6 @@ async def test_two_messages_reach_the_helpers_in_the_order_they_came(monkeypatch
         return None
 
     monkeypatch.setattr(workflow_steering, "route", route)
-    monkeypatch.setattr(workflows, "_allowed", AsyncMock(return_value=True))
     wf = workflows.Workflow(record={"id": "a1"}, ctx={}, thread=None, origin_channel=None)
     events = [SimpleNamespace(seq=1, text="first"), SimpleNamespace(seq=2, text="second")]
     await asyncio.gather(*(workflow_steering.steer(wf, e) for e in events))
@@ -862,17 +880,17 @@ async def test_someone_elses_message_never_reaches_a_helper(env):
 
 
 @pytest.mark.asyncio
-async def test_a_blocked_message_never_reaches_a_helper(env, monkeypatch):
-    _blocks(monkeypatch, "forbidden")
+async def test_a_steered_message_is_never_sent_to_the_content_guard(env, monkeypatch):
+    guard = _blocks(monkeypatch, "forbidden")
     _says_while_looking(env, 5, "do something forbidden")
     env.model = LaneModel([
         _plan_call(("s1", "researcher", [])), _look_call("l1"), _report(call_id="a"),
+        ModelStep(output=[function_call("submit_review", {"replies": []}, call_id="rv")]),
         _report(call_id="f")])
     wf, _ = await _start(env)
     await _finish(wf)
-    assert wf.steering == []
-    assert _positions(env.model.calls[2], "forbidden") == []
-    assert wf.ledger.events[0].outcome == "declined"
+    assert [text for _seq, text, _targets in wf.steering] == ["do something forbidden"]
+    guard.assert_not_awaited()
 
 
 def test_a_message_stays_out_of_the_trim_and_a_filter_error_costs_only_the_message():
@@ -1027,7 +1045,7 @@ async def test_a_helper_that_only_reports_partial_was_not_stopped(env):
 
     wf, _ = await _start(env)
     await _finish(wf)
-    wf2 = SimpleNamespace(cancel_reason="", ledger=None, record={"automatic": True}, id="a1",
+    wf2 = SimpleNamespace(cancel_reason="", ledger=None, record={}, id="a1",
                           results={}, step_states={})
     report = brain_result.BrainReport(status=brain_result.PARTIAL)
 
@@ -1078,9 +1096,9 @@ async def test_two_steps_of_a_wave_keep_their_same_named_files(monkeypatch):
 
 # --------------------------- the skill review ---------------------------
 
-def _ended(state="done", automatic=False, tool_calls=9):
+def _ended(state="done", tool_calls=9):
     wf = workflows.Workflow(record={"id": "a1", "guild_id": 1, "requester_id": 5, "state": state,
-                                    "request": "count things", "automatic": automatic},
+                                    "request": "count things"},
                             ctx={}, thread=FakeChannel(500), origin_channel=FakeChannel(77))
     wf.plan = wp.Plan(goal="g", steps=[wp.Step(id="s1", role="implementer", brief="b")],
                       deliverables=[], notes="")
@@ -1114,9 +1132,8 @@ async def test_a_long_workflow_gets_a_skill_review_once(reviews):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("wf_args", [{"automatic": True}, {"state": "cancelled"},
-                                     {"tool_calls": 2}])
-async def test_no_skill_review_for_automatic_stopped_or_short_jobs(reviews, wf_args):
+@pytest.mark.parametrize("wf_args", [{"state": "cancelled"}, {"tool_calls": 2}])
+async def test_no_skill_review_for_stopped_or_short_jobs(reviews, wf_args):
     await workflows._skill_review(_ended(**wf_args),
                                   brain_result.BrainReport(status=brain_result.DONE))
     assert reviews == []
@@ -1326,7 +1343,7 @@ async def test_a_helper_that_needs_the_requester_asks_in_the_thread_and_runs_aga
             call_id="q")]),
         _report(facts=["Priced in euros"], call_id="a"),
         _report(call_id="f")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await _until(lambda: wf.state == wp.AWAITING_APPROVAL and wf.approval is not None)
     _, call = _press(wf, "approve")
     await call
@@ -1511,7 +1528,7 @@ async def test_a_change_written_while_the_plan_is_made_becomes_an_edit(env, monk
         _plan_call(("s1", "researcher", [])),
         _plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"]), call_id="p2"),
         _report(call_id="a"), _report(call_id="b"), _report(call_id="f")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await _until(lambda: wf.revisions == 1 and wf.approval is not None
                  and not wf.approval.done())
     assert "prices in EUR please" in json.dumps(env.model.calls[1].input)
@@ -1533,7 +1550,7 @@ async def test_a_revised_plan_leaves_the_old_one_as_it_was_with_no_buttons(env, 
         _plan_call(("s1", "researcher", [])),
         _plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"]), call_id="p2"),
         _report(call_id="a"), _report(call_id="b"), _report(call_id="f")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await _until(lambda: wf.revisions == 1 and wf.approval is not None
                  and not wf.approval.done())
     plans = env.thread.plans()
@@ -1568,7 +1585,7 @@ async def test_a_cancel_while_the_plan_changes_leaves_the_old_card_closed(env, m
     env.model = LaneModel([
         _plan_call(("s1", "researcher", [])),
         _plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"]), call_id="p2")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await asyncio.wait_for(_finish(wf), 5)
     assert wf.record["state"] == wp.CANCELLED
     [old] = env.thread.plans()
@@ -1586,7 +1603,7 @@ async def test_a_stop_before_the_plan_is_up_is_not_lost(env, monkeypatch):
 
     monkeypatch.setattr("classes.persona_voice.voice_question", _stopped_meanwhile)
     env.model = LaneModel([_plan_call(("s1", "researcher", []))])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await asyncio.wait_for(_finish(wf), 5)
     assert wf.record["state"] == wp.CANCELLED and len(env.model.calls) == 1
 
@@ -1602,7 +1619,7 @@ async def test_a_failed_revision_says_so_and_costs_nothing(env, monkeypatch):
     env.model = LaneModel([_plan_call(("s1", "researcher", [])),
                            _plan_call(call_id="p2"), _plan_call(call_id="p3"),
                            _report(call_id="a"), _report(call_id="f")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await _until(lambda: any("couldn't make that change" in t for t in env.thread.texts()))
     await _until(lambda: wf.approval is not None and not wf.approval.done())
     assert wf.revisions == 0 and len(wf.plan.steps) == 1
@@ -1625,7 +1642,7 @@ async def test_failed_changes_to_the_plan_run_out_too(env, monkeypatch):
     env.model = LaneModel([_plan_call(("s1", "researcher", [])),
                            _plan_call(call_id="p2"), _plan_call(call_id="p3"),
                            _report(call_id="a"), _report(call_id="f")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await _until(lambda: any("couldn't make that change" in t for t in env.thread.texts()))
     await _until(lambda: wf.approval is not None and not wf.approval.done())
     thread_inbox.deliver(env.thread.id, 9404, 5, "Ana", "add a third step")
@@ -1639,7 +1656,7 @@ async def test_failed_changes_to_the_plan_run_out_too(env, monkeypatch):
 @pytest.mark.asyncio
 async def test_the_plan_pings_the_requester_and_nobody_else(env):
     env.model = LaneModel([_plan_call(("s1", "researcher", [])), _report(call_id="f")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await _until(lambda: wf.approval is not None and not wf.approval.done())
     mentions = env.thread.plans()[-1].kwargs["allowed_mentions"]
     assert [user.id for user in mentions.users] == [wf.requester_id]
@@ -1728,41 +1745,6 @@ async def test_runs_side_by_side_are_never_promised_more_than_is_left(env, monke
     assert wf.promised == 0
 
 
-@pytest.mark.asyncio
-async def test_helpers_share_one_content_check(monkeypatch):
-    calls = []
-
-    async def _check(request):
-        calls.append(request)
-        return True, ""
-
-    monkeypatch.setattr("classes.content_guard.check_web_request", _check)
-    wf = SimpleNamespace(ctx={"brain_request": "the job", "brain_guard": None})
-    first, second = workflows._helper_ctx(wf), workflows._helper_ctx(wf)
-    assert calls == []  # not at set-up: a helper that never uses the workspace costs none
-    assert await brain._workspace_allowed(first) and await brain._workspace_allowed(second)
-    assert calls == ["the job"]
-    later = workflows._helper_ctx(wf)  # a later wave's helper finds it too
-    assert await brain._workspace_allowed(later) and calls == ["the job"]
-
-
-@pytest.mark.asyncio
-async def test_a_helper_stopped_during_the_check_leaves_it_for_the_next(monkeypatch):
-    release = asyncio.Event()
-
-    async def _slow(request):
-        await release.wait()
-        return True, ""
-
-    monkeypatch.setattr("classes.content_guard.check_web_request", _slow)
-    context = {"brain_request": "the job"}
-    waiting = asyncio.create_task(brain._workspace_allowed(context))
-    await asyncio.sleep(0)
-    waiting.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await waiting
-    release.set()
-    assert await brain._workspace_allowed(context)
 
 
 def test_the_longest_plan_goes_over_several_cards_with_nothing_cut():
@@ -1820,12 +1802,6 @@ async def test_the_channel_gets_one_copy_of_each_file_the_newest(monkeypatch):
     assert await workflows.post_workflow_copy(wf) == ["report.md", "chart.png"]
     assert sent[0].data == b"v2"
 
-
-def test_an_automatic_run_is_not_told_a_plan_waits_for_anyone():
-    report = brain_result.BrainReport(status=brain_result.STARTED_WORKFLOW, thread_url="link",
-                                      plan_to_approve=False)
-    text = brain_result.tool_result_for_persona(report)
-    assert "link" in text and "approve" not in text
 
 
 @pytest.mark.asyncio
@@ -1907,12 +1883,15 @@ async def test_new_steps_with_no_id_never_take_a_done_steps_id(env):
 
 
 @pytest.mark.asyncio
-async def test_an_automatic_step_that_needs_someone_never_says_they_were_asked(env):
+async def test_a_step_that_needs_someone_with_no_way_to_hear_them_never_says_they_were_asked(
+        env, monkeypatch):
+    # The thread's ledger could not be claimed (another run holds it).
+    monkeypatch.setattr(thread_inbox, "claim_run", lambda *args: None)
     env.model = LaneModel([
         _plan_call(("s1", "researcher", [])),
         _report(status="needs_input", facts=("Which printer?",), call_id="a"),
         _report(call_id="f")])
-    wf, _ = await _start(env, automatic=True)
+    wf, _ = await _start(env)
     await _finish(wf)
     facts = " ".join(wf.results["s1"]["facts"])
     assert "could not be asked: Which printer?" in facts
@@ -1924,7 +1903,7 @@ async def test_an_automatic_step_that_needs_someone_never_says_they_were_asked(e
 async def test_approve_after_the_plan_was_answered_during_the_defer(env):
     env.model = LaneModel([_plan_call(("s1", "researcher", [])), _report(call_id="a"),
                            _report(call_id="f")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await _until(lambda: wf.state == wp.AWAITING_APPROVAL and wf.approval is not None)
 
     async def _answered_meanwhile():
@@ -1962,7 +1941,7 @@ async def test_a_workflows_image_limit_names_its_own_cap():
 @pytest.mark.asyncio
 async def test_the_plan_line_says_where_the_plan_is(env):
     env.model = LaneModel([_plan_call(("s1", "researcher", []))])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await _until(lambda: wf.state == wp.AWAITING_APPROVAL and wf.approval is not None)
     assert "(voiced) Shall I go ahead with the plan below?" in env.thread.texts()[-1]
     workflows.request_cancel(wf, "test")
@@ -1984,9 +1963,10 @@ def _other_person_during_the_step(env, text):
 
 
 def _blocks(monkeypatch, word):
-    async def _check(text):
-        return (False, "flagged") if word in text else (True, "")
-    monkeypatch.setattr("classes.content_guard.check_web_request", _check)
+    """A content guard that would refuse `word`: workflows never ask it."""
+    guard = AsyncMock(side_effect=lambda text: (False, "flagged") if word in text else (True, ""))
+    monkeypatch.setattr("classes.content_guard.check_web_request", guard)
+    return guard
 
 
 @pytest.mark.asyncio
@@ -2008,45 +1988,46 @@ async def test_someone_else_in_the_thread_cannot_change_the_steps_or_reach_a_hel
 
 
 @pytest.mark.asyncio
-async def test_a_plan_edit_the_guard_blocks_never_reaches_the_manager(env, monkeypatch):
-    _blocks(monkeypatch, "forbidden")
-    env.model = LaneModel([_plan_call(("s1", "researcher", [])), _report(call_id="a"),
-                           _report(call_id="f")])
-    wf, _ = await _start(env, automatic=False)
+async def test_a_plan_edit_is_never_sent_to_the_content_guard(env, monkeypatch):
+    guard = _blocks(monkeypatch, "forbidden")
+    env.model = LaneModel([_plan_call(("s1", "researcher", [])), _plan_call(("s1", "researcher", [])),
+                           _report(call_id="a"), _report(call_id="f")])
+    wf, _ = await _start(env, approved=False)
     await _until(lambda: wf.state == wp.AWAITING_APPROVAL and wf.approval is not None)
     thread_inbox.deliver(env.thread.id, 9601, 5, "Ana", "do something forbidden")
-    await _until(lambda: any("can't make that change" in t for t in env.thread.texts()))
-    assert wf.revisions == 0 and len(env.model.calls) == 1
-    await _until(lambda: wf.approval is not None and not wf.approval.done())
+    await _until(lambda: wf.revisions == 1 and wf.approval is not None and not wf.approval.done())
+    assert "do something forbidden" in json.dumps(env.model.calls[1].input)
     _, call = _press(wf, "approve")
     await call
     await _finish(wf)
     assert wf.record["state"] == wp.DONE
+    guard.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_a_thread_message_the_guard_blocks_never_reaches_the_review(env, monkeypatch):
-    _blocks(monkeypatch, "forbidden")
+async def test_a_thread_message_reaches_the_review_without_the_content_guard(env, monkeypatch):
+    guard = _blocks(monkeypatch, "forbidden")
     _thread_message_during_the_step(env, 9602, "now do something forbidden")
     env.model = LaneModel([
         _plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"])),
         ModelStep(output=[function_call("look", {}, call_id="l")]), _report(call_id="a"),
+        ModelStep(output=[function_call("submit_review", {"replies": []}, call_id="rv")]),
         _report(call_id="b"), _report(call_id="f")])
     wf, _ = await _start(env)
     await _finish(wf)
-    assert wf.ledger.events[0].outcome == "declined"
-    assert wf.said == [] and wf.record["state"] == wp.DONE
-    assert any("I can't act on that message." in t for t in env.thread.texts())
+    assert wf.ledger.events[0].outcome == "noted"
+    assert wf.record["state"] == wp.DONE
+    guard.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_an_answer_the_guard_blocks_never_reaches_the_helper(env, monkeypatch):
-    _blocks(monkeypatch, "forbidden")
+async def test_an_answer_is_never_sent_to_the_content_guard(env, monkeypatch):
+    guard = _blocks(monkeypatch, "forbidden")
     env.model = LaneModel([
         _plan_call(("s1", "researcher", [])),
         _report(status="needs_input", facts=("Which one?",), call_id="a"),
         _report(call_id="f")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await _until(lambda: wf.state == wp.AWAITING_APPROVAL and wf.approval is not None)
     _, call = _press(wf, "approve")
     await call
@@ -2054,7 +2035,8 @@ async def test_an_answer_the_guard_blocks_never_reaches_the_helper(env, monkeypa
     await _until(lambda: wf.question_id is not None)
     thread_inbox.deliver(env.thread.id, 9500, 5, "Ana", "something forbidden")
     await _finish(wf)
-    assert "something forbidden" not in json.dumps([c.input for c in env.model.calls])
+    assert "something forbidden" in json.dumps([c.input for c in env.model.calls])
+    guard.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2076,8 +2058,8 @@ async def test_a_cancel_between_runs_stops_the_next_run_from_starting(env, monke
 async def test_files_from_the_chat_reach_the_plan_and_every_helper(env):
     env.model = LaneModel([_plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"])),
                            _report(call_id="a"), _report(call_id="b"), _report(call_id="f")])
-    ctx = dict(_ctx(env.origin, True), brain_inputs=["sales.csv"], job_dir="jobs/c77-1-abc")
-    result = await workflows.start_workflow(ctx, "report on this", trigger=workflows.TRIGGER_BRAIN)
+    ctx = dict(_ctx(env.origin), brain_inputs=["sales.csv"], job_dir="jobs/c77-1-abc")
+    result = await workflows.start_workflow(ctx, "report on this", trigger=workflows.TRIGGER_DEV)
     assert result.ok
     wf = workflows.get(next(iter(workflows._RUNNING)))
     await _finish(wf)
@@ -2107,7 +2089,7 @@ async def test_the_finish_gets_the_time_kept_back_for_it(env, monkeypatch):
 async def test_the_approval_wait_does_not_come_out_of_the_work_time(env):
     env.model = LaneModel([_plan_call(("s1", "researcher", [])), _report(call_id="a"),
                            _report(call_id="f")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await _until(lambda: wf.state == wp.AWAITING_APPROVAL and wf.approval is not None)
     wf.started -= 3000  # as if the plan had waited 50 minutes
     _, call = _press(wf, "approve")
@@ -2121,12 +2103,12 @@ async def test_writing_past_the_edit_limit_does_not_restart_the_wait(env, monkey
     monkeypatch.setenv("WORKFLOW_PLAN_APPROVAL_SECONDS", "2")
     env.model = LaneModel([_plan_call(("s1", "researcher", [])), _report(call_id="a"),
                            _report(call_id="f")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await _until(lambda: wf.state == wp.AWAITING_APPROVAL and wf.approval is not None)
     wf.revisions = wp.plan_revisions()
     thread_inbox.deliver(env.thread.id, 9603, 5, "Ana", "one more change")
-    await _finish(wf)
-    assert wf.record["state"] == wp.DONE
+    await _finish(wf)  # within 10 s: the 2 s wait ran out, it never restarted
+    assert wf.record["state"] == wp.CANCELLED
     assert len(env.thread.plans()) == 1
 
 
@@ -2144,7 +2126,7 @@ async def test_no_workspace_is_held_while_the_plan_waits(env, monkeypatch):
     monkeypatch.setattr(brain, "_acquire_workspace", _tracked)
     env.model = LaneModel([_plan_call(("s1", "researcher", [])), _report(call_id="a"),
                            _report(call_id="f")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await _until(lambda: wf.state == wp.AWAITING_APPROVAL and wf.approval is not None)
     assert held == []
     _, call = _press(wf, "approve")

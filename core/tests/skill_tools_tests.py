@@ -55,9 +55,12 @@ def store(monkeypatch):
 
 @pytest.fixture
 def allowed():
-    with patch.object(skill_tools, "check_web_request", AsyncMock(return_value=(True, ""))), \
-         patch.object(skill_commands, "check_web_request", AsyncMock(return_value=(True, ""))):
+    """Skills are never sent to the content guard (it checks only search,
+    links and images)."""
+    guard = AsyncMock(return_value=(True, ""))
+    with patch("classes.content_guard.check_web_request", guard):
         yield
+    guard.assert_not_awaited()
 
 
 @pytest.fixture
@@ -120,12 +123,6 @@ async def test_save_skill_tells_the_brain_what_to_fix(store, ctx, allowed):
     assert await store.list(GUILD) == []
     ctx["channel"].send.assert_not_called()
 
-
-@pytest.mark.asyncio
-async def test_save_skill_obeys_the_content_guard(store, ctx):
-    with patch.object(skill_tools, "check_web_request", AsyncMock(return_value=(False, "flagged"))):
-        out = await call(skill_tools.save_skill, ctx, name="bad-skill", description="d", steps="s")
-    assert "safety guard" in out and await store.list(GUILD) == []
 
 
 @pytest.mark.asyncio
@@ -200,9 +197,10 @@ def test_brain_tools_include_skills_unless_switched_off(monkeypatch):
 def test_skills_instructions_are_small_and_off_when_disabled(monkeypatch):
     from classes import brain
     assert len(brain.SKILLS_INSTRUCTIONS) <= 400, len(brain.SKILLS_INSTRUCTIONS)
-    assert brain.instructions().endswith(brain.SKILLS_INSTRUCTIONS)
+    from classes.brain_policy import SAFETY_RULE
+    assert brain.instructions().endswith(brain.SKILLS_INSTRUCTIONS + SAFETY_RULE)
     monkeypatch.setenv("SKILLS_ENABLED", "0")
-    assert brain.instructions() == brain.BRAIN_INSTRUCTIONS
+    assert brain.instructions() == brain.BRAIN_INSTRUCTIONS + SAFETY_RULE
 
 
 def test_the_index_goes_in_the_task_between_the_request_and_the_folder():

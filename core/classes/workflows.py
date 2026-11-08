@@ -14,7 +14,10 @@ one with /task. It runs like this:
    Cancel (classes/workflow_views.py), for the requester only. A message
    from them in the thread is a change: the manager revises the plan, at
    most WORKFLOW_PLAN_REVISIONS times. No answer in
-   WORKFLOW_PLAN_APPROVAL_SECONDS starts it anyway. An automatic run is
+   WORKFLOW_PLAN_APPROVAL_SECONDS (15 minutes) cancels it: nothing runs
+   that nobody approved. Schedules, rules and follow-ups cannot start one
+   (start_workflow refuses an automatic run), so someone is always there to
+   approve. Only the test command (`!workflow`, WORKFLOW_DEV_INJECT) is
    approved at once.
 3. **Steps,** in waves (workflow_policy.next_wave): ready researchers side by
    side, an implementer alone. Each is a subagent, a SandboxAgent of its own
@@ -67,9 +70,6 @@ Why things are the way they are:
   review between steps, which answers it and records an outcome. The thread
   is open to the server, so only the requester can change the steps, and only
   their words reach helpers.
-- **New text passes the content guard.** The guard in the run context only
-  ever saw the request, so a plan edit, a thread message or an answer is
-  checked before it can reach a helper with a shell (_allowed).
 - **Limits cap the cost**: WORKFLOW_TIMEOUT (1 h), WORKFLOW_MAX_TURNS (300) and
   WORKFLOW_MAX_TOKENS (4M) stop a workflow bigger than the biggest job seen, with
   what exists (PARTIAL), never "retry". Helpers leave a reserve of turns and time for
@@ -101,7 +101,7 @@ logger = logging.getLogger(__name__)
 
 TRIGGER_BRAIN = "brain"
 TRIGGER_SLASH = "slash"
-TRIGGER_AUTOMATION = "automation"
+TRIGGER_DEV = "dev"  # !workflow (WORKFLOW_DEV_INJECT): approved at once
 
 # Turns per review or finish run of the manager.
 MANAGER_SHORT_TURNS = 6
@@ -390,6 +390,11 @@ async def start_workflow(ctx: dict, request: str, *, trigger: str, reason: str =
                                        "can in this reply.")
     if not request:
         return StartResult(False, text="There was no request to start a workflow for.")
+    if ctx.get("automatic"):
+        # Nobody is there to approve a plan; start_workflow is not offered
+        # to automatic runs either (brain_policy.effective_tier).
+        return StartResult(False, text="A schedule, rule or follow-up cannot start a workflow. "
+                                       "Do what you can in this reply.")
     guild_id = ctx.get("guild_id")
     requester = ctx.get("user_id")
     if not guild_id or not requester:
@@ -420,7 +425,7 @@ async def start_workflow(ctx: dict, request: str, *, trigger: str, reason: str =
         "requester_name": ctx.get("requester_name") or "", "request": request,
         "reason": " ".join(str(reason or "").split())[:500],
         "draft": [" ".join(str(d).split())[:300] for d in (draft or [])][:wp.DEFAULT_MAX_STEPS],
-        "trigger": trigger, "automatic": bool(ctx.get("automatic")),
+        "trigger": trigger,
         "origin_channel_id": getattr(ctx.get("channel"), "id", None),
         "inputs": _chat_files(ctx),
         "thread_id": thread.id, "thread_url": thread.jump_url,
@@ -466,7 +471,7 @@ async def _busy_text(store, guild_id) -> str:
 
 async def _open_thread(ctx: dict, request: str, message):
     """The workflow's thread: off the message that asked (a new thread, or
-    the thread it is in), or off a header message for an automatic run.
+    the thread it is in), or off a header message when there is none (/task).
     None when no thread can be had, or the thread has a run already."""
     from classes import thread_inbox
     from classes.workspace_tools import ensure_work_thread
@@ -493,11 +498,8 @@ def _run_context(ctx: dict, record: dict, thread) -> dict:
         "requester_name": record["requester_name"],
         "channel": thread,
         "original_message": None,
-        "automatic": record["automatic"],
-        "followup": bool(ctx.get("followup")),
         "discord_client": ctx.get("discord_client") or _client,
         "request_text": record["request"],
-        # The content guard checks this once, at the first workspace action.
         "brain_request": record["request"],
         "image_cap": wp.MAX_IMAGES,
         "workflow_id": record["id"],
@@ -995,7 +997,9 @@ def _model_settings(role: str):
 
 def manager_instructions() -> str:
     from classes.image_generation import image_generation_enabled
-    return MANAGER_INSTRUCTIONS + (MANAGER_IMAGE_LINE if image_generation_enabled() else "")
+    from classes.brain_policy import SAFETY_RULE
+    return (MANAGER_INSTRUCTIONS + (MANAGER_IMAGE_LINE if image_generation_enabled() else "")
+            + SAFETY_RULE)
 
 
 def _manager(mode: str, rounds=()):
@@ -1020,13 +1024,14 @@ def _subagent(role: str):
     from classes.image_review import review_enabled
     from classes.llm_roles import SUBAGENT
 
-    brain._guard_workspace_tools()
     instructions = {wp.SCOUT: SCOUT_INSTRUCTIONS,
                     wp.VERIFIER: workflow_verify.VERIFIER_INSTRUCTIONS}.get(role)
     if instructions is None:
         instructions = SUBAGENT_INSTRUCTIONS + ROLE_LINES[role]
         if role == wp.IMPLEMENTER and review_enabled():
             instructions += IMPLEMENTER_VIEW_LINE
+    from classes.brain_policy import SAFETY_RULE
+    instructions += SAFETY_RULE
     return SandboxAgent(
         name="Helper", model=brain.build_role_model(SUBAGENT),
         instructions=instructions,
@@ -1106,10 +1111,10 @@ async def _approve(wf: Workflow) -> bool:
 
     if wf.cancel_reason:
         return False
-    if wf.record["automatic"]:
-        wf.plan_lead = "Started automatically."
+    if wf.record["trigger"] == TRIGGER_DEV:
+        wf.plan_lead = "Started at once (test command)."
         await _post_plan(wf, "running")
-        metrics.inc_workflow_plan_approval("auto")
+        metrics.inc_workflow_plan_approval("dev")
         await _set_state(wf, "approve")
         return True
     seconds = wp.plan_approval_seconds()
@@ -1121,18 +1126,16 @@ async def _approve(wf: Workflow) -> bool:
         if until is None:
             wf.plan_lead = f"<@{wf.requester_id}> {line}"
             await _post_plan(wf, "approval",
-                             note=f"Starts by itself <t:{int(time.time() + seconds)}:R> if "
+                             note=f"Cancelled <t:{int(time.time() + seconds)}:R> if "
                                   "there's no answer")
             if wf.plan_message is None:
-                # No buttons to press: say so rather than wait in silence.
-                # Plain text: the card itself is what could not be posted.
+                # No buttons to press, so nobody can approve it: it never
+                # starts unapproved. Plain text: the card is what failed.
                 metrics.inc_workflow_plan_approval("timeout")
+                request_cancel(wf, "the plan could not be posted for approval")
                 await _post(wf.thread, content="I couldn't post the plan with its buttons, so "
-                                               "I've started. Say stop here to cancel.\n"
-                                               + wp.plan_text(wf.plan)[:1800])
-                await _set_state(wf, "approve")
-                wf.started = time.monotonic()
-                return True
+                                               "nothing was started. Ask again to retry.")
+                return False
             until = time.monotonic() + seconds
         wf.approval = asyncio.get_running_loop().create_future()
         # request_cancel had no future to answer until now, and acts only once.
@@ -1157,13 +1160,11 @@ async def _approve(wf: Workflow) -> bool:
             await _update_plan_message(wf, content="✅ Approved. Working on it.")
             return True
         if action == "timeout":
+            # Never started unapproved: the plan expires.
             metrics.inc_workflow_plan_approval("timeout")
-            await _set_state(wf, "approve")
-            await _update_plan_message(wf, content="⌛ Started without an answer.")
-            await _post_card(wf.thread, K.heads_up(
-                "⌛ Started without an answer",
-                f"No answer in {_minutes(seconds)}, so I've started. Cancel is on the plan above."))
-            return True
+            request_cancel(wf, f"no answer to the plan in {_minutes(seconds)}")
+            await _remove_buttons(wf)
+            return False
         if action == "cancel":
             metrics.inc_workflow_plan_approval("cancelled")
             await _remove_buttons(wf)
@@ -1175,11 +1176,6 @@ async def _approve(wf: Workflow) -> bool:
             await _post_card(wf.thread, K.heads_up(
                 "📝 No more changes", "That's as many changes as I can make to the plan. "
                                      "Press Approve or Cancel."))
-            continue
-        if not await _allowed(wf, event.text):
-            wf.ledger.record_decision([event.seq], "declined", "Blocked by the content guard.")
-            await _post_card(wf.thread, K.error("I can't make that change to the plan.",
-                                                "🚫 Not changed"))
             continue
         until = None
         wf.revisions += 1
@@ -1287,15 +1283,6 @@ async def _update_plan_message(wf: Workflow, final: bool = False, content: str |
         logger.info(f"Workflow {wf.id}: could not update the plan")
 
 
-async def _allowed(wf: Workflow, text: str) -> bool:
-    """Whether new text passes the content guard (fail-open like the guard)."""
-    from classes.content_guard import check_web_request
-    allowed, reason = await check_web_request(text)
-    if not allowed:
-        logger.warning(f"Workflow {wf.id}: thread text blocked by the content guard: {reason}")
-    return allowed
-
-
 def _waiting_edit(wf: Workflow):
     """The requester's oldest thread message not yet taken (stop words
     are _watch's), or None."""
@@ -1336,12 +1323,9 @@ _SHARED_KEYS = ("image_calls", "images_posted")
 
 def _helper_ctx(wf: Workflow, **keys) -> dict:
     """A helper's own run context: its folder, files and report are its own,
-    and two helpers run at once (see the module docstring). The content guard's
-    check of the request is kept on the workflow (`brain_guard_home`), so they
-    share it, and it starts at the first workspace action like a brain call's
-    (brain._workspace_allowed): the moderation endpoint rate-limits hard."""
+    and two helpers run at once (see the module docstring)."""
     return {**wf.ctx, "brain_report_args": None, "deliverables": [], "delivery_chosen": False,
-            "skills_used": [], "skill_saved": False, "brain_guard_home": wf.ctx, **keys}
+            "skills_used": [], "skill_saved": False, **keys}
 
 
 def _keep_shared(wf: Workflow, ctx: dict) -> None:
@@ -1417,9 +1401,8 @@ async def _step_work(wf: Workflow, step: wp.Step, progress, quiet: bool,
     report, stopped = await _step_attempt(wf, step, progress, retry)
     if (report.status == brain_result.NEEDS_INPUT and not stopped and not wf.cancel_reason):
         question = report.say_to_user or "; ".join(report.facts[:2])
-        # An automatic run has nobody to ask, and no ledger means no way to
-        # hear them: never report that as "asked".
-        can_ask = bool(question) and wf.ledger is not None and not wf.record["automatic"]
+        # No ledger means no way to hear them: never report that as "asked".
+        can_ask = bool(question) and wf.ledger is not None
         answer = await ask_requester(wf, question) if can_ask else ""
         if answer and not wf.cancel_reason:
             files = report.files_posted
@@ -1556,7 +1539,7 @@ async def ask_requester(wf: Workflow, question: str, options=None, label: str = 
     within WORKFLOW_ASK_TIMEOUT."""
     from classes import brain_question
 
-    if wf.ledger is None or wf.record["automatic"]:
+    if wf.ledger is None:
         return ""
 
     def _wait_left():
@@ -1580,10 +1563,6 @@ async def ask_requester(wf: Workflow, question: str, options=None, label: str = 
     answer = result.answer if result.state == brain_question.ANSWERED_STATE else ""
     if answer == brain_question.YOU_DECIDE_ANSWER:
         return brain_question.YOU_DECIDE
-    if answer and not await _allowed(wf, answer):
-        await _post_card(wf.thread, K.heads_up(
-            "🚫 Answer not used", "I can't use that answer, so I'll carry on without it."))
-        return ""
     return answer or ""
 
 
@@ -1601,18 +1580,6 @@ async def _review(wf: Workflow, queue: list) -> list:
     if routing:
         await asyncio.wait(routing, timeout=STEER_WAIT_SECONDS)
     wf.reviewed.update(e.seq for e in pending)
-    usable = []
-    for event in pending:
-        if await _allowed(wf, event.text):
-            usable.append(event)
-        else:
-            ledger.record_decision([event.seq], "declined", "Blocked by the content guard.")
-    if len(usable) < len(pending):
-        # 📨 said it would be seen: say what became of it.
-        await _post_card(wf.thread, K.error("I can't act on that message.", "🚫 Not passed on"))
-    pending = usable
-    if not pending:
-        return queue
     lines = [f"[{e.seq}] {e.author_name}{' (the requester)' if e.is_requester else ''}: {e.text}"
              for e in pending]
     task = "\n\n".join([
@@ -1643,7 +1610,7 @@ async def _review(wf: Workflow, queue: list) -> list:
     if args.get("steps") and queue and not stop:
         # The thread is open to the server: only the requester changes their job.
         new_plan, unusable = _revised_steps(wf, args["steps"]) if by_requester else (None, True)
-    posted = []
+    posted, answered = [], []
     for event in pending:
         reply = replies.get(event.seq, "")
         ledger.record_decision([event.seq], "answered" if reply else "noted", reply)
@@ -1651,7 +1618,13 @@ async def _review(wf: Workflow, queue: list) -> list:
             wf.said.append((event.seq, f"{event.author_name}: {event.text[:300]}"
                             + (f" (reply: {reply[:200]})" if reply else "")))
         if reply:
-            posted.append(f"> {event.text[:150]}\n{reply[:400]}")
+            answered.append((event, reply[:400]))
+    if answered:
+        # Said to people, so in the persona's voice (the record keeps the
+        # manager's own words, which is what later runs read).
+        from classes.persona_voice import voice_replies
+        voiced = await voice_replies(wf.guild_id, [reply for _, reply in answered])
+        posted = [f"> {event.text[:150]}\n{text}" for (event, _), text in zip(answered, voiced)]
     if posted and unusable:
         # The reply may promise a change that was not made: say so.
         posted.append("-# I couldn't change the remaining steps, so they stay as planned.")
@@ -1860,13 +1833,12 @@ async def _plain_done(wf: Workflow) -> None:
 async def _skill_review(wf: Workflow, report: BrainReport) -> None:
     """After the completion reply: is this job worth keeping as a skill? The
     brain's review (classes/skill_reflection.py), reading the plan and what
-    the steps reported, since a workflow has no one run to read. Like a brain
-    call's, never for automatic work. Fail-soft."""
+    the steps reported, since a workflow has no one run to read. Fail-soft."""
     from classes import skill_reflection
     from classes.skill_store import SkillStore
     from classes.tool_cards import trim
     try:
-        if (wf.skill_reviewed or wf.record["automatic"] or wf.plan is None
+        if (wf.skill_reviewed or wf.plan is None
                 or wf.record.get("state") not in (wp.DONE, wp.PARTIAL)
                 or not skill_reflection.should_reflect(status=report.status,
                                                        tool_calls=wf.tool_calls,
