@@ -146,8 +146,10 @@ def worker() -> SearchWorker:
         if old is not None and old.proc is not None and old.proc.returncode is None:
             try:  # its loop is gone, so no reap task can run for it
                 old.proc.kill()
-            except Exception:
+            except ProcessLookupError:  # it ended meanwhile
                 pass
+            except Exception as e:
+                logger.warning(f"Could not kill the old search worker: {e!r}")
         _worker = SearchWorker()
     return _worker
 
