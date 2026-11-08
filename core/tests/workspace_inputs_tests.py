@@ -204,3 +204,15 @@ def test_a_file_is_found_by_the_name_it_had_before_it_was_posted():
     chosen, missing, _ = si.select([], [posted], ["Sales Chart (Q1).png"], 1000)
     assert chosen == [posted] and missing == []
     assert si.select([], [posted], ["Sales Chart (Q2).png"], 1000)[1] == ["Sales Chart (Q2).png"]
+
+
+def test_names_of_other_letters_never_match_each_other():
+    report, plan = si.Candidate("отчёт.pdf", 10, None), si.Candidate("план.pdf", 10, None)
+    chosen, missing, _ = si.select([], [plan, report], ["отчёт.pdf"], 1000)
+    assert chosen == [report] and missing == []
+    assert si.select([], [plan], ["отчёт.pdf"], 1000)[1] == ["отчёт.pdf"]
+    # Uploaded by the bot, such a name is "file.pdf": found by its old name too.
+    posted = si.Candidate("file.pdf", 10, None)
+    assert si.select([], [posted], ["отчёт.pdf"], 1000)[0] == [posted]
+    no_extension = si.Candidate("报告", 10, None)
+    assert si.select([], [no_extension], ["报告"], 1000)[0] == [no_extension]

@@ -82,18 +82,29 @@ def human_size(size) -> str:
     return f"{size / 1_000_000:.1f} MB"
 
 
-def name_key(name: str) -> str:
-    """A file name as matched against another: its letters and digits,
-    lowercase. A name is rewritten on the way (Discord's upload, a card's
-    card.safe_filename, safe_name here), so "Sales Chart (Q1).png" is posted
-    as "Sales_Chart_Q1.png" while the persona was told the first."""
-    base = (name or "").replace("\\", "/").rsplit("/", 1)[-1]
-    return "".join(ch for ch in base.lower() if ch.isascii() and ch.isalnum())
+def upload_name(name: str) -> str:
+    """The name the bot uploads a file under (card.safe_filename): one
+    Discord keeps unchanged, which a card's attachment:// link must match.
+    The extension is kept on its own, so a name of other letters ("图表.png")
+    stays a picture ("file.png")."""
+    name = str(name or "").strip()
+    stem, dot, ext = name.rpartition(".")
+    if not dot or not stem.strip("."):
+        stem, ext = name, ""
+    ext = re.sub(r"[^A-Za-z0-9]+", "", ext)[:10]
+    stem = _UNSAFE.sub("_", stem).strip("._") or "file"
+    return f"{stem[:100 - len(ext) - 1]}.{ext}" if ext else stem[:100]
 
 
 def _matches(candidate, wanted: str) -> bool:
-    want = name_key((wanted or "").strip())
-    return bool(want) and want == name_key(candidate.name)
+    """`wanted` names this file: as written, or as the bot uploaded it (the
+    persona is told "Sales Chart (Q1).png", the chat holds
+    "Sales_Chart_Q1.png"). Never a looser match: two names of other letters
+    would become one."""
+    want = (wanted or "").strip().lower()
+    have = candidate.name.lower()
+    return bool(want) and (want in (have, safe_name(candidate.name).lower())
+                           or upload_name(want).lower() == have)
 
 
 def select(given, recent, requested, max_bytes: int):

@@ -67,17 +67,10 @@ def _item(block):
 
 def safe_filename(name: str) -> str:
     """A file name Discord keeps unchanged on upload (it rewrites spaces and
-    other characters, which would break a card's attachment:// link)."""
-    import re
-    name = str(name or "").strip()
-    stem, dot, ext = name.rpartition(".")
-    if not dot or not stem.strip("."):
-        stem, ext = name, ""
-    # The extension on its own, so a name of other letters ("图表.png")
-    # keeps it: it says the file is a picture.
-    ext = re.sub(r"[^A-Za-z0-9]+", "", ext)[:10]
-    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._") or "file"
-    return f"{stem[:100 - len(ext) - 1]}.{ext}" if ext else stem[:100]
+    other characters, which would break a card's attachment:// link). One
+    rule with the chat-file lookup, which finds the file by either name."""
+    from classes.workspace_inputs import upload_name
+    return upload_name(name)
 
 
 def files_shown(blocks) -> set:
