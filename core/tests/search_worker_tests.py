@@ -182,6 +182,24 @@ async def test_the_real_worker_keeps_native_output_off_the_replies():
     await worker.close()
 
 
+def test_a_new_event_loop_kills_the_old_loops_worker():
+    from unittest.mock import MagicMock
+
+    async def _first():
+        web_research._worker = None
+        web_research.worker().proc = MagicMock(returncode=None)
+        return web_research._worker
+
+    old = asyncio.run(_first())
+
+    async def _second():
+        return web_research.worker()
+
+    assert asyncio.run(_second()) is not old
+    old.proc.kill.assert_called_once()
+    web_research._worker = None
+
+
 @pytest.mark.asyncio
 async def test_each_event_loop_gets_its_own_worker():
     first = web_research.worker()

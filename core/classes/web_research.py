@@ -142,6 +142,12 @@ def worker() -> SearchWorker:
     """This event loop's search worker (tests run several loops)."""
     global _worker
     if _worker is None or _worker.loop is not asyncio.get_running_loop():
+        old, _worker = _worker, None
+        if old is not None and old.proc is not None and old.proc.returncode is None:
+            try:  # its loop is gone, so no reap task can run for it
+                old.proc.kill()
+            except Exception:
+                pass
         _worker = SearchWorker()
     return _worker
 
