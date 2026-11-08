@@ -128,3 +128,20 @@ def test_a_notice_reads_as_a_status_card_without_its_decoration():
 def test_details_skip_empty_values():
     assert K.details([("When", "daily"), ("Next", ""), ("Where", "#general")]) == \
         "**When** daily\n**Where** #general"
+
+
+def test_a_whole_card_moves_a_text_to_the_next_message_instead_of_cutting_it():
+    texts = [K.Text(f"block {i}\n" + "x" * 1500) for i in range(5)]
+    cut = K.split(K.CardSpec(body=list(texts)))
+    whole = K.split(K.CardSpec(body=list(texts), whole=True))
+    assert any(not b.content.startswith("block") for card in cut for b in card if isinstance(b, K.Text))
+    assert [b.content for card in whole for b in card] == [t.content for t in texts]
+    # One that cannot fit any message is still cut, never dropped.
+    huge = K.split(K.CardSpec(body=[K.Text("y" * 9000)], whole=True))
+    assert "".join(b.content for card in huge for b in card).count("y") == 9000
+
+
+def test_a_long_text_of_a_notice_is_cut_in_the_history_not_on_the_card():
+    request = "word " * 600  # 3000 characters, pasted by someone
+    text = K.notice_for_history("bot", ["-# 🧠 Working on it", K.quote(request), "short note"])
+    assert len(text) < K.HISTORY_TEXT_CHARS + 200 and "…" in text and "short note" in text

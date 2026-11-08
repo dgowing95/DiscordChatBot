@@ -69,8 +69,15 @@ def safe_filename(name: str) -> str:
     """A file name Discord keeps unchanged on upload (it rewrites spaces and
     other characters, which would break a card's attachment:// link)."""
     import re
-    base = re.sub(r"[^A-Za-z0-9._-]+", "_", str(name or "").strip()).strip("._") or "file"
-    return base[-100:]
+    name = str(name or "").strip()
+    stem, dot, ext = name.rpartition(".")
+    if not dot or not stem.strip("."):
+        stem, ext = name, ""
+    # The extension on its own, so a name of other letters ("图表.png")
+    # keeps it: it says the file is a picture.
+    ext = re.sub(r"[^A-Za-z0-9]+", "", ext)[:10]
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._") or "file"
+    return f"{stem[:100 - len(ext) - 1]}.{ext}" if ext else stem[:100]
 
 
 def files_shown(blocks) -> set:
@@ -129,7 +136,11 @@ async def _send_one(target, view, *, files, mentions, reference, mention_author,
         kwargs["files"] = files
     if interaction if interaction is not None else isinstance(target, discord.Interaction):
         if first and not target.response.is_done():
-            await target.response.send_message(ephemeral=ephemeral, **kwargs)
+            answered = await target.response.send_message(ephemeral=ephemeral, **kwargs)
+            # The answer comes back with the message it made: no second call.
+            message = getattr(answered, "resource", None)
+            if isinstance(message, discord.InteractionMessage):
+                return message
             return await target.original_response()
         return await target.followup.send(ephemeral=ephemeral, wait=True, **kwargs)
     if first and reference is not None:
@@ -170,17 +181,23 @@ async def reply(interaction, spec: CardSpec, *, ephemeral: bool = True, **kwargs
     return await send_card(interaction, spec, ephemeral=ephemeral, interaction=True, **kwargs)
 
 
-async def edit_message(message, view: KitView, files: list | None = None) -> bool:
-    """Replaces a message's card. Never raises: False when it failed."""
-    try:
-        if files:
-            await message.edit(view=view, attachments=files)
-        else:
-            await message.edit(view=view)
-        return True
-    except Exception as e:
-        logger.info(f"Could not update a card: {e!r}")
-        return False
+async def answer_deferred(interaction, spec: CardSpec, *, files: dict | None = None) -> None:
+    """The card as the answer to a deferred interaction (its "thinking…"
+    message becomes the first message, the rest go as follow-ups). Raises
+    what the first edit raises; a follow-up that fails is logged."""
+    files = dict(files or {})
+    built = views(spec)
+    first = _files_for(built[0], files)
+    await interaction.edit_original_response(
+        view=built[0], allowed_mentions=NO_MENTIONS, **({"attachments": first} if first else {}))
+    for view in built[1:]:
+        more = _files_for(view, files)
+        try:
+            await interaction.followup.send(view=view, allowed_mentions=NO_MENTIONS, wait=True,
+                                            **({"files": more} if more else {}))
+        except Exception:
+            logger.warning("Could not send the rest of a card", exc_info=True)
+            return
 
 
 class LiveCard:
@@ -206,18 +223,17 @@ class LiveCard:
         return self.messages[0] if self.messages else None
 
     async def show(self, spec: CardSpec, timeout: float | None = None,
-                   files: dict | None = None, edit_last_only: bool = False) -> bool:
+                   files: dict | None = None) -> bool:
         """Sends or updates the card. Never raises: False when something
         could not be sent or edited (the next call tries again; a message
-        deleted meanwhile is sent anew). `edit_last_only`: leave the earlier
-        messages as they are (a live card's full, finished part), to keep
-        under Discord's edit rate. Calls run one after another, so a call
+        deleted meanwhile is sent anew). Only the messages whose content
+        changed are edited; a card edited often keeps under Discord's edit
+        rate with CardSpec.whole. Calls run one after another, so a call
         made while one is sending edits what that one sent."""
         async with self._lock:
-            return await self._show(spec, timeout, files, edit_last_only)
+            return await self._show(spec, timeout, files)
 
-    async def _show(self, spec: CardSpec, timeout: float | None, files: dict | None,
-                    edit_last_only: bool) -> bool:
+    async def _show(self, spec: CardSpec, timeout: float | None, files: dict | None) -> bool:
         files = dict(files or {})
         ok = True
         built = views(spec, timeout)
@@ -229,8 +245,7 @@ class LiveCard:
         for index, view in enumerate(built):
             payload = view.to_components()
             if index < len(self.messages):
-                if self._shown[index] == payload or (
-                        edit_last_only and index < len(self.messages) - 1):
+                if self._shown[index] == payload:
                     continue
                 attachments = _files_for(view, files) if view.file_names() else None
                 try:
@@ -240,8 +255,12 @@ class LiveCard:
                         await self.messages[index].edit(view=view)
                     self._shown[index] = payload
                 except discord.NotFound:
+                    # Only it and the ones after it go: the next show() sends
+                    # them anew. Forgetting all would post the earlier ones
+                    # twice, the old copies left up and never edited again.
                     logger.info("A card's message was deleted; it is sent anew next time")
-                    self.forget()
+                    await self._drop(index + 1, spec.colour)
+                    del self.messages[index:], self._shown[index:]
                     return False
                 except Exception as e:
                     logger.info(f"Could not update a card: {e!r}")

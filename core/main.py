@@ -7,7 +7,6 @@ import random
 import signal
 import time
 import aiohttp
-import io
 import sys
 from classes.message_handler import MessageHandler, close_http_session
 from classes.text_llm_handler import TextLLMHandler
@@ -266,15 +265,15 @@ async def register_commands():
                 result = await create_image(prompt, prompt)
             except Exception as e:
                 logger.warning(f"Image generation failed: {e}")
-                await ctx.edit_original_response(view=card.views(K.error(
+                await card.answer_deferred(ctx, K.error(
                     "The image service may be down or busy. Try again in a minute.",
-                    "❌ Couldn't make the image"))[0])
+                    "❌ Couldn't make the image"))
                 return
-            # The picture in its card, a real attachment the next edit finds.
-            await ctx.edit_original_response(
-                view=card.views(tool_cards.image_card(prompt, filename=GENERATED_IMAGE_FILENAME))[0],
-                attachments=[discord.File(io.BytesIO(result.png), filename=GENERATED_IMAGE_FILENAME)],
-            )
+            # The picture in its card, uploaded under the name the next edit
+            # finds; a long prompt (its footer) goes on in a follow-up.
+            await card.answer_deferred(
+                ctx, tool_cards.image_card(prompt, filename=GENERATED_IMAGE_FILENAME),
+                files={GENERATED_IMAGE_FILENAME: result.png})
 
     synced_commands = await command_tree.sync()
     for synced_command in synced_commands:

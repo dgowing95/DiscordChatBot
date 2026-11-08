@@ -85,9 +85,10 @@ if live is not None:
 messages whose content changed are edited. It grows into more messages when the card gets
 longer, and takes down the ones it no longer needs when it gets shorter. It never raises:
 `False` means "try again next time". Updates run one at a time, so two hooks updating at
-once can never post the card twice. For a card edited many times a minute (live command
-output), pass `edit_last_only=True` while it runs, which edits only the newest message and
-keeps under Discord's edit rate. Pass it `False` for the last update.
+once can never post the card twice. For a card that grows often (live command output),
+set `CardSpec(whole=True)`: each text that fits one message is kept whole, so a growing
+text changes only its own message, and an update edits only the newest one. That keeps
+the card under Discord's edit rate.
 
 ### A slash command's or a button's answer
 

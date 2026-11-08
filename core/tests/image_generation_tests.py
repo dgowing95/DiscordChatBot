@@ -740,3 +740,21 @@ def test_edit_source_finds_the_picture_inside_its_card():
     found = image_generation.pick_edit_source(None, [card], BOT)
     assert found is not None and found.filename == "generated-image.png"
     assert image_generation.pick_edit_source(None, [posted_file_card(author_id=7)], BOT) is None
+
+
+@pytest.mark.asyncio
+async def test_a_long_prompt_goes_on_in_a_follow_up_with_no_pings(monkeypatch):
+    main_mod, commands = await _register_and_collect(monkeypatch, "1")
+    ctx = MagicMock()
+    ctx.response.defer = AsyncMock()
+    ctx.edit_original_response = AsyncMock()
+    ctx.followup.send = AsyncMock()
+    prompt = "@everyone a fox " + "in a very detailed forest " * 200 + "THE END"
+    with patch.object(image_generation, "generate_image_from_api",
+                      new=AsyncMock(return_value=b"PNGDATA")):
+        await commands["generate_image"](ctx, prompt)
+    first = ctx.edit_original_response.await_args.kwargs
+    rest = ctx.followup.send.await_args.kwargs
+    assert first["attachments"][0].filename == "generated-image.png" and "files" not in rest
+    assert "THE END" in view_text(rest["view"]) and "Reply to this" in view_text(rest["view"])
+    assert first["allowed_mentions"].everyone is False and rest["allowed_mentions"].everyone is False

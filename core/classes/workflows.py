@@ -1226,7 +1226,7 @@ def _plan_spec(wf: Workflow, buttons: str | None = None, note: str = "", *,
     then each step with its state, in full; its buttons (fresh each time)
     under them. A long plan goes over several messages."""
     if label is None:
-        done, total = wp.steps_done(wf.step_states), len(wf.plan.steps)
+        done, total = wp.steps_done(wf.plan, wf.step_states), len(wf.plan.steps)
         label = (PLAN_TO_APPROVE if buttons == "approval"
                  else f"🧵 Plan · {done} of {total} step{'s' if total != 1 else ''} done")
     body = ([K.Text(wf.plan_lead)] if wf.plan_lead else []) + wp.plan_blocks(wf.plan, wf.step_states)
@@ -1283,7 +1283,7 @@ async def _update_plan_message(wf: Workflow, final: bool = False, content: str |
                                   colour=_END_COLOURS.get(end_state, K.CLOSED))
     else:
         wf.plan_card = _plan_spec(wf, "running")
-    if not await wf.plan_live.show(wf.plan_card, edit_last_only=False):
+    if not await wf.plan_live.show(wf.plan_card):
         logger.info(f"Workflow {wf.id}: could not update the plan")
 
 
@@ -1664,7 +1664,8 @@ async def _review(wf: Workflow, queue: list) -> list:
     if new_plan is not None:
         done = [s for s in wf.plan.steps if s.id in wf.results]
         wf.plan = wp.Plan(goal=wf.plan.goal, steps=done + new_plan.steps,
-                          deliverables=wf.plan.deliverables, notes=wf.plan.notes)
+                          deliverables=wf.plan.deliverables, notes=wf.plan.notes,
+                          title=new_plan.title or wf.plan.title)
         _store_plan(wf, wf.plan)
         for step in queue:
             if step.id not in {s.id for s in new_plan.steps}:

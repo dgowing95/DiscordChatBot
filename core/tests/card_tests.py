@@ -302,3 +302,87 @@ def test_a_cards_picture_goes_into_the_prompt_like_an_attachment():
     from classes.message_handler import image_targets
     assert image_targets(files_of(posted_file_card())) == [
         (2, "https://media.example/attachments/1/2/generated-image.png?ex=1", "image/png")]
+
+
+@pytest.mark.parametrize("name, safe", [
+    ("chart.png", "chart.png"), ("my chart (1).png", "my_chart_1.png"),
+    ("图表.png", "file.png"), ("отчёт данные.csv", "file.csv"), ("café menu.md", "caf_menu.md"),
+    (".bashrc", "bashrc"), ("", "file"), ("noext", "noext"), ("a.tar.gz", "a.tar.gz"),
+    ("x" * 300 + ".png", "x" * 96 + ".png")])
+def test_a_safe_filename_keeps_its_extension(name, safe):
+    from classes.card import safe_filename
+    assert safe_filename(name) == safe
+
+
+@pytest.mark.asyncio
+async def test_a_deleted_later_message_is_sent_again_and_the_earlier_ones_kept():
+    from classes.card import LiveCard
+    sent = []
+
+    async def send(**kwargs):
+        message = MagicMock()
+        message.edit, message.delete = AsyncMock(), AsyncMock()
+        sent.append(message)
+        return message
+
+    channel = MagicMock()
+    channel.send = AsyncMock(side_effect=send)
+    live = LiveCard(channel)
+    await live.show(K.CardSpec(label="🧠 Working", body=[K.Text("word " * 900)], footer="one"))
+    assert len(sent) == 2
+    sent[1].edit = AsyncMock(side_effect=discord.NotFound(MagicMock(status=404), "gone"))
+    assert not await live.show(K.CardSpec(label="🧠 Working", body=[K.Text("word " * 900)], footer="two"))
+    assert live.messages == [sent[0]]
+    assert await live.show(K.CardSpec(label="🧠 Working", body=[K.Text("word " * 900)], footer="two"))
+    assert len(sent) == 3 and live.messages == [sent[0], sent[2]]  # the head is not posted again
+
+
+@pytest.mark.asyncio
+async def test_a_growing_live_transcript_edits_only_its_newest_message():
+    # Seen in review: a running command cut across two messages changed both
+    # on every update, and only the newest was edited, so its lines showed
+    # twice or not at all. Kept whole, it moves to the next message once.
+    from classes.brain_progress import WorkTranscript
+    from classes.card import LiveCard
+    shown = {}
+
+    async def send(**kwargs):
+        message = MagicMock()
+
+        async def edit(**kw):
+            shown[id(message)] = view_text(kw["view"])
+        message.edit = AsyncMock(side_effect=edit)
+        shown[id(message)] = view_text(kwargs["view"])
+        return message
+
+    channel = MagicMock()
+    channel.send = AsyncMock(side_effect=send)
+    live = LiveCard(channel)
+    t = WorkTranscript("chart it", started=1000)
+    for i in range(3):
+        t.add_output("done\n" * 200, 0, block=t.add_command(f"python step_{i}.py"))
+    running = t.add_command("python last.py")
+    edits_when_split = None
+    for i in range(6):
+        t.add_output(f"line {i}\n" * 40, block=running)
+        assert await live.show(t.render())
+        on_screen = "\n".join(shown[id(m)] for m in live.messages)
+        assert on_screen == "\n".join(view_text(v) for v in views(t.render()))
+        if len(live.messages) == 2 and edits_when_split is None:
+            edits_when_split = live.messages[0].edit.await_count
+    # Once the command has moved on to the second message, the first one
+    # (full, its commands finished) is never edited again.
+    assert edits_when_split is not None
+    assert live.messages[0].edit.await_count == edits_when_split
+
+
+@pytest.mark.asyncio
+async def test_an_interactions_answer_is_the_message_it_made_without_fetching_it():
+    from classes.card import send_card
+    made = MagicMock(spec=discord.InteractionMessage)
+    interaction = MagicMock(spec=discord.Interaction)
+    interaction.response.is_done = MagicMock(return_value=False)
+    interaction.response.send_message = AsyncMock(return_value=SimpleNamespace(resource=made))
+    interaction.original_response = AsyncMock()
+    assert await send_card(interaction, K.info("✅ Saved", "x"), interaction=True) == [made]
+    interaction.original_response.assert_not_awaited()

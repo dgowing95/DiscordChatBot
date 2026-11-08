@@ -4,7 +4,7 @@ import io
 
 from agents import FunctionTool, function_tool,RunContextWrapper
 from classes.content_guard import check_web_request
-from classes import card, tool_cards
+from classes import card, card_kit as K, tool_cards
 import discord
 
 logger = logging.getLogger(__name__)
@@ -53,6 +53,9 @@ async def web_search(wrapper: RunContextWrapper[dict], search_request: str) -> s
         result = await web_research.research(search_request, await get_current_datetime(), seen)
     except Exception as e:
         logger.warning(f"An error occurred while searching: {e}")
+        if live is not None:  # not left saying it is searching
+            live.show_soon(K.finished(tool_cards.web_search_card(search_request),
+                                      "The search failed", label=tool_cards.WEB_SEARCHED))
         return "Error fetching search results."
     if live is not None and "sources" in seen:
         # The same card, now saying what it read.

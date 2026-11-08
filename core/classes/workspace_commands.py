@@ -103,7 +103,17 @@ def _can_manage(ctx: discord.Interaction) -> bool:
 
 def _confirm_card(user_id: int) -> K.CardSpec:
     """Reset (red) and Cancel. Only the person who asked can press them, and
-    only with Manage Server (checked again on the press)."""
+    only with Manage Server (checked again on the press). The first press
+    that counts ends it: a second one, landing before the card changed,
+    would reset twice."""
+    answered = []
+
+    async def _already(ctx) -> bool:
+        if answered:
+            await card.reply(ctx, K.error("This was answered already.", "🧹 Already answered"))
+            return True
+        answered.append(True)
+        return False
 
     async def confirm(ctx: discord.Interaction):
         if ctx.user.id != user_id:
@@ -111,6 +121,8 @@ def _confirm_card(user_id: int) -> K.CardSpec:
             return
         if not _can_manage(ctx):
             await card.reply(ctx, K.error(NEEDS_MANAGE, "🔒 Not allowed"))
+            return
+        if await _already(ctx):
             return
         from classes.workspace_manager import workspaces
         await ctx.response.edit_message(view=card.views(K.CardSpec(
@@ -130,6 +142,8 @@ def _confirm_card(user_id: int) -> K.CardSpec:
                                            "as it is free. New tasks wait for it."))[0])
 
     async def cancel(ctx: discord.Interaction):
+        if await _already(ctx):
+            return
         await ctx.response.edit_message(view=card.views(
             K.CardSpec(label="🧹 Reset cancelled", body=[K.Text("Nothing was reset.")],
                        colour=K.CLOSED))[0])

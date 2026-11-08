@@ -575,8 +575,11 @@ def plan_blocks(plan: Plan, step_states: dict | None = None) -> list:
     return [K.Text(goal), K.Divider(), *K.listing(items)]
 
 
-def steps_done(step_states: dict | None) -> int:
-    return sum(1 for state in (step_states or {}).values() if state in ("done", "partial", "skipped"))
+def steps_done(plan: Plan, step_states: dict | None) -> int:
+    """The plan's steps that are over. Only the plan's own: a step a revision
+    took out stays in step_states as "skipped" ("4 of 3 steps done")."""
+    states = step_states or {}
+    return sum(1 for step in plan.steps if states.get(step.id) in ("done", "partial", "skipped"))
 
 
 # --- states ------------------------------------------------------------------

@@ -1391,6 +1391,42 @@ async def test_new_steps_may_build_on_a_done_step_and_later_helpers_hear_the_thr
     assert wf.record["state"] == wp.DONE
 
 
+@pytest.mark.asyncio
+async def test_new_steps_keep_the_plans_title_and_count_only_the_plans_steps(env):
+    thread_id = env.thread.id
+
+    @function_tool
+    async def look() -> str:
+        """Look."""
+        thread_inbox.deliver(thread_id, 9310, 5, "Ana", "drop the rest, just write it")
+        return "ok"
+
+    env.subagent_tools = [look]
+    titled = _plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"]),
+                        ("s3", "implementer", ["s2"]))
+    titled.output[0].arguments = titled.output[0].arguments.replace(
+        '"goal"', '"title": "Printer showdown", "goal"', 1)
+    env.model = LaneModel([
+        titled, ModelStep(output=[function_call("look", {}, call_id="l")]), _report(call_id="a"),
+        ModelStep(output=[function_call("submit_review", {
+            "replies": [{"id": 1, "reply": "Writing it now."}],
+            "steps": [{"id": "s4", "role": "implementer", "brief": "Write it",
+                       "depends_on": ["s1"]}]}, call_id="rv")]),
+        _report(call_id="b"), _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    assert [s.id for s in wf.plan.steps] == ["s1", "s4"]
+    assert wf.plan.title == "Printer showdown" and wf.record["plan"]["title"] == "Printer showdown"
+    labels = [view_text(e["view"]).splitlines()[0] for m in env.thread.plans()
+              for e in m.edits if e.get("view")]
+    counts = [label for label in labels if "steps done" in label]
+    # s2 and s3 were taken out ("skipped"): they are not the plan's steps any more.
+    assert "-# 🧵 Plan · 1 of 2 steps done" in counts, counts
+    assert all(" of 2 steps done" in label for label in counts[counts.index(
+        "-# 🧵 Plan · 1 of 2 steps done"):]), counts
+    assert not any(" 3 of " in label or " 4 of " in label for label in labels), labels
+
+
 # --------------------------- review fixes ---------------------------
 
 def _thread_message_during_the_step(env, seq_id, text):

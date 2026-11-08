@@ -60,10 +60,20 @@ class RestoreButton(discord.ui.DynamicItem[discord.ui.Button], template=RESTORE_
         return cls(match["name"])
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        # Registered whatever the setting, so an old card's button answers;
+        # with skills off it restores nothing, like the hidden /skills.
+        if not skill_format.enabled():
+            await card.reply(interaction, card_kit.error("Skills are switched off.", "❌ Not restored"))
+            return
         try:
             await SkillStore().restore(interaction.guild_id, self.name, interaction.user.id)
         except SkillError as e:
             await card.reply(interaction, card_kit.error(str(e), "❌ Not restored"))
+            return
+        except Exception as e:
+            logger.warning(f"Skills: restore of {self.name} failed: {e!r}")
+            await card.reply(interaction, card_kit.error(
+                "Something went wrong. Try /skills restore in a moment.", "❌ Not restored"))
             return
         # The card it was on loses its button, and says who restored it.
         texts = card.texts_of(interaction.message)

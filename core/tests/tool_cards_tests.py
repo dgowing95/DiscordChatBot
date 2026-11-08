@@ -159,3 +159,27 @@ def test_a_link_discord_would_refuse_as_a_button_still_gets_its_card(url):
     [block] = te.page_card(url).body
     assert isinstance(block, K.Text) and "Reading a page" in block.content
     assert te.can_link("https://example.com/a") and not te.can_link(url)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_search_does_not_leave_its_card_searching(monkeypatch):
+    import asyncio
+    import json
+    from unittest.mock import AsyncMock, MagicMock
+    from agents.tool_context import ToolContext
+    from card_checks import view_text
+    from classes import tool_functions, web_research
+    monkeypatch.setattr(tool_functions, "check_web_request", AsyncMock(return_value=(True, "")))
+    monkeypatch.setattr(web_research, "research", AsyncMock(side_effect=RuntimeError("No results found.")))
+    message = MagicMock()
+    message.edit = AsyncMock()
+    channel = MagicMock()
+    channel.send = AsyncMock(return_value=message)
+    ctx = ToolContext(context={"channel": channel}, tool_name="web_search", tool_call_id="t1",
+                      tool_arguments="{}")
+    out = await tool_functions.web_search.on_invoke_tool(ctx, json.dumps({"search_request": "keyboards"}))
+    assert out == "Error fetching search results."
+    await asyncio.sleep(0)  # the edit runs in the background
+    await asyncio.sleep(0)
+    edited = message.edit.await_args.kwargs["view"]
+    assert edited.colour == K.CLOSED and "The search failed" in view_text(edited)

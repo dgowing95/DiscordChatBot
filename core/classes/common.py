@@ -1,7 +1,5 @@
 import logging
 
-import discord
-
 from classes import card_kit
 
 logger = logging.getLogger(__name__)

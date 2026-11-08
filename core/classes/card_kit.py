@@ -46,7 +46,6 @@ ASK = 0xEB459E      # pink: waiting on a person
 MAX_TEXT = 4000        # characters across every TextDisplay (Discord counts UTF-16 units)
 TEXT_BUDGET = 3800     # what split() fills a message to: room to spare under MAX_TEXT
 MAX_COMPONENTS = 40    # every component, nested ones included
-MAX_ROW_BUTTONS = 5
 MAX_BUTTON_LABEL = 80
 MAX_URL = 512
 MIN_SPLIT_ROOM = 200   # less room than this left in a card: start a new one
@@ -128,6 +127,11 @@ class CardSpec:
     colour: int = ACTIVE
     kind: str = NOTICE
     heading: int = 3  # the title's size: 3 (###) for most, 2 for a panel
+    # Keep each text whole when it fits one message: it starts the next
+    # message instead of being cut to fill this one. For a live card (the
+    # brain's commands): a text cut in two changes both messages each time it
+    # grows, a whole one only its own.
+    whole: bool = False
 
 
 # --- the everyday cards -------------------------------------------------------
@@ -164,7 +168,7 @@ def finished(spec: CardSpec, footer: str | None = None, colour: int = CLOSED,
     body = _trim_spacers([b for b in spec.body if not isinstance(b, Buttons)])
     return CardSpec(body=body, label=spec.label if label is None else label, title=spec.title,
                     footer=spec.footer if footer is None else footer, colour=colour,
-                    kind=spec.kind, heading=spec.heading)
+                    kind=spec.kind, heading=spec.heading, whole=spec.whole)
 
 
 def details(pairs) -> str:
@@ -332,7 +336,8 @@ def split(spec: CardSpec, max_text: int = TEXT_BUDGET, max_components: int = MAX
                     comps += count
                 return
             if isinstance(block, Text) and comps + 1 <= room_components \
-                    and max_text - chars >= MIN_SPLIT_ROOM:
+                    and max_text - chars >= MIN_SPLIT_ROOM \
+                    and not (spec.whole and current and size <= max_text):
                 head, tail = split_text(block.content, max_text - chars)
                 if head:
                     current.append(Text(head))
@@ -395,18 +400,26 @@ def plain(texts) -> str:
 _CODE_BLOCK = re.compile(r"```.*?```", re.DOTALL)
 # A live command's own status line (brain_progress): part of its log.
 _LOG_LINE = re.compile(r"^-# (✅ Finished|❌ Failed|⏳ Running|⏳ Starting|⌨ typed in)")
+# Most of one text of a notice that goes into a prompt. The card shows it all;
+# the model only needs what the card was about (a status card's request, a
+# helper's brief: the request is in the history already, as a message).
+HISTORY_TEXT_CHARS = 1000
 
 
 def notice_for_history(author: str, texts) -> str:
     """How a notice card reads in a prompt: plainly a status card, so the model
     does not take it for something it said (it copies its earlier replies).
     Code blocks and command status lines (a live run's commands and output)
-    are left out: they would fill later prompts and push out the real
-    conversation, as the embed fields they used to be in never did. "" when
-    nothing is left (a message that only continued the commands)."""
+    are left out, and a long text is cut (HISTORY_TEXT_CHARS): they would
+    fill later prompts and push out the real conversation, as the embed they
+    used to be in never did. "" when nothing is left (a message that only
+    continued the commands)."""
     kept = []
     for text in texts:
         text = _CODE_BLOCK.sub("", str(text or ""))
-        kept.append("\n".join(line for line in text.split("\n") if not _LOG_LINE.match(line.strip())))
+        text = "\n".join(line for line in text.split("\n") if not _LOG_LINE.match(line.strip()))
+        if len(text) > HISTORY_TEXT_CHARS:
+            text = text[:HISTORY_TEXT_CHARS - 1].rstrip() + "…"
+        kept.append(text)
     body = plain(kept)
     return f"[Status card posted by '{author}', not a chat message]\n{body}" if body else ""

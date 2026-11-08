@@ -51,6 +51,25 @@ async def test_restore_of_a_skill_that_is_back_already_says_so(monkeypatch):
     press.response.edit_message.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("off, error, says", [
+    (True, None, "Skills are switched off."),
+    (False, ConnectionError("redis down"), "Something went wrong")])
+async def test_restore_refuses_with_skills_off_and_answers_when_it_fails(monkeypatch, off, error, says):
+    from classes import skill_tools
+    if off:
+        monkeypatch.setenv("SKILLS_ENABLED", "0")
+    store = MagicMock()
+    store.restore = AsyncMock(side_effect=error)
+    monkeypatch.setattr(skill_tools, "SkillStore", lambda: store)
+    press = interaction(guild_id=GUILD, user=SimpleNamespace(id=9))
+    await skill_tools.RestoreButton("old-one").callback(press)
+    assert says in replied_text(press)
+    press.response.edit_message.assert_not_awaited()
+    if off:
+        store.restore.assert_not_awaited()
+
+
 def _components(view):
     from discord.components import _component_factory
     return [_component_factory(c, MagicMock()) for c in view.to_components()]

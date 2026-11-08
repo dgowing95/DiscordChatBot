@@ -213,6 +213,14 @@ async def test_the_confirm_button_resets_and_only_for_the_person_who_asked():
         await _button(view, "Reset").callback(ctx)
     fake.reset.assert_awaited_once_with(7)
     assert "Workspace reset" in view_text(ctx.edit_original_response.await_args.kwargs["view"])
+    # A second press that lands before the card changed resets nothing more.
+    again = _interaction()
+    with patch("classes.workspace_manager.workspaces", return_value=fake):
+        await _button(view, "Reset").callback(again)
+        await _button(view, "Cancel").callback(again)
+    fake.reset.assert_awaited_once()
+    again.response.edit_message.assert_not_awaited()
+    assert "answered already" in replied_text(again)
 
 
 @pytest.mark.asyncio

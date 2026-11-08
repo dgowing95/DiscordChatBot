@@ -269,7 +269,7 @@ class WorkTranscript:
             footer.append(self._hint)
         colour = self._final[1] if self._final is not None else K.WORKING
         return CardSpec(label=self._head_label(), title=self._title, body=body,
-                        footer=" · ".join(footer), colour=colour)
+                        footer=" · ".join(footer), colour=colour, whole=True)
 
 
 # The tools that use the server's workspace: the first of them posts the
@@ -486,9 +486,10 @@ class BrainProgressHooks(RunHooks):
         except Exception as e:
             logger.warning(f"Brain progress: render failed: {e}")
             return
-        # While it works only the newest message is edited (the earlier ones
-        # are full and done); the finish updates them all (their colour).
-        if not await self.card.show(spec, edit_last_only=not self._finalized):
+        # Only a message whose content changed is edited: with the commands
+        # kept whole (render), that is the newest one while it works; the
+        # finish updates them all (their colour).
+        if not await self.card.show(spec):
             # Usually a Discord rate limit (edits: 5/minute per channel) or
             # a network error — back off and keep the brain's run going.
             logger.warning("Brain progress: update failed, backing off")
