@@ -87,12 +87,6 @@ def enabled(env=os.environ) -> bool:
     return _env_flag("WORKFLOW_ENABLED", True, env)
 
 
-def from_automations(env=os.environ) -> bool:
-    """WORKFLOW_FROM_AUTOMATIONS (default on): schedules, rules and
-    follow-ups may start one, approved at once."""
-    return _env_flag("WORKFLOW_FROM_AUTOMATIONS", True, env)
-
-
 def ask_timeout(env=os.environ) -> int:
     """Seconds a question in the thread waits for an answer
     (WORKFLOW_ASK_TIMEOUT, default 300)."""
@@ -100,7 +94,7 @@ def ask_timeout(env=os.environ) -> int:
 
 
 def plan_approval_seconds(env=os.environ) -> int:
-    """Seconds the plan waits for Approve before it starts anyway
+    """Seconds the plan waits for Approve before it is cancelled
     (WORKFLOW_PLAN_APPROVAL_SECONDS, default 900)."""
     return _env_int("WORKFLOW_PLAN_APPROVAL_SECONDS", DEFAULT_PLAN_APPROVAL_SECONDS, env)
 

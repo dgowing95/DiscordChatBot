@@ -110,8 +110,8 @@ New variables, all optional:
 | `BRAIN_MAX_CONCURRENT` / `BRAIN_QUEUE_WAIT` | Brain calls at once (3), and seconds a call waits for a free one before the bot says it is busy (120) |
 | `LLAMA_CTX_SIZE` / `LLAMA_PARALLEL` / `LLAMA_CACHE_RAM_MIB` | docker compose only: llama.cpp's total context (80000), slots (1) and prompt cache in MiB (8192). These were fixed in `docker-compose.yaml` before, at the same values |
 | `CONTENT_GUARD_MAX_RETRIES` / `CONTENT_GUARD_RETRY_BACKOFF` | Retries of the moderation call on 429/5xx (2) and its base backoff in seconds (2). The chart had these keys before; now `.env` can set them too |
-| `WORKFLOW_ENABLED` / `WORKFLOW_FROM_AUTOMATIONS` | New: workflows (`/task`, the brain's `start_workflow`; on), and whether schedules, rules and follow-ups may start one, approved at once (on) |
-| `WORKFLOW_PLAN_APPROVAL_SECONDS` / `WORKFLOW_PLAN_REVISIONS` / `WORKFLOW_MAX_STEPS` | New: seconds a plan waits for Approve before it starts anyway (900), changes a plan may get (3), steps in one plan (8) |
+| `WORKFLOW_ENABLED` | New: workflows (`/task`, the brain's `start_workflow`; on). Schedules, rules and follow-ups never start one |
+| `WORKFLOW_PLAN_APPROVAL_SECONDS` / `WORKFLOW_PLAN_REVISIONS` / `WORKFLOW_MAX_STEPS` | New: seconds a plan waits for Approve before it is cancelled (900), changes a plan may get (3), steps in one plan (8) |
 | `WORKFLOW_TIMEOUT` / `WORKFLOW_MAX_TURNS` / `WORKFLOW_MAX_TOKENS` | New: caps on one workflow: seconds (3600), model turns (300) and tokens in and out (4,000,000; 0 = off), every agent together |
 | `WORKFLOW_MAX_PER_GUILD` | New: workflows running at once per server (1) |
 | `SUBAGENT_MODEL` / `SUBAGENT_LLM_HOST` / `SUBAGENT_LLM_API_KEY` | New: a workflow helper's own LLM. Empty = the brain's, then `LLM_*` |
@@ -199,7 +199,7 @@ persona to put in its own words. What users notice:
 - **Big jobs run as workflows** in a thread of their own (`docs/workflows.md`). The brain hands
   one over when a job has many parts (a report from many sources, a small program), or anyone can
   start one with `/task`. A plan is posted first, with Approve / Edit / Cancel for the person who
-  asked; no answer in 15 minutes and it starts anyway. Before the plan it may look at how the job
+  asked; no answer in 15 minutes and it is cancelled. Before the plan it may look at how the job
   is laid out and ask what changes the plan. The steps run in turn, research side by side, and files
   arrive in the thread and in the channel, and the bot replies in the channel when it ends. Saying just
   "stop" in the thread, or Cancel, stops it. One runs per server at a time; a restart stops it
@@ -268,7 +268,7 @@ from the chart. Also new:
 | `skills.enabled`, `skills.maxPerGuild`, `skills.maxVersions`, `skills.maxBytes`, `skills.maxBodyChars`, `skills.maxFiles`, `skills.indexMax`, `skills.reflection.enabled`, `skills.reflection.minToolCalls`, `skills.curator.enabled`, `skills.curator.intervalHours`, `skills.curator.minSkills`, `skills.curator.retireDays` | true, 100, 50, 65536, 8000, 10, 20, true, 6, true, 24, 5, 60 | The `SKILLS_*` settings above |
 | `persona.maxTurns` | **4** (was 20 as `llmMaxTurns`) | `PERSONA_MAX_TURNS` |
 | `brain.workspace.idleSeconds`, `snapshotIntervalSeconds`, `maxWarm`, `jobRetentionHours`, `cpuLimit`, `pidsLimit`, `prewarm` | 900, 1800, 4, 72, empty, 512, true | The `WORKSPACE_*` settings above. `WORKSPACE_INSTANCE` is `<namespace>-<release name>`. The core pod's `terminationGracePeriodSeconds` is `snapshotTimeout` + 30, for the shutdown save |
-| `workflows.enabled`, `fromAutomations`, `askTimeout`, `planApprovalSeconds`, `planRevisions`, `maxSteps`, `timeout`, `maxTurns`, `maxTokens`, `maxPerGuild` | true, true, 300, 900, 3, 8, 3600, 300, 4000000, 1 | The `WORKFLOW_*` settings above |
+| `workflows.enabled`, `askTimeout`, `planApprovalSeconds`, `planRevisions`, `maxSteps`, `timeout`, `maxTurns`, `maxTokens`, `maxPerGuild` | true, 300, 900, 3, 8, 3600, 300, 4000000, 1 | The `WORKFLOW_*` settings above |
 | `subagents.model`, `llmHost`, `apiKey`, `reasoningEffort`, `callTimeout`, `maxTurns`, `maxConcurrent` | empty (= `brain.*`), 100, 2 | The `SUBAGENT_*` settings above; the key goes in the Secret as `SUBAGENT_LLM_API_KEY` |
 
 With `llm.engine: strata`, the render now fails when `persona.apiKey`, `brain.apiKey`, `research.apiKey`,
@@ -317,8 +317,8 @@ unchanged.
 | `discord_bot_llm_call_seconds{caller="brain"}` | New caller: the brain's model calls (the persona's stay `main`) |
 | `discord_bot_sandbox_thread_messages_total{outcome}` | Renamed `discord_bot_workflow_thread_messages_total` (same label): thread messages now go to workflows. Update dashboards |
 | `discord_bot_sandbox_input_presentation_seconds`, `discord_bot_sandbox_input_response_seconds`, `discord_bot_sandbox_stale_actions_blocked_total`, `discord_bot_sandbox_questions_total`, `discord_bot_sandbox_unresolved_input_total`, `discord_bot_sandbox_continuations_total` | Removed, with the sandbox thread they measured. Remove them from dashboards |
-| `discord_bot_workflows_total{trigger,end_state}`, `discord_bot_workflow_seconds{end_state}`, `discord_bot_workflow_subagents`, `discord_bot_workflow_turns` | New: each workflow (`brain`, `slash`, `automation`; `done`, `partial`, `failed`, `cancelled`), its time, steps and model turns |
-| `discord_bot_workflow_plan_approval_total{outcome}`, `discord_bot_workflows_running` | New: how plans were approved (`approved`, `edited`, `cancelled`, `timeout`, `auto`) and workflows running now |
+| `discord_bot_workflows_total{trigger,end_state}`, `discord_bot_workflow_seconds{end_state}`, `discord_bot_workflow_subagents`, `discord_bot_workflow_turns` | New: each workflow (`brain`, `slash`, `dev` for the test command; `done`, `partial`, `failed`, `cancelled`), its time, steps and model turns |
+| `discord_bot_workflow_plan_approval_total{outcome}`, `discord_bot_workflows_running` | New: how plans were answered (`approved`, `edited`, `cancelled`, `timeout`, which cancels, `dev` for the test command) and workflows running now |
 | `discord_bot_llm_call_seconds{caller="workflow_manager"\|"workflow_subagent"}` | New callers: a workflow's manager and helpers |
 | `discord_bot_workflow_scouts_total{outcome}`, `discord_bot_workflow_plan_questions_total{outcome}` | New: how scouts ended (`done`, `reported_at_limit`, `stopped`) and questions before the plan (`answered`, `unanswered`) |
 | `discord_bot_workflow_tokens` | New: tokens, in and out, one workflow used |

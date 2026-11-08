@@ -103,10 +103,9 @@ async def write_plan(wf, change: str = "") -> wp.Plan:
 
 
 def _rounds_left(wf) -> tuple:
-    """Which rounds the manager may still ask for. An automatic run has
-    nobody to ask."""
+    """Which rounds the manager may still ask for."""
     rounds = [] if wf.scouted else [DISCOVER]
-    if not wf.asked and not wf.record["automatic"] and wf.ledger is not None:
+    if not wf.asked and wf.ledger is not None:
         rounds.append(ASK)
     return tuple(rounds)
 
@@ -182,8 +181,7 @@ async def _discover(wf, raw) -> None:
     subjects = wp.clean_scout_subjects(raw)
     if not subjects or wf.cancel_reason:
         return
-    await workflows._post(wf.thread, content=DISCOVERY_NOTE + (
-        "" if wf.record["automatic"] else PLAN_PING_NOTE))
+    await workflows._post(wf.thread, content=DISCOVERY_NOTE + PLAN_PING_NOTE)
     try:
         async with brain._acquire_workspace(wf.guild_id) as lease:
             wf.lease = lease

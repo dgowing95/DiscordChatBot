@@ -539,9 +539,10 @@ async def voice_busy_notice(message) -> None:
 
 async def workflow_dev_inject(message) -> bool:
     """WORKFLOW_DEV_INJECT=1 only (local testing and E2E, never in the chart):
-    "!workflow <request>" starts a workflow, as /task does. A webhook cannot
-    use a slash command, and the brain's own hand-off is the model's choice,
-    so a check going through it fails at random."""
+    "!workflow <request>" starts a workflow, as /task does, with its plan
+    approved at once. A webhook cannot use a slash command or press Approve,
+    and the brain's own hand-off is the model's choice, so a check going
+    through it fails at random."""
     from classes import workflow_policy, workflows
     content = message.content or ""
     if not content.startswith("!workflow ") or message.guild is None:
@@ -552,7 +553,7 @@ async def workflow_dev_inject(message) -> bool:
                "requester_name": message.author.display_name, "channel": message.channel,
                "discord_client": client}
     result = await workflows.start_workflow(context, content.partition(" ")[2],
-                                            trigger=workflows.TRIGGER_SLASH, message=message)
+                                            trigger=workflows.TRIGGER_DEV, message=message)
     if not result.ok:
         await card.send_card(message.channel, K.error(result.text), reference=message,
                              mention_author=False)

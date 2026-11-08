@@ -55,8 +55,8 @@ IMAGE_TIMEOUT = 420
 # A workspace task: the container may start cold (and its image be pulled),
 # then a brain run of a few model calls.
 WORKSPACE_TIMEOUT = 420
-# A whole Tier 3 workflow: plan, the approval wait (WORKFLOW_PLAN_APPROVAL_SECONDS
-# is short here), its steps and the reply. start_stack.sh caps it with WORKFLOW_TIMEOUT.
+# A whole Tier 3 workflow: plan (approved at once by `!workflow`), its steps and
+# the reply. start_stack.sh caps it with WORKFLOW_TIMEOUT.
 WORKFLOW_TIMEOUT = 1200
 # `!workflow` starts one at once, so anything longer means it never started.
 WORKFLOW_START_TIMEOUT = 60
@@ -381,8 +381,8 @@ class Run:
     async def workflow(self):
         """A Tier 3 workflow, by structure only: `!workflow` starts it (the
         brain's own hand-off is the model's choice, so a check through it
-        fails at random), the plan is posted, no one presses Approve (a
-        webhook cannot), so it starts after the short approval wait, and the
+        fails at random), the plan is posted already approved (a webhook
+        cannot press Approve, and an unanswered plan is cancelled), and the
         end and the persona's reply are posted."""
         ended = lambda: metric(self.session, "discord_bot_workflows_total")
         running = lambda: metric(self.session, "discord_bot_workflows_running")

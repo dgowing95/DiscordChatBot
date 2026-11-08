@@ -17,10 +17,10 @@ Which tools a call gets depends on what kind of run it is:
 | generate_image (IMAGE_GEN_ENABLED)                      | yes  | yes       | yes   |
 | skills: use_skill, save_skill, search_skills (SKILLS_ENABLED)           | yes  | yes       | yes   |
 | workspace: attach_file, save_messages_to_file, ask_user (+ Shell) | yes | yes | yes |
-| start_workflow (when Tier 3 is allowed: brain_policy.effective_tier) | yes | yes* | no |
+| start_workflow (when Tier 3 is allowed: brain_policy.effective_tier) | yes | no | no |
 | report                                                  | yes  | yes       | yes   |
 
-(*) only with WORKFLOW_FROM_AUTOMATIONS. Never in a reply nobody asked for.
+start_workflow is never in a reply nobody asked for, nor in an automatic run.
 
 An automatic run (a schedule, a rule or a follow-up) has no personal memory
 and cannot set up more automations, as before. Its usual job is "read the poll,

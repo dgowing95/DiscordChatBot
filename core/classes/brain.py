@@ -942,7 +942,6 @@ async def _run_and_deliver(ctx, lease, agent, task, run_config, hooks, progress,
         if workflow.get("thread_url"):
             out.status = brain_result.STARTED_WORKFLOW
             out.thread_url = workflow["thread_url"]
-            out.plan_to_approve = not ctx.get("automatic")
             out.must_keep = [workflow["thread_url"]]
     elif stopped is None:
         args = ctx.get("brain_report_args")

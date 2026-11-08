@@ -220,7 +220,7 @@ def test_illegal_moves_raise(state, event):
 
 def test_settings_defaults_and_overrides():
     env = {}
-    assert (wp.enabled(env), wp.from_automations(env)) == (True, True)
+    assert wp.enabled(env)
     assert wp.ask_timeout(env) == 300 and wp.plan_approval_seconds(env) == 900
     assert wp.plan_revisions(env) == 3 and wp.max_steps(env) == 8
     assert wp.timeout(env) == 3600 and wp.max_turns(env) == 300
@@ -230,7 +230,6 @@ def test_settings_defaults_and_overrides():
     assert wp.turn_reserve({"WORKFLOW_MAX_TURNS": "50"}) == 10
     assert wp.max_per_guild(env) == 1 and wp.subagent_max_turns(env) == 100
     assert not wp.enabled({"WORKFLOW_ENABLED": "0"})
-    assert not wp.from_automations({"WORKFLOW_FROM_AUTOMATIONS": "false"})
     assert wp.max_steps({"WORKFLOW_MAX_STEPS": "junk"}) == 8
     assert wp.timeout({"WORKFLOW_TIMEOUT": "60"}) == 60
 

@@ -101,13 +101,13 @@ def test_brain_limits_are_backstops(monkeypatch):
     assert brain_policy.brain_max_turns({"BRAIN_MAX_TURNS": "junk"}) == 100
 
 
-def test_only_asked_for_chat_and_allowed_automatic_runs_may_start_a_workflow():
+def test_only_asked_for_chat_may_start_a_workflow():
     tier = brain_policy.effective_tier
     assert tier(env={}) == brain_policy.TIER_WORKFLOW
     assert tier(unprompted=True, env={}) == brain_policy.TIER_BRAIN
     assert tier(voice=True, env={}) == brain_policy.TIER_BRAIN
-    assert tier(automatic=True, env={}) == brain_policy.TIER_WORKFLOW
-    assert tier(automatic=True, env={"WORKFLOW_FROM_AUTOMATIONS": "0"}) == brain_policy.TIER_BRAIN
+    # A schedule, rule or follow-up: nobody is there to approve the plan.
+    assert tier(automatic=True, env={}) == brain_policy.TIER_BRAIN
     assert tier(env={"WORKFLOW_ENABLED": "false"}) == brain_policy.TIER_BRAIN
 
 

@@ -60,11 +60,10 @@ def effective_tier(*, unprompted: bool = False, automatic: bool = False, voice: 
     """The highest tier a brain call may use: 3 when it may start a
     workflow (classes/workflows.py), else 2. Never from a reply nobody asked
     for (F11), never in a voice turn (not yet: a call has no thread to
-    follow), and from an automatic run only with WORKFLOW_FROM_AUTOMATIONS."""
+    follow), and never from an automatic run (a schedule, a rule or a
+    follow-up): nobody is there to approve its plan."""
     from classes import workflow_policy
-    if unprompted or voice or not workflow_policy.enabled(env):
-        return TIER_BRAIN
-    if automatic and not workflow_policy.from_automations(env):
+    if unprompted or voice or automatic or not workflow_policy.enabled(env):
         return TIER_BRAIN
     return TIER_WORKFLOW
 

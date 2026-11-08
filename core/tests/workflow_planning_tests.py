@@ -77,7 +77,7 @@ async def test_discover_then_ask_then_plan_and_what_was_learned_reaches_every_he
         _ask("Metric or imperial?"),
         _plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"])),
         _report(call_id="a"), _report(call_id="b"), _report(call_id="f")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await _question(env, "Metric or imperial?")
     thread_inbox.deliver(env.thread.id, 9000, 5, "Ana", "Metric please")
     await _approve(wf)
@@ -96,7 +96,7 @@ async def test_each_round_happens_once_and_its_tool_goes_away(env):
     env.model = LaneModel([_discover("Which table?"), _report(call_id="s"), _ask("Which year?"),
                            _plan_call(("s1", "researcher", [])), _report(call_id="a"),
                            _report(call_id="f")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await _question(env, "Which year?")
     thread_inbox.deliver(env.thread.id, 9001, 5, "Ana", "2025")
     await _approve(wf)
@@ -126,7 +126,7 @@ async def test_asking_for_both_in_one_turn_runs_both_rounds(env):
     env.model = LaneModel([both, _report(facts=("A table",), call_id="s"),
                            _plan_call(("s1", "researcher", [])), _report(call_id="a"),
                            _report(call_id="f")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await _question(env, "Which year?")
     thread_inbox.deliver(env.thread.id, 9002, 5, "Ana", "2025")
     await _approve(wf)
@@ -150,25 +150,13 @@ async def test_the_requester_is_told_a_plan_is_coming_without_a_ping(env):
     env.model = LaneModel([_discover("Which table?"), _report(call_id="s"),
                            _plan_call(("s1", "researcher", [])), _report(call_id="a"),
                            _report(call_id="f")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await _approve(wf)
     await _finish(wf)
     note = next(m for m in env.thread.sent if "Checking a few things" in (m.kwargs["content"] or ""))
     assert "ready to approve" in note.kwargs["content"] and "<@" not in note.kwargs["content"]
     assert "<@5>" in view_text(env.thread.plans()[0].kwargs["view"])
 
-
-@pytest.mark.asyncio
-async def test_an_automatic_run_is_not_told_to_expect_a_ping_and_cannot_ask(env):
-    env.model = LaneModel([_discover("Which table?"), _report(call_id="s"),
-                           _plan_call(("s1", "researcher", [])), _report(call_id="a"),
-                           _report(call_id="f")])
-    wf, _ = await _start(env)
-    await _finish(wf)
-    assert "ask_requester" not in _tools_of(env.model.calls[0])
-    assert "discover" in _tools_of(env.model.calls[0])
-    note = next(t for t in env.thread.texts() if "Checking a few things" in t)
-    assert "approve" not in note
 
 
 @pytest.mark.asyncio
@@ -215,7 +203,7 @@ async def test_scouts_hold_the_workspace_only_while_they_look(env, monkeypatch):
     env.model = LaneModel([_discover("Which table?"), _report(call_id="s"), _ask("Which year?"),
                            _plan_call(("s1", "researcher", [])), _report(call_id="a"),
                            _report(call_id="f")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await _question(env, "Which year?")
     assert held == [] and wf.lease is None
     thread_inbox.deliver(env.thread.id, 9003, 5, "Ana", "2025")
@@ -281,7 +269,7 @@ async def test_cancel_during_discovery_stops_the_scouts(env):
     env.subagent_tools = [long_look]
     env.model = LaneModel([_discover("Which table?"),
                            ModelStep(output=[function_call("long_look", {}, call_id="l")])])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await asyncio.wait_for(started.wait(), 5)
     _, call = _press(wf, "cancel")
     await call
@@ -295,9 +283,9 @@ async def test_a_scout_gets_the_job_and_files_from_the_chat_but_no_plan(env):
                            _plan_call(("s1", "researcher", [])), _report(call_id="a"),
                            _report(call_id="f")])
     ctx = {"guild_id": 1, "user_id": 5, "requester_name": "Ana", "channel": env.origin,
-           "automatic": True, "original_message": None, "brain_inputs": ["sales.csv"],
+           "original_message": None, "brain_inputs": ["sales.csv"],
            "job_dir": "jobs/c77-1-abc"}
-    await workflows.start_workflow(ctx, "report on this", trigger=workflows.TRIGGER_SLASH)
+    await workflows.start_workflow(ctx, "report on this", trigger=workflows.TRIGGER_DEV)
     wf = workflows.get(next(iter(workflows._RUNNING)))
     await _finish(wf)
     scout = _text_of(env.model.calls[1])
@@ -458,7 +446,7 @@ async def test_a_cancelled_scout_gets_no_last_report(env):
     env.subagent_tools = [long_look]
     env.model = LaneModel([_discover("Rail delays"),
                            ModelStep(output=[function_call("long_look", {}, call_id="l")])])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await asyncio.wait_for(started.wait(), 5)
     _, call = _press(wf, "cancel")
     await call
@@ -502,7 +490,7 @@ async def test_a_cancel_while_waiting_for_the_workspace_starts_no_scouts(env, mo
 
     monkeypatch.setattr(brain, "_acquire_workspace", _cancelled_meanwhile)
     env.model = LaneModel([_discover("Rail delays")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await _finish(wf)
     assert wf.record["state"] == wp.CANCELLED
     assert _scout_card(env, "Rail delays") is None
@@ -569,7 +557,7 @@ async def test_a_finished_plan_card_says_how_it_ended(env):
     env.model = LaneModel([_plan_call(("s1", "researcher", [])),
                            ModelStep(output=[function_call("long_look", {}, call_id="l")]),
                            _report(call_id="f")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await _approve(wf)
     await asyncio.wait_for(started.wait(), 5)
     _, call = _press(wf, "cancel")
@@ -593,7 +581,7 @@ def test_the_manager_can_only_name_a_subject():
 async def test_a_button_answers_and_its_line_shows_on_the_question(env):
     env.model = LaneModel([_ask("Metric or imperial?"), _plan_call(("s1", "researcher", [])),
                            _report(call_id="a"), _report(call_id="f")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     question = await _question(env, "Metric or imperial?")
     labels = [item.label for item in question.kwargs["view"].buttons]
     assert labels == ["Yes", "No", "Answer…", brain_question.YOU_DECIDE]
@@ -610,7 +598,7 @@ async def test_a_button_answers_and_its_line_shows_on_the_question(env):
 async def test_you_decide_tells_the_manager_so(env):
     env.model = LaneModel([_ask("Metric or imperial?"), _plan_call(("s1", "researcher", [])),
                            _report(call_id="a"), _report(call_id="f")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     question = await _question(env, "Metric or imperial?")
     brain_inbox.deliver(question.id, 5, brain_question.YOU_DECIDE_ANSWER)
     await _approve(wf)
@@ -622,7 +610,7 @@ async def test_you_decide_tells_the_manager_so(env):
 async def test_someone_else_cannot_answer_for_the_requester(env):
     env.model = LaneModel([_ask("Metric or imperial?"), _plan_call(("s1", "researcher", [])),
                            _report(call_id="a"), _report(call_id="f")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     question = await _question(env, "Metric or imperial?")
     thread_inbox.deliver(env.thread.id, 9004, 6, "Bo", "imperial")
     await asyncio.sleep(0.05)
@@ -654,7 +642,7 @@ async def test_an_older_message_is_not_taken_for_the_answer(env):
         ModelStep(output=[function_call("submit_review", {
             "replies": [{"id": 1, "reply": "Blue it is."}]}, call_id="rv")]),
         _report(call_id="f")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await _approve(wf)
     await _until(lambda: wf.question_id is not None)
     await asyncio.sleep(0.05)
@@ -671,7 +659,7 @@ async def test_the_first_unanswered_question_ends_the_round(env, monkeypatch):
     env.model = LaneModel([_ask("First?", "Second?", "Third?", "Fourth?"),
                            _plan_call(("s1", "researcher", [])), _report(call_id="a"),
                            _report(call_id="f")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await _approve(wf)
     await _finish(wf)
     assert not any("Second?" in text for text in env.thread.texts())
@@ -684,7 +672,7 @@ async def test_at_most_three_questions_are_asked(env):
     env.model = LaneModel([_ask("First?", "Second?", "Third?", "Fourth?"),
                            _plan_call(("s1", "researcher", [])), _report(call_id="a"),
                            _report(call_id="f")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     for seq, question in enumerate(("First?", "Second?", "Third?")):
         await _question(env, question)
         thread_inbox.deliver(env.thread.id, 9010 + seq, 5, "Ana", "yes")
@@ -697,7 +685,7 @@ async def test_at_most_three_questions_are_asked(env):
 @pytest.mark.asyncio
 async def test_stop_during_a_question_cancels(env):
     env.model = LaneModel([_ask("Metric or imperial?")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await _question(env, "Metric or imperial?")
     thread_inbox.deliver(env.thread.id, 9006, 5, "Ana", "stop", stop_word=True)
     await _finish(wf)
@@ -707,7 +695,7 @@ async def test_stop_during_a_question_cancels(env):
 @pytest.mark.asyncio
 async def test_cancel_during_a_question_closes_it(env):
     env.model = LaneModel([_ask("Metric or imperial?")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     question = await _question(env, "Metric or imperial?")
     workflows.request_cancel(wf, "the requester pressed Cancel")
     await _finish(wf)
@@ -720,7 +708,7 @@ async def test_an_answer_is_never_sent_to_the_content_guard(env, monkeypatch):
     guard = _blocks(monkeypatch, "forbidden")
     env.model = LaneModel([_ask("Which one?"), _plan_call(("s1", "researcher", [])),
                            _report(call_id="a"), _report(call_id="f")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await _question(env, "Which one?")
     thread_inbox.deliver(env.thread.id, 9007, 5, "Ana", "something forbidden")
     await _approve(wf)
@@ -738,7 +726,7 @@ async def test_two_helpers_ask_one_at_a_time(env):
         ModelStep(output=[function_call("report", {"status": "needs_input", "facts": [],
                                                    "say_to_user": "Dollars?"}, call_id="q2")]),
         _report(call_id="a"), _report(call_id="b"), _report(call_id="f")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await _approve(wf)
     await _until(lambda: wf.question_id is not None)
     await asyncio.sleep(0.05)
@@ -769,7 +757,7 @@ async def test_a_message_during_discovery_reaches_the_next_plan_run_and_costs_no
                            ModelStep(output=[function_call("look", {}, call_id="l")]),
                            _report(call_id="s"), _plan_call(("s1", "researcher", [])),
                            _report(call_id="a"), _report(call_id="f")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await _approve(wf)
     await _finish(wf)
     assert wf.revisions == 0
@@ -785,7 +773,7 @@ async def test_a_revised_plan_keeps_what_was_learned_and_can_still_ask(env):
                            _plan_call(("s1", "researcher", []), call_id="p1"),
                            _ask("Which year?"), _plan_call(("s2", "researcher", []), call_id="p2"),
                            _report(call_id="a"), _report(call_id="f")])
-    wf, _ = await _start(env, automatic=False)
+    wf, _ = await _start(env, approved=False)
     await _until(lambda: wf.state == wp.AWAITING_APPROVAL and wf.approval is not None)
     thread_inbox.deliver(env.thread.id, 9022, 5, "Ana", "add a year")
     await _question(env, "Which year?")

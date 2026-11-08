@@ -139,8 +139,8 @@ Metrics (scraped by Prometheus from the /metrics HTTP endpoint):
   Histogram discord_bot_workflow_turns
            Model turns per workflow, every agent together.
   Counter  discord_bot_workflow_plan_approval_total{outcome}
-           How plans were approved (approved / edited / cancelled / timeout /
-           auto).
+           How plans were answered (approved / edited / cancelled / timeout,
+           which cancels / dev, the test command's).
   Counter  discord_bot_workflow_scouts_total{outcome}
            How scouts ended (done / reported_at_limit / stopped).
   Counter  discord_bot_workflow_plan_questions_total{outcome}

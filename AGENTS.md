@@ -231,7 +231,7 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
    | `join_voice_channel` / `leave_voice_channel` (`VOICE_ENABLED`) | join | no | leave |
    | `generate_image` (`IMAGE_GEN_ENABLED`) | yes | yes | yes |
    | `use_skill`, `save_skill`, `search_skills` (`SKILLS_ENABLED`) | yes | yes | yes |
-   | `start_workflow` (`WORKFLOW_ENABLED`; never in a reply nobody asked for) | yes | with `WORKFLOW_FROM_AUTOMATIONS` | no |
+   | `start_workflow` (`WORKFLOW_ENABLED`; never in a reply nobody asked for) | yes | no | no |
    | `attach_file`, `save_messages_to_file`, `ask_user`, `report`, the Shell tools | yes | yes | yes |
 
    - **It works inline, in the channel**, not in a thread: each tool posts its own card, attached files
@@ -393,7 +393,7 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
     | Discovery, if asked for | up to 2 scouts (a SandboxAgent, `SCOUT_INSTRUCTIONS`, mode scout) | subagent | `report` |
     | Questions, if asked for | up to 3 in the thread (`ask_requester`), one at a time | - | a button, a thread message, or `WORKFLOW_ASK_TIMEOUT` |
     | Plan | the manager (a plain Agent, `MANAGER_INSTRUCTIONS`, `brain_tools(mode="manager")`), a fresh run after each round above | brain | `discover`, `ask_requester` or `submit_plan` |
-    | Approval | the plan card with Approve / Edit / Cancel (`workflow_views.py`), requester only | - | a button, a thread message (a change), or `WORKFLOW_PLAN_APPROVAL_SECONDS` |
+    | Approval | the plan card with Approve / Edit / Cancel (`workflow_views.py`), requester only | - | a button, a thread message (a change), or `WORKFLOW_PLAN_APPROVAL_SECONDS`, which cancels it |
     | Steps, in waves (`next_wave`): researchers side by side, an implementer alone | a helper per step (a SandboxAgent, `SUBAGENT_INSTRUCTIONS`, mode researcher / implementer) | subagent | `report` |
     | Between steps | the manager answers waiting thread messages, may change the remaining steps | brain | `submit_review` |
     | Before the first implementer after researchers | a verifier checks what every researcher not yet checked found; a wrong one runs again at once | subagent | `submit_verdict` |
@@ -670,14 +670,13 @@ reads has a row here and a line in `.env.example`, that every row is read by som
 | `BRAIN_LLM_API_KEY` | the brain's key; empty = `LLM_API_KEY`, but only when the brain's host is `LLM_HOST` (else none; startup warns). Chart: `brain.apiKey` |
 | `BRAIN_REASONING_EFFORT` | the brain's `reasoning_effort` [medium]. Chart: `brain.reasoningEffort` |
 | `WORKFLOW_ENABLED` | `0`/`false` removes `/task` and `start_workflow` [on]. Chart: `workflows.enabled` |
-| `WORKFLOW_FROM_AUTOMATIONS` | schedules, rules and follow-ups may start a workflow, approved at once [on]. Chart: `workflows.fromAutomations` |
 | `WORKFLOW_ASK_TIMEOUT` | seconds a workflow step's question in the thread waits for the requester [300]. Chart: `workflows.askTimeout` |
-| `WORKFLOW_PLAN_APPROVAL_SECONDS` | seconds a plan waits for Approve before it starts anyway [900]. Chart: `workflows.planApprovalSeconds` |
+| `WORKFLOW_PLAN_APPROVAL_SECONDS` | seconds a plan waits for Approve before it is cancelled [900]. Chart: `workflows.planApprovalSeconds` |
 | `WORKFLOW_PLAN_REVISIONS` | changes a plan may get before it must be approved or cancelled [3]. Chart: `workflows.planRevisions` |
 | `WORKFLOW_MAX_STEPS` | steps in one plan [8]. Chart: `workflows.maxSteps` |
 | `WORKFLOW_TIMEOUT` / `WORKFLOW_MAX_TURNS` / `WORKFLOW_MAX_TOKENS` | backstops on one workflow: wall-clock seconds [3600], model turns [300] and tokens in and out [4000000; 0 = off] across all its agents; out of any stops it with what exists. Chart: `workflows.timeout` / `maxTurns` / `maxTokens` |
 | `WORKFLOW_MAX_PER_GUILD` | workflows running at once per server [1]. Chart: `workflows.maxPerGuild` |
-| `WORKFLOW_DEV_INJECT` | local testing and E2E only, never in the chart: `!workflow <request>` starts a workflow directly, since a webhook cannot use `/task` |
+| `WORKFLOW_DEV_INJECT` | local testing and E2E only, never in the chart: `!workflow <request>` starts a workflow with its plan approved at once, since a webhook cannot use `/task` or press Approve |
 | `SUBAGENT_MODEL` / `SUBAGENT_LLM_HOST` / `SUBAGENT_LLM_API_KEY` | a workflow helper's connection; empty = the brain's, then `LLM_*` (the key only for the same host). Chart: `subagents.model` / `llmHost` / `apiKey` |
 | `SUBAGENT_REASONING_EFFORT` / `SUBAGENT_CALL_TIMEOUT_SECONDS` | a helper's; empty = the brain's. Chart: `subagents.reasoningEffort` / `callTimeout` |
 | `SUBAGENT_MAX_TURNS` | backstop on one helper's model turns [100]. Chart: `subagents.maxTurns` |
