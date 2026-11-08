@@ -19,8 +19,10 @@ You never pick one: ask in plain words and the bot decides. `/task` starts a wor
 
 - **Each tool says what it did.** A search, a page it read, a poll or an event each post a small
   card in the channel, so you can see where an answer came from.
-- **"🧠 Working on it"** appears when the bot runs code or works with files. With
-  `/workspace progress on` it also shows the commands and their output live.
+- **"🧠 Working on it"** appears when the bot runs code or works with files. One line on it says what
+  the bot is doing right now, in plain words ("⏳ Installing python libraries", "⏳ Creating the
+  script"), updated about every 30 seconds. With `/workspace progress on` it shows the commands and
+  their output live instead.
 - **Files arrive in the channel** before the answer: a chart, a CSV, a script.
 - **Then the answer**, in the bot's own voice, with the facts it found.
 

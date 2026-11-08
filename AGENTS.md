@@ -66,6 +66,7 @@ core/                    # the bot (what runs in production)
     loop_guard.py          # P stops a brain run that repeats itself (also a page or search asked again)
     context_trim.py        # P cuts old tool outputs in a long brain run; keeps a local run in its slot
     brain_progress.py      # the "Working on it" status card and live command output
+    brain_status.py        # the card's one-line status in plain words ("Creating the script")
     workspace_tools.py     # shell wrappers, attach_file and delivery, in/ files, thread tools
     workspace_inputs.py    # P which chat files go to a brain call's in/
     workspace_lifecycle.py # P the per-guild workspace state machine, WORKSPACE_* settings
@@ -218,7 +219,7 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
    | Which tools a call gets | `brain_tools.py` |
    | What the persona is told; must-keep facts | `brain_result.py` |
    | Loop guard, context trimming, limits | `loop_guard.py`, `context_trim.py`, `brain_policy.py` |
-   | Status card, live command output | `brain_progress.py` |
+   | Status card, live command output | `brain_progress.py` (its status line: `brain_status.py`) |
    | Shell wrappers, `attach_file`, delivery, `in/` files | `workspace_tools.py` |
    | The server's container | `workspace_manager.py` (rules: `workspace_lifecycle.py`) |
    | Handing a big job to a workflow (`start_workflow`) | `workflow_tools.py`, `workflows.py` (item 13) |
@@ -237,7 +238,10 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
 
    - **It works inline, in the channel**, not in a thread: each tool posts its own card, attached files
      are posted before the persona replies, and the "🧠 Working on it" card appears only once it uses
-     the workspace.
+     the workspace. With `/workspace progress` off it carries one line on what the brain is doing
+     ("⏳ Creating the script"): a side call (`brain_status.py`, the brain's connection, background
+     lane) writes it from the newest tool calls at most every 30 s, and until then (or when it
+     fails) the line is `tool_cards.helper_line`'s. Never a raw command.
    - **The run context is the persona's**: the same dict plus a few brain keys removed when the call
      ends (`brain._BRAIN_KEYS`). So every tool reads what it always read, per-reply caps hold across
      brain calls, and the persona's counters say what was posted (`brain._posted_things`).
@@ -544,7 +548,8 @@ are the ones that actually change behaviour). The persona's *system* prompt is n
 `HOLD_ON_PROMPT`. Each side job has one prompt of its own: `persona_voice.PROMPT` (~130 characters, a
 question in the persona's voice) and `REPLY_PROMPT` (~140, a workflow manager's thread reply), `image_prompt.SYSTEM_PROMPT` (~2050, the SDXL rewrite),
 `image_review.SYSTEM_PROMPT` / `VIEW_PROMPT` (~1080 / ~150, the picture check) and
-`research_format.SYSTEM_PROMPT` (~780, the research brief).
+`research_format.SYSTEM_PROMPT` (~780, the research brief); `brain_status.PROMPT` (~225, ceiling 300,
+the status line on the brain's card).
 
 - **One home per concept.** When adding guidance, edit its existing home rather than restating it
   nearby: a small model handed two versions of a rule follows neither reliably.
