@@ -320,6 +320,9 @@ workflows:
   timeout: 3600
   maxTurns: 300
   maxTokens: 4000000
+  # Dollars one workflow may cost, as the LLM provider reports it (OpenRouter
+  # does; llama.cpp does not). 0 = off. Raise it for a pricier model.
+  maxCost: 0.50
   # Workflows running at once in one server.
   maxPerGuild: 1
 
@@ -335,6 +338,11 @@ subagents:
   callTimeout: ""
   # Backstop on one helper's model turns.
   maxTurns: 100
+  # Output tokens, thinking included, one helper's model call may make; a call
+  # that uses them all stops the helper at a limit. 0 = off.
+  maxOutputTokens: 32000
+  # Reasoning effort of research steps (low/medium/high); others use reasoningEffort.
+  researcherReasoningEffort: "low"
   # Researchers running at once, cut to the slots a self-hosted server has beside chat's.
   maxConcurrent: 2
 

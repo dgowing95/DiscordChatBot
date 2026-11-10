@@ -113,7 +113,7 @@ def _get_main_model_client() -> LanedModel:
                     default_headers=config.extra_headers or None,
                 ),
             ),
-            config.host_key, config.call_timeout, lane=llm_lanes.CHAT,
+            config.host_key, config.call_timeout, lane=llm_lanes.CHAT, role=config.role,
         )
     return _main_model_client
 

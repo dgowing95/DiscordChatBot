@@ -15,6 +15,7 @@ a 10+ source report with a chart, took 62 min and 238 turns). WORKFLOW_TIMEOUT a
 anything bigger, and running out stops it cleanly with what exists
 (PARTIAL), never "try again".
 """
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -29,8 +30,22 @@ DEFAULT_TIMEOUT_SECONDS = 3600
 DEFAULT_MAX_TURNS = 300
 # Live jobs used 0.5-2.6M tokens; a runaway one 5.1M (maintainer, 2026-11-07).
 DEFAULT_MAX_TOKENS = 4_000_000
+# Dollars, as the provider reports them (OpenRouter; llama.cpp reports none, so
+# there only the tokens count). On OpenRouter's DeepSeek v4.1 Flash a live
+# 3-step job cost $0.22 (2026-11-10), $0.16 of it one helper thinking for
+# 131k output tokens; at about $0.075 per million tokens otherwise, the
+# 0.5-2.6M-token jobs seen are $0.04-0.20 and the 5.1M runaway about $0.37.
+DEFAULT_MAX_COST = 0.50
 DEFAULT_MAX_PER_GUILD = 1
 DEFAULT_SUBAGENT_MAX_TURNS = 100
+# Output tokens, thinking included, one helper's model call may make. A live
+# researcher (2026-11-10) made about 26k a call for 5 calls, $0.16 of its
+# job's $0.22, and handed on nothing; DeepSeek on "high" effort thought for
+# 26.5k tokens on a hard puzzle that "low" solved in 3.8k.
+DEFAULT_SUBAGENT_MAX_OUTPUT_TOKENS = 32_000
+# A researcher's reasoning effort: "low" solved the same puzzle as "medium"
+# with a quarter less thinking (OpenRouter, DeepSeek v4.1 Flash, 2026-11-10).
+DEFAULT_RESEARCHER_EFFORT = "low"
 DEFAULT_SUBAGENT_MAX_CONCURRENT = 2
 # Pictures one workflow may ask for (a chat reply gets 3). Not a setting.
 MAX_IMAGES = 10
@@ -47,9 +62,24 @@ MAX_SUBJECT_CHARS = 120
 MAX_FINDINGS_CHARS = 2700      # room for two scouts' whole findings, so nothing is cut twice
 MAX_PLAN_QUESTIONS = 3
 
+# A step's helper is told to report this many turns, and seconds, before
+# its limits, and one stopped by a limit gets one last call that can only be
+# `report`, in seconds kept back from its run (as a scout). A researcher in
+# a live job (2026-11-09) wrote a 23 KB fact sheet, kept checking quotes to
+# its 100th turn and was stopped with nothing reported; the job then paid
+# for a step to redo it, and ran out of tokens before the write-up.
+HELPER_FINISH_UP_TURNS = 3
+HELPER_FINISH_UP_SECONDS = 120
+HELPER_LAST_REPORT_SECONDS = 90
+
 # Turns kept from the helpers for the check and the final report. A job set
 # to few turns keeps a fifth instead, so its helpers can still work.
 TURN_RESERVE = 40
+# Tokens kept the same way (WORKFLOW_MAX_TOKENS), as a check of 7 turns at
+# about 23k tokens a prompt, twice, and the final report. A live job
+# (2026-11-09) spent all of its 5M on research and stopped before the
+# write-up ran.
+TOKEN_RESERVE = 600_000
 
 # What one check of the finished work may say (classes/workflow_verify.py).
 MAX_CHECKS = 12
@@ -126,6 +156,61 @@ def turn_reserve(env=os.environ) -> int:
     return min(TURN_RESERVE, max_turns(env) // 5)
 
 
+@dataclass(frozen=True)
+class WrapUp:
+    """When a step's helper is told to finish, and the seconds it runs for.
+    finish_up_at: the turn from which it is told (None: never by turns);
+    finish_up_after: the seconds into its run from which it is told (None:
+    never by time); seconds: its run, with the last report's time kept back."""
+    finish_up_at: int | None
+    finish_up_after: float | None
+    seconds: float
+
+
+def helper_wrap_up(turns: int, seconds: float) -> WrapUp:
+    """A step helper's finish-up points for a run of `turns` turns and
+    `seconds` seconds. A run too short to spare them gets none: told to
+    finish on its first turn it would do nothing at all."""
+    if seconds > 2 * HELPER_LAST_REPORT_SECONDS:
+        seconds -= HELPER_LAST_REPORT_SECONDS
+    at = turns - HELPER_FINISH_UP_TURNS if turns > 2 * HELPER_FINISH_UP_TURNS else None
+    after = (seconds - HELPER_FINISH_UP_SECONDS if seconds > 2 * HELPER_FINISH_UP_SECONDS
+             else None)
+    return WrapUp(at, after, seconds)
+
+
+def token_reserve(env=os.environ) -> int:
+    """The tokens helpers leave for the check and the final report."""
+    return min(TOKEN_RESERVE, max_tokens(env) // 5)
+
+
+def cost_reserve(env=os.environ) -> float:
+    """The dollars helpers leave for the check and the final report: a fifth."""
+    return max_cost(env) / 5
+
+
+def run_share(left: float, sharing: int, waiting: int) -> float:
+    """What one helper run may use (tokens or dollars), of the `left` the
+    steps have, when it is one of `sharing` runs starting together and
+    `waiting` steps have not started: each of those keeps half an even share,
+    and the runs split the rest. Past it the helper is told to report, then
+    stopped, so one step cannot spend what the later ones need."""
+    sharing = max(1, sharing)
+    left = max(0, left)
+    kept = waiting * left / (2 * (waiting + sharing)) if waiting > 0 else 0
+    return (left - kept) / sharing
+
+
+def max_cost(env=os.environ) -> float:
+    """Dollars one workflow may cost, every agent together, as the provider
+    reports them (WORKFLOW_MAX_COST) [0.50]. 0 is off; nonsense is the default."""
+    try:
+        value = float(env.get("WORKFLOW_MAX_COST", "") or DEFAULT_MAX_COST)
+    except ValueError:
+        return DEFAULT_MAX_COST
+    return value if math.isfinite(value) and value >= 0 else DEFAULT_MAX_COST
+
+
 def max_tokens(env=os.environ) -> int:
     """Tokens, in and out, across every agent of one workflow
     (WORKFLOW_MAX_TOKENS) [4,000,000]. 0 is off."""
@@ -136,6 +221,18 @@ def max_per_guild(env=os.environ) -> int:
     """Workflows running at once in one server (WORKFLOW_MAX_PER_GUILD,
     default 1)."""
     return _env_int("WORKFLOW_MAX_PER_GUILD", DEFAULT_MAX_PER_GUILD, env)
+
+
+def subagent_max_output_tokens(env=os.environ) -> int:
+    """Output tokens, thinking included, one helper's model call may make
+    (SUBAGENT_MAX_OUTPUT_TOKENS) [32000]. 0 is off."""
+    return _env_count("SUBAGENT_MAX_OUTPUT_TOKENS", DEFAULT_SUBAGENT_MAX_OUTPUT_TOKENS, env)
+
+
+def researcher_effort(env=os.environ) -> str:
+    """A research step's reasoning effort (SUBAGENT_RESEARCHER_REASONING_EFFORT)
+    [low]. Other helpers use SUBAGENT_REASONING_EFFORT."""
+    return (env.get("SUBAGENT_RESEARCHER_REASONING_EFFORT") or "").strip() or DEFAULT_RESEARCHER_EFFORT
 
 
 def subagent_max_turns(env=os.environ) -> int:

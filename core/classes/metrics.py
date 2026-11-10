@@ -95,6 +95,17 @@ Metrics (scraped by Prometheus from the /metrics HTTP endpoint):
   Histogram discord_bot_llm_completion_tokens{caller}
            Generated tokens of one model request, when the server reported it
            (a missing figure is skipped, never recorded as 0).
+  Counter  discord_bot_llm_tokens_total{role,model,kind}
+           Tokens of every model call, to compare models' use (logs and
+           metrics only, classes/token_usage.py). role: persona / brain /
+           subagent, or a side job's caller (research, image_prompt, ...);
+           kind: input (prompt not served from cache) / cached (prompt the
+           provider served from its cache) / reasoning (output spent
+           thinking) / output (the rest: the answer and its tool calls). The
+           kinds do not overlap: their sum is every token.
+  Counter  discord_bot_llm_cost_dollars_total{role,model}
+           Dollars those calls cost, as the provider reported it (OpenRouter
+           does, on every response; llama.cpp does not, so it stays at 0).
 
   History (classes/history_policy.py):
   Counter  discord_bot_history_refreshes_total{reason}
@@ -483,6 +494,19 @@ llm_completion_tokens = Histogram(
     buckets=COMPLETION_TOKEN_BUCKETS,
 )
 
+llm_tokens_total = Counter(
+    "discord_bot_llm_tokens_total",
+    "Tokens of model calls: input (not cached), cached (input served from the provider's cache), "
+    "reasoning (output spent thinking), output (the rest of the output)",
+    ["role", "model", "kind"],
+)
+
+llm_cost_dollars_total = Counter(
+    "discord_bot_llm_cost_dollars_total",
+    "Dollars model calls cost, as the provider reported it",
+    ["role", "model"],
+)
+
 history_refreshes_total = Counter(
     "discord_bot_history_refreshes_total",
     "History windows re-taken from the newest messages, by reason",
@@ -854,6 +878,19 @@ def observe_llm_completion_tokens(caller: str, tokens) -> None:
     usage, and recording that would drag the distribution toward zero."""
     if isinstance(tokens, (int, float)) and not isinstance(tokens, bool) and tokens > 0:
         llm_completion_tokens.labels(caller=str(caller)).observe(tokens)
+
+
+def observe_llm_usage(role: str, model: str, tally) -> None:
+    """One call's token_usage.Tally. Kinds with nothing are skipped, as
+    is a cost the provider did not send."""
+    labels = {"role": str(role), "model": str(model)}
+    for kind, tokens in (("input", tally.input - tally.cached), ("cached", tally.cached),
+                         ("reasoning", tally.reasoning),
+                         ("output", tally.output - tally.reasoning)):
+        if tokens > 0:
+            llm_tokens_total.labels(kind=kind, **labels).inc(tokens)
+    if tally.cost:
+        llm_cost_dollars_total.labels(**labels).inc(tally.cost)
 
 
 def inc_history_refresh(reason: str) -> None:

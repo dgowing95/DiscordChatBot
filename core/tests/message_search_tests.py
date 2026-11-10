@@ -5,6 +5,7 @@
 To run this pytest file from the command line, use:
     pytest core/tests/message_search_tests.py
 """
+import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -620,3 +621,215 @@ def test_a_cards_files_are_named_and_saved():
     assert "linked.png" not in text
     assert msf.export_record(card, GUILD_ID, {})["attachments"] == [
         "generated-image.png", "saturn_notes.md"]
+
+
+# --- saving: time, carrying on, the channel's history ---------------------
+
+def test_before_takes_a_link_an_id_or_a_date():
+    link = f"https://discord.com/channels/{GUILD_ID}/{GENERAL_ID}/1234567890123456789"
+    assert msf.parse_before(link) == 1234567890123456789
+    assert msf.parse_before("1234567890123456789") == 1234567890123456789
+    # Discord's epoch is the first second of 2015.
+    assert msf.parse_before("2015-01-01") == 0
+    assert msf.parse_before("2024-05-31") == (1717113600000 - msf.DISCORD_EPOCH_MS) << 22
+    assert msf.parse_before("2024-05-31T02:00:00+02:00") == msf.parse_before("2024-05-31")
+    assert msf.parse_before("") is None and msf.parse_before(None) is None
+    with pytest.raises(ValueError):
+        msf.parse_before("last tuesday")
+
+
+def test_a_save_pages_for_at_most_ten_minutes_and_leaves_the_run_time():
+    assert msf.export_seconds(None) == msf.EXPORT_MAX_SECONDS == 600
+    assert msf.export_seconds(3000) == 600
+    assert msf.export_seconds(700) == 700 - msf.EXPORT_HAND_BACK_SECONDS
+    # A short run hands back a third: an unprompted brain call has 180 s in all.
+    assert msf.export_seconds(179) == pytest.approx(179 * 2 / 3)
+    assert msf.export_seconds(12) < msf.EXPORT_MIN_SECONDS
+
+
+def test_a_carried_on_save_gets_a_file_of_its_own_and_asks_older_messages():
+    assert msf.export_filename("died", "#ehp", "", 987) == "discord-died-ehp-before-987.jsonl"
+    params = msf.search_params("died", None, None, 25, newest_first=True, max_id=987)
+    assert ("max_id", "987") in params
+    # Before Discord began there is nothing older: id 0, still a cutoff.
+    assert msf.parse_before("2014-06-01") == 0
+    assert ("max_id", "0") in msf.search_params("x", max_id=0, newest_first=True)
+    assert msf.export_filename("x", "this server", "", 0) == "discord-x-before-0.jsonl"
+
+
+def test_the_summary_says_which_dates_it_covers():
+    text = msf.export_summary("in/x.jsonl", 2, 2, {"id": "1"},
+                              span=("2022-01-19 10:00 UTC", "2026-09-22 08:30 UTC"))
+    assert "The oldest is from 2022-01-19 10:00 UTC, the newest from 2026-09-22 08:30 UTC." in text
+    history = msf.export_summary("in/x.jsonl", 2, None, {"id": "1"})
+    assert "Saved 2 messages (the channel's newest, read from its history)" in history
+
+
+class _Clock:
+    """Stands in for message_search_tools' `time`: every request moves it on."""
+
+    def __init__(self, start=1000.0):
+        self.now = start
+
+    def monotonic(self):
+        return self.now
+
+
+@pytest.mark.asyncio
+async def test_a_long_save_stops_in_time_and_says_how_to_carry_on(monkeypatch):
+    from classes import message_search_tools as mst
+    clock = _Clock()
+    monkeypatch.setattr(mst, "time", clock)
+    big = 1_400_000_000_000_000_000  # real ids: before takes 15 digits or more
+    pages = _pages(1000, start_id=big)
+
+    async def slow(route, params):
+        clock.now += 10  # Discord's search, rate limited
+        return await pages(route, params)
+    context, http = _env()
+    http.request = AsyncMock(side_effect=slow)
+    session = _FakeSession()
+    # 60 s for the save: 90 s left, a third of it handed back.
+    context.update(session=session, out_dir="/work/out", brain_deadline=clock.now + 90)
+    text = await _save(context, query="died", max_messages=10000)
+    assert http.request.await_count == 6
+    lines = session.files["/work/in/discord-died.jsonl"].splitlines()
+    oldest = json.loads(lines[-1])["id"]
+    assert len(lines) == 150 and oldest == str(big + 1000 - 149)
+    assert "Stopped early at 150" in text and "The other 850 would take about 3 minutes" in text
+    assert f'before="{oldest}"' in text
+    assert "Saved 150 messages (the newest 150 of 1000 found)" in text
+
+    # Carrying on asks only older messages, into a file of its own.
+    clock.now += 1000
+    context["brain_deadline"] = clock.now + 3000
+    await _save(context, query="died", max_messages=25, before=oldest)
+    assert ("max_id", oldest) in http.request.await_args.kwargs["params"]
+    assert f"/work/in/discord-died-before-{oldest}.jsonl" in session.files
+
+
+@pytest.mark.asyncio
+async def test_no_save_starts_when_the_run_is_nearly_out_of_time():
+    import time
+    context, http = _env()
+    context.update(session=_FakeSession(), brain_deadline=time.monotonic() + 12)
+    assert await _save(context, query="x") == msf.NO_TIME_TEXT
+    http.request.assert_not_called()
+    context["brain_deadline"] = None
+    assert "is not a message link" in (await _save(context, query="x", before="soon"))
+
+
+@pytest.mark.asyncio
+async def test_saves_side_by_side_ask_discord_one_page_at_a_time():
+    context, http = _env()
+    pages, busy = _pages(100), {"now": 0, "most": 0}
+
+    async def one_at_a_time(route, params):
+        busy["now"] += 1
+        busy["most"] = max(busy["most"], busy["now"])
+        await asyncio.sleep(0.01)
+        busy["now"] -= 1
+        return await pages(route, params)
+    http.request = AsyncMock(side_effect=one_at_a_time)
+    context.update(session=_FakeSession())
+    first, second = await asyncio.gather(_save(dict(context), query="a"),
+                                         _save(dict(context), query="b"))
+    assert "(all found)" in first and "(all found)" in second
+    assert busy["most"] == 1 and http.request.await_count == 8
+
+
+@pytest.mark.asyncio
+async def test_a_rate_limited_page_is_asked_again(monkeypatch):
+    from classes import message_search_tools as mst
+    monkeypatch.setattr(mst, "SEARCH_PAGE_SECONDS", 0.01)
+    context, http = _env()
+    pages, calls = _pages(60), {"n": 0}
+
+    async def limited_once(route, params):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise discord.HTTPException(MagicMock(status=429, reason="Too Many Requests"),
+                                        "slow down")
+        return await pages(route, params)
+    http.request = AsyncMock(side_effect=limited_once)
+    context.update(session=_FakeSession())
+    text = await _save(context, query="x")
+    assert text.startswith("Saved 60 messages (all found)") and calls["n"] == 4
+
+
+def _history(total, start_id=50_000):
+    """A channel's history, newest first, answered by `before`, as
+    discord.py's http.logs_from."""
+    ids = list(range(start_id + total, start_id, -1))
+
+    async def logs_from(channel_id, limit, before=None):
+        older = [i for i in ids if before is None or i < int(before)]
+        return [_hit(i, channel_id=channel_id, content="", embeds=[TRACKER_EMBED])
+                for i in older[:limit]]
+    return logs_from
+
+
+@pytest.mark.asyncio
+async def test_a_channel_alone_is_read_from_its_history_not_searched():
+    context, http = _env()
+    http.logs_from = AsyncMock(side_effect=_history(250))
+    session = _FakeSession()
+    context.update(session=session)
+    text = await _save(context, channel="general", max_messages=10000)
+    http.request.assert_not_called()
+    asked = [(c.args[1], c.kwargs["before"]) for c in http.logs_from.await_args_list]
+    assert asked == [(100, None), (100, 50_151), (100, 50_051)]
+    lines = session.files["/work/in/discord-general.jsonl"].splitlines()
+    assert len(lines) == 250 and json.loads(lines[-1])["id"] == "50001"
+    assert "(the channel's newest, read from its history)" in text
+    assert "The oldest is from 2026-03-01 12:00 UTC" in text
+    # Words or an author still go through search.
+    http.request = AsyncMock(side_effect=_pages(3))
+    await _save(context, channel="general", query="chest")
+    http.request.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_age_restricted_channels_history_is_not_saved_elsewhere():
+    context, http = _env()
+    nsfw = _channel(MEMES_ID, "memes", nsfw=True)
+    guild = context["channel"].guild
+    guild.channels = [context["channel"], nsfw]
+    guild.get_channel_or_thread = lambda i: nsfw if i == MEMES_ID else None
+    http.logs_from = AsyncMock(side_effect=_history(5))
+    context.update(session=_FakeSession())
+    assert "age-restricted" in (await _save(context, channel=str(MEMES_ID)))
+    http.logs_from.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_big_search_says_how_long_saving_it_takes():
+    context, http = _env(body=_body(_hit(1), total_results=1449))
+    context["session"] = _FakeSession()
+    assert "(about 5 minutes for that many)" in (await _search(context, query="has died"))
+
+
+@pytest.mark.asyncio
+async def test_a_save_waiting_on_another_saves_lock_gives_up_at_its_time_limit(monkeypatch):
+    from classes import message_search_tools as mst
+    import time
+    context, http = _env()
+    context.update(session=_FakeSession(), brain_deadline=time.monotonic() + 40)
+    monkeypatch.setattr(mst, "export_seconds", lambda left: 0.3)
+    monkeypatch.setattr(mst, "EXPORT_MIN_SECONDS", 0)
+    lock = mst._search_lock(GUILD_ID)
+    await lock.acquire()  # another save holds the server's search
+    try:
+        text = await asyncio.wait_for(_save(context, query="x"), 5)
+    finally:
+        lock.release()
+    assert text == msf.NO_TIME_TEXT
+    http.request.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_request_that_times_out_is_a_failed_search_not_out_of_time():
+    context, http = _env()
+    http.request = AsyncMock(side_effect=TimeoutError())
+    text = await _search(context, query="x")
+    assert "failed on Discord's side" in text

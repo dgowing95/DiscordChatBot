@@ -12,20 +12,23 @@ the seams.
 import asyncio
 import contextlib
 import json
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from agents import Agent, RunConfig, RunContextWrapper, function_tool
+from agents import Agent, ModelSettings, RunConfig, RunContextWrapper, function_tool
 from agents.testing import ModelStep, ScriptedModel, assistant_message, function_call
+from agents.usage import Usage
 
 from brain_tests import _Lease, _Session
 from workflow_store_tests import FakeRedis
 
-from classes import (brain, brain_result, llm_lanes, thread_inbox, workflow_steering,
+from classes import (brain, brain_result, llm_lanes, thread_inbox, token_usage, workflow_steering,
                      workflow_verify, workflows)
 from classes import workflow_policy as wp
 from classes.workflow_store import WorkflowStore
+from classes.laned_model import _with_raw_usage
 from classes import card_kit as K
 from card_checks import interaction as card_interaction, label_of, replied_text, view_text
 from classes import card
@@ -45,6 +48,11 @@ class LaneModel(ScriptedModel):
 
     async def get_response(self, *args, **kwargs):
         self.lanes.append(llm_lanes.current_lane.get())
+        # As LanedModel asks: the provider's usage payload (its cost) is kept.
+        if "model_settings" in kwargs:
+            kwargs["model_settings"] = _with_raw_usage(kwargs["model_settings"])
+        elif len(args) > 2:
+            args = (*args[:2], _with_raw_usage(args[2]), *args[3:])
         return await super().get_response(*args, **kwargs)
 
 
@@ -135,9 +143,11 @@ def env(monkeypatch):
             return Agent(name="Helper", model=ns.model, instructions="verifier",
                          tools=[*ns.subagent_tools, submit_verdict],
                          tool_use_behavior={"stop_at_tool_names": ["submit_verdict"]})
+        # Capped as the real helpers are (SUBAGENT_MAX_OUTPUT_TOKENS).
         return Agent(name="Helper", model=ns.model, instructions="helper",
                      tools=[*ns.subagent_tools, attach_file, brain.report],
-                     tool_use_behavior={"stop_at_tool_names": ["report"]})
+                     tool_use_behavior={"stop_at_tool_names": ["report"]},
+                     model_settings=ModelSettings(max_tokens=32000))
 
     def _config(lease, guard, watch=None):
         return RunConfig(call_model_input_filter=brain.input_filter(guard, 6, watch),
@@ -261,14 +271,100 @@ async def test_a_helper_out_of_turns_makes_the_workflow_partial(env, monkeypatch
     env.model = LaneModel([
         _plan_call(("s1", "researcher", [])),
         ModelStep(output=[function_call("look", {}, call_id="l1")]),
-        _report(facts=["Only part of it was done"], call_id="f"),
+        # Its last report: the one call it gets once stopped, report only.
+        _report(facts=["Only part of it was done"], call_id="last"),
+        _report(call_id="f"),
     ])
     wf, _ = await _start(env)
     await _finish(wf)
     assert wf.record["state"] == wp.PARTIAL
     assert wf.results["s1"]["status"] == brain_result.PARTIAL
+    assert wf.results["s1"]["facts"] == ["Only part of it was done"]
     assert "ran out of steps" in wf.results["s1"]["note"]
+    last = env.model.calls[2]
+    assert workflows.FINISH_UP in json.dumps(last.input)
+    assert [t.name for t in last.tools] == ["report"]
     assert env.queue.get_nowait().report.status == brain_result.PARTIAL
+    assert env.model.remaining_steps == 0
+
+
+@pytest.mark.asyncio
+async def test_a_helper_out_of_time_still_hands_on_what_it_found(env, monkeypatch):
+    """Stopped in the middle of a slow tool (a big message save, say): the
+    last report is made from what it had seen."""
+    monkeypatch.setattr(wp, "HELPER_LAST_REPORT_SECONDS", 5)
+
+    @function_tool
+    async def slow() -> str:
+        """Slow."""
+        await asyncio.sleep(30)
+        return "late"
+
+    env.subagent_tools = [slow]
+    env.model = LaneModel([_plan_call(("s1", "researcher", [])),
+                           ModelStep(output=[function_call("slow", {}, call_id="s")]),
+                           _report(facts=["Saved half the messages"], call_id="last"),
+                           _report(call_id="f")])
+    original = workflows._agent_run
+
+    async def short(wf, agent, task, **kwargs):
+        if kwargs.get("wrap_up"):
+            kwargs["seconds"] = 1
+        return await original(wf, agent, task, **kwargs)
+
+    monkeypatch.setattr(workflows, "_agent_run", short)
+    wf, _ = await _start(env)
+    await _finish(wf)
+    assert "ran out of time" in wf.results["s1"]["note"]
+    assert wf.results["s1"]["facts"] == ["Saved half the messages"]
+
+
+@pytest.mark.asyncio
+async def test_a_helper_is_told_to_finish_before_its_last_turns(env, monkeypatch):
+    monkeypatch.setenv("SUBAGENT_MAX_TURNS", "8")
+
+    @function_tool
+    async def look() -> str:
+        """Look."""
+        return "ok"
+
+    env.subagent_tools = [look]
+    env.model = LaneModel([_plan_call(("s1", "researcher", [])),
+                           *[_look_call(f"l{i}") for i in range(5)],
+                           _report(call_id="a"), _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    helper_calls = [json.dumps(call.input) for call in env.model.calls[1:7]]
+    # 8 turns: told on its last 3 (HELPER_FINISH_UP_TURNS), from the 6th call.
+    assert [workflows.FINISH_UP in text for text in helper_calls] == [False] * 5 + [True]
+    assert wf.results["s1"]["status"] == brain_result.DONE
+
+
+def test_a_helpers_finish_up_points_leave_room_and_short_runs_get_none():
+    plan = wp.helper_wrap_up(100, 3000)
+    assert plan == wp.WrapUp(97, 3000 - 90 - 120, 3000 - 90)
+    # Too short to spare them: told to finish at once it would do nothing.
+    assert wp.helper_wrap_up(6, 180) == wp.WrapUp(None, None, 180)
+    assert wp.helper_wrap_up(7, 181).finish_up_at == 4
+
+
+@pytest.mark.asyncio
+async def test_a_helpers_tools_get_the_end_of_its_own_run(env):
+    seen = {}
+
+    @function_tool
+    async def look(wrapper: RunContextWrapper[dict]) -> str:
+        """Look."""
+        seen["left"] = wrapper.context["brain_deadline"] - time.monotonic()
+        return "ok"
+
+    env.subagent_tools = [look]
+    env.model = LaneModel([_plan_call(("s1", "researcher", [])), _look_call("l1"),
+                           _report(call_id="a"), _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    # WORKFLOW_TIMEOUT 3600, minus the reserves (480) and the last report (90).
+    assert 3000 < seen["left"] <= 3600 - 480 - 90
 
 
 @pytest.mark.asyncio
@@ -988,15 +1084,158 @@ async def test_a_helper_past_the_token_limit_is_told_to_finish(env, monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_a_helper_still_going_past_its_token_share_is_stopped_and_reports(env,
+                                                                               monkeypatch):
+    # 10000, less 2000 held back: s1 may use 6000, as s2 keeps half an even share.
+    monkeypatch.setenv("WORKFLOW_MAX_TOKENS", "10000")
+
+    @function_tool
+    async def look() -> str:
+        """Look."""
+        return "ok"
+
+    env.subagent_tools = [look]
+    big = ModelStep(output=[function_call("look", {}, call_id="l1")],
+                    usage=Usage(requests=1, input_tokens=6000, output_tokens=500,
+                                total_tokens=6500))
+    env.model = LaneModel([
+        _plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"])),
+        big, _look_call("l2"), _look_call("l3"), _look_call("l4"),
+        _report(status="partial", facts=("the sheet is in facts.md",), call_id="last"),
+        _report(call_id="b"), _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    for told in (2, 3, 4):
+        assert workflows.FINISH_UP in json.dumps(env.model.calls[told].input)
+    assert wf.results["s1"]["note"] == workflows.LIMIT_STOPPED
+    assert wf.results["s1"]["facts"] == ["the sheet is in facts.md"]
+    assert "s1" in wf.at_limit
+    assert wf.step_states["s2"] == "done"  # what was kept for it was there
+    assert env.model.remaining_steps == 0
+    # Every run gave back what it did not spend of its share.
+    assert wf.token_promised == 0 and wf.cost_promised == 0
+
+
+@pytest.mark.asyncio
+async def test_a_helper_past_its_share_of_the_dollars_is_stopped_and_reports(env, monkeypatch):
+    # $1, less 20 cents held back: s1 may cost 60 cents, as s2 keeps half an even share.
+    monkeypatch.setenv("WORKFLOW_MAX_TOKENS", "0")
+    monkeypatch.setenv("WORKFLOW_MAX_COST", "1")
+
+    @function_tool
+    async def look() -> str:
+        """Look."""
+        return "ok"
+
+    env.subagent_tools = [look]
+    # The provider's cost (OpenRouter's usage payload), in dollars.
+    dear = ModelStep(output=[function_call("look", {}, call_id="l1")], raw_usage={"cost": 0.65})
+    env.model = LaneModel([
+        _plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"])),
+        dear, _look_call("l2"), _look_call("l3"), _look_call("l4"),
+        _report(status="partial", facts=("half of it",), call_id="last"),
+        _report(call_id="b"), _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    assert workflows.FINISH_UP in json.dumps(env.model.calls[2].input)
+    assert wf.results["s1"]["note"] == workflows.LIMIT_STOPPED
+    assert wf.results["s1"]["facts"] == ["half of it"]
+    assert wf.step_states["s2"] == "done"
+    assert wf.record["cost"] == pytest.approx(0.65)
+    assert env.model.remaining_steps == 0
+
+
+@pytest.mark.asyncio
+async def test_a_helper_call_that_used_its_whole_output_cap_stops_the_step_at_a_limit(env):
+    from agents import ModelBehaviorError
+    from laned_model_tests import _EMPTY
+    from classes.laned_model import OutputCapped
+    env.model = LaneModel([
+        _plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"])),
+        ModelStep(error=OutputCapped(_EMPTY)),
+        _report(status="partial", facts=("what it had",), call_id="last"),
+        _report(call_id="b"), _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    assert wf.results["s1"]["note"] == workflows.LIMIT_STOPPED
+    assert wf.results["s1"]["facts"] == ["what it had"]
+    assert "s1" in wf.at_limit and wf.step_states["s2"] == "done"
+    assert isinstance(OutputCapped(_EMPTY), ModelBehaviorError)
+    # Its tokens never came back in a response: the cap is counted.
+    assert wf.tokens >= 32000
+
+
+@pytest.mark.asyncio
+async def test_a_helper_reply_cut_off_part_way_at_the_cap_is_a_limit_not_its_answer(env):
+    cut = ModelStep(output=[assistant_message("Here is everything I found: 1. The A1 mi",
+                                              item_id="m1")],
+                    usage=Usage(requests=1, input_tokens=100, output_tokens=32000,
+                                total_tokens=32100))
+    env.model = LaneModel([
+        _plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"])),
+        cut, _report(status="partial", facts=("the A1 mini costs 199",), call_id="last"),
+        _report(call_id="b"), _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    assert wf.results["s1"]["note"] == workflows.LIMIT_STOPPED
+    assert wf.results["s1"]["facts"] == ["the A1 mini costs 199"]
+
+
+def _effort(settings):
+    reasoning = settings.reasoning
+    return reasoning.get("effort") if isinstance(reasoning, dict) else reasoning.effort
+
+
+def test_helpers_calls_are_capped_and_research_thinks_low(monkeypatch):
+    monkeypatch.delenv("SUBAGENT_MAX_OUTPUT_TOKENS", raising=False)
+    monkeypatch.delenv("SUBAGENT_RESEARCHER_REASONING_EFFORT", raising=False)
+    monkeypatch.setenv("SUBAGENT_REASONING_EFFORT", "medium")
+    from classes.llm_roles import BRAIN, SUBAGENT
+    researcher = workflows._subagent(wp.RESEARCHER).model_settings
+    implementer = workflows._subagent(wp.IMPLEMENTER).model_settings
+    assert _effort(researcher) == "low" and researcher.max_tokens == 32000
+    assert _effort(implementer) == "medium" and implementer.max_tokens == 32000
+    assert workflows._model_settings(BRAIN).max_tokens is None  # the manager is not capped
+    monkeypatch.setenv("SUBAGENT_MAX_OUTPUT_TOKENS", "0")
+    monkeypatch.setenv("SUBAGENT_RESEARCHER_REASONING_EFFORT", "high")
+    researcher = workflows._model_settings(SUBAGENT, wp.researcher_effort())
+    assert researcher.max_tokens is None and _effort(researcher) == "high"
+
+
+def test_discord_is_never_told_about_money():
+    for text in (workflows.LIMIT_STOPPED,):
+        assert not any(word in text.lower() for word in ("cost", "dollar", "$", "budget"))
+
+
+def test_the_cost_limit_and_its_reserve(monkeypatch):
+    monkeypatch.delenv("WORKFLOW_MAX_TOKENS", raising=False)
+    monkeypatch.delenv("WORKFLOW_MAX_COST", raising=False)
+    wf = workflows.Workflow(record={}, ctx={}, thread=None, origin_channel=None)
+    wf.add_cost(0.39)
+    assert not wf.over_budget(held=True)   # the steps stop at 40 cents
+    wf.add_cost(0.02)
+    assert wf.over_budget(held=True) and not wf.over_budget()
+    wf.add_cost(0.09)
+    assert wf.over_budget()                # 50 cents
+    monkeypatch.setenv("WORKFLOW_MAX_COST", "0")
+    assert not wf.over_budget()
+
+
+@pytest.mark.asyncio
 async def test_tokens_are_counted_from_each_response():
     hooks = brain.BrainHooks(MagicMock(on_llm_end=AsyncMock()), MagicMock(on_llm_end=AsyncMock()),
                              None)
     seen = []
     hooks.on_tokens = seen.append
-    usage = SimpleNamespace(input_tokens=100, output_tokens=20)
-    await hooks.on_llm_end(None, None, SimpleNamespace(usage=usage))
+    costs = []
+    hooks.on_cost = costs.append
+    usage = SimpleNamespace(input_tokens=100, output_tokens=20,
+                            input_tokens_details=SimpleNamespace(cached_tokens=70))
+    await hooks.on_llm_end(None, None, SimpleNamespace(usage=usage, raw_usage={"cost": 0.25}))
     await hooks.on_llm_end(None, None, SimpleNamespace(usage=None))
     assert seen == [120, 0]
+    assert hooks.usage == token_usage.Tally(100, 70, 20, 0.25)
+    assert costs == [0.25]  # only a call that said what it cost
 
 
 def test_the_token_limit_is_4m_by_default_and_0_turns_it_off(monkeypatch):

@@ -111,8 +111,10 @@ async def submit_plan(wrapper: RunContextWrapper[dict], goal: str, steps: list[S
         goal: What the whole job delivers, in one sentence.
         steps: In order. Each: id ("s1"...), title (2-5 words, e.g. "Find
             2026 reviews"), role ("researcher" or "implementer"), brief (the
-            helper's whole job: what to find or make, what to hand on) and
-            depends_on (ids it needs first).
+            helper's whole job: what to find or make, what to hand on; a
+            researcher's is one part, a handful of facts, e.g. "Find the
+            price and print size of the Ender 3, A1 mini and K1", and more
+            parts get more researchers) and depends_on (ids it needs first).
         deliverables: What the user gets, e.g. "report.md", "a chart".
         notes: Decisions every helper should know.
         title: The whole job in 2-5 words, e.g. "Compare budget keyboards".

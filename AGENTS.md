@@ -64,6 +64,7 @@ core/                    # the bot (what runs in production)
     skill_reflection.py    # after a long job, one background call decides whether to save a skill
     skill_curator.py       # the daily tidy-up: merge, retire, describe (its rules are pure)
     loop_guard.py          # P stops a brain run that repeats itself (also a page or search asked again)
+    token_usage.py         # P a model call's tokens (input, cached, output) and cost, for logs and metrics
     context_trim.py        # P cuts old tool outputs in a long brain run; keeps a local run in its slot
     brain_progress.py      # the "Working on it" status card and live command output
     brain_status.py        # the card's one-line status in plain words ("Creating the script")
@@ -173,7 +174,12 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
    `total_slots`, else `LLM_SLOTS`); a remote API never is. `LanedModel` takes the slot for one model
    call, never across a tool (a side call inside a tool would deadlock against its own run), and applies
    the call timeout after the slot is taken, so laned agents leave `ModelSettings.timeout` unset (it
-   would count the wait). It also asks once more when a call is cut off before any output. A side call
+   would count the wait). It also asks once more when a call is cut off before any output. Every call's
+   tokens (input, cached, output) and the cost the provider reports (OpenRouter does) go to
+   `discord_bot_llm_tokens_total` (kinds input, cached, reasoning, output) /
+   `discord_bot_llm_cost_dollars_total` by role and model, there and
+   in `side_llm.py`; a brain call's and a workflow's totals go in their last log line
+   (`token_usage.py`). Never in a card or a reply: it is for comparing models. A side call
    takes the lane of the work making it (`llm_lanes.current_lane`).
 4. **The answer** (`response_filter.py`). Cleaned and sent in 2000-character chunks through
    `chunk_for_discord`; never call `textwrap.wrap` directly, as it returns a long unbroken word as one
@@ -394,6 +400,10 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
       Messages endpoint (not wrapped by discord.py; a 202 means not indexed yet) and the messages around
       one link. Both read what the bot can see, in this server only. `save_messages_to_file` writes every
       match (up to 10000, 20 MB) as JSON lines into the brain's `in/`, so code can count or chart them.
+      Search gives about 25 messages every 5.5 s, so one call pages for at most 10 minutes and stops
+      3 minutes (or a third of what is left, if less) before the run's `brain_deadline` (each workflow helper sets its own), then says how
+      to carry on with `before=` (a message id or a date; its own file). Search requests go one at a
+      time per server; a channel alone (no words, no author) is read from its history instead.
 13. **Tier 3 workflows** (`docs/workflows.md`, `workflows.py`; off with `WORKFLOW_ENABLED=0`). A job too
     big for one brain call runs in its own thread. The brain hands it over with `start_workflow` (which
     ends its run like `report`; the persona is told `started_workflow` and the thread link), or a person
@@ -474,7 +484,23 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
       `WORKFLOW_MAX_TOKENS` (4M; every agent together) stop it with what exists (PARTIAL);
       `SUBAGENT_MAX_TURNS` per helper. Helpers leave 40 turns (`wp.turn_reserve`) and 300 seconds more
       than the final report's for the check. The clock restarts when the plan is answered, so waiting
-      on a person is not work time.
+      on a person is not work time. A step's helper is told to finish 3 turns and 2 minutes before its
+      own limits (`wp.helper_wrap_up`), and one a limit stops gets `_last_report` like a scout, so
+      what it found reaches the later steps rather than a step to do it again. Tokens: the steps stop
+      `wp.token_reserve` (600k) short of the cap, which the check and the final report may use
+      (`over_tokens(_held_tokens(wf))` for the steps, `over_tokens()` for the check), and one helper
+      run gets `wp.run_token_share` of what the steps have left, every step not started keeping half
+      an even share. Past it the helper is told to report and, 3 calls on, stopped (`BudgetSpent`).
+      `WORKFLOW_MAX_COST` (dollars, the provider's own figure) works the same way beside the tokens:
+      a fifth held back (`_held_cost`) and a share per run (`wp.run_share`); `over_budget` is both.
+      A run's share is promised until spent (`owed`), so a run starting meanwhile never counts it
+      twice. The check stops at the full limits and the second check needs room; the manager's
+      final report always runs, so a job can end a little past them.
+      The token cap counts raw tokens, not cost: see `token_usage.py`. Each helper model call is
+      capped at `SUBAGENT_MAX_OUTPUT_TOKENS` (thinking included; `_model_settings`), and one that
+      uses it all is a limit too (`laned_model.OutputCapped`, never retried). Researchers think on
+      `SUBAGENT_RESEARCHER_REASONING_EFFORT` (low). Discord is only ever told "a limit"
+      (`LIMIT_STOPPED`), never tokens or money.
     - **Restarts**: resume is out of scope. A workflow cancelled at shutdown stays live in Redis, and
       at startup `interrupt_all` marks this instance's live ones INTERRUPTED and posts a note in their
       threads. The buttons are `DynamicItem`s registered once, so an old one answers "This workflow has
@@ -687,11 +713,14 @@ reads has a row here and a line in `.env.example`, that every row is read by som
 | `WORKFLOW_PLAN_REVISIONS` | changes a plan may get before it must be approved or cancelled [3]. Chart: `workflows.planRevisions` |
 | `WORKFLOW_MAX_STEPS` | steps in one plan [8]. Chart: `workflows.maxSteps` |
 | `WORKFLOW_TIMEOUT` / `WORKFLOW_MAX_TURNS` / `WORKFLOW_MAX_TOKENS` | backstops on one workflow: wall-clock seconds [3600], model turns [300] and tokens in and out [4000000; 0 = off] across all its agents; out of any stops it with what exists. Chart: `workflows.timeout` / `maxTurns` / `maxTokens` |
+| `WORKFLOW_MAX_COST` | dollars one workflow may cost across all its agents, as the provider reports it [0.50; 0 = off]. OpenRouter reports it; llama.cpp does not, so there only the tokens count. Raise it for a pricier model. Chart: `workflows.maxCost` |
 | `WORKFLOW_MAX_PER_GUILD` | workflows running at once per server [1]. Chart: `workflows.maxPerGuild` |
 | `WORKFLOW_DEV_INJECT` | local testing and E2E only, never in the chart: `!workflow <request>` starts a workflow with its plan approved at once, since a webhook cannot use `/task` or press Approve |
 | `SUBAGENT_MODEL` / `SUBAGENT_LLM_HOST` / `SUBAGENT_LLM_API_KEY` | a workflow helper's connection; empty = the brain's, then `LLM_*` (the key only for the same host). Chart: `subagents.model` / `llmHost` / `apiKey` |
 | `SUBAGENT_REASONING_EFFORT` / `SUBAGENT_CALL_TIMEOUT_SECONDS` | a helper's; empty = the brain's. Chart: `subagents.reasoningEffort` / `callTimeout` |
 | `SUBAGENT_MAX_TURNS` | backstop on one helper's model turns [100]. Chart: `subagents.maxTurns` |
+| `SUBAGENT_MAX_OUTPUT_TOKENS` | output tokens, thinking included, one helper's model call may make [32000; 0 = off]. A call that uses them all before saying anything is not asked again (`laned_model.OutputCapped`) and stops the helper at a limit, with its last report. Chart: `subagents.maxOutputTokens` |
+| `SUBAGENT_RESEARCHER_REASONING_EFFORT` | a research step's `reasoning_effort` [low]; other helpers use `SUBAGENT_REASONING_EFFORT`. Chart: `subagents.researcherReasoningEffort` |
 | `SUBAGENT_MAX_CONCURRENT` | researchers running at once [2], cut to the slots a self-hosted server has beside chat's; an implementer always runs alone. Chart: `subagents.maxConcurrent` |
 | `WORKSPACE_SNAPSHOT_TIMEOUT_SECONDS` | seconds for one workspace save, and for all of them at shutdown [120]. Chart: `brain.workspace.snapshotTimeout` |
 | `BRAIN_CALL_TIMEOUT_SECONDS` | like `PERSONA_CALL_TIMEOUT_SECONDS`, for the brain [600]. Chart: `brain.callTimeout` |

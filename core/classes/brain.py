@@ -61,7 +61,7 @@ from agents import (
     set_tracing_disabled,
 )
 
-from classes import brain_policy, brain_result, context_trim, llm_lanes
+from classes import brain_policy, brain_result, context_trim, llm_lanes, token_usage
 from classes.brain_result import BrainReport
 from classes.laned_model import LanedModel
 from classes.llm_roles import BRAIN, SUBAGENT, role_config
@@ -247,7 +247,7 @@ def _new_brain_model(config, lane: str = llm_lanes.BRAIN) -> LanedModel:
                 max_retries=BRAIN_CLIENT_MAX_RETRIES,
             ),
         ),
-        config.host_key, config.call_timeout, lane=lane,
+        config.host_key, config.call_timeout, lane=lane, role=config.role,
     )
 
 
@@ -491,8 +491,14 @@ class BrainHooks(RunHooks):
         self.tool_calls = 0
         # The longest prompt of the run: what a slot's context has to hold.
         self.peak_prompt_tokens = 0
-        # Called with each response's tokens, in and out (workflows count them).
+        # Called with each response's tokens, in and out, and with its cost
+        # when the provider sent one (workflows count them).
         self.on_tokens = None
+        self.on_cost = None
+        # The run's tokens and cost, for its log line (token_usage.py), and
+        # the newest response's output tokens (a workflow helper's cap).
+        self.usage = token_usage.Tally()
+        self.last_output = 0
         # The run's prompt against its server's slot (context_trim.ContextWatch).
         self.context_watch = None
 
@@ -508,8 +514,13 @@ class BrainHooks(RunHooks):
             self.peak_prompt_tokens = max(self.peak_prompt_tokens, tokens)
         if self.context_watch is not None:
             self.context_watch.seen(tokens)
+        call = token_usage.from_usage(usage, getattr(response, "raw_usage", None))
+        self.usage.add(call)
+        self.last_output = call.output
         if self.on_tokens is not None:
             self.on_tokens(response_tokens(response))
+        if self.on_cost is not None and call.cost:
+            self.on_cost(call.cost)
         for part in self.parts:
             await part.on_llm_end(context, agent, response)
 
@@ -749,7 +760,8 @@ async def run_brain(ctx: dict, request: str, files=None) -> BrainReport:
         brain_policy.TIER_BRAIN, report_out.status, time.monotonic() - started,
         hooks.turns if hooks else 0, hooks.tool_calls if hooks else 0)
     logger.info(f"Brain: {report_out.status} in {time.monotonic() - started:.1f}s"
-                + (f", {hooks.turns} turn(s), {hooks.tool_calls} tool call(s)" if hooks else ""))
+                + (f", {hooks.turns} turn(s), {hooks.tool_calls} tool call(s), "
+                   f"{hooks.usage.text()}" if hooks else ""))
     return report_out
 
 

@@ -148,6 +148,7 @@ data:
   WORKFLOW_TIMEOUT: {{ .Values.workflows.timeout | toString | quote }}
   WORKFLOW_MAX_TURNS: {{ .Values.workflows.maxTurns | toString | quote }}
   WORKFLOW_MAX_TOKENS: {{ .Values.workflows.maxTokens | int64 | toString | quote }}
+  WORKFLOW_MAX_COST: {{ .Values.workflows.maxCost | toString | quote }}
   WORKFLOW_MAX_PER_GUILD: {{ .Values.workflows.maxPerGuild | toString | quote }}
   {{- if .Values.subagents.model }}
   SUBAGENT_MODEL: {{ .Values.subagents.model | quote }}
@@ -162,6 +163,8 @@ data:
   SUBAGENT_CALL_TIMEOUT_SECONDS: {{ .Values.subagents.callTimeout | toString | quote }}
   {{- end }}
   SUBAGENT_MAX_TURNS: {{ .Values.subagents.maxTurns | toString | quote }}
+  SUBAGENT_MAX_OUTPUT_TOKENS: {{ .Values.subagents.maxOutputTokens | int64 | toString | quote }}
+  SUBAGENT_RESEARCHER_REASONING_EFFORT: {{ .Values.subagents.researcherReasoningEffort | quote }}
   SUBAGENT_MAX_CONCURRENT: {{ .Values.subagents.maxConcurrent | toString | quote }}
   # The server workspace container runs on the node's Docker daemon, through
   # the socket mounted in core.yaml.
