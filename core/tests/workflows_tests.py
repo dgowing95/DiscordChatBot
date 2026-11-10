@@ -1141,6 +1141,11 @@ async def test_a_helper_past_its_share_of_the_dollars_is_stopped_and_reports(env
     assert env.model.remaining_steps == 0
 
 
+def test_discord_is_never_told_about_money():
+    for text in (workflows.LIMIT_STOPPED, workflows.SHARE_STOPPED):
+        assert not any(word in text.lower() for word in ("cost", "dollar", "$", "budget"))
+
+
 def test_the_cost_limit_and_its_reserve(monkeypatch):
     monkeypatch.delenv("WORKFLOW_MAX_TOKENS", raising=False)
     monkeypatch.delenv("WORKFLOW_MAX_COST", raising=False)

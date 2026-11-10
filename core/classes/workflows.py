@@ -186,7 +186,11 @@ out, so the plan's briefs can be exact.
   short sentence each."""
 
 HELPER_FAILED = "It hit an error and was stopped."
-SHARE_STOPPED = "It used up its share of the budget and was stopped."
+# What Discord is told when tokens or dollars stop a job or a step: a limit,
+# never which one, and never money (maintainer, 2026-11-10). The figures are
+# for the logs and metrics only.
+LIMIT_STOPPED = "It reached a limit and was stopped."
+SHARE_STOPPED = LIMIT_STOPPED
 
 
 class BudgetSpent(Exception):
@@ -681,7 +685,7 @@ async def _work(wf: Workflow) -> tuple[str, BrainReport]:
             stopped = "It used up its tokens and was stopped."
             break
         if wf.over_cost(_held_cost(wf)):
-            stopped = "It reached its cost limit and was stopped."
+            stopped = LIMIT_STOPPED
             break
         queue = await _review(wf, queue)
         if not queue or wf.cancel_reason:
