@@ -176,7 +176,8 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
    the call timeout after the slot is taken, so laned agents leave `ModelSettings.timeout` unset (it
    would count the wait). It also asks once more when a call is cut off before any output. Every call's
    tokens (input, cached, output) and the cost the provider reports (OpenRouter does) go to
-   `discord_bot_llm_tokens_total` / `discord_bot_llm_cost_dollars_total` by role and model, there and
+   `discord_bot_llm_tokens_total` (kinds input, cached, reasoning, output) /
+   `discord_bot_llm_cost_dollars_total` by role and model, there and
    in `side_llm.py`; a brain call's and a workflow's totals go in their last log line
    (`token_usage.py`). Never in a card or a reply: it is for comparing models. A side call
    takes the lane of the work making it (`llm_lanes.current_lane`).
@@ -492,7 +493,11 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
       an even share. Past it the helper is told to report and, 3 calls on, stopped (`BudgetSpent`).
       `WORKFLOW_MAX_COST` (dollars, the provider's own figure) works the same way beside the tokens:
       a fifth held back (`_held_cost`) and a share per run (`wp.run_share`); `over_budget` is both.
-      The token cap counts raw tokens, not cost: see `token_usage.py`.
+      The token cap counts raw tokens, not cost: see `token_usage.py`. Each helper model call is
+      capped at `SUBAGENT_MAX_OUTPUT_TOKENS` (thinking included; `_model_settings`), and one that
+      uses it all is a limit too (`laned_model.OutputCapped`, never retried). Researchers think on
+      `SUBAGENT_RESEARCHER_REASONING_EFFORT` (low). Discord is only ever told "a limit"
+      (`LIMIT_STOPPED`), never tokens or money.
     - **Restarts**: resume is out of scope. A workflow cancelled at shutdown stays live in Redis, and
       at startup `interrupt_all` marks this instance's live ones INTERRUPTED and posts a note in their
       threads. The buttons are `DynamicItem`s registered once, so an old one answers "This workflow has
@@ -711,6 +716,8 @@ reads has a row here and a line in `.env.example`, that every row is read by som
 | `SUBAGENT_MODEL` / `SUBAGENT_LLM_HOST` / `SUBAGENT_LLM_API_KEY` | a workflow helper's connection; empty = the brain's, then `LLM_*` (the key only for the same host). Chart: `subagents.model` / `llmHost` / `apiKey` |
 | `SUBAGENT_REASONING_EFFORT` / `SUBAGENT_CALL_TIMEOUT_SECONDS` | a helper's; empty = the brain's. Chart: `subagents.reasoningEffort` / `callTimeout` |
 | `SUBAGENT_MAX_TURNS` | backstop on one helper's model turns [100]. Chart: `subagents.maxTurns` |
+| `SUBAGENT_MAX_OUTPUT_TOKENS` | output tokens, thinking included, one helper's model call may make [32000; 0 = off]. A call that uses them all before saying anything is not asked again (`laned_model.OutputCapped`) and stops the helper at a limit, with its last report. Chart: `subagents.maxOutputTokens` |
+| `SUBAGENT_RESEARCHER_REASONING_EFFORT` | a research step's `reasoning_effort` [low]; other helpers use `SUBAGENT_REASONING_EFFORT`. Chart: `subagents.researcherReasoningEffort` |
 | `SUBAGENT_MAX_CONCURRENT` | researchers running at once [2], cut to the slots a self-hosted server has beside chat's; an implementer always runs alone. Chart: `subagents.maxConcurrent` |
 | `WORKSPACE_SNAPSHOT_TIMEOUT_SECONDS` | seconds for one workspace save, and for all of them at shutdown [120]. Chart: `brain.workspace.snapshotTimeout` |
 | `BRAIN_CALL_TIMEOUT_SECONDS` | like `PERSONA_CALL_TIMEOUT_SECONDS`, for the brain [600]. Chart: `brain.callTimeout` |

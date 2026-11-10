@@ -1141,6 +1141,45 @@ async def test_a_helper_past_its_share_of_the_dollars_is_stopped_and_reports(env
     assert env.model.remaining_steps == 0
 
 
+@pytest.mark.asyncio
+async def test_a_helper_call_that_used_its_whole_output_cap_stops_the_step_at_a_limit(env):
+    from agents import ModelBehaviorError
+    from laned_model_tests import _EMPTY
+    from classes.laned_model import OutputCapped
+    env.model = LaneModel([
+        _plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"])),
+        ModelStep(error=OutputCapped(_EMPTY)),
+        _report(status="partial", facts=("what it had",), call_id="last"),
+        _report(call_id="b"), _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    assert wf.results["s1"]["note"] == workflows.LIMIT_STOPPED
+    assert wf.results["s1"]["facts"] == ["what it had"]
+    assert "s1" in wf.at_limit and wf.step_states["s2"] == "done"
+    assert isinstance(OutputCapped(_EMPTY), ModelBehaviorError)
+
+
+def _effort(settings):
+    reasoning = settings.reasoning
+    return reasoning.get("effort") if isinstance(reasoning, dict) else reasoning.effort
+
+
+def test_helpers_calls_are_capped_and_research_thinks_low(monkeypatch):
+    monkeypatch.delenv("SUBAGENT_MAX_OUTPUT_TOKENS", raising=False)
+    monkeypatch.delenv("SUBAGENT_RESEARCHER_REASONING_EFFORT", raising=False)
+    monkeypatch.setenv("SUBAGENT_REASONING_EFFORT", "medium")
+    from classes.llm_roles import BRAIN, SUBAGENT
+    researcher = workflows._subagent(wp.RESEARCHER).model_settings
+    implementer = workflows._subagent(wp.IMPLEMENTER).model_settings
+    assert _effort(researcher) == "low" and researcher.max_tokens == 32000
+    assert _effort(implementer) == "medium" and implementer.max_tokens == 32000
+    assert workflows._model_settings(BRAIN).max_tokens is None  # the manager is not capped
+    monkeypatch.setenv("SUBAGENT_MAX_OUTPUT_TOKENS", "0")
+    monkeypatch.setenv("SUBAGENT_RESEARCHER_REASONING_EFFORT", "high")
+    researcher = workflows._model_settings(SUBAGENT, wp.researcher_effort())
+    assert researcher.max_tokens is None and _effort(researcher) == "high"
+
+
 def test_discord_is_never_told_about_money():
     for text in (workflows.LIMIT_STOPPED, workflows.SHARE_STOPPED):
         assert not any(word in text.lower() for word in ("cost", "dollar", "$", "budget"))

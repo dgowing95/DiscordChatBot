@@ -78,7 +78,10 @@ Why things are the way they are:
   same way as the tokens, beside them (_held_cost). One helper run may use only
   its share of the steps' tokens and dollars (wp.run_share), so research cannot
   spend what the later steps need: past it it is told to report, and stopped a
-  few calls later (BudgetSpent), with the last report a limit gets. The clock counts work: it restarts when the plan is
+  few calls later (BudgetSpent), with the last report a limit gets. A helper's
+  model call is capped at SUBAGENT_MAX_OUTPUT_TOKENS, thinking included; one that
+  uses it all (laned_model.OutputCapped) is a limit too. Discord only ever hears
+  "a limit" (LIMIT_STOPPED): tokens and money stay in the logs and metrics. The clock counts work: it restarts when the plan is
   answered.
 - **A restart interrupts**: resume is out of scope. At startup every live
   workflow becomes INTERRUPTED and its thread is told (interrupt_all).
@@ -198,15 +201,25 @@ class BudgetSpent(Exception):
     share of the tokens or dollars, it went on (_finishing_up)."""
 
 
-def _budget_spent(error: BaseException) -> bool:
-    """Whether BudgetSpent is behind `error`, wrapped or not."""
+def _behind(error: BaseException, kind: type) -> bool:
+    """Whether a `kind` is behind `error`, wrapped or not."""
     seen = set()
     while error is not None and id(error) not in seen:
-        if isinstance(error, BudgetSpent):
+        if isinstance(error, kind):
             return True
         seen.add(id(error))
         error = error.__cause__ or error.__context__
     return False
+
+
+def _budget_spent(error: BaseException) -> bool:
+    return _behind(error, BudgetSpent)
+
+
+def _output_capped(error: BaseException) -> bool:
+    """A helper's model call used all of SUBAGENT_MAX_OUTPUT_TOKENS."""
+    from classes.laned_model import OutputCapped
+    return _behind(error, OutputCapped)
 
 # Told to a scout near its limit, and in its last report when it reaches one.
 FINISH_UP = "You are at your limit. Call `report` now, on its own, with what you have so far."
@@ -1010,8 +1023,8 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
     except Exception as e:
         loop = brain._loop_stop(e)
         hooks.abandon_llm_call("error")
-        if _budget_spent(e):
-            outcome.stopped = SHARE_STOPPED
+        if _budget_spent(e) or _output_capped(e):
+            outcome.stopped = SHARE_STOPPED if _budget_spent(e) else LIMIT_STOPPED
             outcome.at_limit = True
         elif loop is not None:
             outcome.stopped = "It kept repeating itself, so it was stopped."
@@ -1124,10 +1137,16 @@ async def _last_report(wf: Workflow, agent, seen: list, lane: str, seconds: floa
     return None
 
 
-def _model_settings(role: str):
+def _model_settings(role: str, effort: str | None = None):
+    """A workflow agent's settings. A helper's (the subagent role) model
+    calls are capped at SUBAGENT_MAX_OUTPUT_TOKENS, thinking included, and
+    one that uses it all is stopped at a limit (laned_model.OutputCapped)."""
     from agents import ModelSettings
-    from classes.llm_roles import role_config
-    return ModelSettings(temperature=0.5, reasoning={"effort": role_config(role).reasoning_effort})
+    from classes.llm_roles import SUBAGENT, role_config
+    cap = wp.subagent_max_output_tokens() if role == SUBAGENT else 0
+    return ModelSettings(temperature=0.5,
+                         reasoning={"effort": effort or role_config(role).reasoning_effort},
+                         max_tokens=cap or None)
 
 
 def manager_instructions() -> str:
@@ -1175,7 +1194,8 @@ def _subagent(role: str):
         tools=brain_tools(mode=role),
         tool_use_behavior={"stop_at_tool_names": ["submit_verdict" if role == wp.VERIFIER
                                                   else "report"]},
-        model_settings=_model_settings(SUBAGENT))
+        model_settings=_model_settings(
+            SUBAGENT, wp.researcher_effort() if role == wp.RESEARCHER else None))
 
 
 def asked_in(wf: Workflow) -> str:

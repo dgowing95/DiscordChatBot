@@ -38,6 +38,14 @@ DEFAULT_MAX_TOKENS = 4_000_000
 DEFAULT_MAX_COST = 0.50
 DEFAULT_MAX_PER_GUILD = 1
 DEFAULT_SUBAGENT_MAX_TURNS = 100
+# Output tokens, thinking included, one helper's model call may make. A live
+# researcher (2026-11-10) made about 26k a call for 5 calls, $0.16 of its
+# job's $0.22, and handed on nothing; DeepSeek on "high" effort thought for
+# 26.5k tokens on a hard puzzle that "low" solved in 3.8k.
+DEFAULT_SUBAGENT_MAX_OUTPUT_TOKENS = 32_000
+# A researcher's reasoning effort: "low" solved the same puzzle as "medium"
+# with a quarter less thinking (OpenRouter, DeepSeek v4.1 Flash, 2026-11-10).
+DEFAULT_RESEARCHER_EFFORT = "low"
 DEFAULT_SUBAGENT_MAX_CONCURRENT = 2
 # Pictures one workflow may ask for (a chat reply gets 3). Not a setting.
 MAX_IMAGES = 10
@@ -213,6 +221,18 @@ def max_per_guild(env=os.environ) -> int:
     """Workflows running at once in one server (WORKFLOW_MAX_PER_GUILD,
     default 1)."""
     return _env_int("WORKFLOW_MAX_PER_GUILD", DEFAULT_MAX_PER_GUILD, env)
+
+
+def subagent_max_output_tokens(env=os.environ) -> int:
+    """Output tokens, thinking included, one helper's model call may make
+    (SUBAGENT_MAX_OUTPUT_TOKENS) [32000]. 0 is off."""
+    return _env_count("SUBAGENT_MAX_OUTPUT_TOKENS", DEFAULT_SUBAGENT_MAX_OUTPUT_TOKENS, env)
+
+
+def researcher_effort(env=os.environ) -> str:
+    """A research step's reasoning effort (SUBAGENT_RESEARCHER_REASONING_EFFORT)
+    [low]. Other helpers use SUBAGENT_REASONING_EFFORT."""
+    return (env.get("SUBAGENT_RESEARCHER_REASONING_EFFORT") or "").strip() or DEFAULT_RESEARCHER_EFFORT
 
 
 def subagent_max_turns(env=os.environ) -> int:

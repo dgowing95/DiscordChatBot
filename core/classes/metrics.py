@@ -100,7 +100,9 @@ Metrics (scraped by Prometheus from the /metrics HTTP endpoint):
            metrics only, classes/token_usage.py). role: persona / brain /
            subagent, or a side job's caller (research, image_prompt, ...);
            kind: input (prompt not served from cache) / cached (prompt the
-           provider served from its cache) / output.
+           provider served from its cache) / reasoning (output spent
+           thinking) / output (the rest: the answer and its tool calls). The
+           kinds do not overlap: their sum is every token.
   Counter  discord_bot_llm_cost_dollars_total{role,model}
            Dollars those calls cost, as the provider reported it (OpenRouter
            does, on every response; llama.cpp does not, so it stays at 0).
@@ -494,7 +496,8 @@ llm_completion_tokens = Histogram(
 
 llm_tokens_total = Counter(
     "discord_bot_llm_tokens_total",
-    "Tokens of model calls: input (not cached), cached (input served from the provider's cache), output",
+    "Tokens of model calls: input (not cached), cached (input served from the provider's cache), "
+    "reasoning (output spent thinking), output (the rest of the output)",
     ["role", "model", "kind"],
 )
 
@@ -882,7 +885,8 @@ def observe_llm_usage(role: str, model: str, tally) -> None:
     is a cost the provider did not send."""
     labels = {"role": str(role), "model": str(model)}
     for kind, tokens in (("input", tally.input - tally.cached), ("cached", tally.cached),
-                         ("output", tally.output)):
+                         ("reasoning", tally.reasoning),
+                         ("output", tally.output - tally.reasoning)):
         if tokens > 0:
             llm_tokens_total.labels(kind=kind, **labels).inc(tokens)
     if tally.cost:

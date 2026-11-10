@@ -3,8 +3,9 @@
 For the logs and the metrics only, never a card or a reply: the owner
 compares models with it (maintainer, 2026-11-10).
 
-A call's usage splits three ways: prompt tokens the provider served from
-its cache, the rest of the prompt, and the output. Nothing here weights
+A call's usage splits four ways: prompt tokens the provider served from
+its cache, the rest of the prompt, the output's thinking (reasoning tokens)
+and the rest of the output (the answer and its tool calls). Nothing here weights
 them, because the prices are not fixed: OpenRouter billed one DeepSeek
 model's cached input at about a quarter of the uncached price while its
 model listing said 5/6, and output at about 13 times uncached input, and
@@ -28,6 +29,7 @@ class Tally:
     cached: int = 0   # of those, served from the provider's cache
     output: int = 0
     cost: float | None = None  # dollars; None: no call said
+    reasoning: int = 0  # of the output, the thinking
 
     @property
     def total(self) -> int:
@@ -37,14 +39,15 @@ class Tally:
         self.input += other.input
         self.cached += other.cached
         self.output += other.output
+        self.reasoning += other.reasoning
         if other.cost is not None:
             self.cost = (self.cost or 0.0) + other.cost
 
     def text(self) -> str:
         """For a log line, e.g. "5064316 token(s) (4800000 of 5000000 in
-        cached, 64316 out), $0.0812"."""
+        cached, 64316 out, 50000 of them thinking), $0.0812"."""
         line = (f"{self.total} token(s) ({self.cached} of {self.input} in cached, "
-                f"{self.output} out)")
+                f"{self.output} out, {self.reasoning} of them thinking)")
         return line if self.cost is None else f"{line}, ${self.cost:.4f}"
 
 
@@ -85,5 +88,7 @@ def from_usage(usage, raw=None) -> Tally:
     details = _get(usage, "input_tokens_details") or _get(usage, "prompt_tokens_details")
     cached = min(_count(_get(details, "cached_tokens")), inp)
     out = _first(usage, "output_tokens", "completion_tokens")
+    out_details = _get(usage, "output_tokens_details") or _get(usage, "completion_tokens_details")
+    reasoning = min(_count(_get(out_details, "reasoning_tokens")), out)
     cost = _dollars(_get(raw if raw is not None else usage, "cost"))
-    return Tally(inp, cached, out, cost)
+    return Tally(inp, cached, out, cost, reasoning)

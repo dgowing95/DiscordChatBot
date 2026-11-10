@@ -28,7 +28,10 @@ model can spend its whole output budget thinking. Seen live on the brain
 (a hosted DeepSeek thought for 185 s on "draw a lighthouse" and returned
 nothing, which the SDK raises as ModelBehaviorError and which ended the
 run); the same request a minute later went through. Not for streamed
-calls: by then part of the reply may already have been spoken.
+calls: by then part of the reply may already have been spoken. Nor for a
+call whose caller set max_tokens (a workflow helper's output cap): it hit
+the limit it was given, and asking again would only spend as much again, so
+it raises OutputCapped, which a workflow treats as a limit.
 
 Every call's tokens (and cost, when the provider sends it) go to the metrics
 here (classes/token_usage.py), so the calls core makes on the model directly
@@ -54,6 +57,14 @@ def _cut_off_empty(error: ModelBehaviorError) -> bool:
     (agents/models/openai_chatcompletions.py). Matched on its wording: the
     SDK has no subclass for it."""
     return "finish_reason='length'" in str(error)
+
+
+class OutputCapped(ModelBehaviorError):
+    """A call cut off at the max_tokens its caller set, before any output."""
+
+
+def _capped(settings) -> bool:
+    return isinstance(getattr(settings, "max_tokens", None), int)
 
 
 def _with_raw_usage(settings):
@@ -123,6 +134,11 @@ class LanedModel(Model):
             except ModelBehaviorError as e:
                 if not _cut_off_empty(e):
                     raise
+                if _capped(model_settings):
+                    logger.warning(f"Model call ({self._lane()} lane) used all of its "
+                                   f"{model_settings.max_tokens} output tokens before saying "
+                                   f"anything; not asked again")
+                    raise OutputCapped(str(e)) from e
                 logger.warning(f"Model call ({self._lane()} lane) was cut off after "
                                f"{time.monotonic() - started:.0f}s before saying anything; "
                                f"asking once more")

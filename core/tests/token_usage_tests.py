@@ -13,10 +13,10 @@ from classes.metrics import observe_llm_usage
 from laned_model_tests import _call_args
 
 
-def _sdk_usage(inp=3339, cached=3328, out=13):
+def _sdk_usage(inp=3339, cached=3328, out=13, reasoning=0):
     return Usage(requests=1, input_tokens=inp, output_tokens=out, total_tokens=inp + out,
                  input_tokens_details=InputTokensDetails(cached_tokens=cached, cache_write_tokens=0),
-                 output_tokens_details=OutputTokensDetails(reasoning_tokens=0))
+                 output_tokens_details=OutputTokensDetails(reasoning_tokens=reasoning))
 
 
 def test_the_sdks_usage_and_the_providers_cost():
@@ -34,6 +34,16 @@ def test_the_openai_clients_usage_with_its_cost():
     assert (tally.input, tally.cached, tally.output, tally.cost) == (100, 60, 20, 0.002)
 
 
+def test_the_thinking_is_counted_apart_from_the_rest_of_the_output():
+    assert token_usage.from_usage(_sdk_usage(100, 0, 5041, 5037)).reasoning == 5037
+    chat = {"prompt_tokens": 9, "completion_tokens": 300,
+            "completion_tokens_details": {"reasoning_tokens": 261}}
+    assert token_usage.from_usage(chat).reasoning == 261
+    # Never more thinking than output.
+    odd = {"completion_tokens": 10, "completion_tokens_details": {"reasoning_tokens": 50}}
+    assert token_usage.from_usage(odd).reasoning == 10
+
+
 def test_a_server_that_says_less_counts_as_nothing_not_an_error():
     assert token_usage.from_usage(None) == token_usage.Tally()
     tally = token_usage.from_usage(SimpleNamespace(input_tokens=50, output_tokens=None))
@@ -47,13 +57,14 @@ def test_a_server_that_says_less_counts_as_nothing_not_an_error():
 
 def test_a_tally_adds_up_and_reads_in_a_log_line():
     total = token_usage.Tally()
-    assert total.text() == "0 token(s) (0 of 0 in cached, 0 out)"
-    total.add(token_usage.Tally(1000, 800, 50))
+    assert total.text() == "0 token(s) (0 of 0 in cached, 0 out, 0 of them thinking)"
+    total.add(token_usage.Tally(1000, 800, 50, reasoning=40))
     assert total.cost is None  # nobody said
-    total.add(token_usage.Tally(2000, 1900, 30, 0.0125))
+    total.add(token_usage.Tally(2000, 1900, 30, 0.0125, 20))
     total.add(token_usage.Tally(10, 0, 5, 0.0005))
-    assert (total.input, total.cached, total.output) == (3010, 2700, 85)
-    assert total.text() == "3095 token(s) (2700 of 3010 in cached, 85 out), $0.0130"
+    assert (total.input, total.cached, total.output, total.reasoning) == (3010, 2700, 85, 60)
+    assert total.text() == ("3095 token(s) (2700 of 3010 in cached, 85 out, 60 of them "
+                            "thinking), $0.0130")
 
 
 def _value(name, **labels):
@@ -62,11 +73,12 @@ def _value(name, **labels):
 
 def test_the_metrics_split_input_cached_and_output_by_role_and_model():
     labels = {"role": "brain", "model": "test/split"}
-    observe_llm_usage("brain", "test/split", token_usage.Tally(1000, 800, 50, 0.01))
+    observe_llm_usage("brain", "test/split", token_usage.Tally(1000, 800, 50, 0.01, 30))
     observe_llm_usage("brain", "test/split", token_usage.Tally(10, 0, 5))
     assert _value("discord_bot_llm_tokens_total", kind="input", **labels) == 210
     assert _value("discord_bot_llm_tokens_total", kind="cached", **labels) == 800
-    assert _value("discord_bot_llm_tokens_total", kind="output", **labels) == 55
+    assert _value("discord_bot_llm_tokens_total", kind="reasoning", **labels) == 30
+    assert _value("discord_bot_llm_tokens_total", kind="output", **labels) == 25
     assert _value("discord_bot_llm_cost_dollars_total", **labels) == pytest.approx(0.01)
 
 

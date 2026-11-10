@@ -96,6 +96,8 @@ A restart of the bot stops a running workflow; its thread says so. Ask again to 
 | `WORKFLOW_MAX_COST` | 0.50 (0 = off) | Caps what one workflow costs in dollars, as the LLM provider reports it (OpenRouter does; a self-hosted llama.cpp does not, so only the token cap applies there). A fifth is kept for the check and the final report. Raise it for a pricier model |
 | `WORKFLOW_ASK_TIMEOUT` | 300 | How long a question waits for an answer, in seconds |
 | `WORKFLOW_MAX_PER_GUILD` | 1 | Workflows running at once in one server |
+| `SUBAGENT_MAX_OUTPUT_TOKENS` | 32000 (0 = off) | Caps what one helper's model call may write, thinking included. A call that uses it all stops that step, which still hands on what it found |
+| `SUBAGENT_RESEARCHER_REASONING_EFFORT` | low | How hard research steps think (low / medium / high). Other steps use `SUBAGENT_REASONING_EFFORT` |
 | `SUBAGENT_MAX_CONCURRENT` | 2 | Research steps at once, cut to the LLM slots beside chat's |
 | `SUBAGENT_MODEL` / `SUBAGENT_LLM_HOST` / `SUBAGENT_LLM_API_KEY` | the brain's | The helpers' model |
 

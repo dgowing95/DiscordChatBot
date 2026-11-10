@@ -275,3 +275,16 @@ async def test_only_one_retry_and_only_for_that_error():
     with pytest.raises(ModelBehaviorError):
         await LanedModel(other, "https://remote.example", 30).get_response(**_call_args())
     assert len(other.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_used_the_output_cap_it_was_given_is_not_asked_again():
+    from agents import ModelBehaviorError, ModelSettings
+    from classes.laned_model import OutputCapped
+    inner = ScriptedModel([ModelStep(error=ModelBehaviorError(_EMPTY)),
+                           ModelStep(output=[assistant_message("hello", item_id="m1")])])
+    args = _call_args()
+    args["model_settings"] = ModelSettings(max_tokens=32000)
+    with pytest.raises(OutputCapped):
+        await LanedModel(inner, "https://remote.example", 30).get_response(**args)
+    assert len(inner.calls) == 1
