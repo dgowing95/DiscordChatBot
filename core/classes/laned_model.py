@@ -31,7 +31,12 @@ run); the same request a minute later went through. Not for streamed
 calls: by then part of the reply may already have been spoken. Nor for a
 call whose caller set max_tokens (a workflow helper's output cap): it hit
 the limit it was given, and asking again would only spend as much again, so
-it raises OutputCapped, which a workflow treats as a limit.
+it raises OutputCapped, which a workflow treats as a limit. Its output is
+counted as the cap, all thinking: the SDK raises before handing over the
+response, so its usage (and cost) is not known. A model that rejects
+max_tokens with a 400 (an OpenAI reasoning model wants max_completion_tokens;
+gpt-4o allows 16384, DeepSeek's own API 8192) is asked again without it, and
+not sent it again (drops_cap).
 
 Every call's tokens (and cost, when the provider sends it) go to the metrics
 here (classes/token_usage.py), so the calls core makes on the model directly
@@ -40,8 +45,11 @@ OpenRouter puts the cost, only when asked (preserve_raw_usage), so every
 call asks; it changes nothing in the request.
 """
 import asyncio
+import dataclasses
 import logging
 import time
+
+from openai import BadRequestError, UnprocessableEntityError
 
 from agents import ModelBehaviorError, ModelSettings, ModelTimeoutError
 from agents.models.interface import Model
@@ -89,6 +97,8 @@ class LanedModel(Model):
         self.call_timeout = call_timeout
         self.lane = lane
         self.role = role
+        # The server rejected max_tokens once: never sent again (see above).
+        self.drops_cap = False
 
     def __getattr__(self, name):
         # Everything else (the model name, the client) is the inner model's.
@@ -119,6 +129,8 @@ class LanedModel(Model):
                            output_schema, handoffs, tracing, *, previous_response_id=None,
                            conversation_id=None, prompt=None):
         model_settings = _with_raw_usage(model_settings)
+        if self.drops_cap and _capped(model_settings):
+            model_settings = dataclasses.replace(model_settings, max_tokens=None)
 
         def attempt():
             return self._bounded(self.inner.get_response(
@@ -128,9 +140,21 @@ class LanedModel(Model):
             ))
 
         async def call():
+            nonlocal model_settings
             started = time.monotonic()
             try:
                 response = await attempt()
+            except (BadRequestError, UnprocessableEntityError) as e:
+                if not (_capped(model_settings) and "max_tokens" in str(e)):
+                    raise
+                logger.warning(f"Model {getattr(self.inner, 'model', '?')} rejected max_tokens="
+                               f"{model_settings.max_tokens} ({e}); asking without it, and not "
+                               f"sending it again")
+                self.drops_cap = True
+                model_settings = dataclasses.replace(model_settings, max_tokens=None)
+                response = await attempt()
+                self._count(getattr(response, "usage", None), getattr(response, "raw_usage", None))
+                return response
             except ModelBehaviorError as e:
                 if not _cut_off_empty(e):
                     raise
@@ -138,6 +162,9 @@ class LanedModel(Model):
                     logger.warning(f"Model call ({self._lane()} lane) used all of its "
                                    f"{model_settings.max_tokens} output tokens before saying "
                                    f"anything; not asked again")
+                    cap = model_settings.max_tokens
+                    self._count({"output_tokens": cap,
+                                 "output_tokens_details": {"reasoning_tokens": cap}})
                     raise OutputCapped(str(e)) from e
                 logger.warning(f"Model call ({self._lane()} lane) was cut off after "
                                f"{time.monotonic() - started:.0f}s before saying anything; "

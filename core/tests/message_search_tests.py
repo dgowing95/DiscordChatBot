@@ -641,8 +641,10 @@ def test_before_takes_a_link_an_id_or_a_date():
 def test_a_save_pages_for_at_most_ten_minutes_and_leaves_the_run_time():
     assert msf.export_seconds(None) == msf.EXPORT_MAX_SECONDS == 600
     assert msf.export_seconds(3000) == 600
-    assert msf.export_seconds(500) == 500 - msf.EXPORT_HAND_BACK_SECONDS
-    assert msf.export_seconds(100) == 0
+    assert msf.export_seconds(700) == 700 - msf.EXPORT_HAND_BACK_SECONDS
+    # A short run hands back a third: an unprompted brain call has 180 s in all.
+    assert msf.export_seconds(179) == pytest.approx(179 * 2 / 3)
+    assert msf.export_seconds(12) < msf.EXPORT_MIN_SECONDS
 
 
 def test_a_carried_on_save_gets_a_file_of_its_own_and_asks_older_messages():
@@ -687,9 +689,8 @@ async def test_a_long_save_stops_in_time_and_says_how_to_carry_on(monkeypatch):
     context, http = _env()
     http.request = AsyncMock(side_effect=slow)
     session = _FakeSession()
-    # 60 s for the save: the run's deadline less the time it hands back.
-    context.update(session=session, out_dir="/work/out",
-                   brain_deadline=clock.now + msf.EXPORT_HAND_BACK_SECONDS + 60)
+    # 60 s for the save: 90 s left, a third of it handed back.
+    context.update(session=session, out_dir="/work/out", brain_deadline=clock.now + 90)
     text = await _save(context, query="died", max_messages=10000)
     assert http.request.await_count == 6
     lines = session.files["/work/in/discord-died.jsonl"].splitlines()
@@ -711,7 +712,7 @@ async def test_a_long_save_stops_in_time_and_says_how_to_carry_on(monkeypatch):
 async def test_no_save_starts_when_the_run_is_nearly_out_of_time():
     import time
     context, http = _env()
-    context.update(session=_FakeSession(), brain_deadline=time.monotonic() + 60)
+    context.update(session=_FakeSession(), brain_deadline=time.monotonic() + 12)
     assert await _save(context, query="x") == msf.NO_TIME_TEXT
     http.request.assert_not_called()
     context["brain_deadline"] = None

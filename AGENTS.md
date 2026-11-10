@@ -401,7 +401,7 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
       one link. Both read what the bot can see, in this server only. `save_messages_to_file` writes every
       match (up to 10000, 20 MB) as JSON lines into the brain's `in/`, so code can count or chart them.
       Search gives about 25 messages every 5.5 s, so one call pages for at most 10 minutes and stops
-      3 minutes before the run's `brain_deadline` (each workflow helper sets its own), then says how
+      3 minutes (or a third of what is left, if less) before the run's `brain_deadline` (each workflow helper sets its own), then says how
       to carry on with `before=` (a message id or a date; its own file). Search requests go one at a
       time per server; a channel alone (no words, no author) is read from its history instead.
 13. **Tier 3 workflows** (`docs/workflows.md`, `workflows.py`; off with `WORKFLOW_ENABLED=0`). A job too
@@ -493,6 +493,9 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
       an even share. Past it the helper is told to report and, 3 calls on, stopped (`BudgetSpent`).
       `WORKFLOW_MAX_COST` (dollars, the provider's own figure) works the same way beside the tokens:
       a fifth held back (`_held_cost`) and a share per run (`wp.run_share`); `over_budget` is both.
+      A run's share is promised until spent (`owed`), so a run starting meanwhile never counts it
+      twice. The check stops at the full limits and the second check needs room; the manager's
+      final report always runs, so a job can end a little past them.
       The token cap counts raw tokens, not cost: see `token_usage.py`. Each helper model call is
       capped at `SUBAGENT_MAX_OUTPUT_TOKENS` (thinking included; `_model_settings`), and one that
       uses it all is a limit too (`laned_model.OutputCapped`, never retried). Researchers think on

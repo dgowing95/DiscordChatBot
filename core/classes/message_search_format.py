@@ -63,15 +63,16 @@ EXPORT_SAMPLE_CHARS = 800
 # 2026-11-08: 10000 of a channel's messages took 38 minutes and cost a
 # workflow step and then a whole brain call). So one call saves for at most
 # EXPORT_MAX_SECONDS, and always leaves the run EXPORT_HAND_BACK_SECONDS to
-# use what it saved; a run with less than EXPORT_MIN_SECONDS for it is told
-# so at once. What it stopped short of is reached with `before`, from the
+# use what it saved, or a third of what it has left when that is less (an
+# unprompted brain call has 180 s in all, a scout 300); a run with less than
+# EXPORT_MIN_SECONDS for it is told so at once. What it stopped short of is reached with `before`, from the
 # oldest message saved: Discord has no other way past its 9975 offset either.
 # A channel alone is read from its history (100 a page, another rate limit).
 SEARCH_PAGE_SECONDS = 5.5
 HISTORY_PAGE_SIZE = 100
 EXPORT_MAX_SECONDS = 600
 EXPORT_HAND_BACK_SECONDS = 180
-EXPORT_MIN_SECONDS = 30
+EXPORT_MIN_SECONDS = 10
 DISCORD_EPOCH_MS = 1420070400000
 NO_TIME_TEXT = ("Too little time is left in this run to save messages. Use what you have, and "
                 "say what is missing.")
@@ -414,11 +415,12 @@ def parse_before(text) -> int | None:
 
 def export_seconds(left: float | None) -> float:
     """Seconds one save may page for: EXPORT_MAX_SECONDS, and never past the
-    run's deadline less EXPORT_HAND_BACK_SECONDS (`left`: seconds to it,
-    None when the run has none)."""
+    run's deadline less EXPORT_HAND_BACK_SECONDS, or less a third of `left`
+    when that is smaller (`left`: seconds to it, None when the run has none)."""
     if left is None:
         return float(EXPORT_MAX_SECONDS)
-    return max(0.0, min(float(EXPORT_MAX_SECONDS), left - EXPORT_HAND_BACK_SECONDS))
+    hand_back = min(EXPORT_HAND_BACK_SECONDS, max(0.0, left) / 3)
+    return max(0.0, min(float(EXPORT_MAX_SECONDS), left - hand_back))
 
 
 def search_seconds(count: int) -> float:

@@ -288,3 +288,24 @@ async def test_a_call_that_used_the_output_cap_it_was_given_is_not_asked_again()
     with pytest.raises(OutputCapped):
         await LanedModel(inner, "https://remote.example", 30).get_response(**args)
     assert len(inner.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_model_that_rejects_max_tokens_is_asked_without_it_from_then_on():
+    import httpx
+    from agents import ModelSettings
+    from openai import BadRequestError
+    rejected = BadRequestError(
+        "Unsupported parameter: 'max_tokens' is not supported with this model.",
+        response=httpx.Response(400, request=httpx.Request("POST", "https://remote.example")),
+        body=None)
+    inner = ScriptedModel([ModelStep(error=rejected),
+                           ModelStep(output=[assistant_message("one", item_id="m1")]),
+                           ModelStep(output=[assistant_message("two", item_id="m2")])])
+    model = LanedModel(inner, "https://remote.example", 30)
+    args = _call_args()
+    args["model_settings"] = ModelSettings(max_tokens=32000)
+    await model.get_response(**args)
+    await model.get_response(**args)
+    assert model.drops_cap
+    assert [call.model_settings.max_tokens for call in inner.calls] == [32000, None, None]

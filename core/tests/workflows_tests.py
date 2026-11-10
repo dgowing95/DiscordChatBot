@@ -17,7 +17,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from agents import Agent, RunConfig, RunContextWrapper, function_tool
+from agents import Agent, ModelSettings, RunConfig, RunContextWrapper, function_tool
 from agents.testing import ModelStep, ScriptedModel, assistant_message, function_call
 from agents.usage import Usage
 
@@ -143,9 +143,11 @@ def env(monkeypatch):
             return Agent(name="Helper", model=ns.model, instructions="verifier",
                          tools=[*ns.subagent_tools, submit_verdict],
                          tool_use_behavior={"stop_at_tool_names": ["submit_verdict"]})
+        # Capped as the real helpers are (SUBAGENT_MAX_OUTPUT_TOKENS).
         return Agent(name="Helper", model=ns.model, instructions="helper",
                      tools=[*ns.subagent_tools, attach_file, brain.report],
-                     tool_use_behavior={"stop_at_tool_names": ["report"]})
+                     tool_use_behavior={"stop_at_tool_names": ["report"]},
+                     model_settings=ModelSettings(max_tokens=32000))
 
     def _config(lease, guard, watch=None):
         return RunConfig(call_model_input_filter=brain.input_filter(guard, 6, watch),
@@ -1105,11 +1107,13 @@ async def test_a_helper_still_going_past_its_token_share_is_stopped_and_reports(
     await _finish(wf)
     for told in (2, 3, 4):
         assert workflows.FINISH_UP in json.dumps(env.model.calls[told].input)
-    assert wf.results["s1"]["note"] == workflows.SHARE_STOPPED
+    assert wf.results["s1"]["note"] == workflows.LIMIT_STOPPED
     assert wf.results["s1"]["facts"] == ["the sheet is in facts.md"]
     assert "s1" in wf.at_limit
     assert wf.step_states["s2"] == "done"  # what was kept for it was there
     assert env.model.remaining_steps == 0
+    # Every run gave back what it did not spend of its share.
+    assert wf.token_promised == 0 and wf.cost_promised == 0
 
 
 @pytest.mark.asyncio
@@ -1134,7 +1138,7 @@ async def test_a_helper_past_its_share_of_the_dollars_is_stopped_and_reports(env
     wf, _ = await _start(env)
     await _finish(wf)
     assert workflows.FINISH_UP in json.dumps(env.model.calls[2].input)
-    assert wf.results["s1"]["note"] == workflows.SHARE_STOPPED
+    assert wf.results["s1"]["note"] == workflows.LIMIT_STOPPED
     assert wf.results["s1"]["facts"] == ["half of it"]
     assert wf.step_states["s2"] == "done"
     assert wf.record["cost"] == pytest.approx(0.65)
@@ -1157,6 +1161,24 @@ async def test_a_helper_call_that_used_its_whole_output_cap_stops_the_step_at_a_
     assert wf.results["s1"]["facts"] == ["what it had"]
     assert "s1" in wf.at_limit and wf.step_states["s2"] == "done"
     assert isinstance(OutputCapped(_EMPTY), ModelBehaviorError)
+    # Its tokens never came back in a response: the cap is counted.
+    assert wf.tokens >= 32000
+
+
+@pytest.mark.asyncio
+async def test_a_helper_reply_cut_off_part_way_at_the_cap_is_a_limit_not_its_answer(env):
+    cut = ModelStep(output=[assistant_message("Here is everything I found: 1. The A1 mi",
+                                              item_id="m1")],
+                    usage=Usage(requests=1, input_tokens=100, output_tokens=32000,
+                                total_tokens=32100))
+    env.model = LaneModel([
+        _plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"])),
+        cut, _report(status="partial", facts=("the A1 mini costs 199",), call_id="last"),
+        _report(call_id="b"), _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    assert wf.results["s1"]["note"] == workflows.LIMIT_STOPPED
+    assert wf.results["s1"]["facts"] == ["the A1 mini costs 199"]
 
 
 def _effort(settings):
@@ -1181,7 +1203,7 @@ def test_helpers_calls_are_capped_and_research_thinks_low(monkeypatch):
 
 
 def test_discord_is_never_told_about_money():
-    for text in (workflows.LIMIT_STOPPED, workflows.SHARE_STOPPED):
+    for text in (workflows.LIMIT_STOPPED,):
         assert not any(word in text.lower() for word in ("cost", "dollar", "$", "budget"))
 
 

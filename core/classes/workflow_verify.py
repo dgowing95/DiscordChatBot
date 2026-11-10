@@ -231,7 +231,8 @@ async def run(wf) -> None:
             if wf.cancel_reason:
                 return
             await workflows._set_state(wf, "verify")
-            verdict = await _check(wf, "v2") or verdict
+            if not wf.over_budget():
+                verdict = await _check(wf, "v2") or verdict
     if wf.cancel_reason:
         return
     state = _state(verdict)

@@ -495,8 +495,10 @@ class BrainHooks(RunHooks):
         # when the provider sent one (workflows count them).
         self.on_tokens = None
         self.on_cost = None
-        # The run's tokens and cost, for its log line (token_usage.py).
+        # The run's tokens and cost, for its log line (token_usage.py), and
+        # the newest response's output tokens (a workflow helper's cap).
         self.usage = token_usage.Tally()
+        self.last_output = 0
         # The run's prompt against its server's slot (context_trim.ContextWatch).
         self.context_watch = None
 
@@ -514,6 +516,7 @@ class BrainHooks(RunHooks):
             self.context_watch.seen(tokens)
         call = token_usage.from_usage(usage, getattr(response, "raw_usage", None))
         self.usage.add(call)
+        self.last_output = call.output
         if self.on_tokens is not None:
             self.on_tokens(response_tokens(response))
         if self.on_cost is not None and call.cost:

@@ -193,7 +193,6 @@ HELPER_FAILED = "It hit an error and was stopped."
 # never which one, and never money (maintainer, 2026-11-10). The figures are
 # for the logs and metrics only.
 LIMIT_STOPPED = "It reached a limit and was stopped."
-SHARE_STOPPED = LIMIT_STOPPED
 
 
 class BudgetSpent(Exception):
@@ -214,6 +213,15 @@ def _behind(error: BaseException, kind: type) -> bool:
 
 def _budget_spent(error: BaseException) -> bool:
     return _behind(error, BudgetSpent)
+
+
+def _output_cap(agent) -> int:
+    """The max_tokens its model calls are really sent: none once its model
+    dropped it (laned_model.drops_cap)."""
+    if getattr(getattr(agent, "model", None), "drops_cap", False):
+        return 0
+    cap = getattr(getattr(agent, "model_settings", None), "max_tokens", None)
+    return cap if isinstance(cap, int) else 0
 
 
 def _output_capped(error: BaseException) -> bool:
@@ -925,14 +933,24 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
                                                        hooks.context_watch),
             group_id=f"workflow-{wf.id}")
     used = [0, 0.0]  # this run's tokens and dollars
+    # What is left of its share: wf.tokens and wf.cost grow as it spends, so
+    # its promise shrinks by as much, or a run starting meanwhile would count
+    # that spend twice.
+    owed = [0, 0.0]
 
     def _on_tokens(tokens: int) -> None:
         used[0] += tokens
         wf.add_tokens(tokens)
+        taken = min(tokens, owed[0])
+        owed[0] -= taken
+        wf.token_promised -= taken
 
     def _on_cost(dollars: float) -> None:
         used[1] += dollars
         wf.add_cost(dollars)
+        taken = min(dollars, owed[1])
+        owed[1] -= taken
+        wf.cost_promised -= taken
 
     hooks.on_tokens = _on_tokens
     hooks.on_cost = _on_cost
@@ -963,6 +981,10 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
             return (wf.over_budget(held=True)
                     or (bool(wp.max_tokens()) and used[0] >= share)
                     or (bool(wp.max_cost()) and used[1] >= cost_share))
+    elif workspace and (wp.max_tokens() or wp.max_cost()):
+        # The check may use the reserves, but not past the limits themselves.
+        def spent():
+            return wf.over_budget()
     # The reserves are kept back from the steps, for the check and the
     # manager's last runs.
     reserve = _step_reserve_seconds(wf) if holds_back else FINISH_RESERVE_SECONDS if workspace else 0
@@ -993,6 +1015,7 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
     wf.promised += turns
     wf.token_promised += share
     wf.cost_promised += cost_share
+    owed[:] = [share, cost_share]
     wf.sharing = max(1, wf.sharing - 1)
 
     async def _go():
@@ -1003,9 +1026,15 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
     child = asyncio.create_task(_go())
     wf.running.add(child)
     outcome = _Outcome(seen=seen)
+    cap = _output_cap(agent)
     try:
         result = await asyncio.wait_for(child, seconds)
         outcome.final_text = str(result.final_output or "")
+        if cap and hooks.last_output >= cap:
+            # Its last reply was cut off at the cap part-way: what it ended
+            # on is not its report.
+            outcome.stopped = LIMIT_STOPPED
+            outcome.at_limit = True
     except asyncio.CancelledError:
         current = asyncio.current_task()
         if wf.cancel_reason and not (current and current.cancelling()):
@@ -1023,8 +1052,14 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
     except Exception as e:
         loop = brain._loop_stop(e)
         hooks.abandon_llm_call("error")
-        if _budget_spent(e) or _output_capped(e):
-            outcome.stopped = SHARE_STOPPED if _budget_spent(e) else LIMIT_STOPPED
+        if _output_capped(e):
+            # Its tokens never reached the hooks: count the cap (its cost is
+            # not known, laned_model.py).
+            _on_tokens(cap or 0)
+            hooks.usage.add(token_usage.Tally(output=cap or 0, reasoning=cap or 0))
+        if (_budget_spent(e) or _output_capped(e)
+                or (cap and hooks.last_output >= cap)):  # a reply cut off part-way
+            outcome.stopped = LIMIT_STOPPED
             outcome.at_limit = True
         elif loop is not None:
             outcome.stopped = "It kept repeating itself, so it was stopped."
@@ -1034,8 +1069,8 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
     finally:
         wf.running.discard(child)
         wf.promised -= turns
-        wf.token_promised -= share
-        wf.cost_promised -= cost_share
+        wf.token_promised -= owed[0]
+        wf.cost_promised -= owed[1]
         wf.turns += hooks.turns
         wf.tool_calls += hooks.tool_calls
         wf.usage.add(hooks.usage)
@@ -1117,6 +1152,8 @@ async def _last_report(wf: Workflow, agent, seen: list, lane: str, seconds: floa
         child.cancel()
         raise
     except Exception as e:
+        if _output_capped(e):
+            wf.add_tokens(_output_cap(agent))
         logger.warning(f"Workflow {wf.id}: the last report failed: {e!r}")
         return None
     finally:
