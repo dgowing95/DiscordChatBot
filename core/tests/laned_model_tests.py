@@ -292,12 +292,11 @@ async def test_a_call_that_used_the_output_cap_it_was_given_is_not_asked_again()
 
 @pytest.mark.asyncio
 async def test_a_model_that_rejects_max_tokens_is_asked_without_it_from_then_on():
-    import httpx
     from agents import ModelSettings
     from openai import BadRequestError
     rejected = BadRequestError(
         "Unsupported parameter: 'max_tokens' is not supported with this model.",
-        response=httpx.Response(400, request=httpx.Request("POST", "https://remote.example")),
+        response=SimpleNamespace(status_code=400, request=SimpleNamespace(), headers={}),
         body=None)
     inner = ScriptedModel([ModelStep(error=rejected),
                            ModelStep(output=[assistant_message("one", item_id="m1")]),
@@ -309,3 +308,39 @@ async def test_a_model_that_rejects_max_tokens_is_asked_without_it_from_then_on(
     await model.get_response(**args)
     assert model.drops_cap
     assert [call.model_settings.max_tokens for call in inner.calls] == [32000, None, None]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_retry_without_max_tokens_keeps_sending_it():
+    from agents import ModelSettings
+    from openai import BadRequestError
+    response = SimpleNamespace(status_code=400, request=SimpleNamespace(), headers={})
+    rejected = BadRequestError("max_tokens is too large", response=response, body=None)
+    other = BadRequestError("bad messages", response=response, body=None)
+    inner = ScriptedModel([ModelStep(error=rejected), ModelStep(error=other)])
+    model = LanedModel(inner, "https://remote.example", 30)
+    args = _call_args()
+    args["model_settings"] = ModelSettings(max_tokens=32000)
+    with pytest.raises(BadRequestError):
+        await model.get_response(**args)
+    assert not model.drops_cap  # it was not max_tokens after all
+
+
+@pytest.mark.asyncio
+async def test_a_streamed_call_counts_its_cost():
+    from agents import ModelSettings
+    from agents.usage import Usage
+    from prometheus_client import REGISTRY
+    labels = {"role": "persona", "model": "test/stream"}
+    inner = ScriptedModel([ModelStep(output=[assistant_message("hi", item_id="m1")],
+                                     usage=Usage(requests=1, input_tokens=10, output_tokens=2,
+                                                 total_tokens=12),
+                                     raw_usage={"prompt_tokens": 10, "cost": 0.004})])
+    inner.model = "test/stream"
+    model = LanedModel(inner, "https://remote.example", 30, role="persona")
+    args = _call_args()
+    args["model_settings"] = ModelSettings()
+    async for _ in model.stream_response(**args):
+        pass
+    cost = REGISTRY.get_sample_value("discord_bot_llm_cost_dollars_total", labels)
+    assert cost == pytest.approx(0.004)

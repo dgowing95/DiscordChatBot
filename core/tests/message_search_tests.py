@@ -807,3 +807,21 @@ async def test_a_big_search_says_how_long_saving_it_takes():
     context, http = _env(body=_body(_hit(1), total_results=1449))
     context["session"] = _FakeSession()
     assert "(about 5 minutes for that many)" in (await _search(context, query="has died"))
+
+
+@pytest.mark.asyncio
+async def test_a_save_waiting_on_another_saves_lock_gives_up_at_its_time_limit(monkeypatch):
+    from classes import message_search_tools as mst
+    import time
+    context, http = _env()
+    context.update(session=_FakeSession(), brain_deadline=time.monotonic() + 40)
+    monkeypatch.setattr(mst, "export_seconds", lambda left: 0.3)
+    monkeypatch.setattr(mst, "EXPORT_MIN_SECONDS", 0)
+    lock = mst._search_lock(GUILD_ID)
+    await lock.acquire()  # another save holds the server's search
+    try:
+        text = await asyncio.wait_for(_save(context, query="x"), 5)
+    finally:
+        lock.release()
+    assert text == msf.NO_TIME_TEXT
+    http.request.assert_not_called()

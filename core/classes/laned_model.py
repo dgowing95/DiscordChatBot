@@ -75,6 +75,18 @@ def _capped(settings) -> bool:
     return isinstance(getattr(settings, "max_tokens", None), int)
 
 
+def _stream_raw_usage(response) -> dict | None:
+    """The provider's usage payload (its cost) the SDK keeps on a streamed
+    response. It is a private attribute there, so this reads it carefully and
+    gives None if the SDK moved it."""
+    try:
+        from agents.usage import _RAW_USAGE_ATTRIBUTE
+    except ImportError:
+        return None
+    raw = getattr(response, _RAW_USAGE_ATTRIBUTE, None)
+    return raw if isinstance(raw, dict) else None
+
+
 def _with_raw_usage(settings):
     """`settings` asking the SDK to keep the provider's usage payload."""
     try:
@@ -148,11 +160,12 @@ class LanedModel(Model):
                 if not (_capped(model_settings) and "max_tokens" in str(e)):
                     raise
                 logger.warning(f"Model {getattr(self.inner, 'model', '?')} rejected max_tokens="
-                               f"{model_settings.max_tokens} ({e}); asking without it, and not "
-                               f"sending it again")
-                self.drops_cap = True
+                               f"{model_settings.max_tokens} ({e}); asking without it")
                 model_settings = dataclasses.replace(model_settings, max_tokens=None)
                 response = await attempt()
+                # Latched only now the retry has worked: that is what shows
+                # max_tokens was what the server refused.
+                self.drops_cap = True
                 self._count(getattr(response, "usage", None), getattr(response, "raw_usage", None))
                 return response
             except ModelBehaviorError as e:
@@ -221,8 +234,8 @@ class LanedModel(Model):
                             raise ModelTimeoutError(self.call_timeout) from None
                         raise
                     if getattr(event, "type", None) == "response.completed":
-                        # The streamed response's usage; its cost is not kept here.
-                        self._count(getattr(getattr(event, "response", None), "usage", None))
+                        response = getattr(event, "response", None)
+                        self._count(getattr(response, "usage", None), _stream_raw_usage(response))
                     yield event
             finally:
                 await stream.aclose()

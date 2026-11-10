@@ -194,22 +194,35 @@ def _search_lock(guild_id) -> asyncio.Lock:
     return locks.setdefault(guild_id, asyncio.Lock())
 
 
+# _search_page's answer when a save's time ran out while it waited.
+_OUT_OF_TIME = object()
+
+
 async def _search_page(scope: _Scope, limit, offset: int = 0, newest_first: bool = False,
                        max_id=None, retry_until: float | None = None):
     """One page of Discord's search, or the text to return when it fails.
-    `retry_until`: a monotonic time before which a 429 is asked again."""
+    `retry_until` (a save's): a monotonic time before which a 429 is asked
+    again, and past which nothing waits, neither for the server's lock (another
+    save) nor for discord.py sitting out a rate limit: _OUT_OF_TIME then."""
     nsfw = bool(getattr(scope.current, "is_nsfw", lambda: False)())
     params = search_params(scope.query, scope.channel_id, scope.author_id, limit,
                            include_nsfw=nsfw, offset=offset, newest_first=newest_first,
                            max_id=max_id)
     tries = 0
     while True:
+        remaining = None if retry_until is None else retry_until - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            return _OUT_OF_TIME
         try:
-            async with _search_lock(scope.guild.id):
-                body = await scope.client.http.request(
-                    Route("GET", "/guilds/{guild_id}/messages/search", guild_id=scope.guild.id),
-                    params=params)
+            async with asyncio.timeout(remaining):
+                async with _search_lock(scope.guild.id):
+                    body = await scope.client.http.request(
+                        Route("GET", "/guilds/{guild_id}/messages/search",
+                              guild_id=scope.guild.id),
+                        params=params)
             break
+        except TimeoutError:
+            return _OUT_OF_TIME
         except discord.Forbidden:
             return ("Discord didn't allow the search (I need Read Message History, and the bot "
                     "needs the Message Content intent). Tell the user.")
@@ -374,6 +387,11 @@ async def _save_search(scope: _Scope, export: _Export, before_id, stop_at: float
         asked_at = time.monotonic()
         body = await _search_page(scope, MAX_LIMIT, offset, newest_first=True, max_id=before_id,
                                   retry_until=stop_at)
+        if body is _OUT_OF_TIME:
+            if not export.records:
+                raise _Failed(NO_TIME_TEXT)
+            rest = max(0, min(export.wanted, export.total) - len(export.records))
+            return time_stop_text(len(export.records), rest, export.oldest_id)
         if isinstance(body, str):
             if not export.records:
                 raise _Failed(body)

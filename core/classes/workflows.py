@@ -1026,10 +1026,12 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
     child = asyncio.create_task(_go())
     wf.running.add(child)
     outcome = _Outcome(seen=seen)
-    cap = _output_cap(agent)
+    # Read when checked, not before: a model that rejects the cap drops it
+    # during the run (laned_model.drops_cap), and then a long reply is whole.
     try:
         result = await asyncio.wait_for(child, seconds)
         outcome.final_text = str(result.final_output or "")
+        cap = _output_cap(agent)
         if cap and hooks.last_output >= cap:
             # Its last reply was cut off at the cap part-way: what it ended
             # on is not its report.
@@ -1052,6 +1054,7 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
     except Exception as e:
         loop = brain._loop_stop(e)
         hooks.abandon_llm_call("error")
+        cap = _output_cap(agent)
         if _output_capped(e):
             # Its tokens never reached the hooks: count the cap (its cost is
             # not known, laned_model.py).
