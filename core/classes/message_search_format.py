@@ -20,7 +20,8 @@ Shapes worth knowing (Discord's docs; check them again if this breaks):
 
 Saving messages to a file (save_messages_to_file, brain calls only) pages
 through the same search, 25 at a time, with `offset`. Discord refuses an
-offset over 9975, so one search can reach 10000 messages at most. Every
+offset over 9975, so one call reaches 10000 messages at most; a second call
+with `before` (max_id) carries on from the oldest one saved. Every
 message is written in full, as one JSON object per line, for code to read:
 a tally of a bot's 2,000 posts cannot go through a prompt 25 at a time.
 
@@ -32,7 +33,7 @@ before/after was asked, so they are sorted by id here.
 """
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 
 DEFAULT_LIMIT = 10
 MAX_LIMIT = 25
@@ -57,6 +58,23 @@ EXPORT_MAX = 10000
 EXPORT_MAX_OFFSET = 9975
 EXPORT_MAX_BYTES = 20_000_000
 EXPORT_SAMPLE_CHARS = 800
+# How long saving takes. Discord's search answers about one page of 25 every
+# 5.4 s once its first few are used, with a 429 before each (prod,
+# 2026-11-08: 10000 of a channel's messages took 38 minutes and cost a
+# workflow step and then a whole brain call). So one call saves for at most
+# EXPORT_MAX_SECONDS, and always leaves the run EXPORT_HAND_BACK_SECONDS to
+# use what it saved; a run with less than EXPORT_MIN_SECONDS for it is told
+# so at once. What it stopped short of is reached with `before`, from the
+# oldest message saved: Discord has no other way past its 9975 offset either.
+# A channel alone is read from its history (100 a page, another rate limit).
+SEARCH_PAGE_SECONDS = 5.5
+HISTORY_PAGE_SIZE = 100
+EXPORT_MAX_SECONDS = 600
+EXPORT_HAND_BACK_SECONDS = 180
+EXPORT_MIN_SECONDS = 30
+DISCORD_EPOCH_MS = 1420070400000
+NO_TIME_TEXT = ("Too little time is left in this run to save messages. Use what you have, and "
+                "say what is missing.")
 _LINK = re.compile(r"https?://(?:(?:ptb|canary)\.)?discord(?:app)?\.com/channels/"
                    r"(\d+|@me)/(\d+)/(\d+)")
 _BARE_ID = re.compile(r"^\d{15,25}$")
@@ -72,11 +90,12 @@ def clamp_limit(limit) -> int:
 
 def search_params(query: str, channel_id=None, author_id=None, limit=DEFAULT_LIMIT,
                   include_nsfw: bool = False, offset: int = 0,
-                  newest_first: bool = False) -> list:
+                  newest_first: bool = False, max_id=None) -> list:
     """The query string, as (key, value) pairs. Best matches first when there
     are words to match, else newest first (listing someone's messages).
     Saving to a file pages with `offset` and always asks newest first: a
-    relevance order is not stable from one page to the next."""
+    relevance order is not stable from one page to the next. `max_id`: only
+    messages older than that id (a save carrying on from where one stopped)."""
     params = [("limit", str(clamp_limit(limit))),
               ("include_nsfw", "true" if include_nsfw else "false")]
     query = (query or "").strip()[:1024]
@@ -92,6 +111,8 @@ def search_params(query: str, channel_id=None, author_id=None, limit=DEFAULT_LIM
         params.append(("author_id", str(author_id)))
     if offset:
         params.append(("offset", str(int(offset))))
+    if max_id:
+        params.append(("max_id", str(int(max_id))))
     return params
 
 
@@ -358,27 +379,99 @@ def export_record(message: dict, guild_id, channel_names: dict) -> dict:
     }
 
 
-def export_filename(query: str, where: str, author: str) -> str:
+def export_filename(query: str, where: str, author: str, before=None) -> str:
     """A readable file name from what was asked for, e.g.
-    discord-group-shared-storage.jsonl."""
+    discord-group-shared-storage.jsonl. A save carrying on from `before` gets
+    its own, so it never replaces the file it continues."""
     words = " ".join(part for part in (query, author,
                                        "" if where == "this server" else where) if part)
     slug = re.sub(r"[^a-z0-9]+", "-", words.casefold()).strip("-")[:60].strip("-")
-    return f"discord-{slug or 'messages'}.jsonl"
+    return f"discord-{slug or 'messages'}{f'-before-{before}' if before else ''}.jsonl"
 
 
-def export_summary(path: str, saved: int, total: int, first: dict | None,
-                   stopped: str = "") -> str:
-    """What the brain is told: where the file is, how much is in it,
-    its shape (one real record, cut short), and why it stopped if it did."""
+def snowflake_at(when: datetime) -> int:
+    """The smallest message id Discord could give at `when` (aware, or UTC)."""
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0, int(when.timestamp() * 1000) - DISCORD_EPOCH_MS) << 22
+
+
+def parse_before(text) -> int | None:
+    """`before` as a message id: a message link, a bare id, or a date or time
+    (ISO 8601, UTC unless it says otherwise). None when empty. Raises
+    ValueError for anything else."""
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    link = parse_message_link(raw)
+    if link is not None:
+        return link[2]
+    try:
+        return snowflake_at(datetime.fromisoformat(raw.replace("Z", "+00:00")))
+    except ValueError:
+        raise ValueError(raw) from None
+
+
+def export_seconds(left: float | None) -> float:
+    """Seconds one save may page for: EXPORT_MAX_SECONDS, and never past the
+    run's deadline less EXPORT_HAND_BACK_SECONDS (`left`: seconds to it,
+    None when the run has none)."""
+    if left is None:
+        return float(EXPORT_MAX_SECONDS)
+    return max(0.0, min(float(EXPORT_MAX_SECONDS), left - EXPORT_HAND_BACK_SECONDS))
+
+
+def search_seconds(count: int) -> float:
+    """Roughly how long search takes to page through `count` messages."""
+    return -(-max(0, count) // MAX_LIMIT) * SEARCH_PAGE_SECONDS
+
+
+def minutes_text(seconds: float) -> str:
+    minutes = round(seconds / 60)
+    if minutes < 1:
+        return "under a minute"
+    return f"about {minutes} minute{'s' if minutes != 1 else ''}"
+
+
+def carry_on_text(oldest_id) -> str:
+    return (f"To save the older ones, call save_messages_to_file again with the same arguments "
+            f"and before=\"{oldest_id}\" (they go to a file of their own)")
+
+
+def time_stop_text(saved: int, rest: int | None, oldest_id, history: bool = False) -> str:
+    """Why a save stopped at its time limit, what the rest of a search would
+    take, and how to carry on or need less."""
+    more = ("" if not rest else
+            f" The other {rest} would take {minutes_text(search_seconds(rest))} more.")
+    fewer = ("words the messages contain or an author, when only some of them are needed"
+             if history else
+             "words the messages contain, an author, or a channel alone (read straight from "
+             "it, much faster)")
+    return (f"Stopped early at {saved}: one save runs for at most "
+            f"{minutes_text(EXPORT_MAX_SECONDS)}, and this run needs time left to use "
+            f"them.{more} {carry_on_text(oldest_id)}, or need fewer: {fewer}.")
+
+
+def export_summary(path: str, saved: int, total: int | None, first: dict | None,
+                   stopped: str = "", span: tuple[str, str] | None = None) -> str:
+    """What the brain is told: where the file is, how much is in it and
+    the dates it covers, its shape (one real record, cut short), and why it
+    stopped if it did. `total` None: read from a channel's history, which
+    has no count."""
     if not saved:
         return "No messages matched, so no file was written."
+    if total is None:
+        which = "the channel's newest, read from its history"
+    else:
+        which = f"{'all' if saved >= total else f'the newest {saved} of {total}'} found"
     lines = [f"Saved {saved} message{'s' if saved != 1 else ''} "
-             f"({'all' if saved >= total else f'the newest {saved} of {total}'} found) to "
+             f"({which}) to "
              f"{path}, newest first, one JSON object per line. Keys: id, link, channel, author, "
              f"author_id, bot, timestamp (ISO 8601, UTC), content, embeds (each: author, title, "
              f"description, fields [{{name, value}}], footer, url), attachments (file names). "
              f"Read it with code; don't print the whole file."]
+    if span is not None and span[0] and span[1]:
+        lines.append(f"The oldest is from {span[0]}, the newest from {span[1]}.")
     if stopped:
         lines.append(stopped)
     if first is not None:

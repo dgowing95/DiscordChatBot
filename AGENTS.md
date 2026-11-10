@@ -394,6 +394,10 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
       Messages endpoint (not wrapped by discord.py; a 202 means not indexed yet) and the messages around
       one link. Both read what the bot can see, in this server only. `save_messages_to_file` writes every
       match (up to 10000, 20 MB) as JSON lines into the brain's `in/`, so code can count or chart them.
+      Search gives about 25 messages every 5.5 s, so one call pages for at most 10 minutes and stops
+      3 minutes before the run's `brain_deadline` (each workflow helper sets its own), then says how
+      to carry on with `before=` (a message id or a date; its own file). Search requests go one at a
+      time per server; a channel alone (no words, no author) is read from its history instead.
 13. **Tier 3 workflows** (`docs/workflows.md`, `workflows.py`; off with `WORKFLOW_ENABLED=0`). A job too
     big for one brain call runs in its own thread. The brain hands it over with `start_workflow` (which
     ends its run like `report`; the persona is told `started_workflow` and the thread link), or a person
@@ -474,7 +478,9 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
       `WORKFLOW_MAX_TOKENS` (4M; every agent together) stop it with what exists (PARTIAL);
       `SUBAGENT_MAX_TURNS` per helper. Helpers leave 40 turns (`wp.turn_reserve`) and 300 seconds more
       than the final report's for the check. The clock restarts when the plan is answered, so waiting
-      on a person is not work time.
+      on a person is not work time. A step's helper is told to finish 3 turns and 2 minutes before its
+      own limits (`wp.helper_wrap_up`), and one a limit stops gets `_last_report` like a scout, so
+      what it found reaches the later steps rather than a step to do it again.
     - **Restarts**: resume is out of scope. A workflow cancelled at shutdown stays live in Redis, and
       at startup `interrupt_all` marks this instance's live ones INTERRUPTED and posts a note in their
       threads. The buttons are `DynamicItem`s registered once, so an old one answers "This workflow has
