@@ -649,6 +649,10 @@ def test_a_carried_on_save_gets_a_file_of_its_own_and_asks_older_messages():
     assert msf.export_filename("died", "#ehp", "", 987) == "discord-died-ehp-before-987.jsonl"
     params = msf.search_params("died", None, None, 25, newest_first=True, max_id=987)
     assert ("max_id", "987") in params
+    # Before Discord began there is nothing older: id 0, still a cutoff.
+    assert msf.parse_before("2014-06-01") == 0
+    assert ("max_id", "0") in msf.search_params("x", max_id=0, newest_first=True)
+    assert msf.export_filename("x", "this server", "", 0) == "discord-x-before-0.jsonl"
 
 
 def test_the_summary_says_which_dates_it_covers():

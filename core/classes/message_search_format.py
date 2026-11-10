@@ -111,7 +111,7 @@ def search_params(query: str, channel_id=None, author_id=None, limit=DEFAULT_LIM
         params.append(("author_id", str(author_id)))
     if offset:
         params.append(("offset", str(int(offset))))
-    if max_id:
+    if max_id is not None:
         params.append(("max_id", str(int(max_id))))
     return params
 
@@ -386,7 +386,7 @@ def export_filename(query: str, where: str, author: str, before=None) -> str:
     words = " ".join(part for part in (query, author,
                                        "" if where == "this server" else where) if part)
     slug = re.sub(r"[^a-z0-9]+", "-", words.casefold()).strip("-")[:60].strip("-")
-    return f"discord-{slug or 'messages'}{f'-before-{before}' if before else ''}.jsonl"
+    return f"discord-{slug or 'messages'}{'' if before is None else f'-before-{before}'}.jsonl"
 
 
 def snowflake_at(when: datetime) -> int:
