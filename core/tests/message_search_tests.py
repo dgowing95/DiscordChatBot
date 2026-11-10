@@ -825,3 +825,11 @@ async def test_a_save_waiting_on_another_saves_lock_gives_up_at_its_time_limit(m
         lock.release()
     assert text == msf.NO_TIME_TEXT
     http.request.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_request_that_times_out_is_a_failed_search_not_out_of_time():
+    context, http = _env()
+    http.request = AsyncMock(side_effect=TimeoutError())
+    text = await _search(context, query="x")
+    assert "failed on Discord's side" in text

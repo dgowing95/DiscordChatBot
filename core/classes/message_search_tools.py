@@ -213,16 +213,21 @@ async def _search_page(scope: _Scope, limit, offset: int = 0, newest_first: bool
         remaining = None if retry_until is None else retry_until - time.monotonic()
         if remaining is not None and remaining <= 0:
             return _OUT_OF_TIME
+        window = None
         try:
-            async with asyncio.timeout(remaining):
+            async with asyncio.timeout(remaining) as window:
                 async with _search_lock(scope.guild.id):
                     body = await scope.client.http.request(
                         Route("GET", "/guilds/{guild_id}/messages/search",
                               guild_id=scope.guild.id),
                         params=params)
             break
-        except TimeoutError:
-            return _OUT_OF_TIME
+        except TimeoutError as e:
+            if window is not None and window.expired():
+                return _OUT_OF_TIME
+            # The request's own timeout (aiohttp's), not the save's.
+            logger.warning(f"message search timed out: {e!r}")
+            return "The search failed on Discord's side. Tell the user to try again later."
         except discord.Forbidden:
             return ("Discord didn't allow the search (I need Read Message History, and the bot "
                     "needs the Message Content intent). Tell the user.")
