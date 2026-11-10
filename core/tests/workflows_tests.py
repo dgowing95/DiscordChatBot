@@ -12,6 +12,7 @@ the seams.
 import asyncio
 import contextlib
 import json
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -261,14 +262,100 @@ async def test_a_helper_out_of_turns_makes_the_workflow_partial(env, monkeypatch
     env.model = LaneModel([
         _plan_call(("s1", "researcher", [])),
         ModelStep(output=[function_call("look", {}, call_id="l1")]),
-        _report(facts=["Only part of it was done"], call_id="f"),
+        # Its last report: the one call it gets once stopped, report only.
+        _report(facts=["Only part of it was done"], call_id="last"),
+        _report(call_id="f"),
     ])
     wf, _ = await _start(env)
     await _finish(wf)
     assert wf.record["state"] == wp.PARTIAL
     assert wf.results["s1"]["status"] == brain_result.PARTIAL
+    assert wf.results["s1"]["facts"] == ["Only part of it was done"]
     assert "ran out of steps" in wf.results["s1"]["note"]
+    last = env.model.calls[2]
+    assert workflows.FINISH_UP in json.dumps(last.input)
+    assert [t.name for t in last.tools] == ["report"]
     assert env.queue.get_nowait().report.status == brain_result.PARTIAL
+    assert env.model.remaining_steps == 0
+
+
+@pytest.mark.asyncio
+async def test_a_helper_out_of_time_still_hands_on_what_it_found(env, monkeypatch):
+    """Stopped in the middle of a slow tool (a big message save, say): the
+    last report is made from what it had seen."""
+    monkeypatch.setattr(wp, "HELPER_LAST_REPORT_SECONDS", 5)
+
+    @function_tool
+    async def slow() -> str:
+        """Slow."""
+        await asyncio.sleep(30)
+        return "late"
+
+    env.subagent_tools = [slow]
+    env.model = LaneModel([_plan_call(("s1", "researcher", [])),
+                           ModelStep(output=[function_call("slow", {}, call_id="s")]),
+                           _report(facts=["Saved half the messages"], call_id="last"),
+                           _report(call_id="f")])
+    original = workflows._agent_run
+
+    async def short(wf, agent, task, **kwargs):
+        if kwargs.get("wrap_up"):
+            kwargs["seconds"] = 1
+        return await original(wf, agent, task, **kwargs)
+
+    monkeypatch.setattr(workflows, "_agent_run", short)
+    wf, _ = await _start(env)
+    await _finish(wf)
+    assert "ran out of time" in wf.results["s1"]["note"]
+    assert wf.results["s1"]["facts"] == ["Saved half the messages"]
+
+
+@pytest.mark.asyncio
+async def test_a_helper_is_told_to_finish_before_its_last_turns(env, monkeypatch):
+    monkeypatch.setenv("SUBAGENT_MAX_TURNS", "8")
+
+    @function_tool
+    async def look() -> str:
+        """Look."""
+        return "ok"
+
+    env.subagent_tools = [look]
+    env.model = LaneModel([_plan_call(("s1", "researcher", [])),
+                           *[_look_call(f"l{i}") for i in range(5)],
+                           _report(call_id="a"), _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    helper_calls = [json.dumps(call.input) for call in env.model.calls[1:7]]
+    # 8 turns: told on its last 3 (HELPER_FINISH_UP_TURNS), from the 6th call.
+    assert [workflows.FINISH_UP in text for text in helper_calls] == [False] * 5 + [True]
+    assert wf.results["s1"]["status"] == brain_result.DONE
+
+
+def test_a_helpers_finish_up_points_leave_room_and_short_runs_get_none():
+    plan = wp.helper_wrap_up(100, 3000)
+    assert plan == wp.WrapUp(97, 3000 - 90 - 120, 3000 - 90)
+    # Too short to spare them: told to finish at once it would do nothing.
+    assert wp.helper_wrap_up(6, 180) == wp.WrapUp(None, None, 180)
+    assert wp.helper_wrap_up(7, 181).finish_up_at == 4
+
+
+@pytest.mark.asyncio
+async def test_a_helpers_tools_get_the_end_of_its_own_run(env):
+    seen = {}
+
+    @function_tool
+    async def look(wrapper: RunContextWrapper[dict]) -> str:
+        """Look."""
+        seen["left"] = wrapper.context["brain_deadline"] - time.monotonic()
+        return "ok"
+
+    env.subagent_tools = [look]
+    env.model = LaneModel([_plan_call(("s1", "researcher", [])), _look_call("l1"),
+                           _report(call_id="a"), _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    # WORKFLOW_TIMEOUT 3600, minus the reserves (480) and the last report (90).
+    assert 3000 < seen["left"] <= 3600 - 480 - 90
 
 
 @pytest.mark.asyncio

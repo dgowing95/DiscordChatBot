@@ -55,6 +55,8 @@ one brain call can.
   before the next step, changing the remaining steps if you ask. Anyone in the server can write there,
   but only the person who asked can change the steps or reach the helpers.
 - If a helper needs to know something, it asks you in the thread, the same way as before the plan.
+- A helper near the end of its turns or time is told to wrap up, and one that is stopped still hands
+  on what it found, so the next steps can use it.
 - Say just **stop** in the thread, or press **Cancel** on the plan, to stop it. Files made so far
   are kept.
 

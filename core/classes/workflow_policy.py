@@ -47,6 +47,16 @@ MAX_SUBJECT_CHARS = 120
 MAX_FINDINGS_CHARS = 2700      # room for two scouts' whole findings, so nothing is cut twice
 MAX_PLAN_QUESTIONS = 3
 
+# A step's helper is told to report this many turns, and seconds, before
+# its limits, and one stopped by a limit gets one last call that can only be
+# `report`, in seconds kept back from its run (as a scout). A researcher in
+# a live job (2026-11-09) wrote a 23 KB fact sheet, kept checking quotes to
+# its 100th turn and was stopped with nothing reported; the job then paid
+# for a step to redo it, and ran out of tokens before the write-up.
+HELPER_FINISH_UP_TURNS = 3
+HELPER_FINISH_UP_SECONDS = 120
+HELPER_LAST_REPORT_SECONDS = 90
+
 # Turns kept from the helpers for the check and the final report. A job set
 # to few turns keeps a fifth instead, so its helpers can still work.
 TURN_RESERVE = 40
@@ -124,6 +134,29 @@ def max_turns(env=os.environ) -> int:
 def turn_reserve(env=os.environ) -> int:
     """The turns helpers leave for the check and the final report."""
     return min(TURN_RESERVE, max_turns(env) // 5)
+
+
+@dataclass(frozen=True)
+class WrapUp:
+    """When a step's helper is told to finish, and the seconds it runs for.
+    finish_up_at: the turn from which it is told (None: never by turns);
+    finish_up_after: the seconds into its run from which it is told (None:
+    never by time); seconds: its run, with the last report's time kept back."""
+    finish_up_at: int | None
+    finish_up_after: float | None
+    seconds: float
+
+
+def helper_wrap_up(turns: int, seconds: float) -> WrapUp:
+    """A step helper's finish-up points for a run of `turns` turns and
+    `seconds` seconds. A run too short to spare them gets none: told to
+    finish on its first turn it would do nothing at all."""
+    if seconds > 2 * HELPER_LAST_REPORT_SECONDS:
+        seconds -= HELPER_LAST_REPORT_SECONDS
+    at = turns - HELPER_FINISH_UP_TURNS if turns > 2 * HELPER_FINISH_UP_TURNS else None
+    after = (seconds - HELPER_FINISH_UP_SECONDS if seconds > 2 * HELPER_FINISH_UP_SECONDS
+             else None)
+    return WrapUp(at, after, seconds)
 
 
 def max_tokens(env=os.environ) -> int:

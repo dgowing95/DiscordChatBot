@@ -810,16 +810,19 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
                      workspace: bool, progress=None, caller: str = "workflow",
                      ctx: dict | None = None, seconds: float | None = None,
                      finish_up_at: int | None = None, finish_up: str = FINISH_UP,
-                     steer: tuple | None = None, checking: bool = False) -> _Outcome:
+                     steer: tuple | None = None, checking: bool = False,
+                     wrap_up: bool = False) -> _Outcome:
     """One agent run of the workflow, as a child task the cancel can stop.
     Counts its turns into the workflow's, and maps every stop to a reason
     (never raises, except when the workflow itself is being cancelled).
     `ctx` is a helper's own run context; the manager uses the workflow's.
     `seconds` is a limit of its own, under what the workflow has left.
     From turn `finish_up_at` on it is told `finish_up`; its last input is kept
-    for _last_report. `steer`, a place in wf.steering and a step's id: what
-    is for that step from there on reaches the run. Workspace runs leave the
-    reserves alone, but
+    for _last_report. `wrap_up` (a step's helper) sets that turn, and a time
+    too, from what the run really gets (workflow_policy.helper_wrap_up), and
+    keeps the last report's seconds back. `steer`, a place in wf.steering and
+    a step's id: what is for that step from there on reaches the run.
+    Workspace runs leave the reserves alone, but
     for the check (`checking`), which they are there for."""
     from agents import MaxTurnsExceeded, RunConfig, RunHooks, Runner
     from classes import brain, brain_policy, workflow_steering
@@ -845,9 +848,6 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
         run_config = workflow_steering.steered(run_config, wf, *steer)
     seen: list = []
     holds_back = workspace and not checking
-    if finish_up_at is not None or (holds_back and wp.max_tokens()):
-        run_config = _finishing_up(run_config, hooks, finish_up_at, seen, finish_up,
-                                   wf.over_tokens if holds_back else None)
     turns = _turn_limit(wf, max_turns, _held_turns(wf) if holds_back else 0)
     if isinstance(getattr(progress, "max_turns", None), int):
         # A helper's embed counts to the turns it really has (its share, after
@@ -858,6 +858,26 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
     reserve = _step_reserve_seconds(wf) if holds_back else FINISH_RESERVE_SECONDS if workspace else 0
     left = max(30.0, wf.seconds_left() - reserve)
     seconds = left if seconds is None else min(seconds, left)
+    finish_by = None
+    if wrap_up:
+        plan = wp.helper_wrap_up(turns, seconds)
+        seconds = plan.seconds
+        if plan.finish_up_at is not None:
+            finish_up_at = plan.finish_up_at
+        if plan.finish_up_after is not None:
+            finish_by = time.monotonic() + plan.finish_up_after
+    if ctx is not None:
+        # What a tool has left (save_messages_to_file, ask_user): this run's
+        # own end, not the workflow's or the brain call's that started it.
+        ctx["brain_deadline"] = time.monotonic() + seconds
+    over_tokens = wf.over_tokens if holds_back and wp.max_tokens() else None
+    over = None
+    if over_tokens is not None or finish_by is not None:
+        def over():
+            return ((over_tokens is not None and over_tokens())
+                    or (finish_by is not None and time.monotonic() >= finish_by))
+    if finish_up_at is not None or over is not None:
+        run_config = _finishing_up(run_config, hooks, finish_up_at, seen, finish_up, over)
     if wf.cancel_reason:
         # request_cancel can only stop a run that exists. No await from here
         # to wf.running, so a cancel lands on one side or the other.
@@ -1467,16 +1487,24 @@ async def _step_attempt(wf: Workflow, step: wp.Step, progress,
     # No await from here to the run, so a message is either in this text or
     # reaches the run through `steer`.
     parts.append(workflow_steering.said_text(wf, step.id))
-    outcome = await _agent_run(wf, _subagent(step.role), "\n\n".join(filter(None, parts)),
+    agent = _subagent(step.role)
+    outcome = await _agent_run(wf, agent, "\n\n".join(filter(None, parts)),
                                max_turns=wp.subagent_max_turns(), lane=llm_lanes.SUBAGENT,
                                workspace=True, progress=progress, caller="workflow_subagent",
-                               ctx=ctx, steer=(len(wf.steering), step.id))
+                               ctx=ctx, steer=(len(wf.steering), step.id), wrap_up=True)
     _keep_shared(wf, ctx)
     if outcome.at_limit:
         wf.at_limit.add(step.id)
     else:
         wf.at_limit.discard(step.id)
     args = ctx.get("brain_report_args")
+    if args is None and outcome.at_limit:
+        # What it found goes on to the later steps, rather than "found 0
+        # facts" and a step to do it all again.
+        args = await _last_report(wf, agent, outcome.seen, llm_lanes.SUBAGENT,
+                                  wp.HELPER_LAST_REPORT_SECONDS)
+        logger.info(f"Workflow {wf.id}: {step.id} stopped at a limit; its last report "
+                    + ("came" if args is not None else "did not come"))
     if args is not None:
         report = brain_result.parse_report_args(args)
     elif outcome.stopped is None:

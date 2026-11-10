@@ -139,6 +139,7 @@ async def test_a_step_that_ran_out_of_turns_is_not_sent_back(checked, monkeypatc
     checked.subagent_tools = [look]
     checked.model = LaneModel([_plan_call(("s1", "researcher", [])),
                                ModelStep(output=[function_call("look", {}, call_id="l")]),
+                               _report(status="partial", call_id="last"),
                                _verdict(BAD, redo="s1"), _report(call_id="f")])
     wf, _ = await _start(checked)
     await _finish(wf)
@@ -241,7 +242,8 @@ async def test_the_check_and_the_report_still_run_when_a_helper_used_its_turns(c
     look_call = ModelStep(output=[function_call("look", {}, call_id="l")])
     monkeypatch.setattr(workflow_verify, "_room", lambda wf: True)
     checked.model = LaneModel([_plan_call(("s1", "researcher", [])), look_call, look_call,
-                               look_call, _verdict(GOOD), _report(call_id="f")])
+                               look_call, _report(status="partial", call_id="last"),
+                               _verdict(GOOD), _report(call_id="f")])
     wf, _ = await _start(checked)
     await _finish(wf)
     assert "ran out of steps" in wf.results["s1"]["note"]
