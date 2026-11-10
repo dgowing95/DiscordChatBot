@@ -234,8 +234,9 @@ IMPLEMENTER_VIEW_LINE = " Look at a chart or picture you made with `view_image` 
 
 ROLE_LINES = {
     wp.RESEARCHER: ("\n\nYour role: researcher. Find the facts with web_search, fetch_url and "
-                    "this server's messages, and report each with its source. Use the "
-                    "workspace only to read and process data."),
+                    "this server's messages, and report each with its source. Report as soon "
+                    "as each thing your brief asks for has one, or two tries found nothing "
+                    "(say so). Use the workspace only to read and process data."),
     wp.IMPLEMENTER: ("\n\nYour role: implementer. Build what your step asks in your folder, "
                      "check that it works, and attach the files the user gets."),
 }
