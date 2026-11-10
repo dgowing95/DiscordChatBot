@@ -167,7 +167,7 @@ def test_room_for_a_send_back_needs_turns_time_and_tokens(monkeypatch):
     def _wf(turns, seconds, tokens=0):
         return SimpleNamespace(checked=True, turns_left=lambda: turns,
                                seconds_left=lambda: seconds,
-                               over_tokens=lambda reserve=0: tokens >= 4_000_000 - reserve)
+                               over_budget=lambda held=False: tokens >= 4_000_000 - 300_000 * held)
 
     assert workflow_verify._room(_wf(100, 1000))
     assert not workflow_verify._room(_wf(25, 1000))   # 20 held, fewer than 10 over
@@ -421,7 +421,7 @@ async def test_no_research_check_without_an_implementer_or_room(researched, monk
     plan = wp.Plan(goal="g", deliverables=[], notes="", steps=[
         wp.Step(id="s1", role="researcher", brief="b"),
         wp.Step(id="s2", role="implementer", brief="b")])
-    short = SimpleNamespace(cancel_reason=None, over_tokens=lambda reserve=0: False, checked=False,
+    short = SimpleNamespace(cancel_reason=None, over_budget=lambda held=False: False, checked=False,
                             at_limit=set(), plan=plan, research_checked=set(),
                             results={"s1": {"status": "done"}}, id="a1",
                             turns_left=lambda: 55, seconds_left=lambda: 3600)

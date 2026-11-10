@@ -14,7 +14,8 @@ they are, with the cost the provider reports (OpenRouter's usage has
 
 WORKFLOW_MAX_TOKENS still counts raw tokens, in and out: it is a brake on a
 run that goes round in circles, and one weight would be wrong for every
-model but the one it was measured on.
+model but the one it was measured on. What a job costs is capped by
+WORKFLOW_MAX_COST instead, on the provider's own figure.
 """
 import math
 from dataclasses import dataclass

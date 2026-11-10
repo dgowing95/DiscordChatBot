@@ -491,8 +491,10 @@ class BrainHooks(RunHooks):
         self.tool_calls = 0
         # The longest prompt of the run: what a slot's context has to hold.
         self.peak_prompt_tokens = 0
-        # Called with each response's tokens, in and out (workflows count them).
+        # Called with each response's tokens, in and out, and with its cost
+        # when the provider sent one (workflows count them).
         self.on_tokens = None
+        self.on_cost = None
         # The run's tokens and cost, for its log line (token_usage.py).
         self.usage = token_usage.Tally()
         # The run's prompt against its server's slot (context_trim.ContextWatch).
@@ -510,9 +512,12 @@ class BrainHooks(RunHooks):
             self.peak_prompt_tokens = max(self.peak_prompt_tokens, tokens)
         if self.context_watch is not None:
             self.context_watch.seen(tokens)
-        self.usage.add(token_usage.from_usage(usage, getattr(response, "raw_usage", None)))
+        call = token_usage.from_usage(usage, getattr(response, "raw_usage", None))
+        self.usage.add(call)
         if self.on_tokens is not None:
             self.on_tokens(response_tokens(response))
+        if self.on_cost is not None and call.cost:
+            self.on_cost(call.cost)
         for part in self.parts:
             await part.on_llm_end(context, agent, response)
 

@@ -398,8 +398,17 @@ def test_the_token_reserve_is_600k_or_a_fifth_of_a_small_limit():
 
 
 def test_a_helper_run_leaves_the_steps_after_it_half_an_even_share_each():
-    assert wp.run_token_share(1000, 1, 0) == 1000      # the last step gets it all
-    assert wp.run_token_share(1000, 1, 1) == 750       # one after it keeps 250
-    assert wp.run_token_share(1000, 1, 4) == 600       # four keep 100 each
-    assert wp.run_token_share(1200, 2, 1) == 500       # two together, one after: 200 kept
-    assert wp.run_token_share(-5, 1, 2) == 0
+    assert wp.run_share(1000, 1, 0) == 1000      # the last step gets it all
+    assert wp.run_share(1000, 1, 1) == 750       # one after it keeps 250
+    assert wp.run_share(1000, 1, 4) == 600       # four keep 100 each
+    assert wp.run_share(1200, 2, 1) == 500       # two together, one after: 200 kept
+    assert wp.run_share(-5, 1, 2) == 0
+    assert wp.run_share(0.4, 1, 1) == pytest.approx(0.3)  # dollars too
+
+
+def test_the_cost_limit_is_50_cents_by_default_and_0_turns_it_off():
+    assert wp.max_cost({}) == 0.5 and wp.cost_reserve({}) == pytest.approx(0.1)
+    assert wp.max_cost({"WORKFLOW_MAX_COST": "2.5"}) == 2.5
+    assert wp.max_cost({"WORKFLOW_MAX_COST": "0"}) == 0
+    for nonsense in ("lots", "-1", "nan", "inf"):
+        assert wp.max_cost({"WORKFLOW_MAX_COST": nonsense}) == 0.5

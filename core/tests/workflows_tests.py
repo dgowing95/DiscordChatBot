@@ -28,6 +28,7 @@ from classes import (brain, brain_result, llm_lanes, thread_inbox, token_usage, 
                      workflow_verify, workflows)
 from classes import workflow_policy as wp
 from classes.workflow_store import WorkflowStore
+from classes.laned_model import _with_raw_usage
 from classes import card_kit as K
 from card_checks import interaction as card_interaction, label_of, replied_text, view_text
 from classes import card
@@ -47,6 +48,11 @@ class LaneModel(ScriptedModel):
 
     async def get_response(self, *args, **kwargs):
         self.lanes.append(llm_lanes.current_lane.get())
+        # As LanedModel asks: the provider's usage payload (its cost) is kept.
+        if "model_settings" in kwargs:
+            kwargs["model_settings"] = _with_raw_usage(kwargs["model_settings"])
+        elif len(args) > 2:
+            args = (*args[:2], _with_raw_usage(args[2]), *args[3:])
         return await super().get_response(*args, **kwargs)
 
 
@@ -1099,11 +1105,54 @@ async def test_a_helper_still_going_past_its_token_share_is_stopped_and_reports(
     await _finish(wf)
     for told in (2, 3, 4):
         assert workflows.FINISH_UP in json.dumps(env.model.calls[told].input)
-    assert wf.results["s1"]["note"] == workflows.TOKENS_STOPPED
+    assert wf.results["s1"]["note"] == workflows.SHARE_STOPPED
     assert wf.results["s1"]["facts"] == ["the sheet is in facts.md"]
     assert "s1" in wf.at_limit
     assert wf.step_states["s2"] == "done"  # what was kept for it was there
     assert env.model.remaining_steps == 0
+
+
+@pytest.mark.asyncio
+async def test_a_helper_past_its_share_of_the_dollars_is_stopped_and_reports(env, monkeypatch):
+    # $1, less 20 cents held back: s1 may cost 60 cents, as s2 keeps half an even share.
+    monkeypatch.setenv("WORKFLOW_MAX_TOKENS", "0")
+    monkeypatch.setenv("WORKFLOW_MAX_COST", "1")
+
+    @function_tool
+    async def look() -> str:
+        """Look."""
+        return "ok"
+
+    env.subagent_tools = [look]
+    # The provider's cost (OpenRouter's usage payload), in dollars.
+    dear = ModelStep(output=[function_call("look", {}, call_id="l1")], raw_usage={"cost": 0.65})
+    env.model = LaneModel([
+        _plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"])),
+        dear, _look_call("l2"), _look_call("l3"), _look_call("l4"),
+        _report(status="partial", facts=("half of it",), call_id="last"),
+        _report(call_id="b"), _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    assert workflows.FINISH_UP in json.dumps(env.model.calls[2].input)
+    assert wf.results["s1"]["note"] == workflows.SHARE_STOPPED
+    assert wf.results["s1"]["facts"] == ["half of it"]
+    assert wf.step_states["s2"] == "done"
+    assert wf.record["cost"] == pytest.approx(0.65)
+    assert env.model.remaining_steps == 0
+
+
+def test_the_cost_limit_and_its_reserve(monkeypatch):
+    monkeypatch.delenv("WORKFLOW_MAX_TOKENS", raising=False)
+    monkeypatch.delenv("WORKFLOW_MAX_COST", raising=False)
+    wf = workflows.Workflow(record={}, ctx={}, thread=None, origin_channel=None)
+    wf.add_cost(0.39)
+    assert not wf.over_budget(held=True)   # the steps stop at 40 cents
+    wf.add_cost(0.02)
+    assert wf.over_budget(held=True) and not wf.over_budget()
+    wf.add_cost(0.09)
+    assert wf.over_budget()                # 50 cents
+    monkeypatch.setenv("WORKFLOW_MAX_COST", "0")
+    assert not wf.over_budget()
 
 
 @pytest.mark.asyncio
@@ -1112,12 +1161,15 @@ async def test_tokens_are_counted_from_each_response():
                              None)
     seen = []
     hooks.on_tokens = seen.append
+    costs = []
+    hooks.on_cost = costs.append
     usage = SimpleNamespace(input_tokens=100, output_tokens=20,
                             input_tokens_details=SimpleNamespace(cached_tokens=70))
     await hooks.on_llm_end(None, None, SimpleNamespace(usage=usage, raw_usage={"cost": 0.25}))
     await hooks.on_llm_end(None, None, SimpleNamespace(usage=None))
     assert seen == [120, 0]
     assert hooks.usage == token_usage.Tally(100, 70, 20, 0.25)
+    assert costs == [0.25]  # only a call that said what it cost
 
 
 def test_the_token_limit_is_4m_by_default_and_0_turns_it_off(monkeypatch):

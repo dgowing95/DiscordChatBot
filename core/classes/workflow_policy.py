@@ -15,6 +15,7 @@ a 10+ source report with a chart, took 62 min and 238 turns). WORKFLOW_TIMEOUT a
 anything bigger, and running out stops it cleanly with what exists
 (PARTIAL), never "try again".
 """
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -29,6 +30,12 @@ DEFAULT_TIMEOUT_SECONDS = 3600
 DEFAULT_MAX_TURNS = 300
 # Live jobs used 0.5-2.6M tokens; a runaway one 5.1M (maintainer, 2026-11-07).
 DEFAULT_MAX_TOKENS = 4_000_000
+# Dollars, as the provider reports them (OpenRouter; llama.cpp reports none, so
+# there only the tokens count). On OpenRouter's DeepSeek v4.1 Flash a live
+# 3-step job cost $0.22 (2026-11-10), $0.16 of it one helper thinking for
+# 131k output tokens; at about $0.075 per million tokens otherwise, the
+# 0.5-2.6M-token jobs seen are $0.04-0.20 and the 5.1M runaway about $0.37.
+DEFAULT_MAX_COST = 0.50
 DEFAULT_MAX_PER_GUILD = 1
 DEFAULT_SUBAGENT_MAX_TURNS = 100
 DEFAULT_SUBAGENT_MAX_CONCURRENT = 2
@@ -169,16 +176,31 @@ def token_reserve(env=os.environ) -> int:
     return min(TOKEN_RESERVE, max_tokens(env) // 5)
 
 
-def run_token_share(left: int, sharing: int, waiting: int) -> int:
-    """The tokens one helper run may use, of the `left` the steps have, when
-    it is one of `sharing` runs starting together and `waiting` steps have
-    not started: each of those keeps half an even share, and the runs split
-    the rest. Past it the helper is told to report, then stopped, so one step
-    cannot spend what the later ones need."""
+def cost_reserve(env=os.environ) -> float:
+    """The dollars helpers leave for the check and the final report: a fifth."""
+    return max_cost(env) / 5
+
+
+def run_share(left: float, sharing: int, waiting: int) -> float:
+    """What one helper run may use (tokens or dollars), of the `left` the
+    steps have, when it is one of `sharing` runs starting together and
+    `waiting` steps have not started: each of those keeps half an even share,
+    and the runs split the rest. Past it the helper is told to report, then
+    stopped, so one step cannot spend what the later ones need."""
     sharing = max(1, sharing)
     left = max(0, left)
-    kept = waiting * left // (2 * (waiting + sharing)) if waiting > 0 else 0
-    return (left - kept) // sharing
+    kept = waiting * left / (2 * (waiting + sharing)) if waiting > 0 else 0
+    return (left - kept) / sharing
+
+
+def max_cost(env=os.environ) -> float:
+    """Dollars one workflow may cost, every agent together, as the provider
+    reports them (WORKFLOW_MAX_COST) [0.50]. 0 is off; nonsense is the default."""
+    try:
+        value = float(env.get("WORKFLOW_MAX_COST", "") or DEFAULT_MAX_COST)
+    except ValueError:
+        return DEFAULT_MAX_COST
+    return value if math.isfinite(value) and value >= 0 else DEFAULT_MAX_COST
 
 
 def max_tokens(env=os.environ) -> int:

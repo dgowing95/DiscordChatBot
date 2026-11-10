@@ -56,8 +56,8 @@ one brain call can.
   but only the person who asked can change the steps or reach the helpers.
 - If a helper needs to know something, it asks you in the thread, the same way as before the plan.
 - A helper near the end of its turns or time is told to wrap up, and one that is stopped still hands
-  on what it found, so the next steps can use it. Tokens work the same way: one step can use only its
-  share, so the steps after it, the check and the final report always have some left.
+  on what it found, so the next steps can use it. Tokens and cost work the same way: one step can use
+  only its share, so the steps after it, the check and the final report always have some left.
 - Say just **stop** in the thread, or press **Cancel** on the plan, to stop it. Files made so far
   are kept.
 
@@ -93,6 +93,7 @@ A restart of the bot stops a running workflow; its thread says so. Ask again to 
 | `WORKFLOW_PLAN_APPROVAL_SECONDS` | 900 | How long the plan waits for an answer before it is cancelled |
 | `WORKFLOW_TIMEOUT` / `WORKFLOW_MAX_TURNS` | 1 h / 300 | Caps one workflow (the biggest job tried took 62 min) |
 | `WORKFLOW_MAX_TOKENS` | 4000000 (0 = off) | Caps the tokens one workflow uses, in and out, across all its helpers. The steps stop 600000 short of it (a fifth of a smaller cap), which is kept for the check and the final report |
+| `WORKFLOW_MAX_COST` | 0.50 (0 = off) | Caps what one workflow costs in dollars, as the LLM provider reports it (OpenRouter does; a self-hosted llama.cpp does not, so only the token cap applies there). A fifth is kept for the check and the final report. Raise it for a pricier model |
 | `WORKFLOW_ASK_TIMEOUT` | 300 | How long a question waits for an answer, in seconds |
 | `WORKFLOW_MAX_PER_GUILD` | 1 | Workflows running at once in one server |
 | `SUBAGENT_MAX_CONCURRENT` | 2 | Research steps at once, cut to the LLM slots beside chat's |

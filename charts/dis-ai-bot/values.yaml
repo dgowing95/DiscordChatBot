@@ -320,6 +320,9 @@ workflows:
   timeout: 3600
   maxTurns: 300
   maxTokens: 4000000
+  # Dollars one workflow may cost, as the LLM provider reports it (OpenRouter
+  # does; llama.cpp does not). 0 = off. Raise it for a pricier model.
+  maxCost: 0.50
   # Workflows running at once in one server.
   maxPerGuild: 1
 

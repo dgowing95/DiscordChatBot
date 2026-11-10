@@ -489,8 +489,10 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
       `wp.token_reserve` (600k) short of the cap, which the check and the final report may use
       (`over_tokens(_held_tokens(wf))` for the steps, `over_tokens()` for the check), and one helper
       run gets `wp.run_token_share` of what the steps have left, every step not started keeping half
-      an even share. Past it the helper is told to report and, 3 calls on, stopped (`TokensSpent`).
-      The cap counts raw tokens, not cost: see `token_usage.py`.
+      an even share. Past it the helper is told to report and, 3 calls on, stopped (`BudgetSpent`).
+      `WORKFLOW_MAX_COST` (dollars, the provider's own figure) works the same way beside the tokens:
+      a fifth held back (`_held_cost`) and a share per run (`wp.run_share`); `over_budget` is both.
+      The token cap counts raw tokens, not cost: see `token_usage.py`.
     - **Restarts**: resume is out of scope. A workflow cancelled at shutdown stays live in Redis, and
       at startup `interrupt_all` marks this instance's live ones INTERRUPTED and posts a note in their
       threads. The buttons are `DynamicItem`s registered once, so an old one answers "This workflow has
@@ -703,6 +705,7 @@ reads has a row here and a line in `.env.example`, that every row is read by som
 | `WORKFLOW_PLAN_REVISIONS` | changes a plan may get before it must be approved or cancelled [3]. Chart: `workflows.planRevisions` |
 | `WORKFLOW_MAX_STEPS` | steps in one plan [8]. Chart: `workflows.maxSteps` |
 | `WORKFLOW_TIMEOUT` / `WORKFLOW_MAX_TURNS` / `WORKFLOW_MAX_TOKENS` | backstops on one workflow: wall-clock seconds [3600], model turns [300] and tokens in and out [4000000; 0 = off] across all its agents; out of any stops it with what exists. Chart: `workflows.timeout` / `maxTurns` / `maxTokens` |
+| `WORKFLOW_MAX_COST` | dollars one workflow may cost across all its agents, as the provider reports it [0.50; 0 = off]. OpenRouter reports it; llama.cpp does not, so there only the tokens count. Raise it for a pricier model. Chart: `workflows.maxCost` |
 | `WORKFLOW_MAX_PER_GUILD` | workflows running at once per server [1]. Chart: `workflows.maxPerGuild` |
 | `WORKFLOW_DEV_INJECT` | local testing and E2E only, never in the chart: `!workflow <request>` starts a workflow with its plan approved at once, since a webhook cannot use `/task` or press Approve |
 | `SUBAGENT_MODEL` / `SUBAGENT_LLM_HOST` / `SUBAGENT_LLM_API_KEY` | a workflow helper's connection; empty = the brain's, then `LLM_*` (the key only for the same host). Chart: `subagents.model` / `llmHost` / `apiKey` |

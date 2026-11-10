@@ -110,7 +110,7 @@ def due(wf) -> bool:
     """Whether this job gets a check: it has work to look at, and nothing
     stopped it. The caller has seen to a stop by time, turns or a cancel."""
     made = any(result.get("status") != "failed" for result in wf.results.values())
-    return made and not wf.cancel_reason and not wf.over_tokens()
+    return made and not wf.cancel_reason and not wf.over_budget()
 
 
 def failed(wf) -> bool:
@@ -133,7 +133,7 @@ def _room(wf, turns: int = 0, seconds: float = 0) -> bool:
     return (wf.turns_left() - workflows._held_turns(wf) >= MIN_REDO_TURNS + turns
             and wf.seconds_left() - workflows._step_reserve_seconds(wf)
             >= MIN_REDO_SECONDS + seconds
-            and not wf.over_tokens(workflows._held_tokens(wf)))
+            and not wf.over_budget(held=True))
 
 
 def _state(verdict: dict | None) -> str:
@@ -143,7 +143,7 @@ def _state(verdict: dict | None) -> str:
 
 def research_due(wf, queue: list) -> list:
     """The researchers to check now, if any (wp.research_to_check)."""
-    if wf.cancel_reason or wf.over_tokens(workflows._held_tokens(wf)):
+    if wf.cancel_reason or wf.over_budget(held=True):
         return []
     ran = [step for step in wf.plan.steps if step.id in wf.results]
     # One stopped at a limit is never sent back, so a check of it changes nothing.
