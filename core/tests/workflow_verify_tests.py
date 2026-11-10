@@ -159,17 +159,21 @@ async def test_no_send_back_without_room_for_it(checked, monkeypatch):
     assert checked.model.remaining_steps == 0
 
 
-def test_room_for_a_send_back_needs_turns_and_time(monkeypatch):
+def test_room_for_a_send_back_needs_turns_time_and_tokens(monkeypatch):
     monkeypatch.delenv("WORKFLOW_MAX_TURNS", raising=False)
     monkeypatch.delenv("WORKFLOW_TIMEOUT", raising=False)
+    monkeypatch.delenv("WORKFLOW_MAX_TOKENS", raising=False)
 
-    def _wf(turns, seconds):
+    def _wf(turns, seconds, tokens=0):
         return SimpleNamespace(checked=True, turns_left=lambda: turns,
-                               seconds_left=lambda: seconds)
+                               seconds_left=lambda: seconds,
+                               over_tokens=lambda reserve=0: tokens >= 4_000_000 - reserve)
 
     assert workflow_verify._room(_wf(100, 1000))
     assert not workflow_verify._room(_wf(25, 1000))   # 20 held, fewer than 10 over
     assert not workflow_verify._room(_wf(100, 400))   # 330 held, fewer than 120 over
+    assert workflow_verify._room(_wf(100, 1000, 3_600_000))
+    assert not workflow_verify._room(_wf(100, 1000, 3_700_000))  # 300k held, checked
 
 
 @pytest.mark.asyncio
@@ -226,6 +230,29 @@ async def test_a_job_stopped_by_its_limit_is_not_checked(checked, monkeypatch):
     assert wf.step_states["s2"] == "skipped"
     assert "tokens" in checked.queue.get_nowait().report.note
     workflow_verify.run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_the_check_still_runs_when_a_helper_passed_the_tokens_held_back(checked,
+                                                                             monkeypatch):
+    monkeypatch.setenv("WORKFLOW_MAX_TOKENS", "1000")  # a fifth is held back: 200
+
+    @function_tool
+    async def spend() -> str:
+        """Spend."""
+        next(iter(workflows._RUNNING.values())).add_tokens(850)
+        return "ok"
+
+    checked.subagent_tools = [spend]
+    checked.model = LaneModel([_plan_call(("s1", "implementer", [])),
+                               ModelStep(output=[function_call("spend", {}, call_id="s")]),
+                               _report(call_id="a"), _verdict(GOOD), _report(call_id="f")])
+    wf, _ = await _start(checked)
+    await _finish(wf)
+    assert workflows.FINISH_UP in json.dumps(checked.model.calls[2].input)
+    assert wf.verdict["state"] == workflow_verify.PASSED
+    assert wf.record["state"] == wp.DONE
+    assert checked.model.remaining_steps == 0
 
 
 @pytest.mark.asyncio
@@ -394,7 +421,7 @@ async def test_no_research_check_without_an_implementer_or_room(researched, monk
     plan = wp.Plan(goal="g", deliverables=[], notes="", steps=[
         wp.Step(id="s1", role="researcher", brief="b"),
         wp.Step(id="s2", role="implementer", brief="b")])
-    short = SimpleNamespace(cancel_reason=None, over_tokens=lambda: False, checked=False,
+    short = SimpleNamespace(cancel_reason=None, over_tokens=lambda reserve=0: False, checked=False,
                             at_limit=set(), plan=plan, research_checked=set(),
                             results={"s1": {"status": "done"}}, id="a1",
                             turns_left=lambda: 55, seconds_left=lambda: 3600)

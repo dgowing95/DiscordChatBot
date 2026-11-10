@@ -389,3 +389,17 @@ def test_a_long_plan_keeps_every_brief_whole():
     assert all(f"{i}" + "x" * 1400 in "\n".join(texts) for i in range(1, 9))
     cards = K.split(K.CardSpec(body=blocks))
     assert len(cards) > 1  # too long for one message: it goes on in the next
+
+
+def test_the_token_reserve_is_600k_or_a_fifth_of_a_small_limit():
+    assert wp.token_reserve({}) == 600_000
+    assert wp.token_reserve({"WORKFLOW_MAX_TOKENS": "1000000"}) == 200_000
+    assert wp.token_reserve({"WORKFLOW_MAX_TOKENS": "0"}) == 0
+
+
+def test_a_helper_run_leaves_the_steps_after_it_half_an_even_share_each():
+    assert wp.run_token_share(1000, 1, 0) == 1000      # the last step gets it all
+    assert wp.run_token_share(1000, 1, 1) == 750       # one after it keeps 250
+    assert wp.run_token_share(1000, 1, 4) == 600       # four keep 100 each
+    assert wp.run_token_share(1200, 2, 1) == 500       # two together, one after: 200 kept
+    assert wp.run_token_share(-5, 1, 2) == 0

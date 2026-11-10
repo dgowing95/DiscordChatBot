@@ -29,16 +29,22 @@ model can spend its whole output budget thinking. Seen live on the brain
 nothing, which the SDK raises as ModelBehaviorError and which ended the
 run); the same request a minute later went through. Not for streamed
 calls: by then part of the reply may already have been spoken.
+
+Every call's tokens (and cost, when the provider sends it) go to the metrics
+here (classes/token_usage.py), so the calls core makes on the model directly
+are counted too. The SDK keeps the provider's own usage payload, where
+OpenRouter puts the cost, only when asked (preserve_raw_usage), so every
+call asks; it changes nothing in the request.
 """
 import asyncio
 import logging
 import time
 
-from agents import ModelBehaviorError, ModelTimeoutError
+from agents import ModelBehaviorError, ModelSettings, ModelTimeoutError
 from agents.models.interface import Model
 
-from classes import llm_lanes
-from classes.metrics import inc_empty_retry, observe_lane_wait
+from classes import llm_lanes, token_usage
+from classes.metrics import inc_empty_retry, observe_lane_wait, observe_llm_usage
 
 logger = logging.getLogger(__name__)
 
@@ -50,18 +56,28 @@ def _cut_off_empty(error: ModelBehaviorError) -> bool:
     return "finish_reason='length'" in str(error)
 
 
+def _with_raw_usage(settings):
+    """`settings` asking the SDK to keep the provider's usage payload."""
+    try:
+        return settings.resolve(ModelSettings(preserve_raw_usage=True))
+    except Exception:
+        return settings
+
+
 class LanedModel(Model):
     """`inner` called through `host_key`'s lanes, bounded by `call_timeout`.
 
     `lane` None means the lane of the work making the call
-    (llm_lanes.current_lane), read per call.
+    (llm_lanes.current_lane), read per call. `role` labels its token metrics.
     """
 
-    def __init__(self, inner: Model, host_key: str, call_timeout: float, lane: str | None = None):
+    def __init__(self, inner: Model, host_key: str, call_timeout: float, lane: str | None = None,
+                 role: str = "unknown"):
         self.inner = inner
         self.host_key = host_key
         self.call_timeout = call_timeout
         self.lane = lane
+        self.role = role
 
     def __getattr__(self, name):
         # Everything else (the model name, the client) is the inner model's.
@@ -71,6 +87,13 @@ class LanedModel(Model):
 
     def _lane(self) -> str:
         return self.lane or llm_lanes.current_lane.get()
+
+    def _count(self, usage, raw=None) -> None:
+        try:
+            observe_llm_usage(self.role, getattr(self.inner, "model", "unknown"),
+                              token_usage.from_usage(usage, raw))
+        except Exception as e:
+            logger.warning(f"Token metrics failed: {e}")
 
     async def _bounded(self, awaitable):
         try:
@@ -84,6 +107,8 @@ class LanedModel(Model):
     async def get_response(self, system_instructions, input, model_settings, tools,
                            output_schema, handoffs, tracing, *, previous_response_id=None,
                            conversation_id=None, prompt=None):
+        model_settings = _with_raw_usage(model_settings)
+
         def attempt():
             return self._bounded(self.inner.get_response(
                 system_instructions, input, model_settings, tools, output_schema, handoffs,
@@ -94,7 +119,7 @@ class LanedModel(Model):
         async def call():
             started = time.monotonic()
             try:
-                return await attempt()
+                response = await attempt()
             except ModelBehaviorError as e:
                 if not _cut_off_empty(e):
                     raise
@@ -102,7 +127,9 @@ class LanedModel(Model):
                                f"{time.monotonic() - started:.0f}s before saying anything; "
                                f"asking once more")
                 inc_empty_retry(self._lane())
-                return await attempt()
+                response = await attempt()
+            self._count(getattr(response, "usage", None), getattr(response, "raw_usage", None))
+            return response
 
         llm_lanes.last_wait.set(0.0)
         lanes = llm_lanes.lanes_for(self.host_key)
@@ -117,6 +144,7 @@ class LanedModel(Model):
     async def stream_response(self, system_instructions, input, model_settings, tools,
                               output_schema, handoffs, tracing, *, previous_response_id=None,
                               conversation_id=None, prompt=None):
+        model_settings = _with_raw_usage(model_settings)
         lanes = llm_lanes.lanes_for(self.host_key)
         lane = self._lane()
         slot = lanes.slot(lane) if lanes is not None else None
@@ -149,6 +177,9 @@ class LanedModel(Model):
                         if scope.expired():
                             raise ModelTimeoutError(self.call_timeout) from None
                         raise
+                    if getattr(event, "type", None) == "response.completed":
+                        # The streamed response's usage; its cost is not kept here.
+                        self._count(getattr(getattr(event, "response", None), "usage", None))
                     yield event
             finally:
                 await stream.aclose()

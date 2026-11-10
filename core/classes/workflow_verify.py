@@ -132,7 +132,8 @@ def _room(wf, turns: int = 0, seconds: float = 0) -> bool:
     """Room for a step run again, plus `turns` and `seconds`, past the reserves."""
     return (wf.turns_left() - workflows._held_turns(wf) >= MIN_REDO_TURNS + turns
             and wf.seconds_left() - workflows._step_reserve_seconds(wf)
-            >= MIN_REDO_SECONDS + seconds)
+            >= MIN_REDO_SECONDS + seconds
+            and not wf.over_tokens(workflows._held_tokens(wf)))
 
 
 def _state(verdict: dict | None) -> str:
@@ -142,7 +143,7 @@ def _state(verdict: dict | None) -> str:
 
 def research_due(wf, queue: list) -> list:
     """The researchers to check now, if any (wp.research_to_check)."""
-    if wf.cancel_reason or wf.over_tokens():
+    if wf.cancel_reason or wf.over_tokens(workflows._held_tokens(wf)):
         return []
     ran = [step for step in wf.plan.steps if step.id in wf.results]
     # One stopped at a limit is never sent back, so a check of it changes nothing.

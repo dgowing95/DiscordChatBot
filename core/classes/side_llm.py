@@ -41,8 +41,9 @@ import time
 
 from openai import AsyncOpenAI, BadRequestError, UnprocessableEntityError
 
-from classes import llm_lanes
-from classes.metrics import observe_lane_wait, observe_llm_call, observe_llm_completion_tokens
+from classes import llm_lanes, token_usage
+from classes.metrics import (observe_lane_wait, observe_llm_call, observe_llm_completion_tokens,
+                             observe_llm_usage)
 
 logger = logging.getLogger(__name__)
 
@@ -150,4 +151,9 @@ class SideLLM:
             observe_llm_call(self.caller, outcome, time.monotonic() - started)
         usage = getattr(response, "usage", None)
         observe_llm_completion_tokens(self.caller, getattr(usage, "completion_tokens", None))
+        try:
+            # OpenRouter's usage carries its cost in dollars (token_usage.py).
+            observe_llm_usage(self.caller, self.config().model, token_usage.from_usage(usage))
+        except Exception as e:
+            logger.warning(f"{self.caller}: token metrics failed: {e}")
         return response.choices[0].message.content

@@ -64,6 +64,7 @@ core/                    # the bot (what runs in production)
     skill_reflection.py    # after a long job, one background call decides whether to save a skill
     skill_curator.py       # the daily tidy-up: merge, retire, describe (its rules are pure)
     loop_guard.py          # P stops a brain run that repeats itself (also a page or search asked again)
+    token_usage.py         # P a model call's tokens (input, cached, output) and cost, for logs and metrics
     context_trim.py        # P cuts old tool outputs in a long brain run; keeps a local run in its slot
     brain_progress.py      # the "Working on it" status card and live command output
     brain_status.py        # the card's one-line status in plain words ("Creating the script")
@@ -173,7 +174,11 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
    `total_slots`, else `LLM_SLOTS`); a remote API never is. `LanedModel` takes the slot for one model
    call, never across a tool (a side call inside a tool would deadlock against its own run), and applies
    the call timeout after the slot is taken, so laned agents leave `ModelSettings.timeout` unset (it
-   would count the wait). It also asks once more when a call is cut off before any output. A side call
+   would count the wait). It also asks once more when a call is cut off before any output. Every call's
+   tokens (input, cached, output) and the cost the provider reports (OpenRouter does) go to
+   `discord_bot_llm_tokens_total` / `discord_bot_llm_cost_dollars_total` by role and model, there and
+   in `side_llm.py`; a brain call's and a workflow's totals go in their last log line
+   (`token_usage.py`). Never in a card or a reply: it is for comparing models. A side call
    takes the lane of the work making it (`llm_lanes.current_lane`).
 4. **The answer** (`response_filter.py`). Cleaned and sent in 2000-character chunks through
    `chunk_for_discord`; never call `textwrap.wrap` directly, as it returns a long unbroken word as one
@@ -480,7 +485,12 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
       than the final report's for the check. The clock restarts when the plan is answered, so waiting
       on a person is not work time. A step's helper is told to finish 3 turns and 2 minutes before its
       own limits (`wp.helper_wrap_up`), and one a limit stops gets `_last_report` like a scout, so
-      what it found reaches the later steps rather than a step to do it again.
+      what it found reaches the later steps rather than a step to do it again. Tokens: the steps stop
+      `wp.token_reserve` (600k) short of the cap, which the check and the final report may use
+      (`over_tokens(_held_tokens(wf))` for the steps, `over_tokens()` for the check), and one helper
+      run gets `wp.run_token_share` of what the steps have left, every step not started keeping half
+      an even share. Past it the helper is told to report and, 3 calls on, stopped (`TokensSpent`).
+      The cap counts raw tokens, not cost: see `token_usage.py`.
     - **Restarts**: resume is out of scope. A workflow cancelled at shutdown stays live in Redis, and
       at startup `interrupt_all` marks this instance's live ones INTERRUPTED and posts a note in their
       threads. The buttons are `DynamicItem`s registered once, so an old one answers "This workflow has

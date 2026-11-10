@@ -19,11 +19,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from agents import Agent, RunConfig, RunContextWrapper, function_tool
 from agents.testing import ModelStep, ScriptedModel, assistant_message, function_call
+from agents.usage import Usage
 
 from brain_tests import _Lease, _Session
 from workflow_store_tests import FakeRedis
 
-from classes import (brain, brain_result, llm_lanes, thread_inbox, workflow_steering,
+from classes import (brain, brain_result, llm_lanes, thread_inbox, token_usage, workflow_steering,
                      workflow_verify, workflows)
 from classes import workflow_policy as wp
 from classes.workflow_store import WorkflowStore
@@ -1075,15 +1076,48 @@ async def test_a_helper_past_the_token_limit_is_told_to_finish(env, monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_a_helper_still_going_past_its_token_share_is_stopped_and_reports(env,
+                                                                               monkeypatch):
+    # 10000, less 2000 held back: s1 may use 6000, as s2 keeps half an even share.
+    monkeypatch.setenv("WORKFLOW_MAX_TOKENS", "10000")
+
+    @function_tool
+    async def look() -> str:
+        """Look."""
+        return "ok"
+
+    env.subagent_tools = [look]
+    big = ModelStep(output=[function_call("look", {}, call_id="l1")],
+                    usage=Usage(requests=1, input_tokens=6000, output_tokens=500,
+                                total_tokens=6500))
+    env.model = LaneModel([
+        _plan_call(("s1", "researcher", []), ("s2", "implementer", ["s1"])),
+        big, _look_call("l2"), _look_call("l3"), _look_call("l4"),
+        _report(status="partial", facts=("the sheet is in facts.md",), call_id="last"),
+        _report(call_id="b"), _report(call_id="f")])
+    wf, _ = await _start(env)
+    await _finish(wf)
+    for told in (2, 3, 4):
+        assert workflows.FINISH_UP in json.dumps(env.model.calls[told].input)
+    assert wf.results["s1"]["note"] == workflows.TOKENS_STOPPED
+    assert wf.results["s1"]["facts"] == ["the sheet is in facts.md"]
+    assert "s1" in wf.at_limit
+    assert wf.step_states["s2"] == "done"  # what was kept for it was there
+    assert env.model.remaining_steps == 0
+
+
+@pytest.mark.asyncio
 async def test_tokens_are_counted_from_each_response():
     hooks = brain.BrainHooks(MagicMock(on_llm_end=AsyncMock()), MagicMock(on_llm_end=AsyncMock()),
                              None)
     seen = []
     hooks.on_tokens = seen.append
-    usage = SimpleNamespace(input_tokens=100, output_tokens=20)
-    await hooks.on_llm_end(None, None, SimpleNamespace(usage=usage))
+    usage = SimpleNamespace(input_tokens=100, output_tokens=20,
+                            input_tokens_details=SimpleNamespace(cached_tokens=70))
+    await hooks.on_llm_end(None, None, SimpleNamespace(usage=usage, raw_usage={"cost": 0.25}))
     await hooks.on_llm_end(None, None, SimpleNamespace(usage=None))
     assert seen == [120, 0]
+    assert hooks.usage == token_usage.Tally(100, 70, 20, 0.25)
 
 
 def test_the_token_limit_is_4m_by_default_and_0_turns_it_off(monkeypatch):

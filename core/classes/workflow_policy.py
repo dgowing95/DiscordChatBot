@@ -60,6 +60,11 @@ HELPER_LAST_REPORT_SECONDS = 90
 # Turns kept from the helpers for the check and the final report. A job set
 # to few turns keeps a fifth instead, so its helpers can still work.
 TURN_RESERVE = 40
+# Tokens kept the same way (WORKFLOW_MAX_TOKENS), as a check of 7 turns at
+# about 23k tokens a prompt, twice, and the final report. A live job
+# (2026-11-09) spent all of its 5M on research and stopped before the
+# write-up ran.
+TOKEN_RESERVE = 600_000
 
 # What one check of the finished work may say (classes/workflow_verify.py).
 MAX_CHECKS = 12
@@ -157,6 +162,23 @@ def helper_wrap_up(turns: int, seconds: float) -> WrapUp:
     after = (seconds - HELPER_FINISH_UP_SECONDS if seconds > 2 * HELPER_FINISH_UP_SECONDS
              else None)
     return WrapUp(at, after, seconds)
+
+
+def token_reserve(env=os.environ) -> int:
+    """The tokens helpers leave for the check and the final report."""
+    return min(TOKEN_RESERVE, max_tokens(env) // 5)
+
+
+def run_token_share(left: int, sharing: int, waiting: int) -> int:
+    """The tokens one helper run may use, of the `left` the steps have, when
+    it is one of `sharing` runs starting together and `waiting` steps have
+    not started: each of those keeps half an even share, and the runs split
+    the rest. Past it the helper is told to report, then stopped, so one step
+    cannot spend what the later ones need."""
+    sharing = max(1, sharing)
+    left = max(0, left)
+    kept = waiting * left // (2 * (waiting + sharing)) if waiting > 0 else 0
+    return (left - kept) // sharing
 
 
 def max_tokens(env=os.environ) -> int:

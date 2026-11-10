@@ -72,9 +72,13 @@ Why things are the way they are:
   their words reach helpers.
 - **Limits cap the cost**: WORKFLOW_TIMEOUT (1 h), WORKFLOW_MAX_TURNS (300) and
   WORKFLOW_MAX_TOKENS (4M) stop a workflow bigger than the biggest job seen, with
-  what exists (PARTIAL), never "retry". Helpers leave a reserve of turns and time for
-  the check and the final report (_held_turns, _step_reserve_seconds). The clock
-  counts work: it restarts when the plan is answered.
+  what exists (PARTIAL), never "retry". Helpers leave a reserve of turns, time and
+  tokens for the check and the final report (_held_turns, _step_reserve_seconds,
+  _held_tokens). One helper run may use only its share of the steps' tokens
+  (wp.run_token_share), so research cannot spend what the later steps need: past
+  it it is told to report, and stopped a few calls later (TokensSpent), with the
+  last report a limit gets. The clock counts work: it restarts when the plan is
+  answered.
 - **A restart interrupts**: resume is out of scope. At startup every live
   workflow becomes INTERRUPTED and its thread is told (interrupt_all).
 """
@@ -91,7 +95,7 @@ from pathlib import PurePosixPath
 
 import discord
 
-from classes import brain_result, llm_lanes, workspace_lifecycle
+from classes import brain_result, llm_lanes, token_usage, workspace_lifecycle
 from classes import workflow_policy as wp
 from classes.brain_result import BrainReport
 from classes import card as cards, card_kit as K
@@ -181,6 +185,23 @@ out, so the plan's briefs can be exact.
   short sentence each."""
 
 HELPER_FAILED = "It hit an error and was stopped."
+TOKENS_STOPPED = "It used up its share of the tokens and was stopped."
+
+
+class TokensSpent(Exception):
+    """Raised in a helper's input filter: told to report as it passed its
+    share of the tokens, it went on (_finishing_up)."""
+
+
+def _tokens_spent(error: BaseException) -> bool:
+    """Whether TokensSpent is behind `error`, wrapped or not."""
+    seen = set()
+    while error is not None and id(error) not in seen:
+        if isinstance(error, TokensSpent):
+            return True
+        seen.add(id(error))
+        error = error.__cause__ or error.__context__
+    return False
 
 # Told to a scout near its limit, and in its last report when it reaches one.
 FINISH_UP = "You are at your limit. Call `report` now, on its own, with what you have so far."
@@ -239,7 +260,7 @@ class WorkflowDone:
 class _Outcome:
     stopped: str | None = None  # why the run stopped early, or None
     final_text: str = ""
-    at_limit: bool = False      # stopped by its turns or its time
+    at_limit: bool = False      # stopped by its turns, its time or its tokens
     seen: list = field(default_factory=list)  # with finish_up_at: its last input
 
 
@@ -260,6 +281,7 @@ class Workflow:
     cancel_reason: str = ""
     turns: int = 0
     tokens: int = 0           # in and out, every agent together
+    usage: token_usage.Tally = field(default_factory=token_usage.Tally)  # for the log line
     tool_calls: int = 0
     wave: int = 0             # which wave of steps is running
     plan_message: object = None  # the plan card's first message
@@ -268,6 +290,7 @@ class Workflow:
     plan_lead: str = ""          # the line above the plan
     sharing: int = 1          # runs yet to start, sharing what turns are left
     promised: int = 0         # turns given to the runs going now
+    token_promised: int = 0   # tokens given to the helper runs going now
     step_states: dict = field(default_factory=dict)
     results: dict = field(default_factory=dict)
     artifacts: list = field(default_factory=list)
@@ -340,9 +363,11 @@ class Workflow:
     def add_tokens(self, tokens: int) -> None:
         self.tokens += tokens
 
-    def over_tokens(self) -> bool:
+    def over_tokens(self, reserve: int = 0) -> bool:
+        """Past WORKFLOW_MAX_TOKENS, or past it less `reserve` (_held_tokens:
+        where the steps stop, so the check and the final report have some)."""
         limit = wp.max_tokens()
-        return bool(limit) and self.tokens >= limit
+        return bool(limit) and self.tokens >= limit - reserve
 
 
 # workflow id -> its handle, while it runs in this process.
@@ -600,7 +625,7 @@ async def _end(wf: Workflow, store, end_state: str, report: BrainReport) -> None
     metrics.observe_workflow(wf.record["trigger"], end_state, time.monotonic() - wf.started,
                              len(wf.results), wf.turns, wf.tokens)
     logger.info(f"Workflow {wf.id}: {end_state} in {time.monotonic() - wf.started:.0f}s, "
-                f"{len(wf.results)} step(s), {wf.turns} turn(s), {wf.tokens} token(s)")
+                f"{len(wf.results)} step(s), {wf.turns} turn(s), {wf.usage.text()}")
     await queue_done(wf, report)
 
 
@@ -633,7 +658,7 @@ async def _work(wf: Workflow) -> tuple[str, BrainReport]:
         if wf.turns_left() <= _held_turns(wf):
             stopped = "It ran out of steps and was stopped."
             break
-        if wf.over_tokens():
+        if wf.over_tokens(_held_tokens(wf)):
             stopped = "It used up its tokens and was stopped."
             break
         queue = await _review(wf, queue)
@@ -697,6 +722,17 @@ def _step_reserve_seconds(wf: Workflow) -> float:
 def _held_turns(wf: Workflow) -> int:
     """The turns helpers leave for the check and the final report."""
     return wp.turn_reserve() // (2 if wf.checked else 1)
+
+
+def _held_tokens(wf: Workflow) -> int:
+    """The tokens helpers leave for the check and the final report."""
+    return wp.token_reserve() // (2 if wf.checked else 1)
+
+
+def _waiting_steps(wf: Workflow) -> int:
+    """The plan's steps that have not started."""
+    return (sum(1 for step in wf.plan.steps if wf.step_states.get(step.id, "pending") == "pending")
+            if wf.plan else 0)
 
 
 def _helpers_at_once() -> int:
@@ -843,7 +879,13 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
             call_model_input_filter=brain.input_filter(guard, brain_policy.trim_keep_recent(),
                                                        hooks.context_watch),
             group_id=f"workflow-{wf.id}")
-    hooks.on_tokens = wf.add_tokens
+    used = [0]  # this run's tokens
+
+    def _on_tokens(tokens: int) -> None:
+        used[0] += tokens
+        wf.add_tokens(tokens)
+
+    hooks.on_tokens = _on_tokens
     if steer is not None:
         run_config = workflow_steering.steered(run_config, wf, *steer)
     seen: list = []
@@ -853,6 +895,17 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
         # A helper's embed counts to the turns it really has (its share, after
         # any earlier run of the same step), not the setting.
         progress.max_turns = getattr(progress, "turn", 0) + turns
+    # A helper's share of the tokens (wp.run_token_share), worked out with
+    # its turns, before wf.sharing moves on.
+    share = 0
+    spent = None
+    if holds_back and wp.max_tokens():
+        held = _held_tokens(wf)
+        share = wp.run_token_share(wp.max_tokens() - held - wf.tokens - wf.token_promised,
+                                   wf.sharing, _waiting_steps(wf))
+
+        def spent():
+            return wf.over_tokens(held) or used[0] >= share
     # The reserves are kept back from the steps, for the check and the
     # manager's last runs.
     reserve = _step_reserve_seconds(wf) if holds_back else FINISH_RESERVE_SECONDS if workspace else 0
@@ -870,19 +923,18 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
         # What a tool has left (save_messages_to_file, ask_user): this run's
         # own end, not the workflow's or the brain call's that started it.
         ctx["brain_deadline"] = time.monotonic() + seconds
-    over_tokens = wf.over_tokens if holds_back and wp.max_tokens() else None
     over = None
-    if over_tokens is not None or finish_by is not None:
+    if finish_by is not None:
         def over():
-            return ((over_tokens is not None and over_tokens())
-                    or (finish_by is not None and time.monotonic() >= finish_by))
-    if finish_up_at is not None or over is not None:
-        run_config = _finishing_up(run_config, hooks, finish_up_at, seen, finish_up, over)
+            return time.monotonic() >= finish_by
+    if finish_up_at is not None or over is not None or spent is not None:
+        run_config = _finishing_up(run_config, hooks, finish_up_at, seen, finish_up, over, spent)
     if wf.cancel_reason:
         # request_cancel can only stop a run that exists. No await from here
         # to wf.running, so a cancel lands on one side or the other.
         return _Outcome(stopped="It was cancelled.")
     wf.promised += turns
+    wf.token_promised += share
     wf.sharing = max(1, wf.sharing - 1)
 
     async def _go():
@@ -913,7 +965,10 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
     except Exception as e:
         loop = brain._loop_stop(e)
         hooks.abandon_llm_call("error")
-        if loop is not None:
+        if _tokens_spent(e):
+            outcome.stopped = TOKENS_STOPPED
+            outcome.at_limit = True
+        elif loop is not None:
             outcome.stopped = "It kept repeating itself, so it was stopped."
         else:
             logger.warning(f"Workflow {wf.id}: an agent run failed: {e}")
@@ -921,10 +976,12 @@ async def _agent_run(wf: Workflow, agent, task: str, *, max_turns: int, lane: st
     finally:
         wf.running.discard(child)
         wf.promised -= turns
+        wf.token_promised -= share
         wf.turns += hooks.turns
         wf.tool_calls += hooks.tool_calls
+        wf.usage.add(hooks.usage)
         logger.info(f"Workflow {wf.id}: {caller}: {hooks.turns} turn(s), longest prompt "
-                    f"{hooks.peak_prompt_tokens} tokens"
+                    f"{hooks.peak_prompt_tokens} tokens, {hooks.usage.text()}"
                     + (f"; stopped: {outcome.stopped}" if outcome.stopped else ""))
     return outcome
 
@@ -940,18 +997,26 @@ def _turn_limit(wf: Workflow, max_turns: int, reserve: int = 0) -> int:
 
 
 def _finishing_up(run_config, hooks, at: int | None, seen: list, finish_up: str = FINISH_UP,
-                  over=None):
+                  over=None, spent=None):
     """The run's input filter, plus `finish_up` from turn `at` on, or once
-    `over()` says so, and its last input kept in `seen`. Built from what the
-    model was sent, so no tool call in it is left without its result,
-    whatever a limit interrupts."""
+    `over()` or `spent()` says so, and its last input kept in `seen`. Built
+    from what the model was sent, so no tool call in it is left without its
+    result, whatever a limit interrupts. Tokens have no limit of the SDK's to
+    end the run, so a run told by `spent()` that is still going after
+    HELPER_FINISH_UP_TURNS more calls is stopped here (TokensSpent)."""
     from agents.run_config import ModelInputData
     inner = run_config.call_model_input_filter
+    told = [0]
 
     def _filter(data):
         sent = inner(data)
         seen[:] = sent.input
-        if not ((at is not None and hooks.turns >= at) or (over is not None and over())):
+        out = spent is not None and spent()
+        if out:
+            told[0] += 1
+            if told[0] > wp.HELPER_FINISH_UP_TURNS:
+                raise TokensSpent()
+        if not (out or (at is not None and hooks.turns >= at) or (over is not None and over())):
             return sent
         return ModelInputData(input=[*sent.input, {"role": "user", "content": finish_up}],
                               instructions=sent.instructions)
@@ -999,6 +1064,7 @@ async def _last_report(wf: Workflow, agent, seen: list, lane: str, seconds: floa
         wf.running.discard(child)
         wf.turns += 1
     wf.add_tokens(brain.response_tokens(response))
+    wf.usage.add(token_usage.from_usage(response.usage, getattr(response, "raw_usage", None)))
     for item in response.output:
         if getattr(item, "name", None) == tool.name:
             try:
