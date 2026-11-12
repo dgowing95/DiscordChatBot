@@ -59,3 +59,29 @@ async def test_tool_call_text_in_an_unprompted_reply_is_stripped(unprompted, ans
     handler.get_client = _get_client
     with patch("classes.text_llm_handler.get_current_datetime", AsyncMock(return_value="now")):
         assert await handler.generate() == answer
+
+
+@pytest.mark.asyncio
+async def test_an_unprompted_reply_that_was_only_a_tool_call_sends_nothing():
+    # Strata takes refused tools out of the template, and the model may then
+    # write only <tool_call> text: stripped to "", which must post nothing.
+    from classes import message_queue
+    from message_handler_tests import _handled, _handler, _llm_message
+
+    class _FakeLLM:
+        def __init__(self, messages, guild_id, original_message, client=None, unprompted=False):
+            self.reasoning = ""
+
+        async def generate(self):
+            return ""
+
+    message = _llm_message(72)
+    message_queue.mark_unprompted(message.id)
+    handler = _handled(_handler(), message,
+                       lambda h: setattr(h, "messages", [{"role": "user", "content": "hi"}]))
+    handler.message.channel.send = AsyncMock()
+    with patch("classes.message_handler.TextLLMHandler", _FakeLLM), \
+         patch("classes.workspace_manager.workspaces", return_value=MagicMock()):
+        await handler.handle_message()
+    handler.message.channel.send.assert_not_awaited()
+    assert ('❌',) not in [c.args for c in handler.message.add_reaction.call_args_list]

@@ -40,7 +40,7 @@ REMOVED = {
     "SANDBOX_TIMEOUT": "BRAIN_TIMEOUT",
     # Workflows (phase 5)
     "SANDBOX_ASK_USER_TIMEOUT": "WORKFLOW_ASK_TIMEOUT",
-    # A reply the bot was not asked for has no brain since v3.4 (no limits to set)
+    # A reply the bot was not asked for no longer uses the brain (no limits to set)
     "BRAIN_UNPROMPTED_MAX_TURNS": "removed: a reply the bot was not asked for no longer uses the brain",
     "BRAIN_UNPROMPTED_TIMEOUT": "removed: a reply the bot was not asked for no longer uses the brain",
     # Queue

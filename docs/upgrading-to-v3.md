@@ -71,7 +71,7 @@ unless the note says otherwise.
 | `SANDBOX_MAX_TURNS` | `BRAIN_MAX_TURNS` | **Default 10 → 100**, and only a backstop now: the loop guard stops a stuck brain call. Choose again rather than copy the old value |
 | `SANDBOX_TIMEOUT` | `BRAIN_TIMEOUT` | **Default 600 → 1800** seconds, a backstop like `BRAIN_MAX_TURNS`; lane waits count towards it |
 | `SANDBOX_ASK_USER_TIMEOUT` | `WORKFLOW_ASK_TIMEOUT` | Default unchanged (300); used by workflows only |
-| `BRAIN_UNPROMPTED_MAX_TURNS` / `BRAIN_UNPROMPTED_TIMEOUT` | removed (v3.4) | A reply the bot was not asked for (the random reply chance) no longer uses the brain, so it has no limits to set. Delete the lines |
+| `BRAIN_UNPROMPTED_MAX_TURNS` / `BRAIN_UNPROMPTED_TIMEOUT` | removed | A reply the bot was not asked for (the random reply chance) no longer uses the brain, so it has no limits to set. Delete the lines |
 | `LLAMA_ARG_CACHE_TYPE_K` | `LLAMA_CACHE_TYPE_K` | docker compose only; compose passes it on as llama.cpp's own `LLAMA_ARG_CACHE_TYPE_K` |
 | `LLAMA_ARG_CACHE_TYPE_V` | `LLAMA_CACHE_TYPE_V` | docker compose only, as above |
 
@@ -241,7 +241,7 @@ time a call waits for a slot does not count toward its `*_CALL_TIMEOUT_SECONDS`.
 | `sandbox.requestTimeout` | `brain.callTimeout` | Default 600; see `BRAIN_CALL_TIMEOUT_SECONDS` above |
 | `sandbox.maxRetries` | removed | |
 | `sandbox.enabled` | removed | Docker is required: the socket is always mounted |
-| `brain.unprompted.maxTurns`, `brain.unprompted.timeout` | removed (v3.4) | A reply the bot was not asked for no longer uses the brain; see `BRAIN_UNPROMPTED_*` above |
+| `brain.unprompted.maxTurns`, `brain.unprompted.timeout` | removed | A reply the bot was not asked for no longer uses the brain; see `BRAIN_UNPROMPTED_*` above |
 | `sandbox.image` | `brain.workspace.image` | |
 | `sandbox.dockerSocketPath` | `brain.workspace.dockerSocketPath` | |
 | `sandbox.memoryLimit` | `brain.workspace.memoryLimit` | |
