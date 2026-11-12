@@ -60,12 +60,12 @@ HELPER_LINE_CHARS = 80
 
 # Lookups (a web search, a page, a message search, messages read or saved)
 # post their own card only for the first LOOKUP_CARDS of a reply (or of a
-# workflow step); every later one is a line in one more card, edited in place
+# workflow step); every later one is an item in one more card, edited in place
 # (classes/card.py, Lookups). One brain call once posted twenty search cards
 # in a row, between people's messages (prod, 2026-11-12).
 LOOKUP_CARDS = 3
 MORE_LOOKUPS = "🔎 More lookups"
-LOOKUP_LINES = 10  # the newest lines the card shows; the rest are counted
+LOOKUP_ITEMS = 6  # the newest the card shows; the rest are counted
 
 
 def reading_page_title(part: int) -> str:
@@ -200,35 +200,28 @@ def message_search_card(label: str, line: str, footer: str = "") -> CardSpec:
     return CardSpec(label=label, body=[Text(line)], footer=footer)
 
 
-def _texts(blocks) -> list[str]:
-    out = []
-    for block in blocks:
+def lookup_item(spec: CardSpec) -> str:
+    """A lookup's card as one item of the more-lookups card, read the same
+    way as the card itself: its label small, then what it looked up, then
+    its footer small (a failed one's "It didn't work")."""
+    texts = [K.small(spec.label)] if spec.label else []
+    for block in spec.body:
         if isinstance(block, Text):
-            out.append(block.content)
-        elif isinstance(block, Section):
-            out.extend(block.texts)
-    return [K.plain_line(line) for text in out for line in str(text).split("\n")
-            if K.plain_line(line)]
+            texts.append(block.content)
+        elif isinstance(block, Section):  # a page: its label is the first text
+            texts.extend(block.texts)
+    if spec.footer:
+        texts.append(K.small(spec.footer))
+    return "\n".join(t for t in texts if t)
 
 
-def lookup_line(spec: CardSpec) -> str:
-    """A lookup's card as one line of the more-lookups card: its label's
-    emoji, then what it looked up ("🔍 **“birthday”** in this server").
-    A card with no label (a page) has it as its first line."""
-    lines = _texts(spec.body)
-    label = spec.label or (lines.pop(0) if lines else "")
-    emoji = label.split(" ", 1)[0] if label else "🔎"
-    return f"{emoji} {' · '.join(lines) or label}"
-
-
-def more_lookups_card(lines: list[str]) -> CardSpec:
-    """The lookups past the first LOOKUP_CARDS: the newest LOOKUP_LINES, one
-    each, and how many came before them."""
-    shown = lines[-LOOKUP_LINES:]
-    earlier = len(lines) - len(shown)
-    footer = f"and {earlier} earlier" if earlier else ""
-    return CardSpec(label=f"{MORE_LOOKUPS} · {len(lines)}", body=[Text("\n".join(shown))],
-                    footer=footer)
+def more_lookups_card(items: list[str]) -> CardSpec:
+    """The lookups past the first LOOKUP_CARDS: the newest LOOKUP_ITEMS, a gap
+    between each (as in every card's list), and how many came before them."""
+    shown = items[-LOOKUP_ITEMS:]
+    earlier = len(items) - len(shown)
+    return CardSpec(label=f"{MORE_LOOKUPS} · {len(items)}", body=K.listing(shown),
+                    footer=f"and {earlier} earlier" if earlier else "")
 
 
 def drawing_card(prompt: str, editing: bool = False) -> CardSpec:

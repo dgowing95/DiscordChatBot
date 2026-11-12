@@ -454,8 +454,9 @@ class TextLLMHandler:
             self.skill_reviews = list(user_info.get("skill_reviews") or [])
             failed = not isinstance(reply, str) or reply == "Error"
             # A run that failed before calling the brain answered nothing, so
-            # counting it as "answered" would skew the routing metric.
-            if reports or not failed:
+            # counting it as "answered" would skew the routing metric; nor is
+            # an unprompted reply a routing choice (it has no brain).
+            if (reports or not failed) and not user_info.get("unprompted"):
                 inc_persona_escalation("brain" if reports else "answered")
             # A spoken reply says "8 degrees", never "8°C" or a URL, so the
             # exact-token check would count every voice turn as dropping facts.
@@ -588,8 +589,9 @@ class TextLLMHandler:
         )
         if getattr(self, "unprompted", False):
             # A reply nobody asked for only talks. The tools are still sent,
-            # refused, as in _wrap_up (the request stays the same as every
-            # other reply's); tool-call text written anyway is stripped
+            # refused, as in _wrap_up (llama.cpp keeps them in the prompt, so
+            # its cached prefix holds; Strata leaves refused tools out, so
+            # there it does not); tool-call text written anyway is stripped
             # (generate), and a real call is refused by ask_brain.
             settings["tool_choice"] = "none"
         if getattr(self, "voice", False) and no_thinking:

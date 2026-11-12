@@ -246,8 +246,8 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
    - **It works inline, in the channel**, not in a thread: each tool posts its own card, attached files
      are posted before the persona replies. Lookups (web search, a page, messages searched, read or
      saved) are capped: the first `tool_cards.LOOKUP_CARDS` (3) of a reply post their own, every later
-     one is a line in one "🔎 More lookups" card, edited at most every 20 s (`card.lookup_notice`,
-     `card.Lookups`; a workflow step counts its own). Results (a picture, poll, event, memory, skill)
+     one is an item in one "🔎 More lookups" card (the newest 6), edited at most every 20 s
+     (`card.lookup_notice`, `card.Lookups`; a workflow step counts its own). Results (a picture, poll, event, memory, skill)
      always post. The "🧠 Working on it" card appears only once it uses
      the workspace. With `/workspace progress` off it carries one line on what the brain is doing
      ("⏳ Creating the script"): a side call (`brain_status.py`, the brain's connection, background

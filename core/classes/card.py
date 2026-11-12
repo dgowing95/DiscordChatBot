@@ -28,7 +28,7 @@ import time
 
 import discord
 
-from classes import card_kit as K
+from classes import card_kit as K, tool_cards
 from classes.card_kit import CardSpec
 
 logger = logging.getLogger(__name__)
@@ -333,60 +333,82 @@ LOOKUP_EDIT_SECONDS = 20.0  # Discord allows about 5 edits a minute per channel
 
 class Lookups:
     """A reply's lookup cards (tool_cards.LOOKUP_CARDS): the first few are
-    each a notice of their own, every later one a line in one more card.
+    each a notice of their own, every later one an item in one more card.
     That card is sent with the first of them, then edited at most every
     `interval` seconds (a background task, so a lookup never waits on it);
     the last edit lands after the run when it ends inside the interval."""
 
     def __init__(self, channel, *, shown: int | None = None,
                  interval: float = LOOKUP_EDIT_SECONDS):
-        from classes.tool_cards import LOOKUP_CARDS
         self.channel = channel
-        self.shown = LOOKUP_CARDS if shown is None else shown
+        self.shown = tool_cards.LOOKUP_CARDS if shown is None else shown
         self.interval = interval
         self.count = 0
-        self.lines: list[str] = []
+        self.items: list[str] = []
         self.card: LiveCard | None = None
+        self._changes = 0  # items added or updated, so a flush knows it is behind
         self._last = float("-inf")
         self._task: asyncio.Task | None = None
 
-    async def post(self, spec: CardSpec) -> LiveCard | None:
-        """The lookup's own card (to update later), or None when it went into
-        the more-lookups card. Never raises."""
-        from classes import tool_cards
+    async def post(self, spec: CardSpec) -> "LiveCard | LookupItem | None":
+        """The lookup's own card, or its item in the more-lookups card: either
+        is updated with show_soon(). None when the item could not be made.
+        Never raises."""
         self.count += 1
         if self.count <= self.shown:
             return await notice(self.channel, spec)
         try:
-            self.lines.append(tool_cards.lookup_line(spec))
+            self.items.append(tool_cards.lookup_item(spec))
         except Exception as e:
             logger.info(f"Could not add a lookup to its card: {e!r}")
             return None
+        item = LookupItem(self, len(self.items) - 1)
         if self.card is None:
             # Set before the send, so a lookup running beside this one edits
             # it (LiveCard.show runs one call at a time) instead of sending one.
             self.card = LiveCard(self.channel)
             self._last = time.monotonic()
-            await self.card.show(tool_cards.more_lookups_card(self.lines))
-        elif self._task is None or self._task.done():
+            await self.card.show(tool_cards.more_lookups_card(self.items))
+        else:
+            self._changed()
+        return item
+
+    def update(self, index: int, spec: CardSpec) -> None:
+        """An item's lookup changed (it failed, or a search now lists what
+        it read): shown at the next edit."""
+        try:
+            self.items[index] = tool_cards.lookup_item(spec)
+        except Exception as e:
+            logger.info(f"Could not update a lookup in its card: {e!r}")
+            return
+        self._changed()
+
+    def _changed(self) -> None:
+        self._changes += 1
+        if self.card is None or self._dropped():
+            return  # a QuietChannel kept it: editing it would do nothing
+        if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._flush())
             _background.add(self._task)
             self._task.add_done_callback(_background.discard)
-        return None
+
+    def _dropped(self) -> bool:
+        """The card was sent to a QuietChannel, which kept it (a workflow
+        helper's). Not a send that failed: that one is tried again."""
+        return getattr(self.card.message, "dropped", False) is True
 
     async def _flush(self) -> None:
-        """Shows the newest lines once the interval is up, again while more
-        come in meanwhile."""
-        from classes.tool_cards import more_lookups_card
+        """Shows the items once the interval is up, again while they change
+        meanwhile."""
         try:
             while True:
                 wait = self._last + self.interval - time.monotonic()
                 if wait > 0:
                     await asyncio.sleep(wait)
-                count = len(self.lines)
+                changes = self._changes
                 self._last = time.monotonic()
-                await self.card.show(more_lookups_card(self.lines))
-                if len(self.lines) == count:
+                await self.card.show(tool_cards.more_lookups_card(self.items))
+                if self._changes == changes:
                     return
         except asyncio.CancelledError:
             raise
@@ -394,11 +416,23 @@ class Lookups:
             logger.info(f"Could not update the more-lookups card: {e!r}")
 
 
-async def lookup_notice(context: dict, spec: CardSpec) -> LiveCard | None:
+class LookupItem:
+    """A lookup's item in the more-lookups card, updated like its own card
+    would be (LiveCard.show_soon)."""
+
+    def __init__(self, lookups: Lookups, index: int):
+        self.lookups = lookups
+        self.index = index
+
+    def show_soon(self, spec: CardSpec) -> None:
+        self.lookups.update(self.index, spec)
+
+
+async def lookup_notice(context: dict, spec: CardSpec) -> "LiveCard | LookupItem | None":
     """A lookup's notice card (a web search, a page, messages searched, read
-    or saved), counted in the run's Lookups: past the first few it is a line
-    in one shared card, and None comes back (its later updates go nowhere).
-    None too when the run has no channel. Never raises."""
+    or saved), counted in the run's Lookups: past the first few it is an
+    item in one shared card. Either way what comes back is updated with
+    show_soon(). None when the run has no channel. Never raises."""
     channel = context.get("channel")
     if channel is None:
         return None

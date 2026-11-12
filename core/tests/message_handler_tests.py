@@ -967,6 +967,7 @@ async def test_handle_message_does_not_prewarm_for_an_unprompted_reply():
                        lambda h: setattr(h, "messages", [{"role": "user", "content": "hi"}]))
     handler.message.channel.send = AsyncMock()
     manager = MagicMock()
-    with patch("classes.message_handler.TextLLMHandler", _FakeLLM),          patch("classes.workspace_manager.workspaces", return_value=manager):
+    with patch("classes.message_handler.TextLLMHandler", _FakeLLM), \
+         patch("classes.workspace_manager.workspaces", return_value=manager):
         await handler.handle_message()
     manager.prewarm.assert_not_called()

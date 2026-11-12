@@ -85,3 +85,14 @@ async def test_an_unprompted_reply_that_was_only_a_tool_call_sends_nothing():
         await handler.handle_message()
     handler.message.channel.send.assert_not_awaited()
     assert ('❌',) not in [c.args for c in handler.message.add_reaction.call_args_list]
+
+
+@pytest.mark.parametrize("unprompted, counted", [(True, []), (False, ["answered"])])
+def test_an_unprompted_reply_is_not_counted_as_a_routing_choice(unprompted, counted):
+    # discord_bot_persona_escalation_total measures "answer, or ask the
+    # brain"; a reply with no brain made no such choice.
+    handler = _handler(unprompted)
+    seen = []
+    with patch("classes.text_llm_handler.inc_persona_escalation", seen.append):
+        handler._after_run({"unprompted": unprompted}, "ha, same")
+    assert seen == counted

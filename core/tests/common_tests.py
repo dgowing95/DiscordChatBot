@@ -95,13 +95,13 @@ async def test_the_first_lookups_get_their_own_card_and_the_rest_share_one():
     assert all(isinstance(live, card.LiveCard) for live in own)
     assert channel.send.await_count == 3
 
-    assert await card.lookup_notice(ctx, _lookup(3)) is None
+    assert isinstance(await card.lookup_notice(ctx, _lookup(3)), card.LookupItem)
     assert channel.send.await_count == 4  # the more-lookups card, sent at once
     more = channel.send.await_args.kwargs["view"]
     assert "More lookups · 1" in "".join(b.content for b in more.blocks if isinstance(b, K.Text))
 
     for n in (4, 5):
-        assert await card.lookup_notice(ctx, _lookup(n)) is None
+        assert isinstance(await card.lookup_notice(ctx, _lookup(n)), card.LookupItem)
     await asyncio.sleep(0.05)  # the edit waits out the interval, in the background
     assert channel.send.await_count == 4  # later lookups only edit it
     message = lookups.card.message
@@ -132,7 +132,39 @@ async def test_two_lookups_at_once_past_the_first_few_send_one_more_lookups_card
     channel = MagicMock()
     channel.send = AsyncMock(side_effect=send)
     ctx = {"channel": channel, card.LOOKUPS: card.Lookups(channel, shown=0, interval=0)}
-    assert await asyncio.gather(card.lookup_notice(ctx, _lookup(0)),
-                                card.lookup_notice(ctx, _lookup(1))) == [None, None]
+    await asyncio.gather(card.lookup_notice(ctx, _lookup(0)), card.lookup_notice(ctx, _lookup(1)))
     await asyncio.sleep(0.05)
+    assert channel.send.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_quiet_channels_more_lookups_card_is_not_edited():
+    # A workflow helper's QuietChannel keeps the card: no edits to wait on.
+    import asyncio
+    channel = _channel()
+    lookups = card.Lookups(QuietChannel(channel), shown=0, interval=0)
+    ctx = {"channel": lookups.channel, card.LOOKUPS: lookups}
+    for n in range(3):
+        item = await card.lookup_notice(ctx, _lookup(n))
+    item.show_soon(K.finished(_lookup(2), "It didn't work"))
+    await asyncio.sleep(0.01)
+    assert lookups._task is None and channel.send.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_lookup_in_the_more_lookups_card_is_updated_in_place():
+    # A lookup past the first few still shows how it ended ("It didn't work"),
+    # in its own item, at the card's next edit.
+    import asyncio
+    channel = _channel()
+    lookups = card.Lookups(channel, shown=0, interval=0.01)
+    ctx = {"channel": channel, card.LOOKUPS: lookups}
+    first = await card.lookup_notice(ctx, _lookup(0))
+    await card.lookup_notice(ctx, _lookup(1))
+    first.show_soon(K.finished(_lookup(0), "It didn't work"))
+    await asyncio.sleep(0.05)
+    texts = [b.content for b in lookups.card.message.edit.await_args.kwargs["view"].blocks
+             if isinstance(b, K.Text)]
+    assert texts[1:] == ["-# 🔍 Searching this server's messages\n“word 0”\n-# It didn't work",
+                         "-# 🔍 Searching this server's messages\n“word 1”"]
     assert channel.send.await_count == 1

@@ -187,26 +187,31 @@ async def test_a_failed_search_does_not_leave_its_card_searching(monkeypatch):
 
 # --- lookups past the first few: one more-lookups card ----------------------------
 
-@pytest.mark.parametrize("spec, line", [
+@pytest.mark.parametrize("spec, item", [
     (te.message_search_card(te.SEARCHING_MESSAGES, te.message_search_line("birthday", "this server")),
-     "🔍 **“birthday”** in this server"),
-    (te.message_search_card(te.READING_MESSAGES, "Around a message in #general"),
-     "📜 Around a message in #general"),
-    (te.web_search_card("weather in Oslo"), "🔎 **weather in Oslo**"),
-    (te.page_card("https://example.com/a"), "🌐 [example.com › a](https://example.com/a)"),
-    (te.page_card("https://example.com/a", title="A page"),
-     "🌐 **A page** · [example.com › a](https://example.com/a)"),
+     "-# 🔍 Searching this server's messages\n**“birthday”** in this server"),
+    (te.web_search_card("weather in Oslo"), "-# 🔎 Searching the web\n**weather in Oslo**"),
+    (te.page_card("https://example.com/a", part=2),
+     "-# 🌐 Reading a page · part 2\n[example.com › a](https://example.com/a)"),
+    (K.finished(te.message_search_card(te.READING_MESSAGES, "Around a message in #general"),
+                "It didn't work"),
+     "-# 📜 Reading messages\nAround a message in #general\n-# It didn't work"),
 ])
-def test_a_lookup_is_one_line_its_emoji_then_what_it_looked_up(spec, line):
-    assert te.lookup_line(spec) == line
+def test_a_lookup_item_reads_like_its_own_card(spec, item):
+    assert te.lookup_item(spec) == item
 
 
-def test_the_more_lookups_card_shows_the_newest_lines_and_counts_the_rest():
-    few = te.more_lookups_card(["🔍 a", "🔍 b"])
+def test_a_web_search_item_keeps_what_it_read():
+    item = te.lookup_item(te.web_search_card("oslo", [("Yr", "https://yr.no/x")]))
+    assert item.startswith("-# 🔎 Searched the web\n**oslo**\n-# Read 1 page · [yr.no]")
+
+
+def test_the_more_lookups_card_spaces_its_items_and_counts_the_earlier_ones():
+    few = te.more_lookups_card(["a", "b"])
     assert few.label == f"{te.MORE_LOOKUPS} · 2" and few.footer == ""
-    assert _texts(few)[-1] == "🔍 a\n🔍 b"
-    lines = [f"🔍 {i}" for i in range(te.LOOKUP_LINES + 4)]
-    many = te.more_lookups_card(lines)
-    assert many.label == f"{te.MORE_LOOKUPS} · {len(lines)}"
-    assert "\n".join(lines[-te.LOOKUP_LINES:]) in _texts(many)
-    assert "🔍 3\n" not in _texts(many)[1] and many.footer == "and 4 earlier"
+    assert [type(b) for b in few.body] == [K.Text, K.Gap, K.Text]  # a gap between items
+    items = [f"item {i}" for i in range(te.LOOKUP_ITEMS + 4)]
+    many = te.more_lookups_card(items)
+    assert many.label == f"{te.MORE_LOOKUPS} · {len(items)}"
+    assert [b.content for b in many.body if isinstance(b, K.Text)] == items[-te.LOOKUP_ITEMS:]
+    assert many.footer == "and 4 earlier"

@@ -24,10 +24,10 @@ UNPROMPTED_NO_BRAIN = ("Nobody asked you here, so there is no brain this time: j
                        "from the conversation.")
 
 
-async def _lookup_notice(wrapper: RunContextWrapper[dict], spec) -> "card.LiveCard | None":
+async def _lookup_notice(wrapper: RunContextWrapper[dict], spec):
     """A lookup's notice card where it was asked (card.lookup_notice: past the
-    first few of a reply it is a line in one shared card, and None comes back;
-    skipped when the run has no channel; never raises)."""
+    first few of a reply it is an item in one shared card; either is updated
+    with show_soon; None when the run has no channel; never raises)."""
     return await card.lookup_notice(wrapper.context, spec)
 
 
