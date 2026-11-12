@@ -9,8 +9,8 @@ call may take minutes. classes/loop_guard.py is the real guard; the turn and
 time limits here only stop a run that gets past it.
 
 A reply the bot was not asked for (the random reply chance, not a mention)
-gets far tighter backstops (BRAIN_UNPROMPTED_*): nobody is waiting on it, so
-it must never become a half-hour job (F11).
+has no brain at all (TextLLMHandler, tool_functions.ask_brain): nobody is
+waiting on it, and one spent three minutes searching people's messages.
 
 BRAIN_MAX_CONCURRENT caps brain calls at once across the process. Each one
 on a queue worker gets a spare worker, so chat stays answered while the
@@ -32,8 +32,6 @@ DEFAULT_MAX_TURNS = 100
 DEFAULT_TIMEOUT_SECONDS = 1800
 DEFAULT_REPEAT_LIMIT = 3
 DEFAULT_TRIM_KEEP_RECENT = 6
-DEFAULT_UNPROMPTED_MAX_TURNS = 40
-DEFAULT_UNPROMPTED_TIMEOUT_SECONDS = 180
 DEFAULT_ASK_TIMEOUT_SECONDS = 120
 DEFAULT_MAX_CONCURRENT = 3
 DEFAULT_QUEUE_WAIT_SECONDS = 120
@@ -91,25 +89,6 @@ def trim_keep_recent(env=os.environ) -> int:
     """Tool outputs kept whole in the brain's prompt; older ones are cut
     (BRAIN_TRIM_KEEP_RECENT, default 6)."""
     return _env_int("BRAIN_TRIM_KEEP_RECENT", DEFAULT_TRIM_KEEP_RECENT, env)
-
-
-def unprompted_max_turns(env=os.environ) -> int:
-    """Model turns for a brain call in an unprompted reply
-    (BRAIN_UNPROMPTED_MAX_TURNS, default 40)."""
-    return _env_int("BRAIN_UNPROMPTED_MAX_TURNS", DEFAULT_UNPROMPTED_MAX_TURNS, env)
-
-
-def unprompted_timeout(env=os.environ) -> int:
-    """Wall-clock seconds for a brain call in an unprompted reply
-    (BRAIN_UNPROMPTED_TIMEOUT, default 180)."""
-    return _env_int("BRAIN_UNPROMPTED_TIMEOUT", DEFAULT_UNPROMPTED_TIMEOUT_SECONDS, env)
-
-
-def limits_for(*, unprompted: bool, env=os.environ) -> tuple[int, int]:
-    """(max turns, timeout seconds) for one brain call."""
-    if unprompted:
-        return unprompted_max_turns(env), unprompted_timeout(env)
-    return brain_max_turns(env), brain_timeout(env)
 
 
 def ask_timeout(env=os.environ) -> int:

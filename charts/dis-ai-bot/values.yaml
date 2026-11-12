@@ -562,11 +562,6 @@ brain:
   # Tool outputs kept whole in a long call's prompt; older ones are cut to
   # their first and last 400 characters.
   trimKeepRecent: 6
-  # A reply the bot was not asked for (the random reply chance) gets these
-  # tighter backstops instead: nobody is waiting on it.
-  unprompted:
-    maxTurns: 40
-    timeout: 180
   # Seconds the brain waits for the requester to answer a question it asked
   # in the channel (ask_user); counted inside timeout.
   askTimeout: 120

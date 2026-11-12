@@ -58,6 +58,15 @@ GENERATED_IMAGE = "generated-image.png"
 LINK_LABEL_CHARS = 80
 HELPER_LINE_CHARS = 80
 
+# Lookups (a web search, a page, a message search, messages read or saved)
+# post their own card only for the first LOOKUP_CARDS of a reply (or of a
+# workflow step); every later one is an item in one more card, edited in place
+# (classes/card.py, Lookups). One brain call once posted twenty search cards
+# in a row, between people's messages (prod, 2026-11-12).
+LOOKUP_CARDS = 3
+MORE_LOOKUPS = "🔎 More lookups"
+LOOKUP_ITEMS = 6  # the newest the card shows; the rest are counted
+
 
 def reading_page_title(part: int) -> str:
     return READING_PAGE if part <= 1 else f"{READING_PAGE} · part {part}"
@@ -189,6 +198,30 @@ def personality_card(personality: str) -> CardSpec:
 
 def message_search_card(label: str, line: str, footer: str = "") -> CardSpec:
     return CardSpec(label=label, body=[Text(line)], footer=footer)
+
+
+def lookup_item(spec: CardSpec) -> str:
+    """A lookup's card as one item of the more-lookups card, read the same
+    way as the card itself: its label small, then what it looked up, then
+    its footer small (a failed one's "It didn't work")."""
+    texts = [K.small(spec.label)] if spec.label else []
+    for block in spec.body:
+        if isinstance(block, Text):
+            texts.append(block.content)
+        elif isinstance(block, Section):  # a page: its label is the first text
+            texts.extend(block.texts)
+    if spec.footer:
+        texts.append(K.small(spec.footer))
+    return "\n".join(t for t in texts if t)
+
+
+def more_lookups_card(items: list[str]) -> CardSpec:
+    """The lookups past the first LOOKUP_CARDS: the newest LOOKUP_ITEMS, a gap
+    between each (as in every card's list), and how many came before them."""
+    shown = items[-LOOKUP_ITEMS:]
+    earlier = len(items) - len(shown)
+    return CardSpec(label=f"{MORE_LOOKUPS} · {len(items)}", body=K.listing(shown),
+                    footer=f"and {earlier} earlier" if earlier else "")
 
 
 def drawing_card(prompt: str, editing: bool = False) -> CardSpec:

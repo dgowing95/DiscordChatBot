@@ -120,7 +120,7 @@ async def search_messages(wrapper: RunContextWrapper[dict], query: str, channel:
                 f"{context['message_search_calls']})")
     spec = message_search_card(
         SEARCHING_MESSAGES, message_search_line(scope.query, scope.where, scope.author))
-    live = await card.notice(scope.current, spec)
+    live = await card.lookup_notice(context, spec)
     body = await _search_page(scope, limit)
     if isinstance(body, str):
         _failed(live, spec)
@@ -296,7 +296,7 @@ async def save_messages_to_file(wrapper: RunContextWrapper[dict], query: str = "
     spec = message_search_card(
         SAVING_MESSAGES, message_search_line(scope.query, scope.where, scope.author),
         "For code to count or chart them")
-    live = await card.notice(scope.current, spec)
+    live = await card.lookup_notice(context, spec)
     started = time.monotonic()
     export = _Export(scope.guild.id, _channel_names(scope.guild), wanted)
     try:
@@ -566,7 +566,7 @@ async def read_messages_around(wrapper: RunContextWrapper[dict], message: str,
     logger.info(f"Reading {before}/{after} messages around {message_id} in {place.id} (call "
                 f"{context['message_context_calls']})")
     spec = message_search_card(READING_MESSAGES, f"Around a message in #{place.name}")
-    live = await card.notice(current, spec)
+    live = await card.lookup_notice(context, spec)
     try:
         anchor = await client.http.get_message(place.id, message_id)
         older, newer = await asyncio.gather(

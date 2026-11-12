@@ -912,9 +912,8 @@ async def _run_and_deliver(ctx, lease, agent, task, run_config, hooks, progress,
     channel = ctx.get("channel")
     notes = []
     stopped = None
-    # A reply nobody asked for gets the tighter unprompted backstops. The
-    # deadline is what ask_user cuts its wait to.
-    max_turns, timeout = brain_policy.limits_for(unprompted=bool(ctx.get("unprompted")))
+    # The deadline is what ask_user cuts its wait to.
+    max_turns, timeout = brain_policy.brain_max_turns(), brain_policy.brain_timeout()
     ctx["brain_deadline"] = time.monotonic() + timeout
     try:
         result = await asyncio.wait_for(

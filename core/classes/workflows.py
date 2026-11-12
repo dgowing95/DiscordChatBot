@@ -1518,9 +1518,11 @@ _SHARED_KEYS = ("image_calls", "images_posted")
 
 def _helper_ctx(wf: Workflow, **keys) -> dict:
     """A helper's own run context: its folder, files and report are its own,
-    and two helpers run at once (see the module docstring)."""
+    and two helpers run at once (see the module docstring). Its lookup cards
+    are counted afresh (card.Lookups): each step shows its first few."""
+    from classes.card import LOOKUPS
     return {**wf.ctx, "brain_report_args": None, "deliverables": [], "delivery_chosen": False,
-            "skills_used": [], "skill_saved": False, **keys}
+            "skills_used": [], "skill_saved": False, LOOKUPS: None, **keys}
 
 
 def _keep_shared(wf: Workflow, ctx: dict) -> None:

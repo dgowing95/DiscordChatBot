@@ -537,17 +537,20 @@ class MessageHandler:
         await self.prepare_messages()
         if hint:
             self.messages.append({"role": "user", "content": hint})
+        # Let in by the reply chance, not a mention (main.on_message): the
+        # persona only talks, with no brain (TextLLMHandler).
+        unprompted = pop_unprompted(self.message.id)
         # The persona may hand the job to the brain, which needs this server's
         # workspace: start it now, while the persona thinks
         # (WORKSPACE_PREWARM, on by default). Fire-and-forget, fail-soft.
-        self._prewarm_workspace()
+        if not unprompted:
+            self._prewarm_workspace()
         # 3) LLM run + tool calls UNLOCKED (the slow phase; other messages —
         #    same channel or not — can build/generate concurrently).
         ollama = TextLLMHandler(
             self.messages, self.message.guild.id, self.message,
             client=self.client,
-            # Let in by the reply chance, not a mention (main.on_message).
-            unprompted=pop_unprompted(self.message.id),
+            unprompted=unprompted,
         )
         ollama.allow_double_reply = allow_double_reply
         response = await ollama.generate()
