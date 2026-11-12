@@ -618,8 +618,8 @@ async def test_handle_message_passes_client_to_text_llm_handler():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("marked", [True, False])
 async def test_handle_message_passes_the_unprompted_flag(marked):
-    # A message the reply chance let in (main.on_message marks it) gets the
-    # brain's unprompted limits; the flag is popped, so it is used once.
+    # A message the reply chance let in (main.on_message marks it) only
+    # talks, with no brain; the flag is popped, so it is used once.
     from classes import message_queue
     captured = {}
 
@@ -947,3 +947,26 @@ async def test_handle_message_prewarms_the_servers_workspace():
          patch("classes.workspace_manager.workspaces", return_value=manager):
         await handler.handle_message()
     manager.prewarm.assert_called_once_with(handler.message.guild.id)
+
+
+@pytest.mark.asyncio
+async def test_handle_message_does_not_prewarm_for_an_unprompted_reply():
+    # A reply nobody asked for has no brain, so no workspace either.
+    from classes import message_queue
+
+    class _FakeLLM:
+        def __init__(self, messages, guild_id, original_message, client=None, unprompted=False):
+            self.reasoning = ""
+
+        async def generate(self):
+            return "ok"
+
+    message = _llm_message(71)
+    message_queue.mark_unprompted(message.id)
+    handler = _handled(_handler(), message,
+                       lambda h: setattr(h, "messages", [{"role": "user", "content": "hi"}]))
+    handler.message.channel.send = AsyncMock()
+    manager = MagicMock()
+    with patch("classes.message_handler.TextLLMHandler", _FakeLLM),          patch("classes.workspace_manager.workspaces", return_value=manager):
+        await handler.handle_message()
+    manager.prewarm.assert_not_called()

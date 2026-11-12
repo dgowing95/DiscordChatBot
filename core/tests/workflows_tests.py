@@ -2469,3 +2469,13 @@ async def test_task_says_why_it_did_not_start_on_its_first_message(monkeypatch):
     # takes two, and the rest of the request goes on in a follow-up.
     rest = view_text(ctx.followup.send.await_args.kwargs["view"])
     assert rest.count("🧵") + shown.count("🧵") == 1800 + 1  # and the label's
+
+
+def test_each_steps_lookup_cards_are_counted_afresh():
+    # A step shows its own first few lookups (card.Lookups), not what is
+    # left of the workflow's or another step's.
+    from types import SimpleNamespace
+    from classes import card
+    wf = SimpleNamespace(ctx={card.LOOKUPS: object(), "guild_id": 1})
+    ctx = workflows._helper_ctx(wf)
+    assert ctx[card.LOOKUPS] is None and ctx["guild_id"] == 1

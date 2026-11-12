@@ -19,10 +19,16 @@ async def add_emoji_to_message(message: discord.Message, emoji: str) -> None:
     except Exception as e:
         logger.warning(f"Failed to add emoji {emoji} to message {message.id}: {e}")
     
-async def _tool_notice(wrapper: RunContextWrapper[dict], spec) -> "card.LiveCard | None":
-    """The notice card a tool posts where it was asked (card.notice: skipped
-    when the run has no channel, and never raises)."""
-    return await card.notice(wrapper.context.get("channel"), spec)
+# What ask_brain says in a reply nobody asked for (the random reply chance).
+UNPROMPTED_NO_BRAIN = ("Nobody asked you here, so there is no brain this time: just chat, "
+                       "from the conversation.")
+
+
+async def _lookup_notice(wrapper: RunContextWrapper[dict], spec) -> "card.LiveCard | None":
+    """A lookup's notice card where it was asked (card.lookup_notice: past the
+    first few of a reply it is a line in one shared card, and None comes back;
+    skipped when the run has no channel; never raises)."""
+    return await card.lookup_notice(wrapper.context, spec)
 
 
 @function_tool
@@ -46,7 +52,7 @@ async def web_search(wrapper: RunContextWrapper[dict], search_request: str) -> s
         return ("I can't perform that search — it was blocked by the safety "
                 "guard. Please rephrase with a safe, non-harmful query.")
 
-    live = await _tool_notice(wrapper, tool_cards.web_search_card(search_request))
+    live = await _lookup_notice(wrapper, tool_cards.web_search_card(search_request))
     from classes import web_research
     seen = {}
     try:
@@ -82,7 +88,7 @@ async def fetch_url(wrapper: RunContextWrapper[dict], url: str, part: int = 1) -
         return ("I can't fetch that URL — it was blocked by the safety "
                 "guard.")
 
-    live = await _tool_notice(wrapper, tool_cards.page_card(url, part))
+    live = await _lookup_notice(wrapper, tool_cards.page_card(url, part))
     try:
         page = await web_reader.read(url)
     except web_reader.FetchError as e:
@@ -340,8 +346,13 @@ async def ask_brain(wrapper: RunContextWrapper[dict], request: str,
     from classes.brain import run_brain
     from classes.brain_result import tool_result_for_persona
 
-    logger.info(f"Asking the brain: {request}")
     context = wrapper.context
+    if context.get("unprompted"):
+        # Its tools are refused in a reply nobody asked for
+        # (TextLLMHandler._model_settings); this holds where a server ignores that.
+        logger.info(f"Not asking the brain in an unprompted reply: {request}")
+        return UNPROMPTED_NO_BRAIN
+    logger.info(f"Asking the brain: {request}")
     # One brain call at a time per reply: the SDK runs one response's tool
     # calls concurrently, and every brain call shares (and cleans up) the
     # persona's context dict, so two at once would trample each other's

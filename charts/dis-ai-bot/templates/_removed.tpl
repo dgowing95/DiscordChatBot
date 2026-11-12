@@ -57,6 +57,9 @@ includes this, so every render runs it. core does the same for env vars
 {{- end }}
 {{- end }}
 {{- end }}
+{{- if and (kindIs "map" .Values.brain) (hasKey .Values.brain "unprompted") }}
+{{- $found = append $found "brain.unprompted -> removed (v3.4: a reply the bot was not asked for no longer uses the brain)" }}
+{{- end }}
 {{- if $found }}
 {{- fail (printf "\nThese values keys were renamed or removed in v3 (see docs/upgrading-to-v3.md):\n  %s\n" (join "\n  " (sortAlpha $found))) }}
 {{- end }}

@@ -53,7 +53,7 @@ core/                    # the bot (what runs in production)
     brain.py               # run_brain, its SandboxAgent, BRAIN_INSTRUCTIONS, report
     brain_tools.py         # the one list of the brain's tools, gated per kind of run
     brain_result.py        # P BrainReport and what the persona is told
-    brain_policy.py        # P BRAIN_* limits (unprompted replies, questions, slots)
+    brain_policy.py        # P BRAIN_* limits (questions, slots)
     brain_inbox.py         # P questions the brain is waiting on, one per question message
     brain_question.py      # the question in Discord (buttons) and ask(): the one flow of ask_user and ask_requester
     persona_voice.py       # the brain's questions and a manager's thread replies, in the persona's voice
@@ -141,7 +141,8 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
    (`QUEUE_MAX_SIZE`; when it is full a mention gets a short "busy" reply) served by `QUEUE_WORKERS`
    workers. A brain call on a worker starts a spare one (up to `BRAIN_MAX_CONCURRENT`), so chat keeps
    `QUEUE_WORKERS` free; the pool shrinks back as workers finish. A message let in by the reply chance
-   is marked unprompted, and its brain call gets the `BRAIN_UNPROMPTED_*` limits. A per-channel lock covers only the two fast phases, the prompt build and the send. The slow
+   is marked unprompted: the persona only talks, with no brain (its tools are sent with
+   `tool_choice="none"`, as in `_wrap_up`, and `ask_brain` refuses; no workspace prewarm). A per-channel lock covers only the two fast phases, the prompt build and the send. The slow
    LLM and tool phase runs unlocked, so channels run side by side and a new message can be answered
    while an earlier one in the same channel waits on the brain. **Never hold the lock across an LLM or
    tool await.** A brain call that has run 10 s shows in that channel's newer prompts as a one-line hint;
@@ -243,7 +244,11 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
    | `attach_file`, `save_messages_to_file`, `ask_user`, `report`, the Shell tools | yes | yes | yes |
 
    - **It works inline, in the channel**, not in a thread: each tool posts its own card, attached files
-     are posted before the persona replies, and the "🧠 Working on it" card appears only once it uses
+     are posted before the persona replies. Lookups (web search, a page, messages searched, read or
+     saved) are capped: the first `tool_cards.LOOKUP_CARDS` (3) of a reply post their own, every later
+     one is a line in one "🔎 More lookups" card, edited at most every 20 s (`card.lookup_notice`,
+     `card.Lookups`; a workflow step counts its own). Results (a picture, poll, event, memory, skill)
+     always post. The "🧠 Working on it" card appears only once it uses
      the workspace. With `/workspace progress` off it carries one line on what the brain is doing
      ("⏳ Creating the script"): a side call (`brain_status.py`, the brain's connection, background
      lane) writes it from the newest tool calls at most every 30 s, and until then (or when it
@@ -281,8 +286,8 @@ pyproject.toml           # pytest configuration (why bare `pytest` works from th
      brain's choices, "Answer…" for a text box, "You decide"). Only the requester can answer, and only
      deliberately: a button, or Discord's Reply on the question (`on_message`, ✅). An ordinary message
      stays a new request. In a call it is spoken too, and the speaker's next words answer it
-     (`VoiceSession.heard`). At most 3 per call, each up to `BRAIN_ASK_TIMEOUT`; automatic runs and
-     unprompted replies are told to assume.
+     (`VoiceSession.heard`). At most 3 per call, each up to `BRAIN_ASK_TIMEOUT`; automatic runs are
+     told to assume.
 
    - **Skills** (`docs/skills.md`): how the brain solved a recurring job, kept per server in Redis
      (`skill_store.py`: one record per skill, every version kept, a delete is soft), so a workspace
@@ -684,7 +689,6 @@ reads has a row here and a line in `.env.example`, that every row is read by som
 | `BRAIN_MAX_TURNS` | backstop on model turns per brain call [100]. Chart: `brain.maxTurns` |
 | `BRAIN_TIMEOUT` | backstop on a brain call's seconds, lane waits included [1800]. Chart: `brain.timeout` |
 | `BRAIN_REPEAT_LIMIT` | loop guard: the same call this many times in a row, eight calls that bring nothing new, or the same page or search this many times in one run, warns; a second time stops the call [3, min 2]. Chart: `brain.repeatLimit` |
-| `BRAIN_UNPROMPTED_MAX_TURNS` / `BRAIN_UNPROMPTED_TIMEOUT` | backstops for a brain call in a reply the bot was not asked for (the random reply chance): nobody is waiting on it [40 / 180]. Chart: `brain.unprompted.maxTurns` / `timeout` |
 | `BRAIN_ASK_TIMEOUT` | seconds `ask_user` waits for the requester's answer in the channel, cut to what the call has left [120]. Chart: `brain.askTimeout` |
 | `SKILLS_ENABLED` | `0`/`false` turns skills off: no skill tools for the brain, no `/skills`, no index in its task; saved skills are kept (default: on). Chart: `skills.enabled` |
 | `SKILLS_MAX_PER_GUILD` / `SKILLS_MAX_VERSIONS` | live skills per server (default 100; deleted ones do not count), and versions kept per skill (default 50; past it the oldest goes). Chart: `skills.maxPerGuild` / `maxVersions` |

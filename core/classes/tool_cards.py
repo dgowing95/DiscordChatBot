@@ -58,6 +58,15 @@ GENERATED_IMAGE = "generated-image.png"
 LINK_LABEL_CHARS = 80
 HELPER_LINE_CHARS = 80
 
+# Lookups (a web search, a page, a message search, messages read or saved)
+# post their own card only for the first LOOKUP_CARDS of a reply (or of a
+# workflow step); every later one is a line in one more card, edited in place
+# (classes/card.py, Lookups). One brain call once posted twenty search cards
+# in a row, between people's messages (prod, 2026-11-12).
+LOOKUP_CARDS = 3
+MORE_LOOKUPS = "🔎 More lookups"
+LOOKUP_LINES = 10  # the newest lines the card shows; the rest are counted
+
 
 def reading_page_title(part: int) -> str:
     return READING_PAGE if part <= 1 else f"{READING_PAGE} · part {part}"
@@ -189,6 +198,37 @@ def personality_card(personality: str) -> CardSpec:
 
 def message_search_card(label: str, line: str, footer: str = "") -> CardSpec:
     return CardSpec(label=label, body=[Text(line)], footer=footer)
+
+
+def _texts(blocks) -> list[str]:
+    out = []
+    for block in blocks:
+        if isinstance(block, Text):
+            out.append(block.content)
+        elif isinstance(block, Section):
+            out.extend(block.texts)
+    return [K.plain_line(line) for text in out for line in str(text).split("\n")
+            if K.plain_line(line)]
+
+
+def lookup_line(spec: CardSpec) -> str:
+    """A lookup's card as one line of the more-lookups card: its label's
+    emoji, then what it looked up ("🔍 **“birthday”** in this server").
+    A card with no label (a page) has it as its first line."""
+    lines = _texts(spec.body)
+    label = spec.label or (lines.pop(0) if lines else "")
+    emoji = label.split(" ", 1)[0] if label else "🔎"
+    return f"{emoji} {' · '.join(lines) or label}"
+
+
+def more_lookups_card(lines: list[str]) -> CardSpec:
+    """The lookups past the first LOOKUP_CARDS: the newest LOOKUP_LINES, one
+    each, and how many came before them."""
+    shown = lines[-LOOKUP_LINES:]
+    earlier = len(lines) - len(shown)
+    footer = f"and {earlier} earlier" if earlier else ""
+    return CardSpec(label=f"{MORE_LOOKUPS} · {len(lines)}", body=[Text("\n".join(shown))],
+                    footer=footer)
 
 
 def drawing_card(prompt: str, editing: bool = False) -> CardSpec:

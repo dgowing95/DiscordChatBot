@@ -1,5 +1,4 @@
-"""Tests for 3c: the unprompted flag and limits (core/classes/brain_policy.py,
-message_queue.mark_unprompted), the brain's slots (BRAIN_MAX_CONCURRENT /
+"""Tests for 3c: the unprompted flag (message_queue.mark_unprompted), the brain's slots (BRAIN_MAX_CONCURRENT /
 BRAIN_QUEUE_WAIT in core/classes/brain.py) and the elastic worker pool
 (core/classes/message_queue.py, wired in core/main.py).
 
@@ -26,13 +25,10 @@ def _clean(monkeypatch):
 
 # --------------------------- limits ---------------------------
 
-def test_unprompted_replies_get_the_tighter_limits():
-    assert brain_policy.limits_for(unprompted=False, env={}) == (100, 1800)
-    assert brain_policy.limits_for(unprompted=True, env={}) == (40, 180)
-    env = {"BRAIN_UNPROMPTED_MAX_TURNS": "10", "BRAIN_UNPROMPTED_TIMEOUT": "60",
-           "BRAIN_MAX_TURNS": "50", "BRAIN_TIMEOUT": "900"}
-    assert brain_policy.limits_for(unprompted=True, env=env) == (10, 60)
-    assert brain_policy.limits_for(unprompted=False, env=env) == (50, 900)
+def test_brain_limits():
+    assert (brain_policy.brain_max_turns({}), brain_policy.brain_timeout({})) == (100, 1800)
+    env = {"BRAIN_MAX_TURNS": "50", "BRAIN_TIMEOUT": "900"}
+    assert (brain_policy.brain_max_turns(env), brain_policy.brain_timeout(env)) == (50, 900)
 
 
 def test_question_and_slot_settings():
@@ -60,24 +56,22 @@ def test_unprompted_marks_are_capped():
 
 
 @pytest.mark.asyncio
-async def test_an_unprompted_brain_call_runs_with_the_unprompted_limits(monkeypatch):
-    from brain_tests import _brain, _ctx, _report_call
-    from agents.testing import ModelStep, ScriptedModel
-
-    seen = {}
-    real_wait_for = asyncio.wait_for
-
-    async def _wait_for(awaitable, timeout):
-        seen.setdefault("timeouts", []).append(timeout)
-        return await real_wait_for(awaitable, timeout)
-
-    model = ScriptedModel([ModelStep(output=[_report_call()])])
-    with _brain(model), patch.object(brain.asyncio, "wait_for", _wait_for), \
-         patch.object(brain.Runner, "run", wraps=brain.Runner.run) as run:
-        report = await brain.run_brain(_ctx(unprompted=True), "look it up")
-    assert report.status == brain_result.DONE
-    assert run.call_args.kwargs["max_turns"] == 40
-    assert 180 in seen["timeouts"]
+async def test_an_unprompted_reply_never_asks_the_brain(monkeypatch):
+    # A reply nobody asked for only talks: even if a server ignores the
+    # refused tools (tool_choice "none"), ask_brain does not start a brain call.
+    from classes import tool_functions
+    from classes.tool_functions import ask_brain
+    run = AsyncMock()
+    monkeypatch.setattr(brain, "run_brain", run)
+    from agents.tool_context import ToolContext
+    ctx = {"unprompted": True}
+    args = '{"request": "look up who is Finnish"}'
+    result = await ask_brain.on_invoke_tool(
+        ToolContext(context=ctx, tool_name="ask_brain", tool_call_id="t1", tool_arguments=args),
+        args)
+    assert result == tool_functions.UNPROMPTED_NO_BRAIN
+    run.assert_not_awaited()
+    assert "brain_reports" not in ctx
 
 
 # MessageHandler popping the flag: message_handler_tests.py.

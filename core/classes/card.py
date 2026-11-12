@@ -24,6 +24,7 @@ Buttons come in rows of at most 5, in four colours: blurple, grey, green, red.
 import asyncio
 import io
 import logging
+import time
 
 import discord
 
@@ -321,6 +322,90 @@ async def notice(channel, spec: CardSpec) -> LiveCard | None:
     live = LiveCard(channel)
     await live.show(spec)
     return live
+
+
+# The run context's key for its Lookups: the persona's dict, so the count is
+# per reply, across its brain calls; a workflow step starts its own
+# (workflows._helper_ctx).
+LOOKUPS = "lookup_cards"
+LOOKUP_EDIT_SECONDS = 20.0  # Discord allows about 5 edits a minute per channel
+
+
+class Lookups:
+    """A reply's lookup cards (tool_cards.LOOKUP_CARDS): the first few are
+    each a notice of their own, every later one a line in one more card.
+    That card is sent with the first of them, then edited at most every
+    `interval` seconds (a background task, so a lookup never waits on it);
+    the last edit lands after the run when it ends inside the interval."""
+
+    def __init__(self, channel, *, shown: int | None = None,
+                 interval: float = LOOKUP_EDIT_SECONDS):
+        from classes.tool_cards import LOOKUP_CARDS
+        self.channel = channel
+        self.shown = LOOKUP_CARDS if shown is None else shown
+        self.interval = interval
+        self.count = 0
+        self.lines: list[str] = []
+        self.card: LiveCard | None = None
+        self._last = float("-inf")
+        self._task: asyncio.Task | None = None
+
+    async def post(self, spec: CardSpec) -> LiveCard | None:
+        """The lookup's own card (to update later), or None when it went into
+        the more-lookups card. Never raises."""
+        from classes import tool_cards
+        self.count += 1
+        if self.count <= self.shown:
+            return await notice(self.channel, spec)
+        try:
+            self.lines.append(tool_cards.lookup_line(spec))
+        except Exception as e:
+            logger.info(f"Could not add a lookup to its card: {e!r}")
+            return None
+        if self.card is None:
+            # Set before the send, so a lookup running beside this one edits
+            # it (LiveCard.show runs one call at a time) instead of sending one.
+            self.card = LiveCard(self.channel)
+            self._last = time.monotonic()
+            await self.card.show(tool_cards.more_lookups_card(self.lines))
+        elif self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._flush())
+            _background.add(self._task)
+            self._task.add_done_callback(_background.discard)
+        return None
+
+    async def _flush(self) -> None:
+        """Shows the newest lines once the interval is up, again while more
+        come in meanwhile."""
+        from classes.tool_cards import more_lookups_card
+        try:
+            while True:
+                wait = self._last + self.interval - time.monotonic()
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                count = len(self.lines)
+                self._last = time.monotonic()
+                await self.card.show(more_lookups_card(self.lines))
+                if len(self.lines) == count:
+                    return
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.info(f"Could not update the more-lookups card: {e!r}")
+
+
+async def lookup_notice(context: dict, spec: CardSpec) -> LiveCard | None:
+    """A lookup's notice card (a web search, a page, messages searched, read
+    or saved), counted in the run's Lookups: past the first few it is a line
+    in one shared card, and None comes back (its later updates go nowhere).
+    None too when the run has no channel. Never raises."""
+    channel = context.get("channel")
+    if channel is None:
+        return None
+    lookups = context.get(LOOKUPS)
+    if lookups is None:
+        lookups = context[LOOKUPS] = Lookups(channel)
+    return await lookups.post(spec)
 
 
 # --- a card waiting on a person (a question, a plan) ----------------------------

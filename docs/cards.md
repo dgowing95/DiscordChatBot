@@ -72,6 +72,13 @@ await card.notice(ctx.get("channel"), K.info("📊 Making a poll", K.bold(K.safe
 because of its card. Put a new tool's label and card builder in `tool_cards.py`, next to the
 others, and test the builder there (`tool_cards_tests.py`).
 
+A tool that only looks something up (a search, a page, messages read) uses
+`card.lookup_notice(ctx, spec)` instead. The first `tool_cards.LOOKUP_CARDS` (3) lookups of a
+reply post their own card; every later one becomes a line in one "🔎 More lookups" card
+(`tool_cards.lookup_line`), so a long hunt is one card, not twenty. Past the first few it
+returns `None`, so a later update of that lookup's card is simply skipped. A tool whose card
+is the result (a picture, a poll, a saved memory) keeps `card.notice`: it always posts.
+
 ### A card that changes (a status, a search that then lists what it read)
 
 ```python

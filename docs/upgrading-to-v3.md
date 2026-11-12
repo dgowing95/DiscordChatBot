@@ -71,6 +71,7 @@ unless the note says otherwise.
 | `SANDBOX_MAX_TURNS` | `BRAIN_MAX_TURNS` | **Default 10 → 100**, and only a backstop now: the loop guard stops a stuck brain call. Choose again rather than copy the old value |
 | `SANDBOX_TIMEOUT` | `BRAIN_TIMEOUT` | **Default 600 → 1800** seconds, a backstop like `BRAIN_MAX_TURNS`; lane waits count towards it |
 | `SANDBOX_ASK_USER_TIMEOUT` | `WORKFLOW_ASK_TIMEOUT` | Default unchanged (300); used by workflows only |
+| `BRAIN_UNPROMPTED_MAX_TURNS` / `BRAIN_UNPROMPTED_TIMEOUT` | removed (v3.4) | A reply the bot was not asked for (the random reply chance) no longer uses the brain, so it has no limits to set. Delete the lines |
 | `LLAMA_ARG_CACHE_TYPE_K` | `LLAMA_CACHE_TYPE_K` | docker compose only; compose passes it on as llama.cpp's own `LLAMA_ARG_CACHE_TYPE_K` |
 | `LLAMA_ARG_CACHE_TYPE_V` | `LLAMA_CACHE_TYPE_V` | docker compose only, as above |
 
@@ -100,7 +101,6 @@ New variables, all optional:
 | `WORKSPACE_PREWARM` | Start a server's workspace when the bot is about to answer there (on) |
 | `BRAIN_REPEAT_LIMIT` | The loop guard: the same tool call this many times in a row (or eight calls that bring nothing new) earns a warning, then a stop (3) |
 | `BRAIN_TRIM_KEEP_RECENT` | Tool outputs kept whole in a long brain call's prompt; older ones are cut to their first and last 400 characters (6) |
-| `BRAIN_UNPROMPTED_MAX_TURNS` / `BRAIN_UNPROMPTED_TIMEOUT` | Backstops for a brain call in a reply the bot was not asked for (the random reply chance): 40 turns, 180 seconds |
 | `BRAIN_ASK_TIMEOUT` | Seconds the brain waits for the requester to answer its question (120) |
 | `SKILLS_ENABLED` | New: `0` turns skills off (on by default). Saved skills are kept |
 | `SKILLS_MAX_PER_GUILD` / `SKILLS_MAX_VERSIONS` / `SKILLS_MAX_BYTES` / `SKILLS_MAX_BODY_CHARS` / `SKILLS_MAX_FILES` | New: limits on skills: 100 per server, 50 versions each, 64 KB, 8,000 characters of steps, 10 files |
@@ -241,6 +241,7 @@ time a call waits for a slot does not count toward its `*_CALL_TIMEOUT_SECONDS`.
 | `sandbox.requestTimeout` | `brain.callTimeout` | Default 600; see `BRAIN_CALL_TIMEOUT_SECONDS` above |
 | `sandbox.maxRetries` | removed | |
 | `sandbox.enabled` | removed | Docker is required: the socket is always mounted |
+| `brain.unprompted.maxTurns`, `brain.unprompted.timeout` | removed (v3.4) | A reply the bot was not asked for no longer uses the brain; see `BRAIN_UNPROMPTED_*` above |
 | `sandbox.image` | `brain.workspace.image` | |
 | `sandbox.dockerSocketPath` | `brain.workspace.dockerSocketPath` | |
 | `sandbox.memoryLimit` | `brain.workspace.memoryLimit` | |
@@ -264,7 +265,7 @@ from the chart. Also new:
 | `persona.model`, `persona.llmHost`, `persona.apiKey` | empty (= `llm.*`) | The persona's own LLM; the key goes in the Secret as `PERSONA_LLM_API_KEY` |
 | `brain.reasoningEffort` | medium | `BRAIN_REASONING_EFFORT` |
 | `brain.repeatLimit`, `brain.trimKeepRecent` | 3, 6 | `BRAIN_REPEAT_LIMIT`, `BRAIN_TRIM_KEEP_RECENT` |
-| `brain.unprompted.maxTurns`, `brain.unprompted.timeout`, `brain.askTimeout`, `brain.maxConcurrent`, `brain.queueWait` | 40, 180, 120, 3, 120 | `BRAIN_UNPROMPTED_*`, `BRAIN_ASK_TIMEOUT`, `BRAIN_MAX_CONCURRENT`, `BRAIN_QUEUE_WAIT` |
+| `brain.askTimeout`, `brain.maxConcurrent`, `brain.queueWait` | 120, 3, 120 | `BRAIN_ASK_TIMEOUT`, `BRAIN_MAX_CONCURRENT`, `BRAIN_QUEUE_WAIT` |
 | `skills.enabled`, `skills.maxPerGuild`, `skills.maxVersions`, `skills.maxBytes`, `skills.maxBodyChars`, `skills.maxFiles`, `skills.indexMax`, `skills.reflection.enabled`, `skills.reflection.minToolCalls`, `skills.curator.enabled`, `skills.curator.intervalHours`, `skills.curator.minSkills`, `skills.curator.retireDays` | true, 100, 50, 65536, 8000, 10, 20, true, 6, true, 24, 5, 60 | The `SKILLS_*` settings above |
 | `persona.maxTurns` | **4** (was 20 as `llmMaxTurns`) | `PERSONA_MAX_TURNS` |
 | `brain.workspace.idleSeconds`, `snapshotIntervalSeconds`, `maxWarm`, `jobRetentionHours`, `cpuLimit`, `pidsLimit`, `prewarm` | 900, 1800, 4, 72, empty, 512, true | The `WORKSPACE_*` settings above. `WORKSPACE_INSTANCE` is `<namespace>-<release name>`. The core pod's `terminationGracePeriodSeconds` is `snapshotTimeout` + 30, for the shutdown save |

@@ -126,8 +126,8 @@ def pop_enqueued(message_id: int) -> float | None:
 
 
 # Replies the bot was not asked for (the random reply chance let them in,
-# no mention): MessageHandler pops the flag and the brain gets the tighter
-# unprompted limits (brain_policy.limits_for) and asks no questions.
+# no mention): MessageHandler pops the flag, and the persona then only talks,
+# with no brain (TextLLMHandler).
 _unprompted: dict[int, None] = {}
 
 

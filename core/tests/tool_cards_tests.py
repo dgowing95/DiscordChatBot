@@ -183,3 +183,30 @@ async def test_a_failed_search_does_not_leave_its_card_searching(monkeypatch):
     await asyncio.sleep(0)
     edited = message.edit.await_args.kwargs["view"]
     assert edited.colour == K.CLOSED and "The search failed" in view_text(edited)
+
+
+# --- lookups past the first few: one more-lookups card ----------------------------
+
+@pytest.mark.parametrize("spec, line", [
+    (te.message_search_card(te.SEARCHING_MESSAGES, te.message_search_line("birthday", "this server")),
+     "🔍 **“birthday”** in this server"),
+    (te.message_search_card(te.READING_MESSAGES, "Around a message in #general"),
+     "📜 Around a message in #general"),
+    (te.web_search_card("weather in Oslo"), "🔎 **weather in Oslo**"),
+    (te.page_card("https://example.com/a"), "🌐 [example.com › a](https://example.com/a)"),
+    (te.page_card("https://example.com/a", title="A page"),
+     "🌐 **A page** · [example.com › a](https://example.com/a)"),
+])
+def test_a_lookup_is_one_line_its_emoji_then_what_it_looked_up(spec, line):
+    assert te.lookup_line(spec) == line
+
+
+def test_the_more_lookups_card_shows_the_newest_lines_and_counts_the_rest():
+    few = te.more_lookups_card(["🔍 a", "🔍 b"])
+    assert few.label == f"{te.MORE_LOOKUPS} · 2" and few.footer == ""
+    assert _texts(few)[-1] == "🔍 a\n🔍 b"
+    lines = [f"🔍 {i}" for i in range(te.LOOKUP_LINES + 4)]
+    many = te.more_lookups_card(lines)
+    assert many.label == f"{te.MORE_LOOKUPS} · {len(lines)}"
+    assert "\n".join(lines[-te.LOOKUP_LINES:]) in _texts(many)
+    assert "🔍 3\n" not in _texts(many)[1] and many.footer == "and 4 earlier"

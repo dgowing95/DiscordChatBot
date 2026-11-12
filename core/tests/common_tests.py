@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from classes import card, card_kit as K
+from classes import card, card_kit as K, tool_cards
 from classes.common import QuietChannel
 
 
@@ -76,3 +76,63 @@ async def test_a_live_card_edits_only_what_changed_and_knows_a_dropped_one():
     quiet_live = card.LiveCard(QuietChannel(_channel()))
     await quiet_live.show(spec)
     assert quiet_live.dropped
+
+
+# --- lookups: the first few cards, then one more-lookups card (card.Lookups) ------
+
+def _lookup(n):
+    return K.CardSpec(label="🔍 Searching this server's messages", body=[K.Text(f"“word {n}”")])
+
+
+@pytest.mark.asyncio
+async def test_the_first_lookups_get_their_own_card_and_the_rest_share_one():
+    import asyncio
+    channel = _channel()
+    ctx = {"channel": channel}
+    lookups = card.Lookups(channel, shown=3, interval=0.01)
+    ctx[card.LOOKUPS] = lookups
+    own = [await card.lookup_notice(ctx, _lookup(n)) for n in range(3)]
+    assert all(isinstance(live, card.LiveCard) for live in own)
+    assert channel.send.await_count == 3
+
+    assert await card.lookup_notice(ctx, _lookup(3)) is None
+    assert channel.send.await_count == 4  # the more-lookups card, sent at once
+    more = channel.send.await_args.kwargs["view"]
+    assert "More lookups · 1" in "".join(b.content for b in more.blocks if isinstance(b, K.Text))
+
+    for n in (4, 5):
+        assert await card.lookup_notice(ctx, _lookup(n)) is None
+    await asyncio.sleep(0.05)  # the edit waits out the interval, in the background
+    assert channel.send.await_count == 4  # later lookups only edit it
+    message = lookups.card.message
+    assert message.edit.await_count == 1  # both in one edit
+    text = "".join(b.content for b in message.edit.await_args.kwargs["view"].blocks
+                   if isinstance(b, K.Text))
+    assert "More lookups · 3" in text and "word 3" in text and "word 5" in text
+
+
+@pytest.mark.asyncio
+async def test_the_count_starts_with_the_runs_first_lookup_and_needs_a_channel():
+    channel = _channel()
+    ctx = {"channel": channel}
+    await card.lookup_notice(ctx, _lookup(0))
+    assert isinstance(ctx[card.LOOKUPS], card.Lookups) and ctx[card.LOOKUPS].count == 1
+    assert ctx[card.LOOKUPS].shown == tool_cards.LOOKUP_CARDS == 3
+    assert await card.lookup_notice({"channel": None}, _lookup(0)) is None
+
+
+@pytest.mark.asyncio
+async def test_two_lookups_at_once_past_the_first_few_send_one_more_lookups_card():
+    import asyncio
+
+    async def send(**kwargs):
+        await asyncio.sleep(0.01)  # the post takes a while
+        return MagicMock(edit=AsyncMock())
+
+    channel = MagicMock()
+    channel.send = AsyncMock(side_effect=send)
+    ctx = {"channel": channel, card.LOOKUPS: card.Lookups(channel, shown=0, interval=0)}
+    assert await asyncio.gather(card.lookup_notice(ctx, _lookup(0)),
+                                card.lookup_notice(ctx, _lookup(1))) == [None, None]
+    await asyncio.sleep(0.05)
+    assert channel.send.await_count == 1
