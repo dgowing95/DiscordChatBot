@@ -348,7 +348,9 @@ subagents:
 
 # llama.cpp server (replaces Ollama); which model it serves: the `model` value below
 llamacpp:
-  image: ghcr.io/ggml-org/llama.cpp:server-cuda  # CUDA build; the template sets the nvidia runtime class
+  # CUDA build (the template sets the nvidia runtime class). Pin a version:
+  # the pod pulls IfNotPresent, so a moving tag like server-cuda never updates.
+  image: ghcr.io/ggml-org/llama.cpp:server-cuda-v1.0.0-b12359-b1b770d
   port: 8080
   gpuLayers: 99  # 99 = all layers on GPU
   # Requests answered at the same time (slots)
@@ -419,7 +421,7 @@ llamacpp:
 strata:
   # Pick the flavour for the node's GPUs: -cuda13 (NVIDIA driver 580+),
   # -cuda12 (575+); ROCm and SYCL builds exist too. Pin a version.
-  image: ghcr.io/niko1221/strata:0.2.3-cuda13
+  image: ghcr.io/niko1221/strata:0.2.13-cuda13
   port: 8080
   # Optional: also open the API on this port on every node (a NodePort, e.g.
   # 31434, the port llama.cpp's Service uses), for clients outside the

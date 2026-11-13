@@ -12,7 +12,7 @@ services:
     # One of the two LLM servers; COMPOSE_PROFILES in .env picks which runs
     # (llamacpp or strata), so the two never fight over the GPU.
     profiles: [llamacpp]
-    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda-v1.0.0-b12359-b1b770d
     ports:
       - "8081:8081"  # dev uses 8081 (8080 is taken locally); the helm chart uses 8080
     environment:
@@ -58,7 +58,7 @@ services:
     # docs/DOCKER.md). It always checks a key, so LLM_API_KEY in .env is the key
     # for both sides. Point core at it with LLM_HOST=http://strata:8080.
     profiles: [strata]
-    image: ghcr.io/niko1221/strata:${STRATA_IMAGE_TAG:-0.2.3-cuda13}
+    image: ghcr.io/niko1221/strata:${STRATA_IMAGE_TAG:-0.2.13-cuda13}
     # Strata saves each start's settings and reuses them for anything not
     # given, so a setting removed from .env would stay in force; deleting the
     # saved preset first makes every start match .env (models are kept).
