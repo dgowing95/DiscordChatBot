@@ -1,4 +1,4 @@
-FROM python:3.14-slim
+FROM python:3.15-slim
 
 COPY requirements.txt .
 # CUDA torch wheels (they bundle the nvidia-* runtime libs); cu128 works with
