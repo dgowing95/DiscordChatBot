@@ -1,4 +1,4 @@
-FROM python:3.14-slim
+FROM python:3.15-slim
 
 # Browsers go to a fixed path, not root's home, so the non-root user below
 # can run them.
